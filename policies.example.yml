@@ -1,0 +1,39 @@
+# 工蚁系统策略配置
+# 条件→动作声明式规则，AgentEngine每次执行前检查
+# 修改后无需重启，下次执行自动生效
+
+policies:
+  - name: '成本超限暂停'
+    description: '单任务累计费用超过$1时暂停并通知管理员'
+    conditions:
+      - type: cost
+        threshold: 1.0 # USD
+        scope: task # task | project | global
+    actions:
+      - type: pause_task
+      - type: notify_admin
+        message: '任务费用超过$1，已自动暂停'
+
+  - name: '连续失败熔断'
+    description: '项目内连续3个任务失败时暂停项目'
+    conditions:
+      - type: error_rate
+        threshold: 3
+        window: 10 # 最近10个任务
+        scope: project
+    actions:
+      - type: pause_task
+      - type: notify_admin
+        message: '项目内连续多个任务失败，已自动暂停'
+
+  - name: '高成本切换廉价模型'
+    description: '单任务token超过400K时切换为廉价模型'
+    conditions:
+      - type: cost
+        threshold: 400000 # tokens
+        scope: task
+        metric: tokens
+    actions:
+      - type: switch_model
+        strategy: cost-optimal
+        message: 'Token消耗过高，已切换为成本最优策略'

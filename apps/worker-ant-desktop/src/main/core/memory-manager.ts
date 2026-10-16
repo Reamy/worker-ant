@@ -1,0 +1,3239 @@
+/**
+ * SQLite向量记忆管理器。
+ * 写入：异步提取embedding并存储；检索：余弦相似度排序 + Top-K。
+ */
+
+/**
+ * @layer domain — 领域层（内因）— 决定系统"是什么"的核心：Agent引擎、任务管理、记忆系统、事件溯源
+ */
+import type Database from 'better-sqlite3';
+import { type AnsClient } from '@worker-ant/ans-client';
+import { randomUUID } from 'node:crypto';
+import { generateText } from 'ai';
+import { createSafeProvider } from './ai-provider.js';
+import { createLogger } from './logger.js';
+import { assessComplexity } from './task-archetype.js';
+import { boolSetting, readBoolSetting } from './settings-bool.js';
+import { eventBus } from './event-bus.js';
+import { MEM_IMPORTANCE_DEFAULT, PANORAMA_MIN_IMPORTANCE, PANORAMA_TOP_K } from './memory-constants.js';
+// zx_20261003 M5: panorama 综合纳入**非记忆原料**（三元组 top 关系 + 交付物 byType + 调用账成败）。
+import { collectProjectKnowledgeMaterials, formatKnowledgeMaterials } from './project-knowledge-materials.js';
+// zx_20261014_4 批五: **项目域知识册**（零 LLM 派生册）——消费侧的唯一读口（薄委托，不另抄 SQL）。
+import { listProjectKnowledge } from './project-knowledge.js';
+import type { ProjectKnowledgeEntry } from './project-knowledge.js';
+// zx_20260930 M5: 复盘的**提示词**由 `memory-write.ts` 的纯函数定（按终态分叉 + 无事实则不编），
+//   本文件不再就地拼一段"只认成功"的提示词。类型 `FailureRecord` 亦取自那里。
+import { buildTaskReviewPrompt, failureAnchors, isAttributable } from './memory-write.js';
+import type { FailureRecord } from './memory-write.js';
+import { auxModelRequest } from './model-request.js';
+// zx_20261012_3 批二（「算得真」）：字÷4 的分度走**一处真源**（core/token-estimate.ts），不各写一份。
+import { estimateTokensFromChars } from './token-estimate.js';
+// zx_20260930 M6: **时间基准的四个常数与两把派生尺**收进 `core/memory-decay.ts` 一处真源
+//   （本轮之前它们散在本文件里当裸字面量：14 / 21 / 30 / 0.1）。
+import {
+  dbTimeMs, ageDaysSince, memoryAgeDays, decayFactor,
+  RETRIEVAL_TAU_DAYS, MATURITY_TAU_DAYS, CONFIDENCE_TAU_DAYS,
+} from './memory-decay.js';
+// zx_20260930 M7-d: 检索层的"分层与择要"算式收进 `core/memory-select.ts`（零依赖纯函数）——
+//   受控回归直接引**生产这一份**去度量，不必自造等价物。
+// zx_20260930 M7-e: 分词器（`extractKeywords`）与工作记忆的**池/焦点两把尺**同出该处——
+//   注入侧够不到本类的私有方法，故分词器成为**一处真源**（本类的 `_extractKeywords` 改为委托）。
+// zx_20260930 M7-f: 图式重构召回（`applySchemaRecall`）亦同出该处——同一条纪律（判据调生产这一份）。
+import {
+  splitTaskLayers, mergeTaskLayers, applySchemaRecall,
+  extractKeywords, rankWorkingMemory, WM_POOL_CAP, type WorkingMemoryItem,
+} from './memory-select.js';
+// zx_20260930 M8(空性·无常 / 维特根斯坦·一个规则一处): 记忆的**生命周期分级与墓碑**收进
+//   `core/memory-lifecycle.ts`（零依赖纯函数）——哨兵/缘由词表/指纹算法/墓碑语句形状**只此一处**。
+//   ★`MEM_LIVE_SQL` 是本文件**一切读取点**的 WHERE 片段（不再手抄 `!= 'archived'`——手抄者必漏 `'deleted'`）。
+import {
+  MEM_LIVE_SQL, MEM_TYPE_DELETED, MEM_DELETE_REASONS,
+  tombstoneMemory, tombstoneExpiredArchived, tombstoneBlocksContent,
+  boundedSameSource, consolidatedIntoReason, contentFingerprint,
+} from './memory-lifecycle.js';
+// zx_20261012_1 批一（M29 静默失败清零）: 吞写入/状态变更者的空 catch 一律 `recordMemoryFailure`
+//   —— 计一次数、留一行痕；**不改任何回退返回值**（原 `return false/0` 原样保留）。
+import { recordMemoryFailure, MEM_FAIL } from './memory-failure.js';
+// zx_20261004 M14（K-8 轻得下）: **知识图谱簇**与**前瞻记忆簇**已机械搬出本文件（逐字节行为不变）——
+//   本文件只留同名**薄委托**方法，故全部既有调用点零改动。函数取 `(this, …)`（`this` 结构上满足
+//   两模块的最小宿主接口：`readonly db`/`readonly ansClient` + `scheduleChanged`）。
+import {
+  storeTriple as kgStoreTriple, searchKnowledgeGraph as kgSearchKnowledgeGraph,
+  retrieveKnowledgeGraphContext as kgRetrieveKnowledgeGraphContext,
+  extractTriples as kgExtractTriples, extractTriplesWithLLM as kgExtractTriplesWithLLM,
+} from './memory-kg.js';
+import {
+  storeProspective as prospStoreProspective, listProspective as prospListProspective,
+  getTriggeredProspective as prospGetTriggeredProspective,
+  markProspectiveTriggered as prospMarkProspectiveTriggered,
+  scanDueProspective as prospScanDueProspective,
+} from './memory-prospective.js';
+// zx_20260920_1 M7: 两常量在此**转出**，供受控回归从**模块命名空间**取真值（不手抄 0.6）；
+//   真源是 `core/memory-constants.ts`（纯模块，渲染层亦直引同一份）。
+export { MEM_IMPORTANCE_DEFAULT, PANORAMA_MIN_IMPORTANCE, PANORAMA_TOP_K };
+
+const logger = createLogger('memory');
+
+/**
+ * zx_20260930 M7-f 开关键：图式重构召回（巴特莱特）。缺省即开，关 ⇒ 回"纯逐字/语义"的旧口径，供 A/B。
+ * 键名与库内 `ensureSetting` 同源（`database.ts`），并登记在 `settings-bool.ts` 的白名单里
+ * （新增枚举/开关值须穷举全部读取谓词——本处只此一个读点，且判据由 `readBoolSetting` 单一真源给出）。
+ */
+const SCHEMA_RECALL_KEY = 'memory.schema_recall';
+
+/**
+ * zx_20260906 批4 (4d): 记忆沉淀实时——后台写点经节流发射 memory.changed（main 侧聚合 ≤1 次/3s，
+ * 瞬态事件仅内存通知，不落事件日志）。MemoriesPage 订阅后记忆列表/类型卡在沉淀期不再停滞。
+ */
+let _memChangedTimer: ReturnType<typeof setTimeout> | null = null;
+let _memChangedPending = new Map<string, string>(); // key=projectId:type → type
+function scheduleMemoryChanged(projectId: string | null | undefined, memoryType: string): void {
+  const p = projectId || '__none__';
+  _memChangedPending.set(`${p}:${memoryType}`, memoryType);
+  if (_memChangedTimer) return;
+  _memChangedTimer = setTimeout(() => {
+    _memChangedTimer = null;
+    const byProj = new Map<string, Set<string>>();
+    for (const [k, t] of _memChangedPending) {
+      const [p2] = k.split(':');
+      if (!byProj.has(p2!)) byProj.set(p2!, new Set());
+      byProj.get(p2!)!.add(t);
+    }
+    _memChangedPending.clear();
+    for (const [p2, types] of byProj) {
+      void eventBus.emitTransient('memory.changed', {
+        projectId: p2 === '__none__' ? undefined : p2,
+        project_id: p2 === '__none__' ? null : p2,
+        memory_types: [...types],
+      }).catch(() => {});
+    }
+  }, 3000);
+}
+
+export interface MemoryEntry {
+  id: string;
+  project_id: string;
+  task_id: string | null;
+  content: string;
+  embedding: string | null;
+  memory_type: string;
+  importance: number;
+  valence?: string;
+  created_at: string;
+  use_count?: number;
+  last_used_at?: string | null;
+  source?: string;
+  reasoning?: string;
+  context_json?: string;
+  last_reinforced_at?: string | null;
+  success_count?: number;
+  failure_count?: number;
+}
+
+// zx_20260930 M6: `dbTimeMs` 的**实现**已移入 `core/memory-decay.ts`（零依赖模块，`rr` 判据直引同一真源，
+//   不必自造等价物）。此处**原样转出**——既有引点（`project-engine.ts` 等）与 rr 断言一字不改。
+//   语义与 zx_20260929 M4 逐字一致：带 `Z`/偏移的原样解析、其余补 `T`+`Z` 按 UTC 解析、取不到返 `NaN`。
+export { dbTimeMs };
+
+/** 同 run 共现（赫布）强化的单次加权幅度（`_reinforceCooccurrence` 一处消费）。 */
+export const CO_OCCUR_BOOST = 0.02;
+
+/**
+ * zx_20261012_1 批二（M26-a）：向量索引缓存的**键**——`id` + **正文指纹**（一处真源纯函数）。
+ *
+ * 为什么不能只用 `id`：缓存里存的是**按某份正文算出的**向量。若正文改了而缓存仍按 `id` 命中，
+ * 机器就会拿**旧正文的向量**去算"新正文的相关度"（`search` 正这么用）⇒ 召回静默失真。
+ * 把正文指纹并入键：正文一变，键就变，旧项**自然不可达**（"同 id 换内容"这一类一并治住）。
+ * 指纹取 `contentFingerprint`（折叠空白 + 小写 + 长度）⇒ 仅排版差异不构成"另一份内容"。
+ */
+export function embeddingCacheKey(id: string, content: string): string {
+  return `${id}#${contentFingerprint(content).slice(0, 8)}`;
+}
+
+export class MemoryManager {
+  // zx_20261004 M14: `private` → `readonly`（**仅可见性，行为不变**——构造后从不重赋），
+  //   使本实例结构上满足 `MemoryKgHost`/`MemoryProspectiveHost` 的 `readonly db`/`readonly ansClient`。
+  readonly db: Database.Database;
+  readonly ansClient: AnsClient;
+
+  constructor(db: Database.Database, ansClient: AnsClient) {
+    this.db = db;
+    this.ansClient = ansClient;
+    this.initFts();
+    // zx_20260907 M1(A1): 启动时按保留期清理归档记忆(幂等,失败不阻断)
+    try { void this.pruneArchivedMemory(); } catch { /* best-effort */ }
+  }
+
+  /** zx_20261004 M14: 前瞻记忆簇的"记忆已变"节流发射——薄面，转模块级 `scheduleMemoryChanged`
+   *  （throttle 器留本文件，避免 `memory-prospective.ts` 反向 import 成 ESM 环）。 */
+  scheduleChanged(projectId: string | null | undefined, memoryType: string): void {
+    scheduleMemoryChanged(projectId, memoryType);
+  }
+
+  /**
+   * zx_20260907 M1(A1) 建；zx_20260930 M8 收口：归档池保留期届满 —— **落墓碑**（原为物理删）。
+   *
+   * ⚠ 语义变更（M8 如实登记）:本函数**不再减少行数** —— 它把「归档」推进到「墓碑」，
+   *   回收的是**正文体积**（墓碑正文为空），留下的是**去向**（`listTombstones` 可查）。
+   *   这正是 M8 要的「清理前须有可查的去向」：物理删会连"它去哪了"一起删掉。
+   *   返回的是**落墓条数**（与旧返回"删除条数"同形，量纲仍是"本次处置了几条"）。
+   */
+  async pruneArchivedMemory(): Promise<number> {
+    try {
+      const row = this.db.prepare("SELECT value FROM wa_settings WHERE key = 'memory.archive_retention_days'").get() as { value: string } | undefined;
+      const days = Number(row?.value ?? '90');
+      if (!(days > 0)) { logger.info('memory.archive_retention_days=0, 归档清理已关闭'); return 0; }
+      const n = tombstoneExpiredArchived(this.db, days);
+      if (n > 0) logger.info('memory: 按保留期 %d 天落墓碑 %d 条（不再减行数，正文已清空，去向见审计面）', days, n);
+      return n;
+    } catch (e) {
+      logger.warn('memory: 归档清理失败 %s', (e as Error).message);
+      return 0;
+    }
+  }
+
+  /** 初始化FTS5全文搜索 */
+  private initFts(): void {
+    try {
+      this.db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS wa_memories_fts USING fts5(
+          content, memory_type, project_id,
+          content='wa_memories', content_rowid='rowid'
+        );
+      `);
+      // 同步触发器：插入/更新/删除时自动同步FTS索引
+      this.db.exec(`
+        CREATE TRIGGER IF NOT EXISTS wa_memories_ai AFTER INSERT ON wa_memories BEGIN
+          INSERT INTO wa_memories_fts(rowid, content, memory_type, project_id)
+          VALUES (new.rowid, new.content, new.memory_type, new.project_id);
+        END;
+        CREATE TRIGGER IF NOT EXISTS wa_memories_ad AFTER DELETE ON wa_memories BEGIN
+          INSERT INTO wa_memories_fts(wa_memories_fts, rowid, content, memory_type, project_id)
+          VALUES ('delete', old.rowid, old.content, old.memory_type, old.project_id);
+        END;
+        CREATE TRIGGER IF NOT EXISTS wa_memories_au AFTER UPDATE ON wa_memories BEGIN
+          INSERT INTO wa_memories_fts(wa_memories_fts, rowid, content, memory_type, project_id)
+          VALUES ('delete', old.rowid, old.content, old.memory_type, old.project_id);
+          INSERT INTO wa_memories_fts(rowid, content, memory_type, project_id)
+          VALUES (new.rowid, new.content, new.memory_type, new.project_id);
+        END;
+      `);
+
+      // Phase 7.7: 会话搜索 FTS5 表（独立表）
+      this.db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS wa_conversations_fts USING fts5(
+          role, content, task_id
+        );
+      `);
+      // 自动同步触发器：此前 indexConversation 从未被调用，导致 wa_conversations_fts 恒为空、searchConversations 永远无结果。
+      // 现改为在 wa_task_conversations 插入/删除/更新时自动索引（与 wa_memories_fts 同模式）。
+      // 修复 (2026-09-01)：wa_conversations_fts 是普通内嵌内容表（无 content= 外部表声明），
+      // 而 FTS5 'delete' 命令仅支持 external-content/contentless 表——此前 ad/au 触发器用它，
+      // 导致每次删除/更新对话都报 SQL logic error（task:delete 删除任务连带失败，表现为「无法删除已完成任务」）。
+      // 对普通 FTS5 表改用普通 DELETE BY rowid；DROP+CREATE 使存量库启动时自愈。
+      this.db.exec(`
+        DROP TRIGGER IF EXISTS wa_conversations_ad;
+        DROP TRIGGER IF EXISTS wa_conversations_au;
+        CREATE TRIGGER IF NOT EXISTS wa_conversations_ai AFTER INSERT ON wa_task_conversations BEGIN
+          INSERT INTO wa_conversations_fts(rowid, role, content, task_id)
+          VALUES (new.rowid, new.role, substr(new.content, 1, 1000), new.task_id);
+        END;
+        CREATE TRIGGER wa_conversations_ad AFTER DELETE ON wa_task_conversations BEGIN
+          DELETE FROM wa_conversations_fts WHERE rowid = old.rowid;
+        END;
+        CREATE TRIGGER wa_conversations_au AFTER UPDATE ON wa_task_conversations BEGIN
+          DELETE FROM wa_conversations_fts WHERE rowid = old.rowid;
+          INSERT INTO wa_conversations_fts(rowid, role, content, task_id)
+          VALUES (new.rowid, new.role, substr(new.content, 1, 1000), new.task_id);
+        END;
+      `);
+      // 回填 (2026-09-01)：触发器加入前已存在的对话从未进入 FTS 索引（仅后续新增被索引），
+      // 导致会话搜索只能命中部分记录。用幂等 INSERT...SELECT 按原始 rowid 补齐缺失行（重复运行无副作用）。
+      const convCount = (this.db.prepare('SELECT COUNT(*) c FROM wa_task_conversations').get() as { c: number }).c || 0;
+      const ftsCount = (this.db.prepare('SELECT COUNT(*) c FROM wa_conversations_fts').get() as { c: number }).c || 0;
+      if (ftsCount < convCount) {
+        this.db.exec(`
+          INSERT INTO wa_conversations_fts(rowid, role, content, task_id)
+          SELECT c.rowid, c.role, substr(c.content, 1, 1000), c.task_id
+          FROM wa_task_conversations c
+          WHERE NOT EXISTS (SELECT 1 FROM wa_conversations_fts f WHERE f.rowid = c.rowid);
+        `);
+        logger.info({ convCount, ftsCount }, '对话 FTS 索引回填完成');
+      }
+    } catch { /* FTS5 已存在或不可用 */ }
+  }
+
+  /**
+   * Phase 7.7: 索引一条对话记录到 FTS5。
+   */
+  indexConversation(rowid: number, role: string, content: string, taskId: string): void {
+    try {
+      this.db.prepare(
+        'INSERT INTO wa_conversations_fts(rowid, role, content, task_id) VALUES (?, ?, ?, ?)',
+      ).run(rowid, role, content.slice(0, 1000), taskId);
+    } catch (err) {
+      const msg = (err as { message?: string }).message || '';
+      // 仅忽略重复键和表不存在错误，其他错误记录日志
+      if (!msg.includes('UNIQUE constraint') && !msg.includes('no such table')) {
+        logger.warn({ rowid, taskId, errMsg: msg.slice(0, 100) }, 'FTS5索引写入失败');
+      }
+    }
+  }
+
+  /**
+   * Phase 7.7: FTS5 全文本搜索对话记录。
+   */
+  searchConversations(query: string, projectId?: string, limit = 10): Array<{ taskId: string; role: string; content: string }> {
+    try {
+      let rows: Array<{ task_id: string; role: string; content: string }>;
+      if (projectId) {
+        rows = this.db.prepare(`
+          SELECT f.task_id, f.role, f.content FROM wa_conversations_fts f
+          JOIN wa_tasks t ON f.task_id = t.id
+          WHERE wa_conversations_fts MATCH ? AND t.project_id = ?
+          ORDER BY rank LIMIT ?
+        `).all(query, projectId, limit) as Array<{ task_id: string; role: string; content: string }>;
+      } else {
+        rows = this.db.prepare(`
+          SELECT task_id, role, content FROM wa_conversations_fts
+          WHERE wa_conversations_fts MATCH ?
+          ORDER BY rank LIMIT ?
+        `).all(query, limit) as Array<{ task_id: string; role: string; content: string }>;
+      }
+      return rows.map(r => ({ taskId: r.task_id, role: r.role, content: r.content.slice(0, 500) }));
+    } catch {
+      return [];
+    }
+  }
+
+  /** 存储记忆（含embedding）。9.5: 支持source/reasoning */
+  // ⚠ zx_20260920_1 M7 实测：本方法**全仓零调用者**（`apps/`、`packages/` 全扫为空，也不在
+  //   `MemoryRepository` 接口中）—— 是个死入口。本轮**不删**（删它要连带裁定接口与表列默认值的可达性），
+  //   仅把兜底值归到 `MEM_IMPORTANCE_DEFAULT`，免将来接线时把 0.5 那份病带回来。
+  async store(params: {
+    project_id: string;
+    task_id?: string;
+    content: string;
+    embedding: number[];
+    type?: string;
+    importance?: number;
+    reasoning?: string;
+    source?: string;
+  }): Promise<string> {
+    const id = randomUUID();
+    this.db.prepare(
+      'INSERT INTO wa_memories (id, project_id, task_id, content, embedding, memory_type, importance, reasoning, source, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime(\'now\'))',
+    ).run(id, params.project_id, params.task_id ?? null, params.content, JSON.stringify(params.embedding), params.type ?? 'episodic', params.importance ?? MEM_IMPORTANCE_DEFAULT, params.reasoning ?? '', params.source ?? 'agent_execution');
+    scheduleMemoryChanged(params.project_id, params.type ?? 'episodic');
+    return id;
+  }
+
+  /** 存储不含embedding的记忆文本。9.5: 支持source/reasoning/user_id。Phase B: 支持experience(亲历/推断)。A4: 支持reusableExperience(复用价值标记) */
+  storeText(params: { project_id: string; task_id?: string; content: string; type?: string; source?: string; reasoning?: string; user_id?: string; importance?: number; evidence?: { file_path?: string; verified?: boolean }; experience?: 'direct' | 'inferred'; valence?: string; reusableExperience?: boolean }): string {
+    // zx_20260930 M8(空性·无常): 墓碑拦截——**机器不得把用户删掉的东西自己找回来**。
+    //   作用面刻意只在**机器写入侧**（本函数）：用户显式新增（`preferences:create` / `memory:create`）
+    //   走的是直插，不经此处，故天然不受拦。
+    //   ★`user_*` 来源例外：「用户经 IM 说的原话」（`user_correction`）**不受拦**——
+    //   那是**人在说话**，与"机器重提取"是两回事；拦它即等于用一条旧删除堵住用户此刻的嘴。
+    //   返回空串是**如实**：没有新行落库，调用方拿到空 id（调用点均只做无副作用消费，见 `tools/write.ts`）。
+    const src = params.source ?? 'agent_execution';
+    if (!src.startsWith('user_') && tombstoneBlocksContent(this.db, params.project_id, params.content)) {
+      logger.info('memory: 内容命中墓碑 → 机器写入已拦截（project=%s source=%s）', params.project_id, src);
+      return '';
+    }
+    const id = randomUUID();
+    const uid = params.user_id || params.project_id === '__user__' ? (params.user_id || '') : '';
+    // Phase 3.2: 记录编码语境（任务 archetype + 关键词）+ Phase C 证据锚点
+    const contextObj: Record<string, unknown> = {};
+    if (params.task_id) {
+      try {
+        const tctx = JSON.parse((this.db.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get(params.task_id) as { context_json: string } | undefined)?.context_json || '{}');
+        const encodingContext: Record<string, unknown> = {};
+        if (tctx.archetype) encodingContext.archetype = tctx.archetype;
+        const keywords = this._extractKeywords(this.getTaskText(params.task_id));
+        if (keywords.length > 0) encodingContext.keywords = keywords;
+        if (Object.keys(encodingContext).length > 0) contextObj.encoding_context = encodingContext;
+      } catch { /* 忽略 */ }
+    }
+    if (params.evidence) {
+      contextObj.evidence = { ...params.evidence, task_id: params.task_id ?? undefined };
+    }
+    // Phase B 源监控：亲历(direct)/推断(inferred)自动推导——用户来源或有验证证据=亲历，其余默认推断
+    let experience = params.experience;
+    if (!experience) {
+      if (params.evidence?.verified || (params.source ?? '').startsWith('user_')) experience = 'direct';
+      else experience = 'inferred';
+    }
+    contextObj.experience = experience;
+    // A4: 复用价值标记（0/1）——值得复用的经验在检索中加权，相似任务识别更易命中
+    if (params.reusableExperience !== undefined) contextObj.reusable_experience = params.reusableExperience ? 1 : 0;
+    const contextJson = JSON.stringify(contextObj);
+    // zx_20260920_1 M7: 落库刻度**取自一处真源**。此前这条 INSERT **没有 `importance` 列** ⇒ 取表列默认
+    //   0.5，而读侧门槛是 0.6 ⇒ 按基线写入的记忆**出生即不可被整合**，`panorama` 结构性恒 0（闭环死锁）。
+    //   调用方可传模型自评值（`background-review`）：**夹取到 [0,1]**（模型输出不可信），
+    //   但**不**夹到 ≥ 默认值——「这条不重要」是它的合法判断，抹平即另一种失真。
+    const importance = typeof params.importance === 'number' && Number.isFinite(params.importance)
+      ? Math.min(1, Math.max(0, params.importance))
+      : MEM_IMPORTANCE_DEFAULT;
+    this.db.prepare(
+      'INSERT INTO wa_memories (id, project_id, task_id, content, memory_type, importance, source, reasoning, user_id, valence, context_json, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime(\'now\'))',
+    ).run(id, params.project_id, params.task_id ?? null, params.content, params.type ?? 'episodic', importance, params.source ?? 'agent_execution', params.reasoning ?? '', uid, params.valence ?? 'neutral', contextJson);
+    scheduleMemoryChanged(params.project_id, params.type ?? 'episodic');
+    return id;
+  }
+
+  /** 9.5b: 更新记忆内容（再巩固） */
+  updateMemory(id: string, content: string, reasoning?: string): void {
+    // zx_20261012_1 批二（M26-a）: 正文一变即**失效该 id 的旧缓存项**（按旧正文的键删；正文未变则删了也无害）。
+    const before = this.db.prepare('SELECT content FROM wa_memories WHERE id = ?').get(id) as { content?: string } | undefined;
+    this.db.prepare(
+      "UPDATE wa_memories SET content = ?, reasoning = ?, updated_at = datetime('now') WHERE id = ?",
+    ).run(content, reasoning ?? '', id);
+    if (before) this._embeddingCache.delete(embeddingCacheKey(id, before.content ?? ''));
+  }
+
+  /**
+   * 9.5b: 合并两条记忆（保留较新的为容器，合并内容+推理，删除旧条）
+   *
+   * zx_20260930 M8: 正文合并改 `boundedSameSource`——与 `sameSourceReplace` **同一形状的第二个落点**
+   *   （同一个病：把两条全文拼起来，无上界）。未超上限时与旧写法**逐字相同**。
+   *   ⚠ 被吸收的旧条（idB）**仍走物理删、不落墓碑**：它的内容**留在了合并行**里，
+   *   这不是"删除"，而墓碑的语义是"这些内容不再属于系统"——给它落墓反而会**挡住合并后的正文被重新提取**。
+   *   【zx_20261012_1 批一·墓碑纪律**豁免#1**（如实登记）】本处物理删**合法**：正文随 `boundedSameSource`
+   *   并入 idA，墓碑的"正文清空 + 按原正文算指纹"会**误拦合并后正文的重新提取**
+   *   （承接行里已含被并入方正文，再按它算一份删前指纹即自相矛盾）。判据见 `rr_zx_20261012_1` 的"豁免三处恰为这几处"。
+   */
+  mergeMemories(idA: string, idB: string): string {
+    const a = this.db.prepare('SELECT * FROM wa_memories WHERE id = ?').get(idA) as MemoryEntry & { reasoning: string } | undefined;
+    const b = this.db.prepare('SELECT * FROM wa_memories WHERE id = ?').get(idB) as MemoryEntry & { reasoning: string } | undefined;
+    if (!a || !b) throw new Error('Memory not found');
+    const merged = boundedSameSource(a.content, b.content, { label: '合并' });
+    const mergedReasoning = [a.reasoning, b.reasoning].filter(Boolean).join('\n');
+    this.db.prepare(
+      "UPDATE wa_memories SET content = ?, reasoning = ?, importance = MIN(1.0, ? + ?), updated_at = datetime('now') WHERE id = ?",
+    ).run(merged, mergedReasoning, a.importance, b.importance * 0.5, idA);
+    this.db.prepare('DELETE FROM wa_memories WHERE id = ?').run(idB);
+    // zx_20261012_1 批二（M26-a）: 承接方（idA）正文已变、旧条（idB）已删 ⇒ 两条旧缓存项一律失效。
+    this._embeddingCache.delete(embeddingCacheKey(idA, a.content));
+    this._embeddingCache.delete(embeddingCacheKey(idB, b.content));
+    return idA;
+  }
+
+  /** 存储用户偏好（跨项目，user_id维度） */
+  storeUserPreference(params: { user_id: string; content: string; type?: string; source?: string; reasoning?: string }): string {
+    const id = randomUUID();
+    // 用户偏好跨项目，不绑定特定project_id(避免外键约束失败)
+    // zx_20260920_1 M7: 补 `importance` 列——用户偏好本就是「按重要性排序取用」（见 `retrieveByType`/GUI 偏好页），
+    //   而此前取表列默认 0.5 ⇒ 读侧 0.6 的门槛对它恒不可达。
+    this.db.prepare(
+      'INSERT INTO wa_memories (id, project_id, task_id, content, memory_type, importance, source, reasoning, user_id, updated_at) VALUES (?, NULL, NULL, ?, ?, ?, ?, ?, ?, datetime(\'now\'))',
+    ).run(id, params.content, params.type ?? 'semantic', MEM_IMPORTANCE_DEFAULT, params.source ?? 'user_instruction', params.reasoning ?? '', params.user_id);
+    scheduleMemoryChanged(null, params.type ?? 'semantic');
+    return id;
+  }
+
+  /** 获取用户偏好（跨项目，按importance+时间排序） */
+  getUserPreferences(userId: string, limit = 10): Array<MemoryEntry & { reasoning: string; source: string }> {
+    try {
+      return this.db.prepare(
+        "SELECT * FROM wa_memories WHERE user_id = ? AND memory_type = 'semantic' ORDER BY importance DESC, updated_at DESC LIMIT ?",
+      ).all(userId, limit) as Array<MemoryEntry & { reasoning: string; source: string }>;
+    } catch { return []; }
+  }
+
+  /**
+   * 删除用户偏好（`forget_preference` 工具 = 用户明说"忘掉这条"）。
+   *
+   * zx_20260930 M8: **落墓碑，不再物理删**。偏好行的 `project_id` 为 NULL（跨项目），
+   *   故不能走 `tombstoneMemoriesBy`，只能用单条 `tombstoneMemory`。
+   *   残留的 `user_id` 无害：读侧 `getUserPreferences` 只认 `memory_type = 'semantic'`。
+   */
+  deleteUserPreference(memoryId: string, userId: string): boolean {
+    const row = this.db.prepare('SELECT id FROM wa_memories WHERE id = ? AND user_id = ?').get(memoryId, userId);
+    if (!row) return false;
+    return tombstoneMemory(this.db, memoryId, MEM_DELETE_REASONS.userPreference);
+  }
+
+  /** C1: 按类型检索项目记忆（如procedural经验）。排序融合提取强度（意义即使用）+ 编码语境 boost。 */
+  retrieveByType(memoryType: string, projectId: string, limit = 5, currentArchetype?: string | null, taskText?: string): Array<MemoryEntry & { reasoning: string }> {
+    try {
+      const rows = this.db.prepare(
+        "SELECT * FROM wa_memories WHERE project_id = ? AND memory_type = ? ORDER BY importance DESC, created_at DESC LIMIT ?",
+      ).all(projectId, memoryType, limit * 4) as Array<MemoryEntry & { reasoning: string }>;
+      const score = (r: MemoryEntry) => {
+        const base = 0.4 * r.importance + 0.6 * this.retrievalStrength(r);
+        // Phase 3.2 语言游戏：编码语境匹配（同 archetype）给予小幅排序 boost
+        const archetype = this._encodingArchetype(r);
+        // Phase B 源监控：直接经验优先
+        const raw = base + (currentArchetype && archetype === currentArchetype ? 0.05 : 0) + this._experienceBoost(r) + this._maturityBoost(r) + this._processingDepthBoost(r) + this._effectivenessBoost(r.memory_type, projectId) + this._reusableBoost(r);
+        // Phase A (2026-08-27) 空性·无常：易变细节(volatile)排序微降
+        let s = raw * this._applicabilityPenalty(r) * this._conflictPenalty(r);
+        // Phase A (2026-08-27) 空性·缘起：适用条件与当前任务不符 → 排序降权（条件校验落在排序层）
+        if (taskText && this.applicabilityMismatch(r, taskText)) s *= 0.6;
+        return s;
+      };
+      rows.sort((a, b) => score(b) - score(a));
+      return rows.slice(0, limit);
+    } catch { return []; }
+  }
+
+  /** Phase 3.2: 读任务原型（编码/提取语境） */
+  getTaskArchetype(taskId: string): string | null {
+    try {
+      const row = this.db.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get(taskId) as { context_json: string } | undefined;
+      if (!row) return null;
+      const ctx = JSON.parse(row.context_json || '{}');
+      return typeof ctx.archetype === 'string' ? ctx.archetype : null;
+    } catch { return null; }
+  }
+
+  /** A3: 最近同类（同 archetype）成功/失败任务的验收标准，供执行中验收预警对照自查 */
+  getPeerAcceptanceCriteria(projectId: string, archetype: string, limit = 3): Array<{ title: string; status: string; acceptance_criteria: string }> {
+    try {
+      return this.db.prepare(`
+        SELECT title, status, acceptance_criteria
+        FROM wa_tasks
+        WHERE project_id = ? AND parent_task_id = '' AND status IN ('completed','failed')
+          AND acceptance_criteria != '' AND json_extract(context_json, '$.archetype') = ?
+        ORDER BY updated_at DESC LIMIT ?
+      `).all(projectId, archetype, limit) as Array<{ title: string; status: string; acceptance_criteria: string }>;
+    } catch { return []; }
+  }
+
+  /** Phase 3.2: 读记忆的编码语境 archetype */
+  private _encodingArchetype(mem: MemoryEntry): string | null {
+    try {
+      const ctx = JSON.parse(mem.context_json || '{}');
+      const arch = (ctx as { encoding_context?: { archetype?: unknown } }).encoding_context?.archetype;
+      return typeof arch === 'string' ? arch : null;
+    } catch { return null; }
+  }
+
+  /** Phase 3.2: 读记忆的编码语境关键词（存储时从任务标题/描述提取）。 */
+  private _encodingKeywords(mem: MemoryEntry): string[] {
+    try {
+      const ctx = JSON.parse(mem.context_json || '{}') as { encoding_context?: { keywords?: unknown } };
+      const kws = ctx.encoding_context?.keywords;
+      return Array.isArray(kws) ? (kws as string[]) : [];
+    } catch { return []; }
+  }
+
+  /** Phase B: 读记忆的亲历/推断标记（源监控）。 */
+  private _experienceOf(mem: MemoryEntry): 'direct' | 'inferred' | null {
+    try {
+      const ctx = JSON.parse(mem.context_json || '{}') as { experience?: unknown };
+      return ctx.experience === 'direct' || ctx.experience === 'inferred' ? ctx.experience : null;
+    } catch { return null; }
+  }
+
+  /** Phase B: 直接经验优先的检索排序微调（实践论：亲历优先）。 */
+  private _experienceBoost(mem: MemoryEntry): number {
+    return this._experienceOf(mem) === 'direct' ? 0.03 : 0;
+  }
+
+  /** Phase A: 成熟知识检索排序微调（大器晚成：成熟记忆略优先）。 */
+  private _maturityBoost(mem: MemoryEntry): number {
+    return this.maturityOf(mem) * 0.02;
+  }
+
+  /** Phase A (2026-08-27 zx_2) 格物致知：读记忆的加工深度（深=提炼规律/语义关联，浅=机械记录事实）。 */
+  private _processingDepthOf(mem: MemoryEntry): 'deep' | 'shallow' | null {
+    try {
+      const ctx = JSON.parse(mem.context_json || '{}') as { processing_depth?: unknown };
+      return ctx.processing_depth === 'deep' || ctx.processing_depth === 'shallow' ? ctx.processing_depth : null;
+    } catch { return null; }
+  }
+
+  /** Phase A (2026-08-27 zx_2) 格物致知：深加工记忆检索排序微调（深加工可迁移性优先）。 */
+  private _processingDepthBoost(mem: MemoryEntry): number {
+    return this._processingDepthOf(mem) === 'deep' ? 0.03 : 0;
+  }
+
+  /** A4: 复用价值标记检索加权——context_json.reusable_experience=1 的记忆（含可行动建议的复盘）更易命中 */
+  private _reusableBoost(mem: MemoryEntry): number {
+    try {
+      const ctx = JSON.parse(mem.context_json || '{}') as { reusable_experience?: number };
+      return ctx.reusable_experience === 1 ? 0.08 : 0;
+    } catch { return 0; }
+  }
+
+  /** Phase A (2026-08-27) 空性·缘起：读记忆的适用条件 + 稳定性分级。 */
+  private _applicabilityOf(mem: MemoryEntry): { conditions: string[]; stability: 'stable' | 'volatile' } | null {
+    try {
+      const ctx = JSON.parse(mem.context_json || '{}') as { applicability?: { conditions?: unknown; stability?: unknown } };
+      const a = ctx.applicability;
+      if (!a) return null;
+      return {
+        conditions: Array.isArray(a.conditions) ? (a.conditions as string[]).filter((c): c is string => typeof c === 'string') : [],
+        stability: a.stability === 'volatile' ? 'volatile' : 'stable',
+      };
+    } catch { return null; }
+  }
+
+  /** Phase A (2026-08-27) 空性·无常：易变细节(volatile)排序微降（细节易变不如恒常规律可靠）。 */
+  private _applicabilityPenalty(mem: MemoryEntry): number {
+    return this._applicabilityOf(mem)?.stability === 'volatile' ? 0.95 : 1;
+  }
+
+  /** A3 (2026-09-02): 记忆干扰管理——冲突/已取代标记降权（前摄/倒摄干扰）。
+   * context_json.conflict_flag=true 或 superseded=true 的记忆（待辩证扬弃 / 已被更新的同类经验取代）在检索中降权，
+   * 避免把已被矛盾经验或更新的旧信息当权威注入 Agent，直到 dialecticalSublateMemories 将旧记忆扬弃为综合（清除标记）或归档。
+   */
+  private _conflictPenalty(mem: MemoryEntry): number {
+    try {
+      const ctx = JSON.parse(mem.context_json || '{}') as { conflict_flag?: boolean; superseded?: boolean };
+      return ctx.conflict_flag === true || ctx.superseded === true ? 0.6 : 1;
+    } catch { return 1; }
+  }
+
+  /**
+   * Phase A (2026-08-27) 空性·缘起：判断记忆的适用条件是否与当前任务上下文不符。
+   * 条件非空且任务文本不含任何条件的任一关键词 → 条件可能已变/不满足。
+   * 保守：仅用于降权标注提醒，不硬删记忆。
+   */
+  applicabilityMismatch(mem: MemoryEntry, taskText: string): boolean {
+    const a = this._applicabilityOf(mem);
+    if (!a || a.conditions.length === 0) return false;
+    const taskTokens = new Set(this._extractKeywords(taskText || '').map(t => t.toLowerCase()));
+    for (const cond of a.conditions) {
+      const kws = this._extractKeywords(cond);
+      if (kws.length === 0) continue;
+      if (kws.some(k => taskTokens.has(k.toLowerCase()))) return false; // 命中任一条件关键词 → 条件可能满足
+    }
+    return true; // 所有条件关键词都不在任务文本中 → 条件可能已变
+  }
+
+  /**
+   * 9.5d: 同源覆盖——新搜索结果覆盖旧同源记忆，但不能跨源覆盖用户指令。
+   *
+   * zx_20260930 M8 两处收口：
+   * ① 取"旧同源那条"时加 `MEM_LIVE_SQL`——**墓碑不是可覆盖的同源记忆**。
+   *    不加则 UPDATE 会落在墓碑行上 ⇒ 正文被写回、`memory_type` 仍是 'deleted'，
+   *    也就是**删掉的东西在原地复活**（且因类型未变而不触发任何读取点的提醒）。
+   * ② 正文合并改 `boundedSameSource`——覆盖是**同源累加**，无界则每轮把全文再抄一遍，线性膨胀。
+   *    未超上限时与旧写法 `a + '\n[更新]\n' + b` **逐字相同**（零行为变化）。
+   */
+  sameSourceReplace(projectId: string, source: string, content: string, reasoning?: string): string | null {
+    if (source === 'user_correction' || source === 'user_instruction') return null; // 永不覆盖用户来源
+    const existing = this.db.prepare(
+      `SELECT id, content FROM wa_memories WHERE project_id = ? AND source = ? AND ${MEM_LIVE_SQL} ORDER BY created_at DESC LIMIT 1`,
+    ).get(projectId, source) as { id: string; content: string } | undefined;
+    if (existing) {
+      this.db.prepare(
+        "UPDATE wa_memories SET content = ?, reasoning = ?, updated_at = datetime('now') WHERE id = ?",
+      ).run(boundedSameSource(existing.content, content, { label: '更新' }), reasoning ?? '', existing.id);
+      // zx_20261012_1 批二（M26-a）: 同源覆盖也改正文 ⇒ 一并失效旧缓存项（第三个落点，与另两处同一把尺）。
+      this._embeddingCache.delete(embeddingCacheKey(existing.id, existing.content));
+      return existing.id;
+    }
+    return null;
+  }
+
+  /** 更新记忆的embedding（同时失效向量索引缓存） */
+  updateEmbedding(id: string, embedding: number[]): void {
+    // zx_20261012_1 批二（M26-a）: 缓存键＝`id`+**正文指纹** ⇒ 先按**旧正文**删旧项，再按**当前正文**写新项。
+    const row = this.db.prepare('SELECT content FROM wa_memories WHERE id = ?').get(id) as { content?: string } | undefined;
+    this.db.prepare('UPDATE wa_memories SET embedding = ? WHERE id = ?').run(JSON.stringify(embedding), id);
+    if (!row) return;
+    const key = embeddingCacheKey(id, row.content ?? '');
+    this._embeddingCache.delete(key);
+    if (embedding.length > 0) this._embeddingCache.set(key, embedding);
+  }
+
+  // 12.2: 内存向量索引缓存——避免重复JSON.parse，加速余弦相似度计算
+  private _embeddingCache = new Map<string, number[]>();
+  private _cacheGeneration = 0;
+  // Phase B (2026-08-27): 记忆有效性统计缓存（按项目，30 分钟 TTL）
+  private _effectivenessCache = new Map<string, { ts: number; stats: Array<{ memoryType: string; successCount: number; failCount: number; successRate: number; sampleCount: number }> }>();
+  private static readonly EFFECTIVENESS_CACHE_TTL = 30 * 60 * 1000;
+  private static readonly MAX_CACHE_SIZE = 10_000;
+
+  /** 预热向量索引：批量加载项目内所有embedding到内存，超过上限则随机淘汰旧条目 */
+  warmupVectorIndex(projectId: string): number {
+    const rows = this.db.prepare(
+      "SELECT id, content, embedding FROM wa_memories WHERE project_id = ? AND embedding IS NOT NULL AND embedding != ''",
+    ).all(projectId) as Array<{ id: string; content: string; embedding: string }>;
+    for (const row of rows) {
+      try {
+        // 超过上限时随机淘汰20%旧条目
+        if (this._embeddingCache.size >= MemoryManager.MAX_CACHE_SIZE) {
+          const keys = Array.from(this._embeddingCache.keys());
+          const evictCount = Math.ceil(keys.length * 0.2);
+          for (let i = 0; i < evictCount; i++) {
+            this._embeddingCache.delete(keys[Math.floor(Math.random() * keys.length)]!);
+          }
+        }
+        const emb = JSON.parse(row.embedding) as number[];
+        // zx_20261012_1 批二（M26-a）: 键含正文指纹（与 `search`/失效点同一把尺）。
+        if (emb.length > 0) this._embeddingCache.set(embeddingCacheKey(row.id, row.content), emb);
+      } catch { /* skip invalid */ }
+    }
+    this._cacheGeneration++;
+    logger.info({ projectId, cached: this._embeddingCache.size }, '向量索引已预热');
+    return this._embeddingCache.size;
+  }
+
+  /**
+   * 语义检索（12.2优化：内存向量索引，避免重复JSON.parse）。
+   * 首次查询自动预热，后续查询直接使用缓存。
+   */
+  search(queryEmbedding: number[], projectId: string, topK = 5): MemoryEntry[] {
+    if (this._embeddingCache.size === 0) this.warmupVectorIndex(projectId);
+
+    const rows = this.db.prepare(
+      // zx_20260911_4 M5-1(赫布/艾宾浩斯·归档即不再激活): 归档墓碑不得再被取回——见 searchBM25/searchByKeywords/getRecent 同一把尺
+      `SELECT * FROM wa_memories WHERE project_id = ? AND ${MEM_LIVE_SQL} AND embedding IS NOT NULL AND embedding != '' ORDER BY created_at DESC LIMIT 500`,
+    ).all(projectId) as MemoryEntry[];
+
+    if (rows.length === 0) return [];
+
+    const scored = rows.map(row => {
+      try {
+        // zx_20261012_1 批二（M26-a）: 按 `id`+**本文正文指纹**取缓存——正文变过则键已变，此处必 miss 并重取。
+        const embKey = embeddingCacheKey(row.id, row.content ?? '');
+        const emb = this._embeddingCache.get(embKey) ?? (() => {
+          const parsed = JSON.parse(row.embedding!) as number[];
+          if (parsed.length > 0) this._embeddingCache.set(embKey, parsed);
+          return parsed;
+        })();
+        const semantic = cosineSimilarity(queryEmbedding, emb);
+        const retrieval = this.retrievalStrength(row);
+        // A4: reusable_experience=1 记忆小幅加权，相似任务识别更易命中
+        // zx_20260929 M4（同一个降权三处是三个意思）: 补 `_applicabilityPenalty` —— 与 `retrieveByType` 同尺。
+        //   此前易变细节（volatile）只在按类型检索时微降（×0.95），走语义检索却一点不降
+        //   ⇒「这条易变知识算不算数」取决于它**碰巧从哪条路被取回**，而调用方无从知道。
+        const score = (0.6 * semantic + 0.25 * retrieval + 0.15 * row.importance + this._reusableBoost(row))
+          * this._applicabilityPenalty(row) * this._conflictPenalty(row);
+        return { ...row, score };
+      } catch { return { ...row, score: 0 }; }
+    });
+
+    scored.sort((a, b) => b.score - a.score);
+    return scored.slice(0, topK);
+  }
+
+  /** BM25词法搜索（使用FTS5） */
+  searchBM25(query: string, projectId: string, topK = 10): MemoryEntry[] {
+    try {
+      const rows = this.db.prepare(`
+        SELECT m.*, rank FROM wa_memories_fts f
+        JOIN wa_memories m ON f.rowid = m.rowid
+        WHERE wa_memories_fts MATCH ? AND m.project_id = ? AND m.${MEM_LIVE_SQL}
+        ORDER BY rank LIMIT ?
+      `).all(query, projectId, topK) as Array<MemoryEntry & { rank: number }>;
+      return rows;
+    } catch {
+      // FTS5不可用时回退到LIKE搜索
+      return this.searchByKeywords(query.split(/\s+/), projectId, topK);
+    }
+  }
+
+  /** 文本检索（无embedding时的回退方案） */
+  searchByKeywords(keywords: string[], projectId: string, topK = 5): MemoryEntry[] {
+    // Phase D: 术语表双向扩展，消除缩写/全称多义漏检
+    const kwList = this._expandTerms(keywords, projectId);
+    const conditions = kwList.map(() => 'content LIKE ?');
+    const params = kwList.map(k => `%${k}%`);
+    return this.db.prepare(
+      `SELECT * FROM wa_memories WHERE project_id = ? AND ${MEM_LIVE_SQL} AND (${conditions.join(' OR ')}) ORDER BY created_at DESC LIMIT ?`,
+    ).all(projectId, ...params, topK) as MemoryEntry[];
+  }
+
+  /** A2 (2026-09-02): 提取实践效应（retrieval practice / testing effect，Karpicke & Roediger 2008）。
+   * 相似任务开始前主动"回忆"相关记忆，并用当前任务文本做适用性检验：适用（applicabilityMismatch=false）
+   * 的记忆以高于被动再暴露（recordAccess use_count+1）的强度加固（use_count+3，log2 压缩下模拟多次主动回忆，
+   * 使"值得复用且当前适用"的记忆更易在后续检索/相似任务识别中胜出）；条件不匹配的记忆不加成（避免误强化过时记忆）。
+   * 区别于 spacedRepetition（被动重读）与 recordAccess（被动访问）——这是主动回忆测试。
+   * 纯同步、无 LLM 依赖（关键词召回），返回被加固的记忆条数；best-effort 静默。
+   */
+  retrievalPractice(taskText: string, projectId: string, topK = 5): number {
+    try {
+      const text = (taskText || '').trim();
+      if (text.length < 2) return 0;
+      const keywords = this._extractKeywords(text).slice(0, 8);
+      if (keywords.length === 0) return 0;
+      const candidates = this.searchByKeywords(keywords, projectId, topK * 3);
+      if (candidates.length === 0) return 0;
+      let practiced = 0;
+      for (const mem of candidates) {
+        if (practiced >= topK) break;
+        if (this.applicabilityMismatch(mem, text)) continue; // 适用性检验不过 → 不加固
+        this.db.prepare("UPDATE wa_memories SET use_count = use_count + 3, last_used_at = datetime('now') WHERE id = ?").run(mem.id);
+        practiced++;
+      }
+      return practiced;
+    } catch { return 0; }
+  }
+
+  /**
+   * 混合检索：BM25词法 + 向量语义 + RRF融合。
+   * 结合精确关键词匹配和语义理解，比单一方法命中率高。
+   */
+  searchHybrid(queryText: string, queryEmbedding: number[] | null, projectId: string, topK = 5): MemoryEntry[] {
+    const bm25Results = this.searchBM25(queryText, projectId, 20);
+    const vecResults = queryEmbedding ? this.search(queryEmbedding, projectId, 20) : [];
+
+    // Reciprocal Rank Fusion (k=60)
+    const rrfScores = new Map<string, number>();
+    const entries = new Map<string, MemoryEntry>();
+
+    for (const [rank, item] of bm25Results.entries()) {
+      rrfScores.set(item.id, 1 / (60 + rank));
+      entries.set(item.id, item);
+    }
+    for (const [rank, item] of vecResults.entries()) {
+      const current = rrfScores.get(item.id) ?? 0;
+      rrfScores.set(item.id, current + 1 / (60 + rank));
+      if (!entries.has(item.id)) entries.set(item.id, item);
+    }
+
+    // 按RRF分数降序排序
+    const sorted = Array.from(rrfScores.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, topK);
+
+    return sorted.map(([id]) => entries.get(id)!).filter(Boolean);
+  }
+
+  /** 获取项目最近记忆（zx_20260911_4 M5-1: 归档墓碑不计入"最近"——存→取往返须排除已归档） */
+  getRecent(projectId: string, limit = 20): MemoryEntry[] {
+    return this.db.prepare(
+      `SELECT * FROM wa_memories WHERE project_id = ? AND ${MEM_LIVE_SQL} ORDER BY created_at DESC LIMIT ?`,
+    ).all(projectId, limit) as MemoryEntry[];
+  }
+
+  /** 9.5c: 获取项目级语义记忆（跨任务知识）。排序融合提取强度（意义即使用）。 */
+  getProjectKnowledge(projectId: string, limit = 5): Array<MemoryEntry & { reasoning: string; source: string }> {
+    try {
+      const rows = this.db.prepare(
+        "SELECT * FROM wa_memories WHERE project_id = ? AND memory_type = 'semantic' AND importance >= 0.3 ORDER BY importance DESC, updated_at DESC LIMIT ?",
+      ).all(projectId, limit * 4) as Array<MemoryEntry & { reasoning: string; source: string }>;
+      // zx_20260929 M4: 基础式与 `retrieveByType` **同形**（0.4·存储强度 + 0.6·提取强度）⇒ 惩罚因子也必须同一套，
+      //   否则同一条易变/冲突的知识，在「项目知识」段里按原值出现、在「按类型检索」段里却被降了权——
+      //   两段写进同一个上下文，模型看到的是同一件东西的两个价（《管子》度量衡：一把尺，不是两把）。
+      //   故此处**两个乘子都补**（`_applicabilityPenalty` + `_conflictPenalty`），与 `retrieveByType` 看齐。
+      const score = (r: MemoryEntry) => (0.4 * r.importance + 0.6 * this.retrievalStrength(r))
+        * this._applicabilityPenalty(r) * this._conflictPenalty(r);
+      rows.sort((a, b) => score(b) - score(a));
+      return rows.slice(0, limit);
+    } catch { return []; }
+  }
+
+  /**
+   * zx_20261014_4 批五: 项目域知识册（零 LLM 派生册）——消费侧的唯一读口。
+   *   ⚠ 与 `getProjectKnowledge`（上面那个：`wa_memories` 里的 **semantic 记忆**）**不是一回事**：
+   *     那份是"模型综合过的记忆"，这份是**从四类真源直接派生的结构化事实**（零 LLM、可复现）。
+   *   薄委托到 `project-knowledge.ts`（本模块不另抄那份 SQL；"一个数只有一个来源"）。
+   */
+  listDomainKnowledge(projectId: string): ProjectKnowledgeEntry[] {
+    return listProjectKnowledge(this.db, projectId);
+  }
+
+  /** 获取未嵌入的记忆（供批处理） */
+  getUnembedded(limit = 10): MemoryEntry[] {
+    return this.db.prepare(
+      // zx_20260930 M8: 补 embedding 的选行也须排除墓碑——墓碑的 embedding **就是 NULL**，
+      //   不加这一句就会被捞出来算一次向量并写回（写给一条已删记忆）。检索面读不到它，
+      //   但"机器在给一条墓碑做功课"本身即名实不符。
+      `SELECT * FROM wa_memories WHERE (embedding IS NULL OR embedding = '') AND ${MEM_LIVE_SQL} ORDER BY created_at ASC LIMIT ?`,
+    ).all(limit) as MemoryEntry[];
+  }
+
+  /** 批量记录记忆访问追踪（仅更新use_count/last_used_at，不修改importance） */
+  recordAccess(ids: string[]): void {
+    if (ids.length === 0) return;
+    const placeholders = ids.map(() => '?').join(',');
+    this.db.prepare(
+      `UPDATE wa_memories SET use_count = use_count + 1, last_used_at = datetime('now') WHERE id IN (${placeholders})`,
+    ).run(...ids);
+  }
+
+  /**
+   * Phase 1.3 意义即使用：派生"提取强度"（retrieval strength）。
+   * 由 use_count（对数压缩，饱和于 ~20 次）+ last_used_at 近因（时间常数 τ=14 天）合成，不新增列。
+   * 与 importance（存储强度）区分：存储强度衡量长期价值，提取强度衡量当前可及性。
+   *
+   * zx_20260930 M6：τ 与时间尺取自 `memory-decay.ts` 一处真源。本条**刻意读 `last_used_at`**（与
+   *   衰减/置信用的 `memoryAgeDays` 不同列）：提取强度问的是"最近**被取用**"（可及性），若混入
+   *   `created_at`，"刚落库但从未被用过"会被判成"很可及"——那是把提取强度偷换成存储强度。
+   *   `updated_at` 同样不读（系统改写不是使用）。旧注释写"半衰期14天"是**名实不符**（τ=14 的有效半衰期
+   *   是 τ·ln2≈9.7 天）；本轮只把名字与出处归正，**值一字不动**。
+   */
+  retrievalStrength(mem: MemoryEntry): number {
+    const use = mem.use_count ?? 0;
+    const useScore = Math.log2(1 + use) / Math.log2(21); // use_count=0→0, =20→~1
+    const recency = mem.last_used_at ? Math.exp(-ageDaysSince(mem.last_used_at) / RETRIEVAL_TAU_DAYS) : 0;
+    return 0.6 * useScore + 0.4 * recency;
+  }
+
+  /**
+   * Phase 2.2 自知者明：经验可靠性（元记忆）。
+   * 由实践成败计数派生，拉普拉斯平滑：(成功+1)/(成功+失败+2)，0 次实践 = 0.5 中性。
+   */
+  empiricalReliability(mem: MemoryEntry): number {
+    const s = mem.success_count ?? 0;
+    const f = mem.failure_count ?? 0;
+    return (s + 1) / (s + f + 2);
+  }
+
+  /**
+   * Phase A (2026-08-26) 大器晚成：知识成熟度。
+   * 由验证深度（success_count 对数压缩）+ 龄期（created_at 距今天数，半成熟约 21 天）合成，
+   * 衡量知识从「易变」到「稳定」的成熟阶段（不新增列，复用 success_count + created_at）。
+   */
+  maturityOf(mem: MemoryEntry): number {
+    const s = mem.success_count ?? 0;
+    const depth = Math.min(1, Math.log2(1 + s) / Math.log2(11)); // 0次→0, 10次→1 饱和
+    // zx_20260930 M6: 尺与尺度常数取自 `memory-decay.ts` 一处真源（原来是裸字面量 21）。
+    //   本条**刻意读 `created_at`**（而非 `memoryAgeDays`）：成熟度问的是"这条知识**存在**了多久"，
+    //   是**同尺不同列**，不是第三把尺——若改读 `memoryAgeDays`，"一条老知识今天被用了一下"
+    //   会把它打回"未成熟"，那是把成熟度偷换成新鲜度。
+    const age = 1 - Math.exp(-ageDaysSince(mem.created_at) / MATURITY_TAU_DAYS); // 0天→0, 21天→0.63, 90天→0.99
+    let m = depth * age;
+    // Phase A (2026-08-27 zx_2) 格物致知：深加工记忆成熟加速（×1.5，上限 1）
+    if (this._processingDepthOf(mem) === 'deep') m = Math.min(1, m * 1.5);
+    return m;
+  }
+
+  /**
+   * Phase 2.1 实事求是：派生记忆可信度（confidence）。
+   * 由来源可靠性（source 基础分）+ 验证（被使用过/被实践反馈强化过）+ 质疑惩罚（context_json.confidence_penalty）
+   * + 经验可靠性（Phase 2.2 成败计数）合成。
+   */
+  confidenceOf(mem: MemoryEntry): number {
+    const sourceBase: Record<string, number> = {
+      user_instruction: 0.9, user_correction: 0.95, user_manual: 0.9, user_onboarding: 0.8,
+      agent_execution: 0.6, background_review: 0.55, task_execution: 0.5,
+      pattern_extraction: 0.4, auto_extract: 0.45,
+    };
+    let conf = sourceBase[mem.source ?? 'agent_execution'] ?? 0.5;
+    if ((mem.use_count ?? 0) > 0) conf = Math.min(1, conf + 0.1);
+    if (mem.last_reinforced_at) conf = Math.min(1, conf + 0.1);
+    try {
+      const ctx = JSON.parse(mem.context_json || '{}');
+      if (typeof ctx.confidence_penalty === 'number') conf *= ctx.confidence_penalty;
+      // Phase C 证据锚点：有 verified 证据加分；agent 自产记忆无证据降权（私人语言论证——须公共可验证）
+      const evidence = ctx.evidence as { verified?: boolean } | undefined;
+      if (evidence?.verified) conf = Math.min(1, conf + 0.1);
+      else if ((mem.source ?? 'agent_execution') === 'agent_execution' && !evidence) conf *= 0.8;
+      // Phase B 源监控：亲历(direct)/推断(inferred)弱信号校准（实践论：直接经验优先，与证据强信号叠加不冲突）
+      const experience = ctx.experience as 'direct' | 'inferred' | undefined;
+      if (experience === 'direct') conf = Math.min(1, conf + 0.05);
+      else if (experience === 'inferred') conf = Math.max(0, conf - 0.05);
+      // Phase B (2026-08-26) 记忆事实保鲜：被实践反驳(导致失败)→ 强降权（实事求是：事实变认识也要变）
+      if (ctx.staleness) conf *= 0.7;
+      // Phase A (2026-08-27) 空性·无常：易变细节(volatile)可信度更谨慎降权
+      if (ctx.applicability?.stability === 'volatile') conf *= 0.9;
+      // Phase A (2026-08-27 zx_2) 格物致知：深加工记忆可信度更高
+      if (ctx.processing_depth === 'deep') conf = Math.min(1, conf + 0.05);
+    } catch { /* 忽略非法 context_json */ }
+    // D1 (2026-08-31): 遗忘曲线（人类记忆遗忘曲线艾宾浩斯——时间连续衰减；use_count>0 使用对抗遗忘；间隔重复强化 last_reinforced_at 也重置遗忘）
+    // zx_20260930 M6: 龄期改取 `memoryAgeDays(mem)`——它**只认三个语义时间戳**
+    //   （`last_used_at` / `last_reinforced_at` / `created_at` 取最大），`updated_at` 永不参与。
+    //   旧写法（`max(lastUse,lastReinforce) || created_at`）与 `memoryAgeDays` 对**一切真实数据**同值：
+    //   `created_at` 只可能早于那两个（先落库、后被用），故取最大时它是被支配项；若两个都缺，两边都落回
+    //   `created_at`。差别只在"取不到时刻"那一支：旧写法给 `0`（=刚被用过，最不易衰减），新尺给 0 天
+    //   （同为不衰减）——结论一致，且新尺的"取不到"语义写在 `memory-decay.ts` 一处，不再各写各的。
+    //   尺度常数 τ=30 亦取自该处（旧注释写"半衰期30天"是名实不符：τ=30 的有效半衰期是 τ·ln2≈20.8 天）。
+    const useFactor = (mem.use_count ?? 0) > 0 ? 1.5 : 1.0;
+    conf *= Math.exp(-memoryAgeDays(mem) / (CONFIDENCE_TAU_DAYS * useFactor));
+    // Phase 2.2: 融入经验可靠性（0.4 经验 + 0.6 先验）
+    conf = conf * (0.6 + 0.4 * this.empiricalReliability(mem));
+    // Phase A (2026-08-26) 大器晚成：知识成熟度微调——未成熟降微权，成熟升微权
+    const maturity = this.maturityOf(mem);
+    if (maturity < 0.25) conf = Math.max(0, conf - 0.05);
+    else if (maturity >= 0.6) conf = Math.min(1, conf + 0.05);
+    return Math.max(0, Math.min(1, conf));
+  }
+
+  /**
+   * Phase 1.2: 实践反馈强化——任务完成后根据质量反馈到关联记忆的importance。
+   * 成功任务强化关联记忆，失败任务轻微降权。
+   *
+   * zx_20260930 M6（夏克特·错误归因）：**只有"本次真被用上"的记忆才配受奖罚**。
+   *   ① 使用证据 = `context_json.memory_used_ids_run`（`buildMemoryContext` 本 run 的真入文集合，**每 run 覆盖**）。
+   *      它**不是** `injected_memory_ids`——后者是**跨 run 的 union**（供排重），拿它当"本次用过"就是把前几次
+   *      run 用过的记忆一并算到本次成败头上，那正是"一次失败连坐全部注入记忆"的病根。
+   *   ② 降权还须**可指认**（`failureAnchors` / `isAttributable`）：失败自己留下的字据里取不到硬锚点
+   *      ⇒ 指认不了 ⇒ **只记计数**，不降权、不打 `staleness`（承 M2-(c)「只在真知道时标」）。
+   *   ③ 老任务读不到 ① 的键 ⇒ 同样**只记计数**（`_bumpCount`），不奖不罚——宁可少标，不可乱标。
+   *
+   * ⚠ 删去的旧"关键词重叠回退"（无注入记录时按标题/会话词面重叠猜关联）：它**不是** `recordAccess` 命中，
+   *   拿它打 `staleness` 就是同一个错误归因换了个入口。没有使用证据时正确动作是"什么都不做"，不是"猜一批"。
+   */
+  reinforceMemories(taskId: string, projectId: string, success: boolean, qualityScore?: number): number {
+    try {
+      const perRun = this._readRunMemoryIds(taskId);
+      const usedIds = perRun ?? this._readInjectedMemoryIds(taskId);
+      if (usedIds.length === 0) return 0;
+
+      // 失败侧先取锚点，锚点**只从失败自己留下的字据里取**（`failure_record` ∪ 任务标题实词）。
+      // ⚠ 锚点非空**不等于**这批记忆都可指认：还要看本条的正文/证据锚点里是否真出现某个锚点。
+      //   `failure_record === null`（非"无产出物"的异常失败路）时通常只剩标题实词，而多数记忆的正文
+      //   不会逐字含任务标题 ⇒ 它们照样落进"只记计数"那一支。真正的分界在 `_isMemoryAttributable`。
+      const anchors = success ? [] : this._readFailureAnchors(taskId);
+      let touched = 0;
+      for (const id of usedIds) {
+        if (perRun === null) {
+          this._bumpCount(id, success ? 'success_count' : 'failure_count');
+          touched++;
+          continue;
+        }
+        if (success) {
+          if (this._applyReinforcement(id, true, qualityScore, taskId)) touched++;
+          continue;
+        }
+        if (anchors.length > 0 && this._isMemoryAttributable(id, anchors)) {
+          if (this._applyReinforcement(id, false, qualityScore, taskId)) touched++;
+        } else {
+          this._bumpCount(id, 'failure_count');
+          touched++;
+        }
+      }
+      if (touched > 0) {
+        logger.info(
+          { taskId: taskId.slice(0, 8), projectId: projectId.slice(0, 8), success, touched, perRun: perRun !== null, anchors: anchors.length },
+          '记忆反馈强化完成',
+        );
+      }
+      // zx_20261012_1 批二（M26-b）共现强化（赫布）：同一 run **同期入文**的记忆互相加权。
+      //   只认**本次真入文**集合（`perRun`）——`union`（injected_memory_ids）是跨 run 累计，
+      //   拿它当"同期"就是把不同 run 的记忆硬绑一起（与 M6 的错误归因同形）。单条入文 ⇒ 无共现可言。
+      //   失败路不奖（与上面的奖罚方向一致）：只 `_bumpCount`，不动 importance。
+      if (success && perRun !== null && usedIds.length >= 2) {
+        const co = this._reinforceCooccurrence(usedIds);
+        if (co > 0) logger.info({ taskId: taskId.slice(0, 8), coActivated: usedIds.length, boosted: co }, '记忆共现强化（同期入文者互相加权）');
+      }
+      return touched;
+    } catch (err) {
+      recordMemoryFailure(MEM_FAIL.reinforceRun, err, { taskId, projectId });
+      logger.warn({ err, taskId: taskId.slice(0, 8) }, '记忆强化失败');
+      return 0;
+    }
+  }
+
+  /**
+   * zx_20261012_1 批二（M26-b）：共现强化——同一 run 同期入文的记忆两两互相加权（赫布：一起激活的连一起）。
+   *
+   * 与 `_applyReinforcement` 的**奖罚**是两回事：后者按"本次用得好不好"加减，本函数只表达
+   * "这几条**同时**被想起过"这一结构事实，幅度小（`CO_OCCUR_BOOST`）、只加不减、有上界 1.0。
+   * 调用点已在 `reinforceMemories` 内**按 `perRun` 与"≥2 条"两道闸**收窄，本函数不再重复判。
+   */
+  private _reinforceCooccurrence(ids: string[]): number {
+    let boosted = 0;
+    for (const id of ids) {
+      try {
+        const r = this.db.prepare(
+          "UPDATE wa_memories SET importance = MIN(1.0, importance + ?), updated_at = datetime('now') WHERE id = ?",
+        ).run(CO_OCCUR_BOOST, id);
+        if ((r?.changes ?? 0) > 0) boosted++;
+      } catch (err) { recordMemoryFailure(MEM_FAIL.cooccurBump, err, { id }); }
+    }
+    return boosted;
+  }
+
+  /** Phase 1.2: 读任务**累计注入**的记忆 ID（union，供后续 run 排重；无则返回空） */
+  private _readInjectedMemoryIds(taskId: string): string[] {
+    try {
+      const row = this.db.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get(taskId) as { context_json: string } | undefined;
+      if (!row) return [];
+      const ctx = JSON.parse(row.context_json || '{}');
+      const ids = ctx.injected_memory_ids as unknown;
+      return Array.isArray(ids) ? ids.filter((x): x is string => typeof x === 'string') : [];
+    } catch { return []; }
+  }
+
+  /**
+   * zx_20260930 M6: 读**本次 run 真入文**的记忆 ID（`context_json.memory_used_ids_run`）。
+   * 键不存在（本轮之前的存量任务）返回 `null`，与"空数组"**刻意区别**——前者是"不知道"，后者是"知道没用"。
+   */
+  private _readRunMemoryIds(taskId: string): string[] | null {
+    try {
+      const row = this.db.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get(taskId) as { context_json: string } | undefined;
+      if (!row) return null;
+      const ctx = JSON.parse(row.context_json || '{}');
+      const ids = ctx.memory_used_ids_run as unknown;
+      return Array.isArray(ids) ? ids.filter((x): x is string => typeof x === 'string') : null;
+    } catch { return null; }
+  }
+
+  /** zx_20260930 M6: 失败自己留下的字据里能取到的硬锚点（`failure_record` ∪ 任务标题实词）；取不到返回空数组。 */
+  private _readFailureAnchors(taskId: string): string[] {
+    try {
+      const row = this.db.prepare('SELECT title, context_json FROM wa_tasks WHERE id = ?').get(taskId) as { title: string | null; context_json: string } | undefined;
+      if (!row) return [];
+      const ctx = JSON.parse(row.context_json || '{}') as { failure_record?: FailureRecord | null };
+      return failureAnchors(ctx.failure_record ?? null, row.title || '');
+    } catch { return []; }
+  }
+
+  /** zx_20260930 M6: 该记忆与本次失败是否可指认关联（正文或 `context_json.evidence.file_path` 里出现任一硬锚点）。 */
+  private _isMemoryAttributable(memId: string, anchors: string[]): boolean {
+    try {
+      const row = this.db.prepare('SELECT content, context_json FROM wa_memories WHERE id = ?').get(memId) as { content: string | null; context_json: string | null } | undefined;
+      if (!row) return false;
+      let evidencePath: string | null = null;
+      try {
+        const ctx = JSON.parse(row.context_json || '{}') as { evidence?: { file_path?: string | null } };
+        evidencePath = ctx.evidence?.file_path ?? null;
+      } catch { /* 非法 context_json ⇒ 只按正文判 */ }
+      return isAttributable(row.content || '', anchors, evidencePath);
+    } catch { return false; }
+  }
+
+  /** zx_20260930 M6: **只记计数**——不动 importance、不打 `staleness`。"指认不了"时唯一该做的事。 */
+  private _bumpCount(memId: string, col: 'success_count' | 'failure_count'): void {
+    try {
+      this.db.prepare(`UPDATE wa_memories SET ${col} = ${col} + 1 WHERE id = ?`).run(memId);
+    } catch (err) { recordMemoryFailure(MEM_FAIL.reinforceBumpCount, err, { memId, col }); }
+  }
+
+  /** Phase 1.2: 对单条记忆施加强化/降权，返回是否成功。Phase B: 失败时标记 staleness（实践反驳）。 */
+  private _applyReinforcement(memId: string, success: boolean, qualityScore?: number, taskId?: string): boolean {
+    try {
+      if (success) {
+        const q = (qualityScore || 70) / 100;
+        const delta = 0.1 * q; // 成功→强化
+        this.db.prepare(
+          "UPDATE wa_memories SET importance = MIN(1.0, importance + ?), success_count = success_count + 1, last_reinforced_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
+        ).run(Math.round(delta * 100) / 100, memId);
+        // Phase B (2026-08-26): 成功重新验证 → 清除 staleness（实践重新验证，记忆不再"可能过时"）
+        try {
+          const row = this.db.prepare('SELECT context_json FROM wa_memories WHERE id = ?').get(memId) as { context_json: string } | undefined;
+          if (row) {
+            const ctx = JSON.parse(row.context_json || '{}');
+            if (ctx.staleness) {
+              delete ctx.staleness;
+              this.db.prepare('UPDATE wa_memories SET context_json = ? WHERE id = ?').run(JSON.stringify(ctx), memId);
+            }
+          }
+        } catch { /* ignore */ }
+      } else {
+        const delta = -0.05; // 失败→轻微降权
+        this.db.prepare(
+          "UPDATE wa_memories SET importance = MAX(0.05, importance + ?), failure_count = failure_count + 1, last_reinforced_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
+        ).run(Math.round(delta * 100) / 100, memId);
+        // Phase B (2026-08-26) 记忆事实保鲜：被注入使用的记忆导致失败 → 标记可能过时（实践反驳）
+        if (taskId) {
+          try {
+            const row = this.db.prepare('SELECT context_json FROM wa_memories WHERE id = ?').get(memId) as { context_json: string } | undefined;
+            if (row) {
+              const ctx = JSON.parse(row.context_json || '{}');
+              ctx.staleness = { contradicted_at: new Date().toISOString(), failed_task: taskId };
+              this.db.prepare('UPDATE wa_memories SET context_json = ? WHERE id = ?').run(JSON.stringify(ctx), memId);
+            }
+          } catch { /* ignore */ }
+        }
+      }
+      return true;
+    } catch (err) { recordMemoryFailure(MEM_FAIL.reinforceApply, err, { memId, success }); return false; }
+  }
+
+  /**
+   * 分层检索：返回短期(最近N条) + 中期(高重要性无嵌入) + 长期(语义相似)的三层结果。
+   *
+   * zx_20260930 M7-d：加 `opts.longTermK` **放宽长期层的候选池**（默认 = `topK` ⇒ 旧行为逐字不变）。
+   *   调用方 `retrieveTaskRelevant` 要在长期层里再分"情景/语义"两层各排各的 ⇒ 池子必须比最终条数宽，
+   *   否则一层就被 topK 卡死、无从分层。刻意**不改返回类型、不动默认值**（"加可选参数，不改签名语义"）——
+   *   既有调用点一字不动。注意 `midTerm` 仍按 `topK` 取：本参数问的是**长期层**的池宽。
+   */
+  retrieveLayered(queryText: string, queryEmbedding: number[] | null, projectId: string, topK = 5, opts?: { longTermK?: number }): {
+    shortTerm: MemoryEntry[];
+    midTerm: MemoryEntry[];
+    longTerm: MemoryEntry[];
+  } {
+    const shortTerm = this.getRecent(projectId, 5);
+    const shortIds = new Set(shortTerm.map(m => m.id));
+
+    const midTerm = this.db.prepare(
+      // zx_20260930 M8: 中层（重要性召回）此前**没有任何类型过滤** ⇒ 墓碑会被当作"重要记忆"抽出来。
+      `SELECT * FROM wa_memories WHERE project_id = ? AND importance >= 0.7 AND ${MEM_LIVE_SQL} AND id NOT IN (` +
+      shortTerm.map(() => '?').join(',') + ") ORDER BY importance DESC, created_at DESC LIMIT ?",
+    ).all(projectId, ...Array.from(shortIds), topK) as MemoryEntry[];
+
+    const midIds = new Set(midTerm.map(m => m.id));
+    const allExclude = new Set([...shortIds, ...midIds]);
+
+    const longK = Math.max(topK, opts?.longTermK ?? topK);
+    let longTerm: MemoryEntry[] = [];
+    if (queryEmbedding) {
+      longTerm = this.search(queryEmbedding, projectId, longK + 10)
+        .filter(m => !allExclude.has(m.id))
+        .slice(0, longK);
+    }
+
+    // 纯检索无副作用：访问记录由调用方在"实际注入"时统一 recordAccess，
+    // 避免"检索到但未注入"的记忆被错误计入使用次数（使用强度应反映真实使用）。
+    return { shortTerm, midTerm, longTerm };
+  }
+
+  /**
+   * Phase 1.1 补充：任务相关记忆检索（三层检索的长期层落地）。
+   * 用当前任务的 title+description 作为查询、复用任务启动时已生成的 task_embedding，
+   * 召回与当前任务语义相关的历史记忆，弥补类型检索"只看 importance、不看任务相关性"的缺陷。
+   *
+   * zx_20260930 M7-d（Tulving《情景记忆的要素》）: **检索层分层**。此前这里只取 `longTerm`——
+   *   那是 `search()` 一个混合分排出的 top-K，情景记忆与语义记忆在同池同分里争名额，
+   *   语义分高的那层把情景层整体挤出去。现改为：先把长期层候选池**放宽**（`longTermK = max(4·topK, 20)`），
+   *   再按 Tulving 二分**各排各的**（情景=近因、语义=0.4·重要度+0.6·提取强度），最后**轮转交织**取 `topK`。
+   *   候选池的**排除语义一字未动**（仍排除最近 5 条与高重要度中期层）——本处只加"分层"这一跳。
+   *
+   * zx_20260930 M7-f（巴特莱特·图式重构召回）: 末跳再加**一次按当下需求的重建**——`schemaText`
+   *   （由调用方从"任务立志 + 主要矛盾"拼出，**不是**题面本身）作为图式，对交织结果重排。
+   *   为什么必须**从外部传图式**而非就地拿 `title+description`：题面正是本函数上游 `queryText` 的取数源
+   *   ——拿它当图式，等于用**同一把逐字尺**再量一遍，那是自我印证而非重建。
+   *   开关 `memory.schema_recall`（缺省即开）关掉即回旧口径，供 A/B；`schemaText` 缺省（`''`）时
+   *   `applySchemaRecall` 判不出图式 ⇒ 原序返回 ⇒ **既有调用点（不传第四参）行为一字不变**。
+   *   成员集不动（只重排，见 `memory-select.ts` 该函数注释）——本处不新增任何丢点。
+   */
+  retrieveTaskRelevant(taskId: string, projectId: string, topK = 5, schemaText = ''): MemoryEntry[] {
+    try {
+      const task = this.db.prepare('SELECT title, description, context_json FROM wa_tasks WHERE id = ?').get(taskId) as { title: string; description: string; context_json: string } | undefined;
+      if (!task) return [];
+      const queryText = `${task.title}. ${(task.description || '').slice(0, 500)}`;
+      let queryEmb: number[] | null = null;
+      try { queryEmb = JSON.parse(task.context_json || '{}').task_embedding as number[] | null; } catch { queryEmb = null; }
+      if (!queryEmb || queryEmb.length === 0) return [];
+      const pool = this.retrieveLayered(queryText, queryEmb, projectId, topK, { longTermK: Math.max(topK * 4, 20) }).longTerm;
+      const { episodic, semantic } = splitTaskLayers(pool, (m) => this.retrievalStrength(m), Date.now());
+      const merged = mergeTaskLayers(episodic, semantic, topK);
+      if (!schemaText || !readBoolSetting(this.db, SCHEMA_RECALL_KEY)) return merged;
+      return applySchemaRecall(merged, schemaText, { keywordsOf: extractKeywords });
+    } catch { return []; }
+  }
+
+  /** 合并相似记忆：将相似度>0.9的记忆合并为一条 */
+  consolidateMemories(projectId: string): number {
+    const memories = this.db.prepare(
+      "SELECT * FROM wa_memories WHERE project_id = ? AND embedding IS NOT NULL AND embedding != '' ORDER BY created_at DESC LIMIT 200",
+    ).all(projectId) as MemoryEntry[];
+    let mergedCount = 0;
+    // zx_20261012_1 批一: `consumed` 守卫——`memories` 是**起跑时的快照**，被合并走的 b 其快照项仍在，
+    //   若不拦，外层 i 会再以 b 为容器去 UPDATE（对已落墓碑的行无效果）却仍把 c 物理删掉 ⇒ 静默丢内容。
+    //   `reconsolidateMemories` 早有同形守卫（:2396），此处补齐——同一个病，同一把尺。
+    const consumed = new Set<string>();
+
+    for (let i = 0; i < memories.length; i++) {
+      const a = memories[i]!;
+      if (!a.embedding || consumed.has(a.id)) continue;
+      for (let j = i + 1; j < memories.length; j++) {
+        const b = memories[j]!;
+        if (!b.embedding || consumed.has(b.id)) continue;
+        try {
+          const embA = JSON.parse(a.embedding) as number[];
+          const embB = JSON.parse(b.embedding) as number[];
+          const sim = cosineSimilarity(embA, embB);
+          if (sim > 0.92) {
+            // 合并到较新的记忆
+            const merged = `[合并记忆]\n${a.content}\n---\n${b.content}`;
+            this.db.prepare('UPDATE wa_memories SET content = ?, importance = MIN(1.0, ? + ?), embedding = ? WHERE id = ?')
+              .run(merged, a.importance, b.importance * 0.5, a.embedding, a.id);
+            // zx_20261012_1 批一（墓碑纪律）: 被并入的 b 原为**物理删** ⇒ 去向不可查。改落墓碑，
+            //   `deleted_reason` 指向承接正文的 a ⇒ "这条去哪了"可答；正文未丢（已融进 a）。
+            tombstoneMemory(this.db, b.id, consolidatedIntoReason(a.id));
+            consumed.add(b.id);
+            mergedCount++;
+          } else if (sim > 0.85) {
+            // 干扰遗忘：相似但不够合并的记忆，旧条目受干扰惩罚
+            const penalty = 0.7;
+            const newImportance = Math.max(0.05, (b.importance * penalty));
+            this.db.prepare('UPDATE wa_memories SET importance = ?, updated_at = datetime(\'now\') WHERE id = ?')
+              .run(Math.round(newImportance * 100) / 100, b.id);
+          }
+        } catch (err) { recordMemoryFailure(MEM_FAIL.consolidateMerge, err, { projectId, aId: a.id, bId: b.id }); }
+      }
+    }
+    if (mergedCount > 0) logger.info({ projectId, mergedCount }, '记忆整合完成');
+    return mergedCount;
+  }
+
+  /**
+   * Phase 7.4: 记忆整合管道——去重+冲突解决+遗忘。
+   * 返回 {deduped, conflicts, forgotten, challenged, pruned}
+   */
+  runConsolidationPipeline(projectId: string): { deduped: number; conflicts: number; forgotten: number; challenged: number; pruned: number } {
+    const result = { deduped: 0, conflicts: 0, forgotten: 0, challenged: 0, pruned: 0 };
+
+    // 1. 去重（已有逻辑）
+    result.deduped = this.consolidateMemories(projectId);
+
+    // zx_20260920 M5: 此处原有「冲突解决：同 type 内保留最新、其余 importance 逐轮 ×0.5」，已删——
+    //   ① 它不是冲突判据：同 type 内不止一条 ≠ 冲突，semantic/procedural 本就是**累积**的知识（真库 semantic 77 条）；
+    //   ② 无下界且每轮管线各打一次 ⇒ importance = 0.5^n 直奔 0（真库实测自 2^-95 到 2^-140，是它的指纹）。
+    //   后果不止「降权」：`retrieveByType` 对 semantic 要求 `importance >= 0.3`，打折两轮即**检索不到**；
+    //   而 `synthesizeProjectKnowledge` 的门槛「≥3 条 importance ≥0.6」被它压成**恒不可满足**（真库 panorama 恒 0）。
+    //   冲突交给本管道下方的 `detectAndResolveConflicts`：它有真的重叠率/效价判据，只打 `superseded` 标、不动 importance。
+
+    // Phase 9.5: Ebbinghaus 衰减——先对所有非归档记忆应用时间衰减
+    const allMemories = this.db.prepare(
+      `SELECT id, importance, memory_type, valence, source, use_count, is_exemplar, last_used_at, last_reinforced_at, created_at FROM wa_memories WHERE project_id = ? AND ${MEM_LIVE_SQL}`,
+    ).all(projectId) as Array<{ id: string; importance: number; memory_type: string; valence: string | null; source: string; use_count: number; is_exemplar: number; last_used_at: string | null; last_reinforced_at: string | null; created_at: string | null }>;
+
+    for (const mem of allMemories) {
+      // zx_20260930 M6: 衰减曲线收进 `memory-decay.ts` 一处真源——半衰期**按记忆类型派生**
+      //   （情景 7 天 / 认识类 30 天 / 用户偏好·负空间·全景 90 天），再乘效价（正 ×2 / 负 ×0.5）
+      //   与核心豁免（×5，原 λ×0.2 的同一件事）。
+      //   **龄期只认三个语义时间戳**（`last_used_at`/`last_reinforced_at`/`created_at` 取最大），
+      //   `updated_at` **永不参与**：它被十几处系统写刷新（同源替换 / 强化 / 冲突合并 / 工具改写），
+      //   拿它当年龄等于每次系统改写白送一轮新的半衰期。zx_20260920 M5 记的"半衰期 ~18 小时"病根有二，
+      //   此处收掉的是第二个（第一个是时区基准，已由 `dbTimeMs` 在 M4 收口）。
+      //   ⚠ 与 M5 之前相比这是**改生产行为**：基准由"所有类型一律 ≈6.9 天"改为上表分档 ⇒ 非情景类
+      //     记忆衰减显著变慢。这是 M6-1 的裁定所要求（短命情景 vs 长效认识），不是顺手改曲线。
+      const decayed = mem.importance * decayFactor(mem);
+      if (Math.abs(decayed - mem.importance) > 0.01) {
+        this.db.prepare('UPDATE wa_memories SET importance = ? WHERE id = ?')
+          .run(Math.max(0, Math.round(decayed * 100) / 100), mem.id);
+      }
+    }
+
+    // 3. 遗忘：importance<0.1 且 >7天未访问的归档
+    // zx_20260914 M3-2: panorama（项目知识全景）**免归档**——它是整合产物、全项目仅一条，
+    //   被"遗忘"掉等于整块理性认识凭空消失（真库曾因此 panorama=0）；衰减仍会作用于它（如实保留），
+    //   但 `retrieveByType` 无 importance 阈值，故只要不归档就仍会被注入。
+    const cutoff = new Date(Date.now() - 7 * 86400000).toISOString().replace('T', ' ').slice(0, 19);
+    const forgotten = this.db.prepare(
+      // zx_20260930 M8: 归档的**来源条件**须排除墓碑——否则一条墓碑会被"归档"改写掉，
+      //   分级从「墓碑」翻回「归档」，删除留痕当场作废（`MEM_LIVE_SQL` 即此一处真源）。
+      `UPDATE wa_memories SET memory_type = 'archived' WHERE project_id = ? AND importance < 0.1 AND created_at < ? AND memory_type NOT IN ('archived', 'panorama') AND ${MEM_LIVE_SQL}`,
+    ).run(projectId, cutoff);
+    result.forgotten = forgotten.changes;
+
+    // Phase 3.2: 矛盾检测——新旧记忆内容冲突处理
+    const resolvedConflicts = this.detectAndResolveConflicts(projectId);
+    result.conflicts += resolvedConflicts;
+
+    // Phase 2.3 反者道之动：质疑高权重低验证记忆（防止过拟合固化）
+    result.challenged = this.challengeOverconfident(projectId);
+
+    // Phase 3.2 为道日损：主动精简低价值/过期冲突记忆
+    result.pruned = this.pruneMemories(projectId);
+
+    if (result.deduped > 0 || result.conflicts > 0 || result.forgotten > 0 || result.challenged > 0 || result.pruned > 0) {
+      logger.info({ projectId, ...result }, '记忆整合管道完成');
+    }
+    return result;
+  }
+
+  /**
+   * Phase 2.3 反者道之动：定期质疑"importance 高但从未被验证/使用"的记忆。
+   * 物极必反——过度自信（高权重）且无实践检验的记忆应被降可信度，避免固化错误认知。
+   * 通过写入 context_json.confidence_penalty 实现，不直接改 importance（保留价值，降可信度）。
+   */
+  challengeOverconfident(projectId: string): number {
+    // ⚠ zx_20260920_1 M7: 本行的 `0.6` 与 `PANORAMA_MIN_IMPORTANCE` **同值不同义**——这里是
+    //   「反者道之动」的**质疑线**（候选集还要求 `use_count = 0 AND last_reinforced_at IS NULL`），
+    //   不是「可被整合进全景」的下限。**刻意不并入**那个常量：并了就等于把两个本可独立调节的概念
+    //   锁死成一个。改全景门槛时，请一并评估本行与 `extractApplicabilityConditions` 的闸。
+    //   （下方 `importance < 0.7` 那道闸是**唯一**放过"按基线新写入记忆"的地方，见 memory-constants.ts。）
+    const rows = this.db.prepare(
+      `SELECT id, importance, use_count, last_reinforced_at, context_json FROM wa_memories WHERE project_id = ? AND ${MEM_LIVE_SQL} AND importance >= 0.6 AND (use_count = 0 OR use_count IS NULL) AND (last_reinforced_at IS NULL OR last_reinforced_at = '')`,
+    ).all(projectId) as Array<{ id: string; importance: number; use_count: number; last_reinforced_at: string | null; context_json: string }>;
+
+    let challenged = 0;
+    for (const r of rows) {
+      try {
+        const ctx = JSON.parse(r.context_json || '{}');
+        // Phase A (2026-08-27) 空性·无常：易变细节(volatile)质疑门槛降为 0.6，恒常规律保持原 0.7
+        const isVolatile = (ctx as { applicability?: { stability?: string } }).applicability?.stability === 'volatile';
+        if (r.importance < 0.7 && !isVolatile) continue;
+        const existing = typeof ctx.confidence_penalty === 'number' ? ctx.confidence_penalty : 1;
+        ctx.confidence_penalty = Math.max(0.2, Math.round(existing * 0.8 * 100) / 100);
+        this.db.prepare('UPDATE wa_memories SET context_json = ? WHERE id = ?').run(JSON.stringify(ctx), r.id);
+        challenged++;
+      } catch { /* 忽略非法 context_json */ }
+    }
+    if (challenged > 0) logger.info({ projectId, challenged }, '反者道之动：质疑高权重低验证记忆');
+    return challenged;
+  }
+
+  /**
+   * Phase 3.2 为道日损：主动精简冗余/低价值/过期冲突记忆（归档可恢复，非物理删除）。
+   * 比被动 Ebbinghaus 衰减阈值更积极：低价值(importance<0.3 且从未使用>30天) + 过期冲突(标记冲突>7天未解决)。
+   */
+  pruneMemories(projectId: string): number {
+    let pruned = 0;
+    const cutoff30 = new Date(Date.now() - 30 * 86_400_000).toISOString().replace('T', ' ').slice(0, 19);
+    // zx_20260914 M3-2: 同"遗忘"——panorama 免归档（整合产物，被精简掉等于全项目理性认识消失）
+    const low = this.db.prepare(
+      `UPDATE wa_memories SET memory_type = 'archived' WHERE project_id = ? AND memory_type NOT IN ('archived', 'panorama') AND ${MEM_LIVE_SQL} AND importance < 0.3 AND (use_count = 0 OR use_count IS NULL) AND created_at < ?`,
+    ).run(projectId, cutoff30);
+    pruned += low.changes;
+
+    const cutoff7 = new Date(Date.now() - 7 * 86_400_000).toISOString().replace('T', ' ').slice(0, 19);
+    // zx_20260914 M3-2: panorama 在此**亦须**免归档——这条对 panorama 是**可达**的（此前判为不可达是误判）：
+    //   矛盾检测把 `conflict_flag` 打在 `newer` 上（当对方为 user_instruction/纠正 时，见 `:1177`），
+    //   而 panorama 正是"后写"的一方；判据是 token 重叠率 ≥0.3（非语义冲突）——
+    //   用户指令与项目全景本就同题，误标概率不低。一旦被标且 7 天内没重新综合（综合走 LLM 闸门、
+    //   失败即 return null），全景就被这条清掉。实测：一周内未综合 ⇒ 全景被归档、context_json 留 conflict_flag。
+    const stale = this.db.prepare(
+      `UPDATE wa_memories SET memory_type = 'archived' WHERE project_id = ? AND memory_type NOT IN ('archived', 'panorama') AND ${MEM_LIVE_SQL} AND context_json LIKE '%"conflict_flag":true%' AND updated_at < ?`,
+    ).run(projectId, cutoff7);
+    pruned += stale.changes;
+
+    if (pruned > 0) logger.info({ projectId, pruned }, '为道日损：主动精简低价值/过期冲突记忆');
+    return pruned;
+  }
+
+  /**
+   * Phase 3.1 间隔重复：对高价值记忆（importance≥0.8 且 positive）按递增间隔(1→3→7→30天)重放，
+   * 用 cost-optimal 低成本模型校验"是否仍成立"，通过则强化、失败则降可信度。对抗被动遗忘。
+   */
+  async spacedRepetition(projectId: string): Promise<number> {
+    try {
+      const candidates = this.db.prepare(
+        `SELECT id, content, last_reinforced_at, created_at, context_json FROM wa_memories WHERE project_id = ? AND ${MEM_LIVE_SQL} AND importance >= 0.8 AND valence = 'positive'`,
+      ).all(projectId) as Array<{ id: string; content: string; last_reinforced_at: string | null; created_at: string; context_json: string }>;
+
+      let validated = 0;
+      const now = Date.now();
+      for (const mem of candidates) {
+        try {
+          const ctx = JSON.parse(mem.context_json || '{}');
+          const repeatCount = (ctx.spaced_repeat_count as number) || 0;
+          const intervalDays = [1, 3, 7, 30][Math.min(repeatCount, 3)]!;
+          // zx_20260929 M4: 同一把尺（本条管"间隔到了没"：8 小时误差会把 1 天档提前到 16 小时触发）
+          const last = mem.last_reinforced_at ? dbTimeMs(mem.last_reinforced_at) : dbTimeMs(mem.created_at);
+          if ((now - last) / 86_400_000 < intervalDays) continue;
+
+          const m = await this.ansClient.getOptimalModel(auxModelRequest());
+          if (!m?.url || !m?.api_key || !m?.model_name) break;
+          const provider = createSafeProvider({ baseURL: m.url, apiKey: m.api_key });
+          const model = provider(m.model_name);
+          const result = await generateText({
+            model, temperature: 0.1, maxTokens: m.max_output_tokens || 4096,
+            prompt: `以下是工蚁系统项目的一条重要经验记忆。请判断它是否仍然成立、值得保留（只需回答"是"或"否"）：\n\n${mem.content.slice(0, 400)}\n\n是否仍成立？`,
+          });
+          const verdict = (result.text || '').trim();
+          if (/否|不成立|过时|错误/.test(verdict)) {
+            const existing = typeof ctx.confidence_penalty === 'number' ? ctx.confidence_penalty : 1;
+            ctx.confidence_penalty = Math.max(0.2, Math.round(existing * 0.7 * 100) / 100);
+            this.db.prepare('UPDATE wa_memories SET context_json = ? WHERE id = ?').run(JSON.stringify(ctx), mem.id);
+          } else {
+            ctx.spaced_repeat_count = repeatCount + 1;
+            this.db.prepare(
+              "UPDATE wa_memories SET last_reinforced_at = datetime('now'), context_json = ?, importance = MIN(1.0, importance + 0.02) WHERE id = ?",
+            ).run(JSON.stringify(ctx), mem.id);
+            validated++;
+          }
+        } catch { /* 单条校验失败继续 */ }
+      }
+      if (validated > 0) logger.info({ projectId, validated }, '间隔重复：重放强化重要记忆');
+      return validated;
+    } catch { return 0; }
+  }
+
+  /**
+   * Phase 3.2: 矛盾检测——基于内容重叠+效价对比，检测新旧记忆冲突并自动处理。
+   * 策略：
+   *   1. source='user_correction' 新记忆 → 替换旧记忆内容
+   *   2. source='agent_execution' 且高重叠低效价差异 → 旧记忆标记为 conflicted
+   *   3. source='user_instruction' 旧记忆 → 永远不被覆盖，新记忆记录冲突
+   */
+  detectAndResolveConflicts(projectId: string): number {
+    const memories = this.db.prepare(
+      `SELECT id, content, source, valence, importance, context_json FROM wa_memories WHERE project_id = ? AND ${MEM_LIVE_SQL} ORDER BY created_at DESC LIMIT 50`,
+    ).all(projectId) as Array<{ id: string; content: string; source: string; valence: string; importance: number; context_json: string }>;
+
+    if (memories.length < 2) return 0;
+    let resolved = 0;
+
+    for (let i = 0; i < memories.length; i++) {
+      const newer = memories[i]!;
+      if (!newer.content) continue;
+      const newerTokens = new Set(newer.content.toLowerCase().split(/[\s,，。、；：！？\n]+/).filter(t => t.length > 1));
+
+      for (let j = i + 1; j < memories.length; j++) {
+        const older = memories[j]!;
+        if (!older.content) continue;
+        const olderTokens = older.content.toLowerCase().split(/[\s,，。、；：！？\n]+/).filter(t => t.length > 1);
+
+        // 计算内容重叠度
+        const overlap = olderTokens.filter(t => newerTokens.has(t)).length;
+        const overlapRatio = overlap / Math.max(1, Math.min(newerTokens.size, olderTokens.length));
+        if (overlapRatio < 0.3) continue; // 低重叠，跳过
+
+        // 效价冲突检测：新旧记忆效价相反（positive vs negative）→ 高阶冲突
+        const valenceConflict = (newer.valence === 'positive' && older.valence === 'negative')
+          || (newer.valence === 'negative' && older.valence === 'positive');
+
+        // 策略判断
+        if (newer.source === 'user_correction') {
+          // 策略1: 用户纠正 → 覆盖旧记忆
+          this.db.prepare(
+            "UPDATE wa_memories SET content = ?, source = 'user_correction', valence = ?, updated_at = datetime('now') WHERE id = ?",
+          ).run(older.content + '\n[已纠正→] ' + newer.content, newer.valence, older.id);
+          // 【zx_20261012_1 批一·墓碑纪律**豁免#2**（如实登记）】newer 的正文已并入 older（上句 UPDATE），
+          //   物理删合法——与合并同形：内容在别处留存，落墓反而误拦"纠正后正文"的重新提取。
+          this.db.prepare('DELETE FROM wa_memories WHERE id = ?').run(newer.id);
+          resolved++;
+        } else if (older.source === 'user_instruction' || older.source === 'user_correction') {
+          // 策略3: 用户指令/纠正永远不被覆盖 → 新记忆标记冲突
+          const ctx = JSON.parse(newer.context_json || '{}');
+          ctx.conflict_flag = true;
+          ctx.conflict_with = older.id;
+          this.db.prepare('UPDATE wa_memories SET context_json = ? WHERE id = ?')
+            .run(JSON.stringify(ctx), newer.id);
+          resolved++;
+        } else if (valenceConflict && overlapRatio > 0.5) {
+          // 高阶效价冲突 → 旧记忆标记冲突待审 + A3 superseded（检索降权，避免把已被矛盾经验取代的旧信息当权威注入）
+          const ctx = JSON.parse(older.context_json || '{}');
+          ctx.conflict_flag = true;
+          ctx.conflict_with = newer.id;
+          ctx.superseded = true;
+          this.db.prepare('UPDATE wa_memories SET context_json = ? WHERE id = ?')
+            .run(JSON.stringify(ctx), older.id);
+          resolved++;
+        } else if (newer.source === 'agent_execution' && overlapRatio > 0.7) {
+          // 策略2: agent_execution 高重叠 → 新记忆保留，标记潜在冲突引用
+          const ctx = JSON.parse(newer.context_json || '{}');
+          ctx.potential_conflict = true;
+          ctx.related_to = older.id;
+          this.db.prepare('UPDATE wa_memories SET context_json = ? WHERE id = ?')
+            .run(JSON.stringify(ctx), newer.id);
+          resolved++;
+        }
+      }
+    }
+
+    if (resolved > 0) logger.info({ projectId, resolved }, '记忆矛盾检测完成');
+    return resolved;
+  }
+
+  /**
+   * Phase (2026-08-31) 记忆冲突的辩证升华（黑格尔辩证法·正反合 + 否定之否定）。
+   * 对 detectAndResolveConflicts 标记的效价冲突记忆对（conflict_flag + conflict_with），
+   * 用 LLM 把正反矛盾「扬弃」为条件化综合记忆（保留精华 + 超越局限 + 显性化适用条件）。
+   * 正题（被标记记忆）更新为综合，反题归档（保留可追溯）。
+   */
+  async dialecticalSublateMemories(projectId: string): Promise<number> {
+    try {
+      const conflictPairs = this.db.prepare(
+        `SELECT id, content, context_json FROM wa_memories WHERE project_id = ? AND ${MEM_LIVE_SQL} AND context_json LIKE '%"conflict_flag":true%' AND context_json LIKE '%"conflict_with"%' LIMIT 5`
+      ).all(projectId) as Array<{ id: string; content: string; context_json: string }>;
+      if (conflictPairs.length === 0) return 0;
+
+      let sublated = 0;
+      for (const thesis of conflictPairs) {
+        try {
+          const ctx = JSON.parse(thesis.context_json || '{}') as { conflict_with?: string };
+          if (!ctx.conflict_with) continue;
+          const antithesis = this.db.prepare(
+            `SELECT id, content, source FROM wa_memories WHERE id = ? AND ${MEM_LIVE_SQL}`
+          ).get(ctx.conflict_with) as { id: string; content: string; source: string } | undefined;
+          if (!antithesis) continue;
+          // 用户指令/纠正（权威）不与 agent 内容「综合」，跳过扬弃（避免稀释权威）
+          if (antithesis.source === 'user_instruction' || antithesis.source === 'user_correction') continue;
+
+          const synthesis = await this._sublateWithLLM(thesis.content, antithesis.content);
+          if (!synthesis) continue;
+
+          const newCtx: Record<string, unknown> = { ...ctx };
+          newCtx.sublated = { from: antithesis.id, at: new Date().toISOString() };
+          delete newCtx.conflict_flag;
+          delete newCtx.conflict_with;
+          delete newCtx.superseded; // A3: 已扬弃为综合 → 恢复检索权（不再按被取代降权）
+          this.db.prepare("UPDATE wa_memories SET content = ?, valence = 'neutral', context_json = ?, updated_at = datetime('now') WHERE id = ?")
+            .run(synthesis, JSON.stringify(newCtx), thesis.id);
+          this.db.prepare("UPDATE wa_memories SET memory_type = 'archived', updated_at = datetime('now') WHERE id = ?").run(antithesis.id);
+          sublated++;
+        } catch (err) { recordMemoryFailure(MEM_FAIL.sublatePair, err, { projectId, thesisId: thesis.id }); }
+      }
+      if (sublated > 0) logger.info({ projectId: projectId.slice(0, 8), sublated }, '记忆辩证扬弃完成');
+      return sublated;
+    } catch (err) {
+      recordMemoryFailure(MEM_FAIL.sublateRun, err, { projectId });
+      logger.warn({ projectId: projectId.slice(0, 8), errMsg: (err as Error).message }, '记忆辩证扬弃失败');
+      return 0;
+    }
+  }
+
+  /** 内部：LLM 辩证扬弃——把正题（thesis）+ 反题（antithesis）综合为合题（synthesis）。 */
+  private async _sublateWithLLM(thesis: string, antithesis: string): Promise<string | null> {
+    try {
+      const m = await this.ansClient.getOptimalModel(auxModelRequest());
+      if (!m?.url || !m?.api_key || !m?.model_name) return null;
+      const provider = createSafeProvider({ baseURL: m.url, apiKey: m.api_key });
+      const model = provider(m.model_name);
+      const result = await generateText({
+        model, temperature: 0.2, maxTokens: m.max_output_tokens || 4096,
+        prompt: `以下是关于同一主题的两条矛盾记忆。请辩证扬弃（黑格尔正反合）：既保留两者精华、又超越两者局限、显性化适用条件，综合为一条更高的记忆。\n\n正题：${thesis.slice(0, 300)}\n反题：${antithesis.slice(0, 300)}\n\n输出 JSON：{"synthesis": "综合记忆（含适用条件：在什么条件下成立、什么条件下不成立）"}，简洁中文，不要泛泛而谈。`,
+      });
+      const text = result.text || '';
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) return null;
+      const parsed = JSON.parse(jsonMatch[0]) as { synthesis?: string };
+      if (!parsed.synthesis || parsed.synthesis.trim().length < 4) return null;
+      return `[扬弃] ${parsed.synthesis.trim().slice(0, 300)}`;
+    } catch { return null; }
+  }
+
+  /** 存储知识三元组（去重：同subject+predicate+object+project_id不重复插入）——M14 起委托 `memory-kg.ts`。 */
+  storeTriple(params: { projectId: string; subject: string; predicate: string; object: string; confidence?: number; source?: string }): string | null {
+    return kgStoreTriple(this, params);
+  }
+
+  /** 知识图谱检索：1-2跳邻域扩展——M14 起委托 `memory-kg.ts`。 */
+  searchKnowledgeGraph(query: string, projectId: string, limit = 10): Array<{ subject: string; predicate: string; object: string; confidence: number }> {
+    return kgSearchKnowledgeGraph(this, query, projectId, limit);
+  }
+
+  /**
+   * Phase 3.1 家族相似性：从任务标题/描述提取关键词，查询知识图谱，返回去重后的相关三元组。
+   * 优先【】内领域词，其次长度>1的中英文词（过滤常见虚词），限前3个查询词。——M14 起委托 `memory-kg.ts`。
+   */
+  retrieveKnowledgeGraphContext(taskId: string, projectId: string, limit = 5): Array<{ subject: string; predicate: string; object: string }> {
+    return kgRetrieveKnowledgeGraphContext(this, taskId, projectId, limit);
+  }
+
+  /** 简单三元组提取：从文本中提取常见关系模式——M14 起委托 `memory-kg.ts`。 */
+  extractTriples(text: string, projectId: string): number {
+    return kgExtractTriples(this, text, projectId);
+  }
+
+  /** LLM驱动的三元组提取：用低成本模型从文本中提取关系——M14 起委托 `memory-kg.ts`。 */
+  async extractTriplesWithLLM(text: string, projectId: string, taskId: string): Promise<number> {
+    return kgExtractTriplesWithLLM(this, text, projectId, taskId);
+  }
+
+  // ==================== P1.3 范例驱动规则 ====================
+
+  /** 标记一条记忆为范例（正例或反例） */
+  markExemplar(id: string, type: 'good' | 'bad', context?: { archetype?: string; trigger?: string; toolSequence?: string[] }): void {
+    try {
+      const ctx = context ? JSON.stringify(context) : null;
+      this.db.prepare("UPDATE wa_memories SET is_exemplar = 1, exemplar_type = ?, exemplar_context = ? WHERE id = ?").run(type, ctx, id);
+    } catch { /* best-effort */ }
+  }
+
+  /** 取消范例标记 */
+  unmarkExemplar(id: string): void {
+    try {
+      this.db.prepare("UPDATE wa_memories SET is_exemplar = 0, exemplar_type = NULL, exemplar_context = NULL WHERE id = ?").run(id);
+    } catch { /* best-effort */ }
+  }
+
+  /** 获取项目的范例记忆（effectRank=true 时按"被真正应用"证据升序优先——A2 用法即意义，importance 仍主键） */
+  getExemplars(projectId: string, type?: 'good' | 'bad', limit = 5, effectRank = false): Array<{ id: string; content: string; type: string; context: unknown }> {
+    try {
+      const typeFilter = type ? "AND exemplar_type = ?" : "";
+      const params: unknown[] = [projectId];
+      if (type) params.push(type);
+      const rows = this.db.prepare(
+        // zx_20260911_4 M5-2(庄子·得鱼忘筌): 范例亦须过归档尺——真库 5 条范例中 3 条为墓碑（含相似冲突墓碑），
+        // 此前仍被注入提示词（存→取往返在范例路径上失守）。
+        `SELECT id, content, importance, exemplar_type as type, exemplar_context as context, context_json as cj, updated_at as updated FROM wa_memories WHERE project_id = ? ${typeFilter} AND is_exemplar = 1 AND ${MEM_LIVE_SQL}`
+      ).all(...params) as Array<{ id: string; content: string; type: string; context: string; cj?: string; importance: number; updated: string }>;
+      const list = rows.map(r => {
+        let context: unknown = null;
+        try { context = r.context ? JSON.parse(r.context) : null; } catch { context = null; }
+        let applied = 0; let lastSuccess = false;
+        if (effectRank) {
+          try { const cj = JSON.parse(r.cj || '{}') as { applied?: { count?: number; last_success?: boolean } }; applied = Number(cj.applied?.count) || 0; lastSuccess = cj.applied?.last_success === true; } catch { /* ignore */ }
+        }
+        return { id: r.id, content: r.content, type: r.type, context, importance: Number(r.importance) || 0, updated: r.updated || '', applied, lastSuccess };
+      });
+      // A2 (2026-09-08_1): 有效样板(被后续 run 真正采纳且成功)加权置前——权重小(0.1),importance 仍主键；同分按更新时间
+      list.sort((a, b) => {
+        const sa = a.importance + (effectRank && a.applied > 0 && a.lastSuccess ? 0.1 : 0);
+        const sb = b.importance + (effectRank && b.applied > 0 && b.lastSuccess ? 0.1 : 0);
+        if (sa !== sb) return sb - sa;
+        return String(b.updated).localeCompare(String(a.updated));
+      });
+      return list.slice(0, limit).map(({ id, content, type, context }) => ({ id, content, type, context }));
+    } catch { return []; }
+  }
+
+  /** 生成范例上下文字符串（注入Agent system prompt；memory.exemplar_effect_rank 开关 true=有效样板优先） */
+  /**
+   * zx_20260913 M4-3(名实相符 / 记账即事实): 本函数此前只回字符串——**内部本有 id**（`getExemplars` 返回含 `id`）
+   * 却不外露，于是调用方 `add('范例记忆', ctx)` 无 id 可传 ⇒ 既不能跨 run 排除、也不进 `recordAccess`。
+   * 现以**可选 opts** 外露（不动返回类型 ⇒ 既有 3 个 rr 的 `() => ''` 桩照旧成立）：
+   *   `excluded`：跨 run 去重（与 `buildMemoryContext` 的 `notExcluded` **同尺**：取回后过滤，不放宽检索面）；
+   *   `outIds`：实际写入文本的 id（与文本同序），供 `add(name, text, ids)` 记账。
+   */
+  generateExemplarContext(projectId: string, opts?: { excluded?: ReadonlySet<string>; outIds?: string[] }): string {
+    let effectRank = true;
+    try {
+      const s = this.db.prepare("SELECT value FROM wa_settings WHERE key = 'memory.exemplar_effect_rank'").get() as { value?: string } | undefined;
+      effectRank = boolSetting(s?.value);
+    } catch { effectRank = true; }
+    const notEx = <T extends { id: string }>(arr: T[]): T[] => opts?.excluded ? arr.filter((e) => !opts.excluded!.has(e.id)) : arr;
+    const good = notEx(this.getExemplars(projectId, 'good', 3, effectRank));
+    const bad = notEx(this.getExemplars(projectId, 'bad', 2, effectRank));
+    if (good.length === 0 && bad.length === 0) return '';
+
+    let ctx = '\n<exemplar-context>\n[范例驱动规则] 以下是本项目的成功/失败范例，请参考正例模式、避免反例模式：\n';
+    if (good.length > 0) {
+      ctx += '\n✅ 成功范例：\n';
+      for (const e of good) { ctx += `  - ${e.content.slice(0, 300)}\n`; opts?.outIds?.push(e.id); }
+    }
+    if (bad.length > 0) {
+      ctx += '\n❌ 失败范例（避免重复）：\n';
+      for (const e of bad) { ctx += `  - ${e.content.slice(0, 300)}\n`; opts?.outIds?.push(e.id); }
+    }
+    ctx += '</exemplar-context>';
+    return ctx;
+  }
+
+  // ==================== P1.4 家族相似聚类 ====================
+
+  /** 为已完成任务生成embedding并存储到context_json */
+  async generateTaskEmbedding(taskId: string, projectId: string): Promise<void> {
+    try {
+      const task = this.db.prepare('SELECT title, description FROM wa_tasks WHERE id = ?').get(taskId) as { title: string; description: string } | undefined;
+      if (!task) return;
+      const taskText = `${task.title}. ${(task.description || '').slice(0, 500)}`;
+      const emb = await this._embedText(taskText);
+      if (emb && emb.length > 0) {
+        const ctx = JSON.parse((this.db.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get(taskId) as { context_json: string })?.context_json || '{}');
+        ctx.task_embedding = emb;
+        this.db.prepare('UPDATE wa_tasks SET context_json = ? WHERE id = ?').run(JSON.stringify(ctx), taskId);
+      }
+    } catch { /* best-effort */ }
+  }
+
+  /** 查找与给定任务最相似的历史任务（基于余弦相似度） */
+  findSimilarTasks(projectId: string, taskId?: string, limit = 5): Array<{ id: string; title: string; status: string; similarity: number }> {
+    try {
+      // 获取目标任务的embedding
+      let targetEmb: number[] | null = null;
+      if (taskId) {
+        const task = this.db.prepare("SELECT context_json FROM wa_tasks WHERE id = ?").get(taskId) as { context_json: string } | undefined;
+        if (task) {
+          try { targetEmb = JSON.parse(task.context_json || '{}').task_embedding as number[]; } catch { /* */ }
+        }
+      }
+
+      // 获取所有有embedding的已完成任务
+      const candidates = this.db.prepare(
+        "SELECT id, title, status, context_json FROM wa_tasks WHERE project_id = ? AND status = 'completed' AND context_json LIKE '%task_embedding%' ORDER BY updated_at DESC LIMIT 100"
+      ).all(projectId) as Array<{ id: string; title: string; status: string; context_json: string }>;
+
+      if (candidates.length === 0) return [];
+
+      const scored: Array<{ id: string; title: string; status: string; similarity: number }> = [];
+
+      if (targetEmb) {
+        // 有目标embedding：余弦相似度排序
+        for (const c of candidates) {
+          if (c.id === taskId) continue;
+          try {
+            const candEmb = JSON.parse(c.context_json || '{}').task_embedding as number[] | undefined;
+            if (candEmb && candEmb.length > 0) {
+              const sim = this._cosineCalc(targetEmb, candEmb);
+              if (sim > 0.5) scored.push({ id: c.id, title: c.title, status: c.status, similarity: Math.round(sim * 100) });
+            }
+          } catch { /* skip */ }
+        }
+        scored.sort((a, b) => b.similarity - a.similarity);
+      } else {
+        // 无目标：返回最近完成的任务
+        for (const c of candidates.slice(0, limit)) {
+          scored.push({ id: c.id, title: c.title, status: c.status, similarity: 0 });
+        }
+      }
+
+      return scored.slice(0, limit);
+    } catch { return []; }
+  }
+
+  /**
+   * A1 (2026-09-01): 相似历史任务经验提炼——供 buildMemoryContext 注入（让历史同类经验真正送达 Agent）
+   * 毛选实践论「从实践中来」：召回 TopN 相似历史任务 → 各取 episodic/procedural 记忆 Top2 → 提炼经验文本。
+   */
+  // zx_20260911_5 M4-3（纯省算，不改语义）: 允许调用方传入**已取**的相似任务列表，免同参重复检索（E9）。
+  getSimilarTaskExperience(projectId: string, taskId: string, limit = 3, precomputed?: Array<{ id: string; title: string; status: string; similarity: number }>, opts?: { excluded?: ReadonlySet<string>; outIds?: string[] }): string {
+    try {
+      const similar = precomputed ?? this.findSimilarTasks(projectId, taskId, limit);
+      if (similar.length === 0) return '';
+      const lines = ['[历史同类经验] 以下为本项目相似历史任务的经验（供参考，勿机械套用）：'];
+      for (const s of similar) {
+        // zx_20260913 M4-3: 补 `id` 并于取回后过滤（与 `notExcluded` 同尺，不放宽检索面）；id 与文本同序供记账。
+        const mems = this.db.prepare(
+          "SELECT id, content, importance, memory_type, valence FROM wa_memories WHERE task_id = ? AND memory_type IN ('episodic','procedural') ORDER BY importance DESC LIMIT 2"
+        ).all(s.id) as Array<{ id: string; content: string; importance: number; memory_type: string; valence: string }>;
+        const fresh = opts?.excluded ? mems.filter((m) => !opts.excluded!.has(m.id)) : mems;
+        if (fresh.length === 0) continue;
+        lines.push(`- 相似任务「${s.title}」（状态: ${s.status}，相似度: ${s.similarity}）`);
+        for (const m of fresh) {
+          const tag = m.valence === 'positive' ? '成功' : m.valence === 'negative' ? '失败' : m.memory_type;
+          lines.push(`  【${tag}】${m.content.slice(0, 200)}`);
+          opts?.outIds?.push(m.id);
+        }
+      }
+      // 全部子记忆都被排除时不留空标头（与 `## 空段` 约束同尺）
+      return lines.length > 1 ? lines.join('\n') : '';
+    } catch { return ''; }
+  }
+
+  /** 跨项目查找相似任务 */
+  findCrossProjectSimilarTasks(projectId: string, taskId?: string, limit = 3): Array<{ id: string; title: string; projectName: string; similarity: number }> {
+    try {
+      let targetEmb: number[] | null = null;
+      if (taskId) {
+        const task = this.db.prepare("SELECT context_json FROM wa_tasks WHERE id = ?").get(taskId) as { context_json: string } | undefined;
+        if (task) { try { targetEmb = JSON.parse(task.context_json || '{}').task_embedding as number[]; } catch { /* */ } }
+      }
+      if (!targetEmb) return [];
+
+      const candidates = this.db.prepare(
+        "SELECT t.id, t.title, p.name as project_name, t.context_json FROM wa_tasks t JOIN wa_projects p ON t.project_id = p.id WHERE t.project_id != ? AND t.status = 'completed' AND t.context_json LIKE '%task_embedding%' ORDER BY t.updated_at DESC LIMIT 200"
+      ).all(projectId) as Array<{ id: string; title: string; project_name: string; context_json: string }>;
+
+      const scored: Array<{ id: string; title: string; projectName: string; similarity: number }> = [];
+      for (const c of candidates) {
+        try {
+          const candEmb = JSON.parse(c.context_json || '{}').task_embedding as number[] | undefined;
+          if (candEmb && candEmb.length > 0) {
+            const sim = this._cosineCalc(targetEmb, candEmb);
+            if (sim > 0.7) scored.push({ id: c.id, title: c.title, projectName: c.project_name, similarity: Math.round(sim * 100) });
+          }
+        } catch { /* skip */ }
+      }
+      scored.sort((a, b) => b.similarity - a.similarity);
+      return scored.slice(0, limit);
+    } catch { return []; }
+  }
+
+  /** Phase C (2026-08-26) 家族相似：跨项目知识迁移——把跨项目已验证的高价值语义/程序性知识注入当前任务。 */
+  getCrossProjectKnowledge(projectId: string, taskId: string, topK = 3): Array<{ id: string; content: string; projectName: string; memoryType: string }> {
+    try {
+      const task = this.db.prepare("SELECT context_json FROM wa_tasks WHERE id = ?").get(taskId) as { context_json: string } | undefined;
+      if (!task) return [];
+      const targetEmb = JSON.parse(task.context_json || '{}').task_embedding as number[] | undefined;
+      if (!targetEmb || targetEmb.length === 0) return [];
+
+      const candidates = this.db.prepare(
+        "SELECT t.id, t.title, t.project_id, p.name as project_name, t.context_json FROM wa_tasks t JOIN wa_projects p ON t.project_id = p.id WHERE t.project_id != ? AND t.status = 'completed' AND t.context_json LIKE '%task_embedding%' ORDER BY t.updated_at DESC LIMIT 200",
+      ).all(projectId) as Array<{ id: string; title: string; project_id: string; project_name: string; context_json: string }>;
+
+      const scored: Array<{ projectId: string; projectName: string; similarity: number }> = [];
+      for (const c of candidates) {
+        try {
+          const candEmb = JSON.parse(c.context_json || '{}').task_embedding as number[] | undefined;
+          if (candEmb && candEmb.length > 0) {
+            const sim = this._cosineCalc(targetEmb, candEmb);
+            if (sim > 0.7) scored.push({ projectId: c.project_id, projectName: c.project_name, similarity: sim });
+          }
+        } catch { /* skip */ }
+      }
+      scored.sort((a, b) => b.similarity - a.similarity);
+      if (scored.length === 0) return [];
+
+      const out: Array<{ id: string; content: string; projectName: string; memoryType: string }> = [];
+      const seenProjects = new Set<string>();
+      for (const s of scored.slice(0, 3)) {
+        if (seenProjects.has(s.projectId)) continue;
+        seenProjects.add(s.projectId);
+        // zx_20260913 M4-3: 补 `id`——调用方据此跨 run 排除（与 `notExcluded` 同尺）并记账。
+        const memories = this.db.prepare(
+          "SELECT id, content, memory_type FROM wa_memories WHERE project_id = ? AND memory_type IN ('semantic','procedural') AND importance >= 0.7 ORDER BY importance DESC, updated_at DESC LIMIT 3",
+        ).all(s.projectId) as Array<{ id: string; content: string; memory_type: string }>;
+        for (const m of memories) {
+          out.push({ id: m.id, content: m.content.slice(0, 200), projectName: s.projectName, memoryType: m.memory_type });
+        }
+        if (out.length >= topK + 3) break;
+      }
+      return out.slice(0, topK + 3);
+    } catch { return []; }
+  }
+
+  // ==================== Phase 2.2: 家族相似性聚类 ====================
+
+  /**
+   * Jaccard相似度聚类：同一项目内语义相似的记忆自动关联。
+   * 使用词袋模型（字符bigram），similarity > 0.6 时链接。
+   */
+  clusterSimilarMemories(projectId: string): { linked: number } {
+    const memories = this.db.prepare(
+      `SELECT id, content FROM wa_memories WHERE project_id = ? AND ${MEM_LIVE_SQL} ORDER BY updated_at DESC LIMIT 100`,
+    ).all(projectId) as Array<{ id: string; content: string }>;
+    if (memories.length < 2) return { linked: 0 };
+
+    // 预处理：为每条记忆生成bigram集合
+    const bigramSets = memories.map(m => {
+      const clean = (m.content || '').replace(/[^一-鿿a-zA-Z0-9一-鿿]/g, '');
+      const bigrams = new Set<string>();
+      for (let i = 0; i < clean.length - 1; i++) {
+        bigrams.add(clean.slice(i, i + 2));
+      }
+      return { id: m.id, bigrams };
+    });
+
+    let linked = 0;
+    for (let i = 0; i < bigramSets.length; i++) {
+      // 检查是否已有相似关联
+      const existingSimilar = this.db.prepare(
+        "SELECT similar_to FROM wa_memories WHERE id = ? AND similar_to != ''",
+      ).get(bigramSets[i]!.id) as { similar_to: string } | undefined;
+      if (existingSimilar) continue; // 已有关联，跳过
+
+      for (let j = i + 1; j < bigramSets.length; j++) {
+        const a = bigramSets[i]!;
+        const b = bigramSets[j]!;
+        // Jaccard: |A ∩ B| / |A ∪ B|
+        const intersection = new Set([...a.bigrams].filter(x => b.bigrams.has(x)));
+        const union = new Set([...a.bigrams, ...b.bigrams]);
+        const similarity = union.size > 0 ? intersection.size / union.size : 0;
+
+        if (similarity > 0.6) {
+          // 双向关联
+          const updateSimilar = (id: string, simId: string) => {
+            const row = this.db.prepare('SELECT similar_to FROM wa_memories WHERE id = ?').get(id) as { similar_to: string } | undefined;
+            const existing = (row?.similar_to || '') ? JSON.parse(row!.similar_to) as string[] : [];
+            if (!existing.includes(simId)) {
+              existing.push(simId);
+              this.db.prepare('UPDATE wa_memories SET similar_to = ? WHERE id = ?').run(JSON.stringify(existing), id);
+            }
+          };
+          updateSimilar(a.id, b.id);
+          updateSimilar(b.id, a.id);
+          linked++;
+        }
+      }
+    }
+
+    if (linked > 0) logger.info({ projectId, linked, total: memories.length }, '记忆相似聚类完成');
+    return { linked };
+  }
+
+  /** 公开的文本向量化入口（供 search_project_memory 等工具生成查询向量） */
+  async embedText(text: string): Promise<number[] | null> {
+    return this._embedText(text);
+  }
+
+  /** 公开余弦相似度（暴露内部 _cosineCalc，供 task-archetype 语义分类使用） */
+  cosineSimilarity(a: number[], b: number[]): number {
+    return this._cosineCalc(a, b);
+  }
+
+  /** 原型 embedding 缓存（6 原型 FAMILY_REPRESENTATIVES 描述，首次生成后复用） */
+  private _archetypeEmbeddings: Map<string, number[]> | null = null;
+
+  /** B1 (2026-08-31) 语义分类：任务文本 embedding vs 原型描述 embedding，返回相似度最高的原型 */
+  async classifyArchetypeByEmbedding(taskText: string, representatives: Record<string, string>): Promise<{ archetype: string; score: number } | null> {
+    try {
+      const taskEmb = await this._embedText(taskText);
+      if (!taskEmb || taskEmb.length === 0) return null;
+      if (!this._archetypeEmbeddings || this._archetypeEmbeddings.size === 0) {
+        this._archetypeEmbeddings = new Map();
+        for (const [archetype, desc] of Object.entries(representatives)) {
+          const emb = await this._embedText(desc);
+          if (emb && emb.length > 0) this._archetypeEmbeddings.set(archetype, emb);
+        }
+      }
+      if (this._archetypeEmbeddings.size === 0) return null;
+      let best: { archetype: string; score: number } | null = null;
+      for (const [archetype, emb] of this._archetypeEmbeddings) {
+        const sim = this._cosineCalc(taskEmb, emb);
+        if (!best || sim > best.score) best = { archetype, score: sim };
+      }
+      return best;
+    } catch { return null; }
+  }
+
+  /** 内部：调用ANS获取文本embedding */
+  private async _embedText(text: string): Promise<number[] | null> {
+    try {
+      const embModel = await this.ansClient.getOptimalModel({ capabilities: ['embedding'] });
+      if (!embModel?.url) return null;
+      const baseUrl = embModel.url.replace(/\/$/, '');
+      // Ollama 原生 /api/embed 或已含 /embeddings 的端点直接用；OpenAI 兼容端点(url含/v1)追加 /embeddings
+      const embUrl = baseUrl.includes('/api/embed') || baseUrl.includes('/embeddings')
+        ? baseUrl : `${baseUrl}/embeddings`;
+      const resp = await fetch(embUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${embModel.api_key || ''}` },
+        body: JSON.stringify({ input: text.slice(0, 4000), model: embModel.model_name || 'text-embedding-3-small' }),
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (!resp.ok) return null;
+      const json = await resp.json() as { data?: Array<{ embedding: number[] }>; embeddings?: number[][] };
+      // 兼容 OpenAI（data[0].embedding）与 Ollama（embeddings[0]）两种返回格式
+      return json.data?.[0]?.embedding || json.embeddings?.[0] || null;
+    } catch { return null; }
+  }
+
+  /** 内部：余弦相似度计算（类内部使用，避免直接调用外部函数） */
+  private _cosineCalc(a: number[], b: number[]): number {
+    if (a.length !== b.length) return 0;
+    let dot = 0, normA = 0, normB = 0;
+    for (let i = 0; i < a.length; i++) {
+      dot += a[i]! * b[i]!;
+      normA += a[i]! ** 2;
+      normB += b[i]! ** 2;
+    }
+    if (normA === 0 || normB === 0) return 0;
+    return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+  }
+
+  // ==================== Phase 3.1 前瞻记忆 ====================
+
+  /** 登记前瞻记忆（记住未来要做的事）。trigger_condition 为事件型文本，due_at 为时间型（可选）。——M14 起委托 `memory-prospective.ts`。 */
+  storeProspective(params: { projectId: string; taskId?: string; content: string; triggerCondition?: string; dueAt?: string }): string {
+    return prospStoreProspective(this, params);
+  }
+
+  /** 列出项目内前瞻记忆（含各状态，调用方按 status 过滤）。——M14 起委托 `memory-prospective.ts`。 */
+  listProspective(projectId: string, limit = 30): MemoryEntry[] {
+    return prospListProspective(this, projectId, limit);
+  }
+
+  /** 检查前瞻记忆触发：事件型（trigger_condition 关键词命中 taskText）或时间型（due_at 已过）。——M14 起委托 `memory-prospective.ts`。 */
+  getTriggeredProspective(projectId: string, taskText: string): MemoryEntry[] {
+    return prospGetTriggeredProspective(this, projectId, taskText);
+  }
+
+  /** 标记前瞻记忆为已触发。——M14 起委托 `memory-prospective.ts`。 */
+  markProspectiveTriggered(id: string): void {
+    prospMarkProspectiveTriggered(this, id);
+  }
+
+  /** Phase 3.1: 扫描所有项目中 due_at 到期的前瞻记忆（时间型，空闲周期扫描用）。命中即标记 triggered 并返回。——M14 起委托 `memory-prospective.ts`。 */
+  scanDueProspective(now: number): Array<{ id: string; projectId: string; content: string }> {
+    return prospScanDueProspective(this, now);
+  }
+
+  // ==================== Phase 3.2 线索依赖提取 ====================
+
+  /** 多线索加权检索（关键词线索 + 编码语境关键词 + 提取强度 + 重要性 + 使用频次 + 编码语境加成）。 */
+  retrieveByCue(taskText: string, projectId: string, topK = 5): MemoryEntry[] {
+    try {
+      const rows = this.db.prepare(
+        `SELECT * FROM wa_memories WHERE project_id = ? AND ${MEM_LIVE_SQL} AND memory_type != 'prospective' ORDER BY updated_at DESC LIMIT 200`,
+      ).all(projectId) as MemoryEntry[];
+      const cueKws = this._expandTerms(this._extractKeywords(taskText), projectId); // Phase D: 术语扩展
+      const score = (m: MemoryEntry) => {
+        const content = (m.content || '').toLowerCase();
+        const encKws = this._encodingKeywords(m);
+        let cue = 0;
+        if (cueKws.length > 0) {
+          // 内容关键词命中
+          const contentHits = cueKws.filter(k => content.includes(k.toLowerCase())).length;
+          const contentCue = contentHits / cueKws.length;
+          // 编码语境关键词命中（存储时记录，权重更高——编码特异性）
+          let encodingCue = 0;
+          if (encKws.length > 0) {
+            const encHits = cueKws.filter(k => encKws.some(ek => ek.toLowerCase() === k.toLowerCase())).length;
+            encodingCue = encHits / cueKws.length;
+          }
+          cue = Math.max(contentCue, encodingCue * 1.5);
+        }
+        const archetype = this._encodingArchetype(m);
+        const archBoost = archetype ? 0.05 : 0;
+        // zx_20260929 M4: 补 `_applicabilityPenalty`（与 `retrieveByType` 同尺）——多线索检索是"任务开场找线索"的
+        //   主要入口之一，此前它连冲突降权都乘了、唯独漏了易变降权，是本轮四条路径里最后一条不一致的。
+        return (0.55 * cue + 0.25 * this.retrievalStrength(m) + 0.15 * m.importance + 0.05 * Math.min(1, (m.use_count ?? 0) / 10) + archBoost + this._experienceBoost(m) + this._maturityBoost(m))
+          * this._applicabilityPenalty(m) * this._conflictPenalty(m);
+      };
+      return rows.sort((a, b) => score(b) - score(a)).slice(0, topK);
+    } catch { return []; }
+  }
+
+  /**
+   * 提取关键词（过滤虚词/停用词 + 中文 bigram 回退，最多 15 个）。
+   *
+   * zx_20260930 M7-e：**实现已移入 `core/memory-select.ts`**（与本类八处调用点共用同一份），
+   *   本方法只剩一次委托——签名与名字一字不改，故八处调用点与既有判据皆无感。
+   *   搬家的理由：注入侧（`memory-context.ts`）要算"这条笔记与当下任务有多少共同词"，
+   *   而跨模块调用 `private` 是编译错；与其在那边抄第二份分词，不如把实现提到零依赖模块。
+   */
+  private _extractKeywords(text: string): string[] {
+    return extractKeywords(text);
+  }
+
+  // ==================== Phase 3.3 工作记忆 ====================
+
+  /**
+   * 读任务工作记忆**池**（任务内临时情境，与长期记忆物理分离——存 `wa_tasks.context_json`）。
+   *
+   * ⚠ 这里返回的是**池**（上限 `WM_POOL_CAP`），不是**注入焦点**（`WM_WINDOW_CAP`=7±2）。
+   *   两者的分开正是 M7-e 的修法：旧实现把 7±2 这道**焦点**上限当成**存储**上限用（FIFO 丢最旧），
+   *   于是"只准同时想 7 件事"被读成"只准记 7 条"，第 8 条一落笔第 1 条即销毁、再无从沉淀。
+   */
+  getWorkingMemory(taskId: string): WorkingMemoryItem[] {
+    try {
+      const row = this.db.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get(taskId) as { context_json: string } | undefined;
+      if (!row) return [];
+      const ctx = JSON.parse(row.context_json || '{}') as Record<string, unknown>;
+      const wm = ctx.working_memory;
+      return Array.isArray(wm) ? (wm as WorkingMemoryItem[]) : [];
+    } catch { return []; }
+  }
+
+  /**
+   * 记一条工作记忆。**记录即复述**（巴德利·复述回路）：
+   *   · 同内容再记一次 ⇒ **不是**塞第二条，而是给这一条 `n` 加一、刷新 `ts`（=最近一次复述时刻）。
+   *     旧实现无条件 push ⇒ 复述在库里被记成"两条笔记"（占两格、沉淀出两条同源记忆）。
+   *   · 池满（`WM_POOL_CAP`）⇒ 按**同一个值算式**（复述强度 × 任务相关度 × 新近度）淘汰**最低者**。
+   *     旧实现 `while (wm.length > 7) wm.shift()` 丢的是**最旧**的，而"最旧"只是值的三个因子之一
+   *     ——一条被反复复述、且切题的老笔记不该因时序被扔。
+   *
+   * 池上界是**硬界**而非那把尺：它在"单任务记满 WM_POOL_CAP 条"时才触发（正常任务远不到），
+   * 触发时按值淘汰（不是任意/最旧）。注入侧的**焦点择要**另在 `memory-context.ts` 落账。
+   */
+  addWorkingMemory(taskId: string, content: string): void {
+    try {
+      const row = this.db.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get(taskId) as { context_json: string } | undefined;
+      if (!row) return;
+      const ctx = JSON.parse(row.context_json || '{}') as Record<string, unknown>;
+      const wm = Array.isArray(ctx.working_memory) ? (ctx.working_memory as WorkingMemoryItem[]) : [];
+      const text = content.slice(0, 500);
+      const ts = new Date().toISOString();
+      const hit = wm.find((w) => w.content === text);
+      if (hit) { hit.n = (hit.n ?? 1) + 1; hit.ts = ts; }
+      else wm.push({ content: text, ts, n: 1 });
+      if (wm.length > WM_POOL_CAP) {
+        const ranked = rankWorkingMemory(wm, {
+          taskText: this.getTaskText(taskId), keywordsOf: extractKeywords, nowMs: Date.now(),
+        });
+        const keep = new Set(ranked.slice(0, WM_POOL_CAP).map((r) => r.item));
+        ctx.working_memory = wm.filter((w) => keep.has(w));
+        // zx_20261012_1 批二（工作记忆池淘汰留痕，§1.4）：池满时把**被挤出的是哪条**如实记一行。
+        //   本轮**不消费**（M27 的"挤出可见"再取用），此处只为那一格预埋数据——静默淘汰即"没发生过"。
+        const evicted = wm.filter((w) => !keep.has(w));
+        if (evicted.length > 0) {
+          logger.info(
+            { taskId: taskId.slice(0, 8), cap: WM_POOL_CAP, evicted: evicted.map((e) => e.content.slice(0, 60)) },
+            '工作记忆池淘汰（挤出最低分者）',
+          );
+        }
+      } else {
+        ctx.working_memory = wm;
+      }
+      this.db.prepare('UPDATE wa_tasks SET context_json = ? WHERE id = ?').run(JSON.stringify(ctx), taskId);
+    } catch (err) { recordMemoryFailure(MEM_FAIL.workingMemoryAdd, err, { taskId }); }
+  }
+
+  /** 稳定字符串哈希（djb2），用于工作记忆分槽去重。 */
+  private _hashString(s: string): number {
+    let h = 5381;
+    for (let i = 0; i < s.length; i++) { h = ((h << 5) + h + s.charCodeAt(i)) | 0; }
+    return Math.abs(h) >>> 0;
+  }
+
+  /** A1 (2026-09-02): 工作记忆 → 长期记忆巩固门（Atkinson-Shiffrin：工作记忆经巩固转入长期记忆）。
+   * 任务终止（completed/failed）时调用：把 agent 执行中显式记录的工作记忆（note 工具 → context_json.working_memory，
+   * 随任务结束即消失）去重后写入 wa_memories（source='working_memory:*'，type='episodic'，experience='direct'），
+   * 附任务标题+成败上下文，使本次执行的关键笔记沉淀为后续相似任务可召回的长期记忆。
+   * 去重：按内容哈希分槽（sameSourceReplace），重跑/恢复同一笔记合并不重复，不同笔记各自独立。
+   * 返回沉淀条数。
+   */
+  promoteWorkingMemory(taskId: string, projectId: string, success: boolean): number {
+    try {
+      const task = this.db.prepare('SELECT title, context_json FROM wa_tasks WHERE id = ?').get(taskId) as { title: string; context_json: string } | undefined;
+      if (!task) return 0;
+      const ctx = JSON.parse(task.context_json || '{}') as Record<string, unknown>;
+      const wm = Array.isArray(ctx.working_memory) ? (ctx.working_memory as WorkingMemoryItem[]) : [];
+      if (wm.length === 0) return 0;
+      const title = (task.title || taskId).slice(0, 40);
+      let promoted = 0;
+      for (const item of wm) {
+        const note = (item.content || '').trim();
+        if (note.length < 10) continue; // 过短笔记无沉淀价值（避免噪声记忆）
+        const memoryContent = `[${success ? '成功' : '失败'}任务「${title}」工作笔记] ${note.slice(0, 500)}`;
+        const source = `working_memory:${taskId.slice(0, 8)}:${this._hashString(note)}`;
+        const replaced = this.sameSourceReplace(projectId, source, memoryContent, success ? '工作记忆沉淀（任务成功）' : '工作记忆沉淀（任务失败）');
+        if (!replaced) {
+          this.storeText({ project_id: projectId, task_id: taskId, type: 'episodic', content: memoryContent, source, experience: 'direct', valence: success ? 'positive' : 'negative' });
+        }
+        promoted++;
+      }
+      return promoted;
+    } catch { return 0; }
+  }
+
+  /** 读任务标题+描述（供线索依赖提取 / 前瞻记忆触发的检索查询）。 */
+  getTaskText(taskId: string): string {
+    try {
+      const t = this.db.prepare('SELECT title, description FROM wa_tasks WHERE id = ?').get(taskId) as { title: string; description: string } | undefined;
+      return t ? `${t.title}. ${(t.description || '').slice(0, 500)}` : '';
+    } catch { return ''; }
+  }
+
+  // ==================== Phase A 情景→语义抽象化 ====================
+
+  /**
+   * 情景记忆→语义记忆自动抽象化（实践论：感性认识→理性认识的飞跃）。
+   * 统计预筛（success_count≥3 的 episodic，按 archetype 分组）→ LLM 精炼（cost-optimal 蒸馏规则）→ 去重标记。
+   * 返回抽象出的语义规则条数。
+   */
+  async abstractSemanticKnowledge(projectId: string): Promise<number> {
+    try {
+      const candidates = this.db.prepare(
+        "SELECT * FROM wa_memories WHERE project_id = ? AND memory_type = 'episodic' AND success_count >= 3 AND (context_json NOT LIKE '%\"abstracted\":true%') ORDER BY updated_at DESC LIMIT 100",
+      ).all(projectId) as MemoryEntry[];
+      if (candidates.length < 2) return 0;
+
+      const groups = new Map<string, MemoryEntry[]>();
+      for (const m of candidates) {
+        const arch = this._encodingArchetype(m) ?? 'general';
+        const list = groups.get(arch);
+        if (list) list.push(m); else groups.set(arch, [m]);
+      }
+
+      let abstracted = 0;
+      for (const members of groups.values()) {
+        if (members.length < 2) continue;
+        const rules = await this._abstractWithLLM(members);
+        for (const rule of rules) {
+          // 去重：与已有 semantic 记忆关键词重叠则跳过
+          const kws = this._extractKeywords(rule).slice(0, 3);
+          if (kws.length === 0) continue;
+          const dup = this.searchByKeywords(kws, projectId, 3);
+          if (dup.some(d => d.memory_type === 'semantic')) continue;
+          this.storeText({ project_id: projectId, content: rule, type: 'semantic', source: 'abstraction' });
+          abstracted++;
+        }
+        // 标记原 episodic 已抽象（仅当 LLM 实际产出规则，失败时保留供下次重试）
+        if (rules.length === 0) continue;
+        for (const m of members) {
+          try {
+            const ctx = JSON.parse(m.context_json || '{}') as Record<string, unknown>;
+            ctx.abstracted = true;
+            this.db.prepare('UPDATE wa_memories SET context_json = ? WHERE id = ?').run(JSON.stringify(ctx), m.id);
+          } catch (err) { recordMemoryFailure(MEM_FAIL.abstractMark, err, { projectId, memId: m.id }); }
+        }
+      }
+      if (abstracted > 0) logger.info({ projectId: projectId.slice(0, 8), abstracted }, '情景→语义抽象完成');
+      return abstracted;
+    } catch (err) {
+      recordMemoryFailure(MEM_FAIL.abstractRun, err, { projectId });
+      logger.warn({ projectId: projectId.slice(0, 8), errMsg: (err as Error).message }, '情景→语义抽象失败');
+      return 0;
+    }
+  }
+
+  /** 用 cost-optimal 模型从多条已验证的 episodic 记忆中蒸馏可复用语义规则。 */
+  private async _abstractWithLLM(members: MemoryEntry[]): Promise<string[]> {
+    try {
+      const m = await this.ansClient.getOptimalModel(auxModelRequest());
+      if (!m?.url || !m?.api_key || !m?.model_name) return [];
+      const provider = createSafeProvider({ baseURL: m.url, apiKey: m.api_key });
+      const model = provider(m.model_name);
+      const experiences = members.map(x => `- ${x.content.slice(0, 300)}`).join('\n');
+      const result = await generateText({
+        model, temperature: 0.2, maxTokens: m.max_output_tokens || 4096,
+        prompt: `以下是工蚁系统在一个项目中经过实践验证（成功≥3次）的具体经历。请从中提炼 1-3 条可复用的通用经验/规则（语义知识），每条一行，用中文，简洁明确，不要重复经历本身：\n\n${experiences}`,
+      });
+      return (result.text || '')
+        .split('\n')
+        .map(s => s.replace(/^\s*[-*\d.]+\s*/, '').trim())
+        .filter(s => s.length > 5 && s.length < 200);
+    } catch { return []; }
+  }
+
+  // ==================== Phase B 知识盲区登记 ====================
+
+  /** 登记知识盲区（解决不了的问题，持久化元认知——知不知，上）。 */
+  storeUnknown(projectId: string, taskId: string | undefined, content: string): string {
+    const id = randomUUID();
+    const ctx = {
+      known_unknown: {
+        encountered_task: taskId ?? null,
+        encountered_at: new Date().toISOString(),
+      },
+    };
+    this.db.prepare(
+      "INSERT INTO wa_memories (id, project_id, task_id, content, memory_type, importance, source, context_json, updated_at) VALUES (?, ?, ?, ?, 'unknown', ?, 'agent_execution', ?, datetime('now'))",
+    ).run(id, projectId, taskId ?? null, content, MEM_IMPORTANCE_DEFAULT, JSON.stringify(ctx));
+    scheduleMemoryChanged(projectId, 'unknown');
+    return id;
+  }
+
+  /** 列出项目内已登记的知识盲区。 */
+  listUnknowns(projectId: string, limit = 20): MemoryEntry[] {
+    try {
+      return this.db.prepare(
+        "SELECT * FROM wa_memories WHERE project_id = ? AND memory_type = 'unknown' ORDER BY created_at DESC LIMIT ?",
+      ).all(projectId, limit) as MemoryEntry[];
+    } catch { return []; }
+  }
+
+  /** 检索当前任务是否命中已知盲区（关键词命中）。 */
+  retrieveUnknownHits(taskText: string, projectId: string, topK = 3): MemoryEntry[] {
+    try {
+      const unknowns = this.listUnknowns(projectId, 30);
+      const kws = this._extractKeywords(taskText);
+      if (kws.length === 0) return [];
+      const score = (m: MemoryEntry) => {
+        const content = (m.content || '').toLowerCase();
+        return kws.filter(k => content.includes(k.toLowerCase())).length / kws.length;
+      };
+      return unknowns.filter(m => score(m) > 0).sort((a, b) => score(b) - score(a)).slice(0, topK);
+    } catch { return []; }
+  }
+
+  // ==================== Phase B (2026-08-26) 负空间记忆 ====================
+
+  /** 登记负空间（试过失败/刻意回避，持久化规避经验——有无相生）。 */
+  storeNegative(projectId: string, taskId: string | undefined, content: string, kind: 'tried_failed' | 'avoid' = 'tried_failed'): string {
+    const id = randomUUID();
+    const ctx = {
+      negative: {
+        kind,
+        encountered_task: taskId ?? null,
+        encountered_at: new Date().toISOString(),
+      },
+    };
+    this.db.prepare(
+      "INSERT INTO wa_memories (id, project_id, task_id, content, memory_type, importance, source, valence, context_json, updated_at) VALUES (?, ?, ?, ?, 'negative', ?, 'agent_execution', 'negative', ?, datetime('now'))",
+    ).run(id, projectId, taskId ?? null, content, MEM_IMPORTANCE_DEFAULT, JSON.stringify(ctx));
+    scheduleMemoryChanged(projectId, 'negative');
+    return id;
+  }
+
+  /** 列出项目内已登记的负空间记忆。 */
+  listNegatives(projectId: string, limit = 20): MemoryEntry[] {
+    try {
+      return this.db.prepare(
+        "SELECT * FROM wa_memories WHERE project_id = ? AND memory_type = 'negative' ORDER BY created_at DESC LIMIT ?",
+      ).all(projectId, limit) as MemoryEntry[];
+    } catch { return []; }
+  }
+
+  /** 检索当前任务是否命中已知负空间（关键词命中）。 */
+  retrieveNegativeHits(taskText: string, projectId: string, topK = 3): MemoryEntry[] {
+    try {
+      const negatives = this.listNegatives(projectId, 30);
+      const kws = this._extractKeywords(taskText);
+      if (kws.length === 0) return [];
+      const score = (m: MemoryEntry) => {
+        const content = (m.content || '').toLowerCase();
+        return kws.filter(k => content.includes(k.toLowerCase())).length / kws.length;
+      };
+      return negatives.filter(m => score(m) > 0).sort((a, b) => score(b) - score(a)).slice(0, topK);
+    } catch { return []; }
+  }
+
+  // ==================== Phase D 术语表检索消歧 ====================
+
+  /** 读项目术语表（language_game.terminology，缩写↔全称映射）。 */
+  getProjectTerminology(projectId: string): Record<string, string> {
+    try {
+      const proj = this.db.prepare('SELECT context_json FROM wa_projects WHERE id = ?').get(projectId) as { context_json: string } | undefined;
+      if (!proj) return {};
+      const ctx = JSON.parse(proj.context_json || '{}') as { language_game?: { terminology?: unknown } };
+      const terms = ctx.language_game?.terminology;
+      return (terms && typeof terms === 'object') ? (terms as Record<string, string>) : {};
+    } catch { return {}; }
+  }
+
+  /** Phase D: 术语表双向扩展（缩写→全称、全称→缩写），用于检索查询消歧。 */
+  private _expandTerms(keywords: string[], projectId: string): string[] {
+    const terms = this.getProjectTerminology(projectId);
+    if (Object.keys(terms).length === 0) return keywords;
+    const expanded = new Set<string>(keywords);
+    for (const k of keywords) {
+      const lower = k.toLowerCase();
+      for (const [abbr, full] of Object.entries(terms)) {
+        if (abbr.toLowerCase() === lower) expanded.add(full);
+        else if (full.toLowerCase() === lower) expanded.add(abbr);
+      }
+    }
+    return [...expanded];
+  }
+
+  // ==================== Phase A 程序性记忆→技能 ====================
+
+  /**
+   * 程序性记忆→技能草案提取（维特根斯坦 意义即使用 + 毛选 第二次飞跃）。
+   * 查询 success_count≥3 的 procedural 记忆，按 archetype 分组，LLM 蒸馏技能草案，存 wa_skills(draft)。
+   * 返回生成的技能草案条数。
+   */
+  async extractProceduralSkills(projectId: string): Promise<number> {
+    try {
+      const candidates = this.db.prepare(
+        "SELECT * FROM wa_memories WHERE project_id = ? AND memory_type = 'procedural' AND success_count >= 3 AND (context_json NOT LIKE '%\"skill_compiled\":true%') ORDER BY updated_at DESC LIMIT 100",
+      ).all(projectId) as MemoryEntry[];
+      if (candidates.length < 2) return 0;
+
+      const groups = new Map<string, MemoryEntry[]>();
+      for (const m of candidates) {
+        const arch = this._encodingArchetype(m) ?? 'general';
+        const list = groups.get(arch);
+        if (list) list.push(m); else groups.set(arch, [m]);
+      }
+
+      let extracted = 0;
+      for (const members of groups.values()) {
+        if (members.length < 2) continue;
+        const skill = await this._distillSkillWithLLM(members);
+        if (!skill) continue;
+        this.storeSkillDraft(projectId, skill);
+        extracted++;
+        // 标记源记忆已编译（仅当成功产出技能草案）
+        for (const m of members) {
+          try {
+            const ctx = JSON.parse(m.context_json || '{}') as Record<string, unknown>;
+            ctx.skill_compiled = true;
+            this.db.prepare('UPDATE wa_memories SET context_json = ? WHERE id = ?').run(JSON.stringify(ctx), m.id);
+          } catch { /* ignore */ }
+        }
+      }
+      if (extracted > 0) logger.info({ projectId: projectId.slice(0, 8), extracted }, '程序性记忆→技能草案提取完成');
+      return extracted;
+    } catch (err) {
+      logger.warn({ projectId: projectId.slice(0, 8), errMsg: (err as Error).message }, '程序性记忆→技能提取失败');
+      return 0;
+    }
+  }
+
+  /** 用 cost-optimal 模型从多条已验证的 procedural 记忆中蒸馏技能草案。 */
+  private async _distillSkillWithLLM(members: MemoryEntry[]): Promise<{ name: string; description: string; steps: string[] } | null> {
+    try {
+      const m = await this.ansClient.getOptimalModel(auxModelRequest());
+      if (!m?.url || !m?.api_key || !m?.model_name) return null;
+      const provider = createSafeProvider({ baseURL: m.url, apiKey: m.api_key });
+      const model = provider(m.model_name);
+      const experiences = members.map(x => `- ${x.content.slice(0, 300)}`).join('\n');
+      const result = await generateText({
+        model, temperature: 0.2, maxTokens: m.max_output_tokens || 4096,
+        prompt: `以下是工蚁系统在一个项目中经过实践验证（成功≥3次）的操作步骤经验。请将其提炼为一个可复用的操作技能，输出 JSON：{"name":"技能名(简洁英文snake_case)","description":"一句话说明用途","steps":["步骤1","步骤2",...]}\n\n经验：\n${experiences}`,
+      });
+      const text = result.text || '';
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) return null;
+      const parsed = JSON.parse(jsonMatch[0]) as { name?: string; description?: string; steps?: string[] };
+      if (!parsed.name || !Array.isArray(parsed.steps) || parsed.steps.length === 0) return null;
+      return {
+        name: parsed.name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40),
+        description: (parsed.description || '').slice(0, 200),
+        steps: parsed.steps.map(s => (s || '').trim()).filter(s => s.length > 0).slice(0, 20),
+      };
+    } catch { return null; }
+  }
+
+  /** 存储技能草案到 wa_skills(status='draft')。同名（任意状态）已存在则返回已有 id，避免 wa_skills.name 唯一约束冲突。 */
+  storeSkillDraft(projectId: string, skill: { name: string; description: string; steps: string[] }): string {
+    // name 为全局 UNIQUE，去重须按 name 全查（不限 status），否则同名已 approved/rejected 时 INSERT 抛 UNIQUE 异常
+    const existing = this.db.prepare(
+      "SELECT id FROM wa_skills WHERE name = ?",
+    ).get(skill.name) as { id: string } | undefined;
+    if (existing) return existing.id;
+    const id = randomUUID();
+    this.db.prepare(
+      "INSERT INTO wa_skills (id, name, description, category, config, status, project_id, updated_at) VALUES (?, ?, ?, 'custom', ?, 'draft', ?, datetime('now'))",
+    ).run(id, skill.name, skill.description, JSON.stringify({ instructions: skill.steps }), projectId);
+    return id;
+  }
+
+  /** 列出待审批的技能草案（projectId 为空时跨全部项目，供全局审批 UI 使用）。 */
+  listSkillDrafts(projectId?: string, limit = 20): Array<{ id: string; name: string; description: string; steps: string[] }> {
+    try {
+      const rows = projectId
+        ? this.db.prepare(
+            "SELECT id, name, description, config FROM wa_skills WHERE project_id = ? AND status = 'draft' ORDER BY created_at DESC LIMIT ?",
+          ).all(projectId, limit) as Array<{ id: string; name: string; description: string; config: string }>
+        : this.db.prepare(
+            "SELECT id, name, description, config FROM wa_skills WHERE status = 'draft' ORDER BY created_at DESC LIMIT ?",
+          ).all(limit) as Array<{ id: string; name: string; description: string; config: string }>;
+      return rows.map(r => {
+        let steps: string[] = [];
+        try { steps = (JSON.parse(r.config || '{}') as { instructions?: string[] }).instructions || []; } catch { /* ignore */ }
+        return { id: r.id, name: r.name, description: r.description, steps };
+      });
+    } catch { return []; }
+  }
+
+  /** 批准技能草案：注册进 skill-registry 并持久化 approved。 */
+  async approveSkill(draftId: string): Promise<{ name: string } | null> {
+    const row = this.db.prepare(
+      "SELECT name, description, config FROM wa_skills WHERE id = ? AND status = 'draft'",
+    ).get(draftId) as { name: string; description: string; config: string } | undefined;
+    if (!row) return null;
+    const { registerSkill } = await import('./skill-registry.js');
+    let instructions = '';
+    try { instructions = ((JSON.parse(row.config || '{}') as { instructions?: string[] }).instructions || []).join('\n'); } catch { /* ignore */ }
+    registerSkill({ name: row.name, description: row.description, category: 'custom', content: instructions });
+    this.db.prepare("UPDATE wa_skills SET status = 'approved', updated_at = datetime('now') WHERE id = ?").run(draftId);
+    return { name: row.name };
+  }
+
+  /** 拒绝技能草案。 */
+  rejectSkill(draftId: string): boolean {
+    const r = this.db.prepare(
+      "UPDATE wa_skills SET status = 'rejected', updated_at = datetime('now') WHERE id = ? AND status = 'draft'",
+    ).run(draftId);
+    return r.changes > 0;
+  }
+
+  /** 启动时加载所有已批准的记忆衍生技能到 skill-registry。 */
+  async loadSkillsFromDb(): Promise<number> {
+    try {
+      const { registerSkill } = await import('./skill-registry.js');
+      const rows = this.db.prepare(
+        "SELECT name, description, config FROM wa_skills WHERE status = 'approved'",
+      ).all() as Array<{ name: string; description: string; config: string }>;
+      let loaded = 0;
+      for (const r of rows) {
+        let instructions = '';
+        try { instructions = ((JSON.parse(r.config || '{}') as { instructions?: string[] }).instructions || []).join('\n'); } catch { /* ignore */ }
+        registerSkill({ name: r.name, description: r.description, category: 'custom', content: instructions });
+        loaded++;
+      }
+      if (loaded > 0) logger.info({ loaded }, '已从数据库加载已批准技能');
+      return loaded;
+    } catch { return 0; }
+  }
+
+  // ==================== Phase C 记忆再巩固 ====================
+
+  /**
+   * 记忆再巩固（毛选 矛盾论 对立统一 + 人类记忆重构 Bartlett）。
+   * 相似但非冲突（余弦 0.75-0.92、效价不相反）的记忆对，较新且有验证/已使用者为新证据，
+   * 用 cost-optimal 模型把增量信息融入旧记忆内容（保留旧 id/importance 历史）。
+   * 返回再巩固条数。
+   */
+  async reconsolidateMemories(projectId: string): Promise<number> {
+    try {
+      const memories = this.db.prepare(
+        `SELECT * FROM wa_memories WHERE project_id = ? AND ${MEM_LIVE_SQL} AND embedding IS NOT NULL AND embedding != '' ORDER BY created_at DESC LIMIT 120`,
+      ).all(projectId) as MemoryEntry[];
+      if (memories.length < 2) return 0;
+
+      let reconsolidated = 0;
+      const consumed = new Set<string>();
+      for (let i = 0; i < memories.length; i++) {
+        const newer = memories[i]!;
+        if (!newer.embedding || consumed.has(newer.id)) continue;
+        for (let j = i + 1; j < memories.length; j++) {
+          const older = memories[j]!;
+          if (!older.embedding || consumed.has(older.id)) continue;
+          try {
+            const embA = JSON.parse(newer.embedding) as number[];
+            const embB = JSON.parse(older.embedding) as number[];
+            const sim = cosineSimilarity(embA, embB);
+            if (sim < 0.75 || sim >= 0.92) continue;
+            // 效价相反 → 冲突，交由 detectAndResolveConflicts 处理，不再巩固
+            if ((newer.valence === 'positive' && older.valence === 'negative') || (newer.valence === 'negative' && older.valence === 'positive')) continue;
+            // 新证据判定：较新记忆须已使用或有验证证据
+            if (!((newer.use_count ?? 0) >= 1 || this._hasEvidence(newer))) continue;
+            // 防失控：旧记忆 reconsolidated_count >= 3 停止
+            if (this._reconsolidatedCount(older) >= 3) continue;
+            const merged = await this._reconsolidateWithLLM(older, newer);
+            if (!merged) continue;
+            this.db.prepare(
+              "UPDATE wa_memories SET content = ?, updated_at = datetime('now') WHERE id = ?",
+            ).run(merged, older.id);
+            const ctx = JSON.parse(older.context_json || '{}') as Record<string, unknown>;
+            ctx.reconsolidated_count = this._reconsolidatedCount(older) + 1;
+            this.db.prepare('UPDATE wa_memories SET context_json = ? WHERE id = ?').run(JSON.stringify(ctx), older.id);
+            consumed.add(newer.id);
+            reconsolidated++;
+          } catch (err) { recordMemoryFailure(MEM_FAIL.reconsolidatePair, err, { projectId, olderId: older.id, newerId: newer.id }); }
+        }
+      }
+      if (reconsolidated > 0) logger.info({ projectId: projectId.slice(0, 8), reconsolidated }, '记忆再巩固完成');
+      return reconsolidated;
+    } catch (err) {
+      recordMemoryFailure(MEM_FAIL.reconsolidateRun, err, { projectId });
+      logger.warn({ projectId: projectId.slice(0, 8), errMsg: (err as Error).message }, '记忆再巩固失败');
+      return 0;
+    }
+  }
+
+  /** Phase C: 读记忆是否有验证证据。 */
+  private _hasEvidence(mem: MemoryEntry): boolean {
+    try {
+      const ctx = JSON.parse(mem.context_json || '{}') as { evidence?: { verified?: boolean } };
+      return !!ctx.evidence?.verified;
+    } catch { return false; }
+  }
+
+  /** Phase C: 读记忆的再巩固次数。 */
+  private _reconsolidatedCount(mem: MemoryEntry): number {
+    try {
+      const ctx = JSON.parse(mem.context_json || '{}') as { reconsolidated_count?: number };
+      return typeof ctx.reconsolidated_count === 'number' ? ctx.reconsolidated_count : 0;
+    } catch { return 0; }
+  }
+
+  /** Phase C: LLM 把新记忆增量信息融入旧记忆，返回修订后的旧记忆内容。 */
+  private async _reconsolidateWithLLM(older: MemoryEntry, newer: MemoryEntry): Promise<string | null> {
+    try {
+      const m = await this.ansClient.getOptimalModel(auxModelRequest());
+      if (!m?.url || !m?.api_key || !m?.model_name) return null;
+      const provider = createSafeProvider({ baseURL: m.url, apiKey: m.api_key });
+      const model = provider(m.model_name);
+      const result = await generateText({
+        model, temperature: 0.2, maxTokens: m.max_output_tokens || 4096,
+        prompt: `以下是工蚁系统的两条相关经验记忆。请把「新记忆」中的增量信息融入「旧记忆」，保留旧记忆的稳定部分，输出修订后的旧记忆（一段话，简洁，不要新增臆造内容）：\n\n旧记忆：${older.content.slice(0, 400)}\n\n新记忆：${newer.content.slice(0, 400)}\n\n修订后：`,
+      });
+      const text = (result.text || '').trim();
+      if (text.length < 10 || text.length > 800) return null;
+      return text;
+    } catch { return null; }
+  }
+
+  // ==================== Phase D 检索失败自省 ====================
+
+  /**
+   * 深度检索（知道感/舌尖现象补救，道德经 知不知 + 维特根斯坦 知道如何继续）。
+   * 常规检索未命中时回退：原始对话 FTS 回溯 + 松弛关键词 + 跨项目相似任务标题线索。
+   * 返回恢复的线索列表（content + source）。
+   */
+  deepRetrieve(taskText: string, projectId: string, taskId?: string, topK = 5): Array<{ content: string; source: string }> {
+    const out: Array<{ content: string; source: string }> = [];
+    const seen = new Set<string>();
+
+    // 1. 原始对话 FTS 回溯（舌尖现象：记得做过但不记得细节）
+    try {
+      const convs = this.searchConversations(taskText, projectId, 5);
+      for (const c of convs) {
+        const key = `conv:${c.taskId}:${c.content.slice(0, 40)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({ content: `[对话回溯·${c.role}] ${c.content.slice(0, 200)}`, source: 'conversation' });
+      }
+    } catch { /* ignore */ }
+
+    // 2. 松弛关键词检索（更少停用词 + 术语扩展）
+    try {
+      const kws = this._expandTerms(this._relaxedKeywords(taskText), projectId);
+      if (kws.length > 0) {
+        const mems = this.searchByKeywords(kws, projectId, topK);
+        for (const m of mems) {
+          if (seen.has(m.id)) continue;
+          seen.add(m.id);
+          out.push({ content: m.content.slice(0, 200), source: 'memory' });
+        }
+      }
+    } catch { /* ignore */ }
+
+    // 3. 跨项目相似任务标题线索
+    if (taskId) {
+      try {
+        const cross = this.findCrossProjectSimilarTasks(projectId, taskId, 3);
+        for (const t of cross) {
+          const key = `cross:${t.id}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          out.push({ content: `[跨项目 ${t.similarity}%] ${t.title}（${t.projectName}）`, source: 'cross-project-task' });
+        }
+      } catch { /* ignore */ }
+    }
+
+    return out.slice(0, topK + 3);
+  }
+
+  /** Phase D: 松弛关键词（更少停用词，召回更多线索）。 */
+  private _relaxedKeywords(text: string): string[] {
+    const stop = new Set(['的', '了', '在', '是', '和', '与', '及', '或', 'to', 'the', 'for', 'and', 'of', 'a', 'an']);
+    const words = text.split(/[\s,，。、；：！？\n()（）:：/\[\]【】]+/).filter(w => w.length > 1 && !stop.has(w.toLowerCase()));
+    return [...new Set(words)].slice(0, 15);
+  }
+
+  // ==================== Phase A (2026-08-26) 任务复盘 ====================
+
+  /**
+   * 任务复盘（实践论「再认识」+ 人类 AAR）：对比计划 vs 实际，产出偏差+可复用教训，存为 retrospective 记忆。
+   * 返回复盘记忆 id，无可复述的"实际"或 LLM 失败返回 null。
+   *
+   * zx_20260930 M5（失败也复盘·按终态分叉）：此前本函数**只认成功**——门是 `ctx.completion_summary`
+   *   不存在就 `return null`，而那条键**只有成功收尾（`finalize_task`）才写** ⇒ 失败任务永远没有复盘，
+   *   失败的教训与阻塞条件一条也不沉淀（比成功配方更该记住的东西）。
+   *   现改：提示词的构造（含"实际"取哪一份真源、该问配方还是教训）**全部**交给
+   *   `memory-write.ts` 的纯函数 `buildTaskReviewPrompt`——它按终态分叉，且手上没有事实时返回 null（**不编**）。
+   *   输出 JSON 键 `{delta, lesson, action}` 两路同形，下方解析/落库一字未改。
+   */
+  async generateTaskRetrospective(taskId: string, projectId: string): Promise<string | null> {
+    try {
+      const task = this.db.prepare(
+        'SELECT title, description, acceptance_criteria, status, context_json FROM wa_tasks WHERE id = ?',
+      ).get(taskId) as { title: string; description: string; acceptance_criteria: string; status: string | null; context_json: string } | undefined;
+      if (!task) return null;
+      const ctx = JSON.parse(task.context_json || '{}') as {
+        completion_summary?: string; failure_record?: FailureRecord;
+        awaiting_input?: { question?: string }; acceptance_check?: { reason?: string };
+      };
+      const built = buildTaskReviewPrompt({
+        status: task.status,
+        title: task.title,
+        description: task.description,
+        acceptanceCriteria: task.acceptance_criteria,
+        completionSummary: ctx.completion_summary,
+        failureRecord: ctx.failure_record ?? null,
+        awaitingQuestion: ctx.awaiting_input?.question ?? null,
+        acceptanceReason: ctx.acceptance_check?.reason ?? null,
+      });
+      if (!built) return null; // 手上没有可复述的事实 ⇒ 不编
+
+      const m = await this.ansClient.getOptimalModel(auxModelRequest());
+      if (!m?.url || !m?.api_key || !m?.model_name) return null;
+      const provider = createSafeProvider({ baseURL: m.url, apiKey: m.api_key });
+      const model = provider(m.model_name);
+      const result = await generateText({
+        model, temperature: 0.2, maxTokens: m.max_output_tokens || 4096,
+        prompt: built.prompt,
+      });
+      const text = result.text || '';
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) return null;
+      const parsed = JSON.parse(jsonMatch[0]) as { delta?: string; lesson?: string; action?: string };
+      if (!parsed.lesson) return null;
+      const content = `[复盘] 计划：${task.title.slice(0, 60)} | 偏差：${(parsed.delta || '').slice(0, 100)} | 教训：${parsed.lesson.slice(0, 200)}${parsed.action ? ` | 行动：${parsed.action.slice(0, 200)}` : ''}`;
+      // A4: 含「下次怎么做」可行动建议 → 判定为值得复用，写入 reusable_experience=1（检索加权）
+      const memId = this.storeText({ project_id: projectId, task_id: taskId, content, type: 'retrospective', source: 'retrospective', reusableExperience: !!parsed.action });
+      // B1 (2026-09-03): 复盘结构化落库——content 保留一行摘要（检索/兼容不变），结构放 context_json.retrospective（UI 分节渲染）
+      try {
+        const memRow = this.db.prepare('SELECT context_json FROM wa_memories WHERE id=?').get(memId) as { context_json: string } | undefined;
+        const prev = memRow?.context_json ? (JSON.parse(memRow.context_json) as Record<string, unknown>) : {};
+        this.db.prepare('UPDATE wa_memories SET context_json = ? WHERE id = ?').run(
+          JSON.stringify({ ...prev, retrospective: { plan: task.title.slice(0, 200), delta: parsed.delta || '', lesson: parsed.lesson, action: parsed.action || '', reusable: !!parsed.action } }),
+          memId,
+        );
+      } catch { /* 结构落库失败不影响 content 摘要 */ }
+      return memId;
+    } catch { return null; }
+  }
+
+  // ==================== Phase A (2026-08-27) 记忆整合成体系 ====================
+
+  /**
+   * 记忆整合成体系（实践论第一次飞跃：感性→理性认识 + 大制不割）。
+   * 把分散的高价值记忆综合为连贯「项目知识全景」，存为 memory_type='panorama'（同源覆盖只保留最新）。
+   * 返回全景记忆 id，候选记忆 < `PANORAMA_TOP_K` 或 LLM 失败返回 null。
+   */
+  async synthesizeProjectKnowledge(projectId: string): Promise<string | null> {
+    try {
+      // zx_20260920_1 M7: 门槛**由真源拼出**，不另写 `0.6` 字面量——写侧（`MEM_IMPORTANCE_DEFAULT`）与
+      //   读侧（本行）原先各写各的、谁也没把另一条当约束，于是「≥3 条 ≥0.6」对新写入恒不可满足。
+      //   ⚠ 本支**一字未改**（zx_20261002 M9-② 只在下方**另起一支**，不改这条绝对门槛的语义与串面）。
+      const highValue = this.db.prepare(
+        `SELECT content, memory_type FROM wa_memories WHERE project_id = ? AND memory_type IN ('semantic','procedural','retrospective','negative') AND importance >= ${PANORAMA_MIN_IMPORTANCE} ORDER BY importance DESC, updated_at DESC LIMIT 30`,
+      ).all(projectId) as Array<{ content: string; memory_type: string }>;
+
+      // zx_20261002 M9-②（佛学·应无所住／夏克特·错误归因／艾宾浩斯·遗忘曲线）: **相对名次支**。
+      //   实证：`importance` 是**时间函数**（衰减），真库活项目记忆已跌到 0.02–0.28 ⇒ 上面那条绝对门槛
+      //   在合法数据下**结构性不可满足**（闸在册、永不落 ⇒ 真库 `panorama` 恒 0）。
+      //   故补一把**同项目相对名次**的尺：项目内候选齐 `PANORAMA_TOP_K` 条即够综合。绝对支不废——
+      //   它继续把"高价值"那几条**排到前面**（下面的合并顺序：绝对支在前），只是不再是**唯一准入**。
+      //   ⚠ 命名取舍：本支取数**不按 importance 过滤**，故谓词里没有 `importance >=`；两支都以
+      //     `ORDER BY importance DESC` 收尾 ⇒ 即便整体衰减，"项目里最有价值的那几条"仍被优先喂给 LLM。
+      const topRanked = this.db.prepare(
+        `SELECT content, memory_type FROM wa_memories WHERE project_id = ? AND memory_type IN ('semantic','procedural','retrospective','negative') ORDER BY importance DESC, updated_at DESC LIMIT ${PANORAMA_TOP_K}`,
+      ).all(projectId) as Array<{ content: string; memory_type: string }>;
+
+      // 合并两支：绝对支在前（高价值优先），按（类型, 正文）去重。
+      //   谓词一致 ⇒ 同一行不可能只在一支里"变样"；去重只为清掉两支都取到的重复。
+      const seen = new Set<string>();
+      const memories: Array<{ content: string; memory_type: string }> = [];
+      for (const m of [...highValue, ...topRanked]) {
+        const key = m.memory_type + '\u0000' + m.content;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        memories.push(m);
+      }
+      // 门槛：**候选条数** ≥ TOP_K（旧写法是硬编码的 `< 3`；现值收进真源，口径不变）。
+      if (memories.length < PANORAMA_TOP_K) return null;
+
+      const m = await this.ansClient.getOptimalModel(auxModelRequest());
+      if (!m?.url || !m?.api_key || !m?.model_name) return null;
+      const provider = createSafeProvider({ baseURL: m.url, apiKey: m.api_key });
+      const model = provider(m.model_name);
+      const memoriesText = memories.map(x => `[${x.memory_type}] ${x.content.slice(0, 200)}`).join('\n');
+      // zx_20261003 M5: 综合的输入**不止记忆**——把项目**非记忆原料**（三元组 top 关系 + 交付物 byType +
+      //   调用账成败）一并喂进去作**旁证**。空则不出段（`formatKnowledgeMaterials` 返空串）。
+      //   ⚠ **不改**上面的 `memories.length < PANORAMA_TOP_K` 门槛——"候选不足 ⇒ 如实 return null" 语义不动；
+      //     非记忆原料**不是**门槛的兜底（否则又会造出"没记忆也能凑一份 panorama"的伪知识）。
+      const materialsText = formatKnowledgeMaterials(collectProjectKnowledgeMaterials(this.db, projectId));
+      const materialsBlock = materialsText
+        ? `\n\n另附该项目的**非记忆原料**（交付物/关系/服务调用账）——**仅作旁证**，可据此校正你对项目现状的判断，但**不得**据此臆造未记载的内容：\n${materialsText}`
+        : '';
+      const result = await generateText({
+        model, temperature: 0.2, maxTokens: m.max_output_tokens || 4096,
+        prompt: `以下是工蚁系统一个项目中积累的高价值记忆（按类型标注）。请综合为一份连贯的「项目知识全景」，输出 JSON：{"overview":"项目概况","tech_stack":"技术栈/架构","approaches":"已验证打法","pitfalls":"坑/注意事项","blind_spots":"知识盲区"}。简洁中文，只综合不臆造。\n\n${memoriesText}${materialsBlock}`,
+      });
+      const text = result.text || '';
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) return null;
+      const parsed = JSON.parse(jsonMatch[0]) as Record<string, string>;
+      const parts: string[] = [];
+      if (parsed.overview) parts.push(`【概况】${parsed.overview}`);
+      if (parsed.tech_stack) parts.push(`【技术栈】${parsed.tech_stack}`);
+      if (parsed.approaches) parts.push(`【打法】${parsed.approaches}`);
+      if (parsed.pitfalls) parts.push(`【坑】${parsed.pitfalls}`);
+      if (parsed.blind_spots) parts.push(`【盲区】${parsed.blind_spots}`);
+      const content = parts.join('\n');
+      if (content.length < 20) return null;
+
+      // 同源覆盖：删除旧全景，存新全景（只保留最新）
+      // 【zx_20261012_1 批一·墓碑纪律**豁免#3**（如实登记）】panorama 是**派生行**（由现存记忆 LLM 综合而成，
+      //   非用户写入的信息载体）——删它不丢任何"用户/机器写入的事实"，下次综合即重算。落墓反会污染审计面。
+      this.db.prepare("DELETE FROM wa_memories WHERE project_id = ? AND memory_type = 'panorama'").run(projectId);
+      const id = this.storeText({ project_id: projectId, content, type: 'panorama', source: 'synthesis' });
+      // 全景综合的是项目里**最有价值的那几条**（绝对支高价值在前、相对支补足），「理性认识」应不低于其组成部分，设 0.8 防过快衰减
+      this.db.prepare('UPDATE wa_memories SET importance = 0.8 WHERE id = ?').run(id);
+      return id;
+    } catch { return null; }
+  }
+
+  // ==================== Phase A (2026-08-27) 记忆缘起条件 ====================
+
+  /**
+   * 记忆缘起条件提取（空性·缘起性空 + 无常）：对高价值 semantic/procedural 记忆，
+   * LLM 提取「适用条件 + 稳定性分级」，写入 context_json.applicability。
+   * 已有 applicability 的记忆跳过（幂等）。返回是否成功提取。
+   */
+  async extractApplicabilityConditions(memId: string, projectId: string): Promise<boolean> {
+    try {
+      const mem = this.db.prepare(
+        "SELECT content, context_json, importance FROM wa_memories WHERE id = ? AND project_id = ?",
+      ).get(memId, projectId) as { content: string; context_json: string; importance: number } | undefined;
+      // ⚠ zx_20260920_1 M7: 同值不同义的第二处 `0.6`（另见 `challengeOverconfident`）——这里是
+      //   「缘起条件提取」的闸，不是全景门槛，**刻意不并入** `PANORAMA_MIN_IMPORTANCE`；
+      //   调全景门槛时请一并评估此处。
+      if (!mem || mem.importance < 0.6) return false;
+      const ctx = JSON.parse(mem.context_json || '{}') as { applicability?: unknown };
+      if (ctx.applicability && Object.keys(ctx.applicability as object).length > 0) return false; // 已提取，幂等跳过
+
+      const m = await this.ansClient.getOptimalModel(auxModelRequest());
+      if (!m?.url || !m?.api_key || !m?.model_name) return false;
+      const provider = createSafeProvider({ baseURL: m.url, apiKey: m.api_key });
+      const model = provider(m.model_name);
+      const result = await generateText({
+        model, temperature: 0.1, maxTokens: m.max_output_tokens || 4096,
+        prompt: `以下是工蚁系统的一条高价值记忆。请判断这条记忆的「适用条件/前提」和「稳定性」。\n\n记忆：${mem.content.slice(0, 400)}\n\n输出 JSON：{"conditions": ["适用条件短语，如'仅适用于Windows环境'、'需要Node 22+'，没有则空数组"], "stability": "stable"|"volatile"}\n\nstability 判定：stable=恒常规律（技术栈选型/架构原则等不易变）；volatile=无常细节（具体版本号/临时环境配置/易变状态）。简洁中文。`,
+      });
+      const text = result.text || '';
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) return false;
+      const parsed = JSON.parse(jsonMatch[0]) as { conditions?: unknown; stability?: unknown };
+      const conditions = Array.isArray(parsed.conditions) ? (parsed.conditions as unknown[]).filter((c): c is string => typeof c === 'string' && c.length > 1).slice(0, 5) : [];
+      const stability = parsed.stability === 'volatile' ? 'volatile' : 'stable';
+      if (conditions.length === 0 && stability !== 'volatile') return false; // 既无条件也无无常标记，跳过
+
+      const fresh = JSON.parse(mem.context_json || '{}') as Record<string, unknown>;
+      fresh.applicability = { conditions, stability, extracted_at: new Date().toISOString() };
+      this.db.prepare('UPDATE wa_memories SET context_json = ? WHERE id = ?').run(JSON.stringify(fresh), memId);
+      return true;
+    } catch { return false; }
+  }
+
+  /**
+   * 记忆加工深度评估（加工水平理论 + 王阳明·格物致知 + 维特根斯坦·意义即使用 + 空性·缘起）：
+   * 对已存储的记忆，LLM 判断「深加工（与已有知识关联+提炼规律）/浅加工（机械记录事实）」，
+   * 写入 context_json.processing_depth；deep 记忆 importance 上浮 +0.1。
+   * 已有 processing_depth 的记忆跳过（幂等）。返回是否成功评估。
+   */
+  async assessProcessingDepth(memId: string, projectId: string): Promise<boolean> {
+    try {
+      const mem = this.db.prepare(
+        "SELECT content, context_json FROM wa_memories WHERE id = ? AND project_id = ?",
+      ).get(memId, projectId) as { content: string; context_json: string } | undefined;
+      if (!mem) return false;
+      const ctx = JSON.parse(mem.context_json || '{}') as { processing_depth?: unknown };
+      if (ctx.processing_depth === 'deep' || ctx.processing_depth === 'shallow') return false; // 已评估，幂等跳过
+
+      const m = await this.ansClient.getOptimalModel(auxModelRequest());
+      if (!m?.url || !m?.api_key || !m?.model_name) return false;
+      const provider = createSafeProvider({ baseURL: m.url, apiKey: m.api_key });
+      const model = provider(m.model_name);
+      const result = await generateText({
+        model, temperature: 0.1, maxTokens: m.max_output_tokens || 4096,
+        prompt: `以下是工蚁系统的一条记忆。请判断这条记忆的「加工深度」。\n\n记忆：${mem.content.slice(0, 400)}\n\n输出 JSON：{"depth": "deep"|"shallow", "reason": "一句话说明"}\n\ndeep=深层加工（提炼了规律/因果/可迁移的方法，而非仅记录事实）；shallow=浅层加工（机械记录某次事实/状态，未提炼规律）。`,
+      });
+      const text = result.text || '';
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) return false;
+      const parsed = JSON.parse(jsonMatch[0]) as { depth?: string };
+      const depth = parsed.depth === 'deep' ? 'deep' : 'shallow';
+
+      const fresh = JSON.parse(mem.context_json || '{}') as Record<string, unknown>;
+      fresh.processing_depth = depth;
+      this.db.prepare('UPDATE wa_memories SET context_json = ? WHERE id = ?').run(JSON.stringify(fresh), memId);
+      // 深加工记忆 importance 上浮 +0.1（格物致知：深加工更可靠）
+      if (depth === 'deep') {
+        this.db.prepare('UPDATE wa_memories SET importance = MIN(1.0, importance + 0.1) WHERE id = ?').run(memId);
+      }
+      return true;
+    } catch { return false; }
+  }
+
+  // ==================== Phase B (2026-08-27) 记忆行动转化 ====================
+
+  /**
+   * 记忆行动转化（王阳明知行合一 + 事上磨练）：任务完成后 LLM 判定每条注入记忆是否「真正被应用」
+   * （其结论/打法在本次执行中被采纳并影响行动），而非仅被检索。
+   * 被应用且成功的记忆额外强化（真知必能行）；被检索却未应用的记忆微降（知而不行只是未知）。
+   * 返回 { applied, notApplied }，无注入记忆/无完成摘要/LLM 失败返回 null。
+   *
+   * zx_20260930 M6: 判定的对象与 `reinforceMemories` **同一份使用证据**（per-run 优先、老任务落回 union）——
+   *   两处若各取一套，"基础强化算在谁头上"就对不上（见 `_recordApplication` 的 `baseReinforced`）。
+   */
+  async assessMemoryApplication(taskId: string, projectId: string): Promise<{ applied: number; notApplied: number } | null> {
+    try {
+      const perRun = this._readRunMemoryIds(taskId);
+      const injectedIds = perRun ?? this._readInjectedMemoryIds(taskId);
+      if (injectedIds.length === 0) return null;
+      const task = this.db.prepare('SELECT status, context_json FROM wa_tasks WHERE id = ?').get(taskId) as { status: string; context_json: string } | undefined;
+      if (!task) return null;
+      const ctx = JSON.parse(task.context_json || '{}');
+      const summary = ctx.completion_summary as string | undefined;
+      if (!summary) return null;
+      const success = task.status === 'completed';
+      // 复算 reinforceMemories 的 success 基础强化幅度（0.1*q，与 _applyReinforcement 保持一致），用于 notApplied 精确抵消
+      const qScore = (ctx.completion_quality as { score?: number } | undefined)?.score;
+      const reinforceDelta = 0.1 * ((qScore ?? 70) / 100);
+
+      const mems = injectedIds.map(id => {
+        const row = this.db.prepare('SELECT id, content FROM wa_memories WHERE id = ?').get(id) as { id: string; content: string } | undefined;
+        return row ? { id: row.id, content: row.content.slice(0, 200) } : null;
+      }).filter((x): x is { id: string; content: string } => x !== null);
+      if (mems.length === 0) return null;
+
+      const m = await this.ansClient.getOptimalModel(auxModelRequest());
+      if (!m?.url || !m?.api_key || !m?.model_name) return null;
+      const provider = createSafeProvider({ baseURL: m.url, apiKey: m.api_key });
+      const model = provider(m.model_name);
+      const memsText = mems.map((x, i) => `${i + 1}. ${x.content}`).join('\n');
+      const result = await generateText({
+        model, temperature: 0.1, maxTokens: m.max_output_tokens || 4096,
+        prompt: `以下是工蚁系统一个已完成任务的注入记忆与完成摘要。请判定每条记忆是否「真正被应用」（即其结论/打法在本次执行中被采纳并影响行动），而非仅被检索。\n\n注入记忆：\n${memsText}\n\n任务完成摘要：\n${summary.slice(0, 500)}\n\n输出 JSON：{"applied": [记忆编号...], "notApplied": [记忆编号...]}，编号从1开始，只输出编号数组。`,
+      });
+      const text = result.text || '';
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) return null;
+      const parsed = JSON.parse(jsonMatch[0]) as { applied?: unknown; notApplied?: unknown };
+      const toIdx = (v: unknown): Set<number> => new Set(Array.isArray(v) ? (v as unknown[]).map(Number).filter(n => Number.isInteger(n) && n >= 1 && n <= mems.length) : []);
+
+      let applied = 0, notApplied = 0;
+      const appliedIdx = toIdx(parsed.applied);
+      const notAppliedIdx = toIdx(parsed.notApplied);
+      for (let i = 0; i < mems.length; i++) {
+        const mem = mems[i]!;
+        if (appliedIdx.has(i + 1)) { applied++; this._recordApplication(mem.id, true, success, reinforceDelta, perRun !== null); }
+        else if (notAppliedIdx.has(i + 1)) { notApplied++; this._recordApplication(mem.id, false, success, reinforceDelta, perRun !== null); }
+      }
+      if (applied + notApplied > 0) logger.info({ taskId: taskId.slice(0, 8), applied, notApplied, success }, '记忆行动转化判定完成');
+      return { applied, notApplied };
+    } catch { return null; }
+  }
+
+  /**
+   * Phase B: 记录单条记忆的应用结果，并对「被应用且成功/被检索未应用」做知行合一增量强化。
+   * `baseReinforced`（zx_20260930 M6）：`reinforceMemories` 是否**真的**给这条加过基础分。
+   *   老任务（无 per-run 键）只记计数、importance 分文未动 ⇒ 抵不掉从未加过的分。
+   */
+  private _recordApplication(memId: string, applied: boolean, success: boolean, reinforceDelta = 0.07, baseReinforced = true): void {
+    try {
+      const row = this.db.prepare('SELECT context_json FROM wa_memories WHERE id = ?').get(memId) as { context_json: string } | undefined;
+      if (!row) return;
+      const ctx = JSON.parse(row.context_json || '{}') as Record<string, unknown>;
+      const prev = (ctx.applied as { count?: number; last_applied_at?: string; last_success?: boolean } | undefined) ?? {};
+      ctx.applied = {
+        count: (prev.count ?? 0) + (applied ? 1 : 0),
+        last_applied_at: applied ? new Date().toISOString() : prev.last_applied_at,
+        last_success: applied ? success : prev.last_success,
+      };
+      this.db.prepare('UPDATE wa_memories SET context_json = ? WHERE id = ?').run(JSON.stringify(ctx), memId);
+
+      // 知行合一增量强化（叠加在 reinforceMemories 基础强化之上）
+      if (applied && success) {
+        // 被应用且成功：额外 +0.03（真知被行且成，强于仅被检索）
+        this.db.prepare('UPDATE wa_memories SET importance = MIN(1.0, importance + 0.03) WHERE id = ?').run(memId);
+      } else if (!applied && success) {
+        // 被检索未应用且成功：抵消 reinforceMemories 的基础强化(+reinforceDelta)并额外 -0.03（知而不行只是未知，纠正死记）
+        // zx_20260930 M6: 抵的只能是**真加过**的分——老任务只记计数（`baseReinforced=false`）时只扣 0.03。
+        const back = baseReinforced ? reinforceDelta + 0.03 : 0.03;
+        this.db.prepare('UPDATE wa_memories SET importance = MAX(0.05, importance - ?) WHERE id = ?').run(Math.round(back * 100) / 100, memId);
+      }
+    } catch (err) { recordMemoryFailure(MEM_FAIL.applicationRecord, err, { memId, applied, success }); }
+  }
+
+  // ==================== Phase C (2026-08-27) 自我设限信念识别 ====================
+
+  /**
+   * 自我设限信念识别（王阳明·破心中贼）：从失败任务对话中提取「自我设限假设」
+   * （如"无法完成/需人工/不可行/超出能力"等未尝试就放弃的内在信念），存为 memory_type='limiting_belief'。
+   * 严控触发：仅 status='failed' 且未提取过的任务，且提取到明确「自我设限」措辞才存。
+   * 返回提取条数。
+   */
+  async extractLimitingBeliefs(projectId: string): Promise<number> {
+    try {
+      const tasks = this.db.prepare(
+        "SELECT id, title, context_json FROM wa_tasks WHERE project_id = ? AND status = 'failed' AND (context_json NOT LIKE '%\"limiting_belief_extracted\":true%') ORDER BY updated_at DESC LIMIT 10",
+      ).all(projectId) as Array<{ id: string; title: string; context_json: string }>;
+      if (tasks.length === 0) return 0;
+
+      const m = await this.ansClient.getOptimalModel(auxModelRequest());
+      if (!m?.url || !m?.api_key || !m?.model_name) return 0;
+      const provider = createSafeProvider({ baseURL: m.url, apiKey: m.api_key });
+      const model = provider(m.model_name);
+
+      let extracted = 0;
+      for (const task of tasks) {
+        try {
+          const convs = this.db.prepare(
+            "SELECT role, content FROM wa_task_conversations WHERE task_id = ? ORDER BY rowid ASC LIMIT 50",
+          ).all(task.id) as Array<{ role: string; content: string }>;
+          if (convs.length === 0) continue;
+          const convText = convs.map(c => `[${c.role}] ${(c.content || '').slice(0, 300)}`).join('\n');
+
+          const result = await generateText({
+            model, temperature: 0.1, maxTokens: m.max_output_tokens || 4096,
+            prompt: `以下是工蚁系统一个失败任务的对话。请判断其中是否存在「自我设限信念」（未尝试就放弃的内在假设，如"无法完成/需要人工/不可行/超出能力/只能放弃"），注意排除客观技术障碍和已实际尝试过的失败。\n\n任务：${task.title.slice(0, 100)}\n对话：\n${convText.slice(0, 2500)}\n\n输出 JSON：{"belief": "自我设限信念描述，不存在则为空字符串", "evidence": "支撑该判断的对话片段"}。简洁中文。`,
+          });
+          const text = result.text || '';
+          const jsonMatch = text.match(/\{[\s\S]*\}/);
+          if (!jsonMatch) continue;
+          const parsed = JSON.parse(jsonMatch[0]) as { belief?: string; evidence?: string };
+          const belief = (parsed.belief || '').trim();
+          if (belief.length < 4) continue;
+
+          const id = this.storeText({
+            project_id: projectId, task_id: task.id,
+            content: `[心中贼] ${belief.slice(0, 200)}`,
+            type: 'limiting_belief', source: 'limiting_belief',
+          });
+          // 存信念依据（evidence），供注入时展示
+          try {
+            const mrow = this.db.prepare('SELECT context_json FROM wa_memories WHERE id = ?').get(id) as { context_json: string } | undefined;
+            if (mrow) {
+              const mctx = JSON.parse(mrow.context_json || '{}') as Record<string, unknown>;
+              mctx.belief = { evidence: (parsed.evidence || '').slice(0, 200) };
+              this.db.prepare('UPDATE wa_memories SET context_json = ? WHERE id = ?').run(JSON.stringify(mctx), id);
+            }
+          } catch { /* ignore */ }
+
+          // 标记该任务已提取，避免重复
+          const tctx = JSON.parse(task.context_json || '{}') as Record<string, unknown>;
+          tctx.limiting_belief_extracted = true;
+          this.db.prepare('UPDATE wa_tasks SET context_json = ? WHERE id = ?').run(JSON.stringify(tctx), task.id);
+          extracted++;
+        } catch { /* 单任务提取失败继续下一个 */ }
+      }
+      if (extracted > 0) logger.info({ projectId: projectId.slice(0, 8), extracted }, '破心中贼：自我设限信念提取完成');
+      return extracted;
+    } catch { return 0; }
+  }
+
+  // ==================== zx_20260905 批1 (2026-09-05) 理解预跑「三调合一」 ====================
+  // 原 任务立志(identifyTaskGoal) + 主要矛盾(identifyTaskPrincipalContradiction) + 需求卡 refine(refineRequirementCard)
+  // 是 3 次独立 cost-optimal LLM 预读，各自把任务文本再送一次且不计费（不可见成本）。此处合并为一次结构化预读，
+  // 一次产出 goal/success_criteria/investigate + key_constraint + req_card，并统一缓存到 ctxJson：
+  //   · task_goal 已存在（首识或用户纠正回写）→ 复用、绝不覆盖（沿用 C3 语义）
+  //   · principal_contradiction / requirement_card 同源缓存 → resume 不再重复预读（原矛盾每次 resume 都重算）
+  //   · 附带 prelude_usage 估算预读 token，使此前不可见成本可见（不并入步进记账，避免双计）
+  async runTaskPrelude(
+    taskId: string, projectId: string,
+  ): Promise<{ goal: { goal: string; success_criteria: string; investigate: string[] } | null; contradiction: string | null; card: string | null } | null> {
+    try {
+      const row = this.db.prepare('SELECT title, description, acceptance_criteria, context_json FROM wa_tasks WHERE id = ? AND project_id = ?').get(taskId, projectId) as { title: string; description: string | null; acceptance_criteria: string | null; context_json: string } | undefined;
+      if (!row) return null;
+      const ctx: Record<string, unknown> = (() => { try { return JSON.parse(row.context_json || '{}'); } catch { return {}; } })();
+      const title = (row.title || '').slice(0, 200);
+      const description = row.description || '';
+      const acceptance = row.acceptance_criteria || '';
+      const isSimple = assessComplexity(`${title} ${description}`) === 'simple';
+      const isSubagent = ctx.type === 'subagent' || Number(ctx.depth || 0) >= 1;
+
+      // 缓存读取：task_goal（首识/用户纠正），contradiction/card（本次或历史 run 预读）
+      const existingGoal = ctx.task_goal as { goal?: string; success_criteria?: string; investigate?: unknown } | undefined;
+      const cachedGoal = existingGoal?.goal && String(existingGoal.goal).length >= 4
+        ? { goal: String(existingGoal.goal).slice(0, 120), success_criteria: (existingGoal.success_criteria || '').trim().slice(0, 120), investigate: Array.isArray(existingGoal.investigate) ? (existingGoal.investigate as unknown[]).filter((x): x is string => typeof x === 'string' && x.length > 1).slice(0, 3) : [] }
+        : null;
+      const cachedContr = typeof ctx.principal_contradiction === 'string' && String(ctx.principal_contradiction).trim().length >= 4 ? String(ctx.principal_contradiction).trim().slice(0, 120) : null;
+      const cachedCard = typeof ctx.requirement_card === 'string' && String(ctx.requirement_card).trim().length > 0 ? String(ctx.requirement_card) : null;
+
+      // 各字段门：goal/矛盾 仅 complex|standard 识别（沿用旧 gate）；需求卡 refine 仅长文(≥300)且非 subagent/depth≥1
+      const needGoal = !isSimple && !cachedGoal;
+      const needContr = !isSimple && !cachedContr;
+      const textLen = `${title}\n${description}\n${acceptance}`.length;
+      const needCard = !isSubagent && !cachedCard && textLen >= 300;
+      if (!needGoal && !needContr && !needCard) {
+        return { goal: cachedGoal, contradiction: cachedContr, card: cachedCard };
+      }
+
+      const m = await this.ansClient.getOptimalModel(auxModelRequest());
+      if (!m?.url || !m?.api_key || !m?.model_name) return { goal: cachedGoal, contradiction: cachedContr, card: cachedCard };
+
+      const req: string[] = [];
+      if (needGoal) req.push('goal/success_criteria/investigate');
+      if (needContr) req.push('key_constraint');
+      if (needCard) req.push('req_card');
+      const skeleton: string[] = [];
+      if (needGoal) skeleton.push('"goal": "核心目标一句话(须具体可验证)", "success_criteria": "成功标准一句话", "investigate": ["需先调查的关键信息，最多3条"]');
+      if (needContr) skeleton.push('"key_constraint": "关键约束一句话(无明确难点则空字符串)"');
+      if (needCard) skeleton.push('"req_card": "极简需求卡(纯文本，行式: 目标:/边界约束:/产出文件:/验收要点:/勿做:)"');
+
+      const provider = createSafeProvider({ baseURL: m.url, apiKey: m.api_key });
+      const model = provider(m.model_name);
+      const prompt = [
+        '以下是工蚁系统一个待执行任务。请一次性完成"需求理解预读"。',
+        '',
+        `任务：${title}`,
+        description ? `描述：${description.slice(0, 2000)}` : '',
+        needCard && acceptance ? `验收标准：${acceptance.slice(0, 1500)}` : '',
+        '',
+        '只输出一个 JSON 对象，包含以下字段：',
+        req.join('；'),
+        `JSON 骨架：{ ${skeleton.join(', ')} }`,
+        'goal=要达成什么（志不立天下无可成之事，须具体可验证、不可过短）；key_constraint=决定成败的关键约束（技术难点/关键依赖/最易失败环节），无明确难点返回空字符串；req_card=给执行模型的极简需求卡，信息不足写"待确认：…"。简洁中文。',
+      ].filter(Boolean).join('\n');
+      const result = await generateText({ model, temperature: 0.2, maxTokens: m.max_output_tokens || 4096, prompt });
+      const out = result.text || '';
+      const outChars = out.length;
+      const jsonMatch = out.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) return { goal: cachedGoal, contradiction: cachedContr, card: cachedCard };
+      const parsed = (() => { try { return JSON.parse(jsonMatch[0]) as { goal?: unknown; success_criteria?: unknown; investigate?: unknown; key_constraint?: unknown; req_card?: unknown }; } catch { return {}; } })();
+
+      let newGoal = cachedGoal;
+      if (needGoal) {
+        let g = typeof parsed.goal === 'string' ? parsed.goal.trim() : '';
+        // 立志兜底：goal 过短/为空回退 title（王阳明立志：志不立天下无可成之事）
+        if (g.length < 4) g = title.length >= 4 ? `完成「${title}」` : '';
+        if (g) newGoal = {
+          goal: g.slice(0, 120),
+          success_criteria: (typeof parsed.success_criteria === 'string' ? parsed.success_criteria : '').trim().slice(0, 120),
+          investigate: Array.isArray(parsed.investigate) ? (parsed.investigate as unknown[]).filter((x): x is string => typeof x === 'string' && x.length > 1).slice(0, 3) : [],
+        };
+      }
+      let newContr = cachedContr;
+      if (needContr) {
+        const k = typeof parsed.key_constraint === 'string' ? parsed.key_constraint.trim() : '';
+        if (k.length >= 4) newContr = k.slice(0, 120);
+      }
+      let newCard = cachedCard;
+      if (needCard) {
+        const rc = typeof parsed.req_card === 'string' ? parsed.req_card.trim() : '';
+        if (rc) newCard = `[需求卡(提炼)]\n${rc.slice(0, 1200)}`;
+      }
+
+      // 回写 ctxJson（只写本次算出的缺失字段；task_goal 缓存存在时绝不动用户纠正值）
+      try {
+        const latest = JSON.parse((this.db.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get(taskId) as { context_json: string })?.context_json || '{}') as Record<string, unknown>;
+        if (needGoal && newGoal) latest.task_goal = newGoal;
+        if (needContr && newContr) latest.principal_contradiction = newContr;
+        if (needCard && newCard) latest.requirement_card = newCard;
+        latest.prelude_usage = { tokens_in: estimateTokensFromChars(prompt.length), tokens_out: estimateTokensFromChars(outChars), tokens: estimateTokensFromChars(prompt.length) + estimateTokensFromChars(outChars) };
+        this.db.prepare('UPDATE wa_tasks SET context_json = ? WHERE id = ?').run(JSON.stringify(latest), taskId);
+      } catch { /* 回写失败不阻塞 */ }
+      logger.info({ taskId: taskId.slice(0, 8), needGoal, needContr, needCard, goal: newGoal ? newGoal.goal.slice(0, 24) : '', contr: newContr ? newContr.slice(0, 24) : '' }, '任务理解预读(三调合一)完成');
+      return { goal: newGoal, contradiction: newContr, card: newCard };
+    } catch { return null; }
+  }
+
+  /**
+   * 任务立志（王阳明·立志 + 毛选·调查研究）：委托 runTaskPrelude，保持调用语义（simple 返回 null）。
+   */
+  async identifyTaskGoal(taskId: string, projectId: string): Promise<{ goal: string; success_criteria: string; investigate: string[] } | null> {
+    const p = await this.runTaskPrelude(taskId, projectId).catch(() => null);
+    return p?.goal ?? null;
+  }
+
+  /**
+   * 任务级主要矛盾识别（毛选·矛盾论 + 维特根斯坦）：委托 runTaskPrelude，保持调用语义（simple 返回 null）。
+   */
+  async identifyTaskPrincipalContradiction(taskId: string, projectId: string): Promise<string | null> {
+    const p = await this.runTaskPrelude(taskId, projectId).catch(() => null);
+    return p?.contradiction ?? null;
+  }
+
+  // ==================== Phase B (2026-08-27) 记忆有效性评估 ====================
+
+  /**
+   * 记忆有效性评估（实事求是：实践检验记忆）。按 memory_type 统计「注入后任务成功率」。
+   * 样本≥3 才纳入；30 分钟缓存避免频繁全表扫描。
+   */
+  buildMemoryEffectivenessStats(projectId: string): Array<{ memoryType: string; successCount: number; failCount: number; successRate: number; sampleCount: number }> {
+    const cached = this._effectivenessCache.get(projectId);
+    if (cached && Date.now() - cached.ts < MemoryManager.EFFECTIVENESS_CACHE_TTL) return cached.stats;
+    const stats = this._computeEffectivenessStats(projectId);
+    this._effectivenessCache.set(projectId, { ts: Date.now(), stats });
+    return stats;
+  }
+
+  private _computeEffectivenessStats(projectId: string): Array<{ memoryType: string; successCount: number; failCount: number; successRate: number; sampleCount: number }> {
+    try {
+      const tasks = this.db.prepare(
+        "SELECT context_json, status FROM wa_tasks WHERE project_id = ? AND status IN ('completed','failed') AND context_json LIKE '%injected_memory_ids%'",
+      ).all(projectId) as Array<{ context_json: string; status: string }>;
+      if (tasks.length < 3) return [];
+
+      const typeStats = new Map<string, { success: number; fail: number }>();
+      for (const t of tasks) {
+        try {
+          const ctx = JSON.parse(t.context_json || '{}');
+          const ids = ctx.injected_memory_ids as unknown;
+          if (!Array.isArray(ids) || ids.length === 0) continue;
+          const isSuccess = t.status === 'completed';
+          const placeholders = ids.map(() => '?').join(',');
+          const rows = this.db.prepare(`SELECT DISTINCT memory_type FROM wa_memories WHERE id IN (${placeholders})`).all(...ids) as Array<{ memory_type: string }>;
+          for (const r of rows) {
+            const entry = typeStats.get(r.memory_type) || { success: 0, fail: 0 };
+            if (isSuccess) entry.success++; else entry.fail++;
+            typeStats.set(r.memory_type, entry);
+          }
+        } catch { /* skip */ }
+      }
+
+      const stats: Array<{ memoryType: string; successCount: number; failCount: number; successRate: number; sampleCount: number }> = [];
+      for (const [type, e] of typeStats) {
+        const total = e.success + e.fail;
+        if (total < 3) continue;
+        stats.push({ memoryType: type, successCount: e.success, failCount: e.fail, successRate: e.success / total, sampleCount: total });
+      }
+      stats.sort((a, b) => b.successRate - a.successRate);
+      return stats;
+    } catch { return []; }
+  }
+
+  /** Phase B: 记忆类型有效性排序微调（实事求是：成功类型略优先、失败类型略降权）。 */
+  private _effectivenessBoost(memoryType: string, projectId: string): number {
+    const stats = this.buildMemoryEffectivenessStats(projectId);
+    const s = stats.find(x => x.memoryType === memoryType);
+    if (!s) return 0;
+    if (s.successRate >= 0.7) return 0.02;
+    if (s.successRate < 0.4) return -0.02;
+    return 0;
+  }
+
+  // ==================== Phase C (2026-08-27) 任务执行元认知 ====================
+
+  /**
+   * 任务执行元认知（具体问题具体分析 + 语言游戏）：按 archetype 从工具成败数据学习「执行打法」。
+   * 返回 { archetype: "优先: X/Y；避免: Z" }，样本≥3 才纳入。
+   */
+  buildExecutionPlaybook(projectId: string): Record<string, string> {
+    try {
+      const proj = this.db.prepare('SELECT context_json FROM wa_projects WHERE id = ?').get(projectId) as { context_json: string } | undefined;
+      const ctx = JSON.parse(proj?.context_json || '{}');
+      const usage = ctx.tool_usage as Record<string, { toolName: string; archetype: string; successCount: number; failCount: number }> | undefined;
+      if (!usage) return {};
+      const byArchetype = new Map<string, { verified: string[]; avoid: string[] }>();
+      for (const record of Object.values(usage)) {
+        const sc = record.successCount || 0;
+        const fc = record.failCount || 0;
+        const total = sc + fc;
+        if (total < 3) continue;
+        const entry = byArchetype.get(record.archetype) || { verified: [], avoid: [] };
+        if (sc / total >= 0.8) entry.verified.push(record.toolName);
+        else if (sc / total < 0.4) entry.avoid.push(record.toolName);
+        byArchetype.set(record.archetype, entry);
+      }
+      const playbook: Record<string, string> = {};
+      for (const [archetype, e] of byArchetype) {
+        const parts: string[] = [];
+        if (e.verified.length > 0) parts.push(`优先: ${e.verified.join('/')}`);
+        if (e.avoid.length > 0) parts.push(`避免: ${e.avoid.join('/')}`);
+        if (parts.length > 0) playbook[archetype] = parts.join('；');
+      }
+      return playbook;
+    } catch { return {}; }
+  }
+}
+
+/** 余弦相似度 */
+function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length !== b.length) return 0;
+  let dot = 0, normA = 0, normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i]! * b[i]!;
+    normA += a[i]! ** 2;
+    normB += b[i]! ** 2;
+  }
+  if (normA === 0 || normB === 0) return 0;
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}

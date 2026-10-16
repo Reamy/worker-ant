@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>工蚁 Worker Ant —— 跑在你机器上、用手机就能指挥的私有 AI 打工队</title>
+    <meta
+      name="description"
+      content="工蚁是一支跑在你自己机器上的私有 AI 打工队：你用自然语言派活，它在本机改文件、跑命令、提交 git，产出登记成可交付资产；出门在外，发条微信就能查进度、审产物。代码不出你的机器。开源 · AGPL-3.0。"
+    />
+    <meta name="theme-color" content="#faf8f5" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="工蚁 Worker Ant —— 私有 AI 打工队" />
+    <meta
+      property="og:description"
+      content="跑在你机器上、用手机就能指挥的私有 AI 打工队。代码不出你的机器，任务不占你的双手。"
+    />
+    <meta property="og:url" content="https://workerant.cn/" />
+    <meta property="og:locale" content="zh_CN" />
+    <link rel="canonical" href="https://workerant.cn/" />
+    <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png" />
+    <link rel="icon" href="/favicon-16.png" sizes="16x16" type="image/png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="nav">
+      <div class="wrap nav-inner">
+        <a class="brand" href="/">
+          <img class="brand-mark" src="/brand-icon.png" alt="" width="26" height="26" />
+          <span class="brand-text">工蚁 <em>Worker Ant</em></span>
+        </a>
+        <nav class="nav-links">
+          <a href="#why">为什么</a>
+          <a href="#how">怎么用</a>
+          <a href="#uses">能干什么</a>
+          <a href="#start">快速开始</a>
+          <a href="#pricing">定价</a>
+          <a href="#faq">常见问题</a>
+        </nav>
+        <a class="btn btn-ghost nav-cta" href="https://github.com/Reamy/worker-ant" rel="noopener">GitHub</a>
+      </div>
+    </header>
+
+    <main>
+      <!-- ============ 0. Hero ============ -->
+      <section class="hero">
+        <div class="wrap">
+          <p class="eyebrow">开源 · 本机执行 · 自带模型 Key</p>
+          <h1>跑在你机器上、用手机就能指挥的<br class="br-mobile" />私有 AI 打工队</h1>
+          <p class="lede">
+            你用自然语言派活，它真的在你电脑上改文件、跑命令、提交 git。<br />
+            产出登记成可交付资产；你出门在外，发条微信就能查进度、审产物。
+          </p>
+          <p class="hero-tag">代码不出你的机器，任务不占你的双手。</p>
+          <p class="hero-en">A self-hosted AI agent crew you command from your phone.</p>
+
+          <div class="cta-row">
+            <a class="btn btn-primary" href="https://github.com/Reamy/worker-ant" rel="noopener">查看源码 · GitHub</a>
+            <a class="btn btn-secondary" href="#start">从源码运行</a>
+            <span class="btn btn-disabled" aria-disabled="true">下载 macOS · 即将推出</span>
+          </div>
+
+          <p class="trust">开源（AGPL-3.0）· 引擎跑在你本机 · BYO Key，我们不碰你的模型账单</p>
+        </div>
+      </section>
+
+      <!-- ============ 1. 痛点 ============ -->
+      <section id="why" class="band">
+        <div class="wrap">
+          <h2>你的时间，正在被「杂活」吃掉</h2>
+          <ul class="pain">
+            <li>
+              <span class="pain-k">整理 issue、写周报、巡检服务、批量改文件——每周都在重复</span
+              ><span class="pain-v">手动做，或写一堆零散的 shell 脚本，散在各自机器上</span>
+            </li>
+            <li>
+              <span class="pain-k">想让 AI 干真活，但代码 / 数据不能上传云端</span
+              ><span class="pain-v">云 Agent 要你把仓库传上去，直接出局</span>
+            </li>
+            <li>
+              <span class="pain-k">人在外面，任务却卡在电脑前</span
+              ><span class="pain-v">只能回去看，或者微信里问同事「跑完了吗」</span>
+            </li>
+            <li>
+              <span class="pain-k">想知道 AI 到底做了什么、改了哪些文件</span
+              ><span class="pain-v">只有一段聊天记录，黑盒，没法审计</span>
+            </li>
+          </ul>
+          <p class="band-foot">
+            工蚁就是为这四件事造的一支<strong>私有打工队</strong>——它住在你的机器上，听得懂你的话，认得你的手机。
+          </p>
+        </div>
+      </section>
+
+      <!-- ============ 2. 三根矛 ============ -->
+      <section class="band band-alt">
+        <div class="wrap">
+          <h2>不是又一个 AI 助手，是<strong>你的</strong> AI 打工队</h2>
+          <div class="cards-3">
+            <article class="card">
+              <h3>① 本机私有 —— 你的代码不出门</h3>
+              <p>引擎跑在你自己的机器上，文件读写、命令执行、git 提交<strong>全在本机发生</strong>。</p>
+              <p>代码与数据不经过我们的任何服务器。<strong>你的私有，是结构性的，不是承诺的。</strong></p>
+            </article>
+            <article class="card">
+              <h3>② 手机 IM 指挥 —— 发条微信就能派活</h3>
+              <p>微信 / 钉钉 / 飞书 / 企业微信 / QQ——<strong>用你本来就在用的 IM</strong>。</p>
+              <p>发消息 = 派活 / 查进度 / 审批确认 / 收成果。<strong>出差、通勤、饭桌上都能盯。</strong></p>
+            </article>
+            <article class="card">
+              <h3>③ 成果一等公民 —— 干了什么，看得见</h3>
+              <p>产出是<strong>登记在册的可交付资产</strong>（文件、报告、草稿），不是一段会滚走的聊天。</p>
+              <p>事件溯源引擎记录<strong>每一步动作</strong>，可暂停、可恢复、可重放、可审计。</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 3. 工作原理 ============ -->
+      <section id="how" class="band">
+        <div class="wrap">
+          <h2>三步，从「说一句话」到「收到成果」</h2>
+          <ol class="steps">
+            <li>
+              <span class="step-n">①</span>
+              <h3>连接你的模型</h3>
+              <p>填一个 API Key，或指向你自己的网关。</p>
+            </li>
+            <li>
+              <span class="step-n">②</span>
+              <h3>用一句话派活</h3>
+              <p>「把本周 git 提交整理成一份周报，按模块分组。」</p>
+            </li>
+            <li>
+              <span class="step-n">③</span>
+              <h3>收成果 / 手机上接着盯</h3>
+              <p>产出登记成资产；出门在外发条微信就能查进度、审产物。</p>
+            </li>
+          </ol>
+          <p class="note">
+            如实标注：目前需自行启动 ANS 服务并配置 Key；一键安装向导在开发中——见 <a href="#start">快速开始</a>。
+          </p>
+        </div>
+      </section>
+
+      <!-- ============ 4. 真实用例 ============ -->
+      <section id="uses" class="band band-alt">
+        <div class="wrap">
+          <h2>它到底能替你干什么</h2>
+          <div class="cards-2">
+            <article class="card card-use">
+              <h3>周报自动化</h3>
+              <p class="quote">「把这周本仓库的 git 提交整理成一份周报，按模块分组」</p>
+              <p class="out">→ 一份 Markdown 周报</p>
+            </article>
+            <article class="card card-use">
+              <h3>仓库体检</h3>
+              <p class="quote">「扫描全仓 TODO / FIXME，按文件聚合并生成 issue 草稿」</p>
+              <p class="out">→ 一份可提交的 issue 列表</p>
+            </article>
+            <article class="card card-use">
+              <h3>值守告警</h3>
+              <p class="quote">「每 30 分钟巡检这几个服务，异常时微信告警给我」</p>
+              <p class="out">→ 定时任务 + IM 告警</p>
+            </article>
+            <article class="card card-use">
+              <h3>批量整理</h3>
+              <p class="quote">「把这个目录里的素材按日期重命名并归类」</p>
+              <p class="out">→ 整理后的文件树</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 5. 快速开始 ============ -->
+      <section id="start" class="band">
+        <div class="wrap">
+          <h2>装上就能用</h2>
+
+          <div class="start-grid">
+            <div class="start-col">
+              <h3>方式一：下载安装包 <span class="tag">待落地</span></h3>
+              <p class="muted">一键安装向导正在开发中。届时：下载 → 填 Key → 创建项目 → 一句话派活。</p>
+            </div>
+
+            <div class="start-col start-col-primary">
+              <h3>方式二：从源码运行 <span class="tag tag-ok">当前可用</span></h3>
+              <p class="muted">环境要求：Node.js ≥ 22、pnpm ≥ 9。</p>
+              <pre
+                class="code"
+              ><button class="copy" type="button" data-copy aria-label="复制">复制</button><code>pnpm install
+pnpm dev:ans                                 # 终端 1：AI 资源中心（ANS）
+cd apps/worker-ant-desktop &amp;&amp; bash run.sh    # 终端 2：桌面端</code></pre>
+              <p class="muted">⚠️ 当前需自行启动 ANS 并配置模型 Key。<strong>一键安装向导正在开发中。</strong></p>
+              <p><a class="link" href="https://github.com/Reamy/worker-ant" rel="noopener">打开仓库 →</a></p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 6. 竞品对照 ============ -->
+      <section class="band band-alt">
+        <div class="wrap">
+          <h2>和你在用的工具，不冲突，是补位</h2>
+          <div class="table-wrap">
+            <table class="compare">
+              <thead>
+                <tr>
+                  <th>你可能会拿来比</th>
+                  <th>它擅长</th>
+                  <th>工蚁补的那格</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Cursor / Claude Code / Copilot</td>
+                  <td>编辑器里「写这段代码这一刻」</td>
+                  <td><strong>跨工具的杂务编排</strong>；不绑编辑器；<strong>手机能指挥</strong></td>
+                </tr>
+                <tr>
+                  <td>Manus / OpenHands / Coze</td>
+                  <td>云托管，任务能跑</td>
+                  <td><strong>代码 / 数据不出内网</strong>；本机执行</td>
+                </tr>
+                <tr>
+                  <td>n8n / Dify</td>
+                  <td>拖拽编排固定流程</td>
+                  <td><strong>自然语言 + 本机执行</strong>，更贴近开发者</td>
+                </tr>
+                <tr>
+                  <td>手机上的 AI App</td>
+                  <td>单点问答、轻任务</td>
+                  <td><strong>IM 原生 + 真在本机执行任务</strong></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 7. 定价 ============ -->
+      <section id="pricing" class="band">
+        <div class="wrap">
+          <h2>核心开源免费，能力按需付费</h2>
+          <div class="table-wrap">
+            <table class="pricing">
+              <thead>
+                <tr>
+                  <th>版本</th>
+                  <th>价格</th>
+                  <th>包含</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr class="row-now">
+                  <td><strong>Community</strong> <span class="tag tag-ok">现在可用</span></td>
+                  <td><strong>¥0</strong></td>
+                  <td>开源核心引擎全功能，BYO Key；适合个人与小项目</td>
+                </tr>
+                <tr>
+                  <td>Pro <span class="tag">即将开放</span></td>
+                  <td>¥99 / 月 · ¥899 / 年</td>
+                  <td>无限项目、云同步、高级模板、优先支持</td>
+                </tr>
+                <tr>
+                  <td>Team <span class="tag">即将开放</span></td>
+                  <td>¥199 / 人 / 月（≥ 3 席）</td>
+                  <td>团队共享记忆 / 模板 / 成果库、成员权限、<strong>审计视图</strong></td>
+                </tr>
+                <tr>
+                  <td>早鸟终身 <span class="tag">即将开放</span></td>
+                  <td>¥1999（前 100 名）</td>
+                  <td>一次性买断 Pro 终身</td>
+                </tr>
+                <tr>
+                  <td>企业私有化 <span class="tag">路线图</span></td>
+                  <td>定制</td>
+                  <td>内网部署 + SLA + 定制</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="note">
+            主推<strong>年付</strong>；免费版给得起，但<strong>并发 / 项目数有天花板</strong>；<strong>BYO Key</strong
+            >——模型账单你直接付给模型厂商，我们不抽成。付费通道尚未开通，标准以正式开放时为准。
+          </p>
+        </div>
+      </section>
+
+      <!-- ============ 8. FAQ ============ -->
+      <section id="faq" class="band band-alt">
+        <div class="wrap">
+          <h2>常见问题</h2>
+          <div class="faq">
+            <details>
+              <summary>我的代码会被上传吗？</summary>
+              <p>不会。引擎在你本机执行，文件、命令、git 都不经过我们的服务器。你填的模型 Key 也只在你本机使用。</p>
+            </details>
+            <details>
+              <summary>支持哪些模型？</summary>
+              <p>任何 OpenAI 兼容端点，或你自己的网关。BYO Key，你说了算。</p>
+            </details>
+            <details>
+              <summary>一定要用微信吗？</summary>
+              <p>不。微信 / 钉钉 / 飞书 / 企业微信 / QQ 任选；也可以只在桌面端用，不接 IM。</p>
+            </details>
+            <details>
+              <summary>能操作网页吗（点按钮、填表单）？</summary>
+              <p>目前不内置浏览器自动化。当前定位是<strong>文件 / 命令 / API 类任务</strong>；浏览器能力在路线图上。</p>
+            </details>
+            <details>
+              <summary>开源到什么程度？</summary>
+              <p>
+                引擎核心与桌面端开源（AGPL-3.0）；云端协作与企业特性闭源。详见仓库的 <code>OPEN_SOURCE_SCOPE</code>。
+              </p>
+            </details>
+            <details>
+              <summary>一个人 / 小团队值得用吗？</summary>
+              <p>正是为你们做的。它省的是「重复杂活」的时间——那正是拿来做产品的时间。</p>
+            </details>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <div class="wrap foot-inner">
+        <div class="foot-col">
+          <h4>产品</h4>
+          <a href="https://github.com/Reamy/worker-ant/releases" rel="noopener">下载</a>
+          <a href="#pricing">定价</a>
+          <a href="https://github.com/Reamy/worker-ant#readme" rel="noopener">文档</a>
+        </div>
+        <div class="foot-col">
+          <h4>社区</h4>
+          <a href="https://github.com/Reamy/worker-ant" rel="noopener">GitHub</a>
+          <a href="https://github.com/Reamy/worker-ant/issues" rel="noopener">Issues</a>
+          <a href="https://github.com/Reamy/worker-ant/blob/main/CONTRIBUTING.md" rel="noopener">参与贡献</a>
+        </div>
+        <div class="foot-col">
+          <h4>许可</h4>
+          <a href="https://github.com/Reamy/worker-ant/blob/main/LICENSE" rel="noopener">AGPL-3.0</a>
+          <a href="https://github.com/Reamy/worker-ant/blob/main/COMMERCIAL_LICENSE.md" rel="noopener">商业许可</a>
+        </div>
+      </div>
+      <div class="wrap foot-base">
+        <p class="foot-slogan">工蚁系统 · 你的代码不出门，你的任务不睡觉。</p>
+        <p class="foot-copy">© <span id="year">2026</span> 工蚁 Worker Ant · 备案与主体信息以正式开放时为准</p>
+      </div>
+    </footer>
+
+    <script>
+      document.getElementById('year').textContent = String(new Date().getFullYear());
+      document.querySelectorAll('[data-copy]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var code = btn.parentElement.querySelector('code');
+          navigator.clipboard.writeText(code.innerText).then(function () {
+            btn.textContent = '已复制';
+            setTimeout(function () {
+              btn.textContent = '复制';
+            }, 1500);
+          });
+        });
+      });
+    </script>
+  </body>
+</html>

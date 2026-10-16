@@ -1,0 +1,270 @@
+/**
+ * zx_20261005 批五 M19 / zx_20261011_5 批五 / zx_20261016_5「界」—— 开源发布导出脚本（导出「产品代码」，不导出「商业计划/内务」）。
+ *
+ * 病根：本仓同时装着**要开源的东西**（引擎/桌面端/ans-server/SDK/`scripts/`/`docs/`）
+ *   与**不该开源的东西**（`apps/_archive/` 的历史包袱、`business-plan/` 的定价与商业策略、
+ *   `plans/` 的**规划与实施过程**、`CLAUDE.md` 的**内务协作说明**）。若直接把整仓一推，这些就一并公开了
+ *   ——**开源的是产品，不是内务**。
+ *
+ * 本脚本用 `git archive HEAD`（**只取已提交内容**，工作区脏文件不进）+ 路径排除，
+ *   产出一个干净的 tar.gz，并**当场自证**：
+ *     ① 归档内**无** `apps/_archive/`、`business-plan/`、`plans/`、`data/`、`CLAUDE.md`、`.gitleaksignore`；
+ *     ② 归档内**无**被跟踪的 `.env`（唯一允许 `.env.example`）；
+ *     ③ 归档内 LICENSE / README.md / README.en.md / CONTRIBUTING.md / COMMERCIAL_LICENSE.md **在场**；
+ *     ④ 解包后扫**私钥**（`BEGIN … PRIVATE KEY`）与签名密钥文件名 ⇒ 命中即失败。
+ *   任一不过 ⇒ 非 0 退出、**不交付产物**（承「发布前硬闸」纪律）。
+ *
+ * `--push <url>`：用**同一份干净树**建一个**全新历史**（`git init` + **单提交**，**丢弃本地历史**）
+ *   并推到给定远端。之所以**不推本地历史**：本地 1954 次提交里含内务迭代痕迹与一枚已失活的
+ *   一次性 iLink 钥匙（见 `.gitleaksignore`），公开仓只该有**产品快照**——历史留在本仓。
+ *   ⚠ **同一份排除面**驱动 tar 导出与 push（`EXCLUDE_PREFIXES` 一处真源），不各写一份。
+ *   ⚠ **重推须 `--force`**：远端 main 已存在且与全新历史无共同祖先 ⇒ non-fast-forward；公开仓只该是一份
+ *   产品快照，重推＝整体替换（如 zx_20261016_5 把 `plans/project/` 扩为 `plans/`）。故 `pushFreshHistory` 用 `git push --force`。
+ *
+ * `--append <url>`（zx_20261015_1）：把本次导出树作为**一枚新提交**叠在**远端当前 `main`** 之上
+ *   （父节点＝远端 `main`，diff＝自上次公开推送以来的全部变更），**普通推送、无 `--force`**。
+ *   用途：让公开仓的历史**累积**（一次发布＝一枚提交），而非每次整体替换 ⇒ 不再孤儿化上一枚提交、
+ *   tag 不再被甩在旧历史上（公开仓从"一张快照"变成"一个在长大的项目"）。
+ *   ⚠ **与 `--push` 的取舍**：`--append` **不可事后擦除**——一旦推错的提交永久留在公开历史里，
+ *   只能再补一枚"删除提交"（内容仍可查）；`--push --force` 能整体抹掉重来，代价是孤儿化历史。
+ *   误发敏感内容的场景**仍应走 `--push`**（逃生门保留）。
+ *   ⚠ **首次推送必须用 `--push`**：远端空仓无 `main` 可作父节点，脚本**显式拒**而非静默退化。
+ *
+ * ⚠ 本脚本只做**导出与结构自证**；**全历史**密钥扫描是 M20（`data/oss-scan-*.txt`），
+ *   两者互补：本脚本看「导出的树」，M20 看「全部历史提交」。
+ *
+ * 用法：`npx tsx scripts/publish-oss.ts [--out <path>] [--push <git-url> | --append <git-url>]`
+ */
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+/** 开源导出**必须排除**的路径（前缀匹配；文件项如 `CLAUDE.md` 用完整相对路径）。理由见 `business-plan/materials/open-source-scope.md` §3。
+ *  `.gitleaksignore` 亦出局：其指纹**绑定本地旧提交 SHA**，与全新单提交历史毫无对应关系，留在公开仓只会误导（真误报已改为 inline `//gitleaks:allow`，随源码走）。
+ *  `plans/` **整目录**出局（zx_20261016_5「界」）——它记的是"我们怎么想、怎么试、试错了几次"，是**内务**；
+ *  产品仓该公开的是"这系统怎么造"。**推翻** §5 旧定案（原为"`improve/` 开、`project/` 不开"）的两条实测理由：
+ *    ① **商业口径已漏**——`plans/improve/zx_20261008.md` 记着「R1 裁定（自然人主体）⇒ 无开票能力 ⇒ Team 暂不售卖、
+ *       企业线关闭」这类**路线裁定与理由**，正是排除 `business-plan/` 要挡的东西（⚠ 价格本身不是秘密，见 `README.md` ——
+ *       漏的是"为什么这么定、哪些现在卖不了"的推理）；
+ *    ② **真钥匙已漏过**——历史提交里的 iLink 文件钥匙曾随 `plans/improve/zx_20260924.md` 一同上线（见 `oss-secret-scan.sh` §7）。
+ *  内容资产（工程哲学复盘）改由 `docs/engineering-log.md` 的**公开摘要**承接——留故事，不留细节。
+ *  ⚠ **本行须保持单行**：`scripts/oss-secret-scan.sh` 用 sed 按 `^const EXCLUDE_PREFIXES = \[(.*)\];$` 解析它；换行即令扫面**静默塌缩**。 */
+const EXCLUDE_PREFIXES = ['apps/_archive/', 'business-plan/', 'plans/', 'data/', 'CLAUDE.md', '.gitleaksignore'];
+/** 排除后**必须仍在场**的关键文件（M17/M18 交付物 + 项目入口）。 */
+const MUST_HAVE = ['LICENSE', 'README.md', 'README.en.md', 'CONTRIBUTING.md', 'COMMERCIAL_LICENSE.md'];
+/** 归档内允许存在的 `.env*`（其余 `.env` / `.env.*` 一律视为泄漏）。 */
+const ENV_ALLOWLIST = ['.env.example'];
+
+function sh(cmd: string, args: string[], cwd?: string): string {
+  return execFileSync(cmd, args, { cwd, encoding: 'utf-8', maxBuffer: 256 * 1024 * 1024 });
+}
+
+function fail(msg: string): never {
+  console.error(`\n❌ ${msg}`);
+  process.exit(1);
+}
+
+/** ① `git archive HEAD` + 路径排除 → 干净 tar.gz。 */
+function buildArchive(root: string, outAbs: string): void {
+  fs.mkdirSync(path.dirname(outAbs), { recursive: true });
+  const archiveArgs = ['archive', '--format=tar.gz', '--prefix=worker-ant-oss/', '-o', outAbs, 'HEAD'];
+  for (const p of EXCLUDE_PREFIXES) archiveArgs.push(`:(exclude)${p.replace(/\/$/, '')}`);
+  sh('git', archiveArgs, root);
+}
+
+/** 解包到临时目录，返回 `{ tmp, extracted }`（调用方负责 `rmSync(tmp)`）。 */
+function extractArchive(outAbs: string): { tmp: string; extracted: string } {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'oss-export-'));
+  sh('tar', ['-xzf', outAbs, '-C', tmp]);
+  return { tmp, extracted: path.join(tmp, 'worker-ant-oss') };
+}
+
+/** 解包树内的全部文件（相对路径，已排序）。 */
+function listFiles(extracted: string): string[] {
+  const out: string[] = [];
+  const walk = (dir: string): void => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else out.push(path.relative(extracted, p));
+    }
+  };
+  walk(extracted);
+  return out.sort();
+}
+
+/** ②–④ 结构 + 内容自证；返回问题条数（0 = 通过）。 */
+function verify(extracted: string, files: string[]): number {
+  let red = 0;
+  for (const bad of EXCLUDE_PREFIXES) {
+    const hit = files.filter((f) => f.startsWith(bad));
+    if (hit.length) { console.error(`  ✗ 排除失败：${bad} 仍有 ${hit.length} 项（如 ${hit[0]}）`); red++; }
+    else console.log(`  ✓ 已排除：${bad}`);
+  }
+  for (const must of MUST_HAVE) {
+    if (files.includes(must)) console.log(`  ✓ 在场：${must}`);
+    else { console.error(`  ✗ 缺失：${must}（M17/M18 交付物未进导出）`); red++; }
+  }
+  const envFiles = files.filter((f) => /(^|\/)\.env($|\.)/.test(f) && !ENV_ALLOWLIST.includes(path.basename(f)));
+  if (envFiles.length) { console.error(`  ✗ 归档内含被跟踪的 .env：${envFiles.join(', ')}`); red++; }
+  else console.log(`  ✓ 无被跟踪的 .env（仅允许 ${ENV_ALLOWLIST.join('/')}）`);
+
+  const offenders: string[] = [];
+  for (const f of files) {
+    if (/license-signing-key.*\.pem$/i.test(f)) { offenders.push(`${f} (签名私钥文件名)`); continue; }
+    if (!/\.(ts|tsx|js|mjs|cjs|json|md|yml|yaml|env|example|txt|pem|key)$/i.test(f)) continue;
+    const body = fs.readFileSync(path.join(extracted, f), 'utf-8');
+    if (/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(body)) offenders.push(`${f} (内嵌私钥)`);
+  }
+  if (offenders.length) { console.error(`  ✗ 导出产物扫出私钥（${offenders.length} 处）：\n  - ${offenders.join('\n  - ')}`); red++; }
+  else console.log('  ✓ 解包后无私钥（BEGIN … PRIVATE KEY / 签名密钥文件名）');
+  return red;
+}
+
+/**
+ * 用干净树在**临时目录**建**全新历史**（单提交，**不继承本地历史**）并推到 `url`。
+ * 作者署名沿用本仓 `user.name` / `user.email`（不改全局配置）。
+ */
+function pushFreshHistory(root: string, extracted: string, files: string[], url: string): void {
+  const git = (args: string[]): string => sh('git', args, extracted);
+  const name = sh('git', ['config', 'user.name'], root).trim();
+  const email = sh('git', ['config', 'user.email'], root).trim();
+
+  git(['-c', 'init.defaultBranch=main', 'init']);
+  git(['config', 'user.name', name]);
+  git(['config', 'user.email', email]);
+  // `-f`：导出树是**已提交内容**的投影，即使匹配 `.gitignore` 也须原样进仓（如被跟踪的 .env.example）。
+  git(['add', '-A', '-f']);
+  const committed = sh('git', ['diff', '--cached', '--name-only'], extracted).split('\n').filter(Boolean).length;
+  if (committed !== files.length) {
+    fail(`全新历史提交数与导出树不符（提交 ${committed} vs 树 ${files.length}）——似有 .gitignore 吞件，不推。`);
+  }
+  const msg = [
+    '工蚁 (Worker Ant) — 开源首发快照',
+    '',
+    'AGPL-3.0-only。本仓为**产品代码快照**（单提交历史）；不含内部商业计划 / 历史归档 / 内务协作说明。',
+  ].join('\n');
+  git(['commit', '-q', '-m', msg]);
+  const sha = sh('git', ['rev-parse', '--short', 'HEAD'], extracted).trim();
+  console.log(`  ✓ 全新历史已建：单提交 ${sha}，${files.length} 个文件，作者 ${name} <${email}>`);
+  console.log(`  → 推送：git push --force ${url} HEAD:main`);
+  // 重推时远端 main 已存在且与全新历史**无共同祖先** ⇒ 必为 non-fast-forward，须 `--force` 整体覆盖。
+  // 这是**有意的**：公开仓只该是一份产品快照；重推＝用新快照替换旧快照，非增量叠加。
+  git(['push', '--force', url, 'HEAD:main']);
+  console.log(`  ✓ 已推送：${url}（main，--force 覆盖）`);
+}
+
+/**
+ * zx_20261015_1 —— 把干净树作为**一枚新提交**叠在远端 `main` 之上（**增量累积历史**）。
+ * 父节点＝远端 `main` ⇒ 该提交的 diff 恰为「自上次公开推送以来的全部变更」；普通推送，无 `--force`。
+ * **提交前**自证（索引逐项 == 导出树），不过则**不提交、不推送**——承「慎重初战」（B2 不可事后擦除）。
+ */
+function pushAppendHistory(root: string, extracted: string, files: string[], url: string): void {
+  const name = sh('git', ['config', 'user.name'], root).trim();
+  const email = sh('git', ['config', 'user.email'], root).trim();
+
+  if (!sh('git', ['ls-remote', '--heads', url, 'main']).trim()) {
+    fail(`远端没有 \`main\`（${url}）——首次发布必须用 \`--push\`；\`--append\` 需要一枚既有提交作父节点。`);
+  }
+
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'oss-append-'));
+  try {
+    const git = (args: string[]): string => sh('git', args, repo);
+    // 不依赖 `git clone` 的默认分支启发式：显式 fetch `main` 再 reset，父节点必为远端 main。
+    git(['-c', 'init.defaultBranch=main', 'init']);
+    git(['remote', 'add', 'origin', url]);
+    git(['fetch', '--quiet', 'origin', 'main']);
+    git(['reset', '--hard', 'FETCH_HEAD']);
+    git(['config', 'user.name', name]);
+    git(['config', 'user.email', email]);
+    const parent = git(['rev-parse', '--short', 'HEAD']).trim();
+
+    // 清空工作树（保留 .git）→ 覆盖为本次导出树。
+    for (const e of fs.readdirSync(repo)) {
+      if (e !== '.git') fs.rmSync(path.join(repo, e), { recursive: true, force: true });
+    }
+    fs.cpSync(extracted, repo, { recursive: true });
+
+    // `-f`：导出树是**已提交内容**的投影，即使匹配 `.gitignore` 也须原样进仓（如被跟踪的 .env.example）。
+    git(['add', '-A', '-f']);
+    const staged = git(['ls-files']).split('\n').map((s) => s.trim()).filter(Boolean).sort();
+    const want = [...files].sort();
+    const missing = want.filter((f) => !staged.includes(f));
+    const extra = staged.filter((f) => !want.includes(f));
+    if (missing.length || extra.length) {
+      fail(
+        `提交前自证未过（**不提交、不推送**）：索引与导出树不符——缺失 ${missing.length} 项` +
+          `${missing[0] ? `（如 ${missing[0]}）` : ''}、多余 ${extra.length} 项${extra[0] ? `（如 ${extra[0]}）` : ''}。`,
+      );
+    }
+
+    // 导出树与远端 main **逐字节相同** ⇒ 无可提交（再 append 一次只会撞 `nothing to commit`）⇒ 如实跳过。
+    if (!git(['diff', '--cached', '--name-only', 'HEAD']).trim()) {
+      console.log(`  ✓ 无变更：导出树与远端 main（${parent}）一致，**不新建提交、不推送**。`);
+      return;
+    }
+
+    const msg = [
+      '工蚁 (Worker Ant) — 开源快照',
+      '',
+      'AGPL-3.0-only。本仓为**产品代码快照**；不含内部商业计划 / 历史归档 / 内务协作说明。',
+    ].join('\n');
+    git(['commit', '-q', '-m', msg]);
+    const sha = git(['rev-parse', '--short', 'HEAD']).trim();
+    console.log(`  ✓ 已建新提交：${parent} → ${sha}（父＝远端 main），${files.length} 个文件，作者 ${name} <${email}>`);
+    console.log(`  → 推送：git push ${url} HEAD:main（**无** --force）`);
+    // 远端在 fetch 之后又动过 ⇒ non-fast-forward，git 自行拒绝；如实报错，**不**静默转 force。
+    git(['push', url, 'HEAD:main']);
+    console.log(`  ✓ 已推送：${url}（main，增量追加，未 force）`);
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+}
+
+function main(): void {
+  const argv = process.argv.slice(2);
+  const outFlag = argv.indexOf('--out');
+  const pushFlag = argv.indexOf('--push');
+  const appendFlag = argv.indexOf('--append');
+  const pushUrl = pushFlag >= 0 ? argv[pushFlag + 1] : undefined;
+  const appendUrl = appendFlag >= 0 ? argv[appendFlag + 1] : undefined;
+  if (pushUrl && appendUrl) fail('`--push` 与 `--append` 互斥，只能给一个。');
+  const root = sh('git', ['rev-parse', '--show-toplevel']).trim();
+  const headShort = sh('git', ['rev-parse', '--short', 'HEAD'], root).trim();
+  const outRel = outFlag >= 0 ? argv[outFlag + 1]! : `release/worker-ant-oss-${headShort}.tar.gz`;
+  const outAbs = path.isAbsolute(outRel) ? outRel : path.join(root, outRel);
+
+  console.log(`[M19] 开源导出：HEAD=${headShort} → ${path.relative(root, outAbs)}`);
+  console.log(`[M19] 排除路径：${EXCLUDE_PREFIXES.join(' , ')}`);
+  if (pushUrl) console.log(`[M19] push 目标：${pushUrl}（**全新历史**：单提交，不推本地历史，--force 覆盖）`);
+  if (appendUrl) console.log(`[M19] append 目标：${appendUrl}（**增量累积**：一枚新提交叠在远端 main 之上，无 --force）`);
+
+  // ① 导出：git archive 只取 HEAD 已提交内容；:(exclude) 路径排除。
+  buildArchive(root, outAbs);
+  const size = fs.statSync(outAbs).size;
+  console.log(`[M19] 归档已生成：${(size / 1024 / 1024).toFixed(2)} MB`);
+
+  // ②–④ 解包 → 结构/内容自证。
+  const { tmp, extracted } = extractArchive(outAbs);
+  try {
+    const files = listFiles(extracted);
+    if (verify(extracted, files) > 0) fail(`导出结构自证未过，**不交付**：${path.relative(root, outAbs)}`);
+    console.log(`\n✅ M19 开源导出通过：${path.relative(root, outAbs)}（${files.length} 个文件）`);
+
+    if (pushUrl) {
+      console.log(`\n[publish] 建**全新历史**并推送 → ${pushUrl}`);
+      pushFreshHistory(root, extracted, files, pushUrl);
+    }
+    if (appendUrl) {
+      console.log(`\n[publish] **增量追加**一枚提交并推送 → ${appendUrl}`);
+      pushAppendHistory(root, extracted, files, appendUrl);
+    }
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+
+  console.log('   注：全历史密钥扫描见 M20（data/oss-scan-*.txt）；推送公开远端前两者都须通过。');
+}
+
+main();

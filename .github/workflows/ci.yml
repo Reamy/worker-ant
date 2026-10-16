@@ -1,0 +1,94 @@
+name: CI
+
+# ⚠ `pnpm/action-setup` **不要**加 `with: { version: … }`：根 `package.json` 有 `packageManager: pnpm@9.15.4`，
+#   该 action 会自己读它；再显式指定且版本串不同（`9` ≠ `9.15.4`）⇒ 它抛硬错
+#   「Multiple versions of pnpm specified」并**在 setup 步即失败**（2026-10-11 起两次 push 的 4 红 1 绿均此因）。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'pnpm'
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm run lint
+
+      - run: pnpm run typecheck
+
+  format-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'pnpm'
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm run format:check
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'pnpm'
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm run build
+
+      - run: pnpm run test
+
+  security-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'pnpm'
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm audit --audit-level=high || true
+
+  oss-export-check:
+    # 开源导出**结构自证**（轻量：无 build / 无 test / **无需装依赖**——脚本零运行时依赖，
+    # 用 Node 自带类型剥离直接跑）。逻辑唯一真源 = scripts/publish-oss.ts，
+    # 本 job 只**调用**它，不复制任何排除/校验逻辑。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+
+      - run: node --experimental-strip-types scripts/publish-oss.ts --out /tmp/oss-check.tar.gz

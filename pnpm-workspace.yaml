@@ -1,0 +1,5 @@
+packages:
+  - 'apps/ans-server'
+  - 'apps/worker-ant-desktop'
+  - 'apps/worker-ant-desktop/renderer'
+  - 'packages/*'

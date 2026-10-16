@@ -1,0 +1,981 @@
+{
+  "version": "1.0.0",
+  "updated_at": "2026-06-29",
+  "providers": [
+    {
+      "id": "openai",
+      "name": "OpenAI",
+      "base_url": "https://api.openai.com/v1",
+      "website": "https://platform.openai.com",
+      "protocol": "openai",
+      "api_key_guide": {
+        "title": "获取 OpenAI API Key",
+        "steps": [
+          "访问 https://platform.openai.com 注册账号",
+          "进入 API Keys 页面，点击「Create new secret key」",
+          "绑定信用卡（新用户有免费额度）",
+          "将生成的 sk-... 密钥填入端点配置的 API Key 字段"
+        ],
+        "docs_url": "https://platform.openai.com/docs"
+      }
+    },
+    {
+      "id": "anthropic",
+      "name": "Anthropic",
+      "base_url": "https://api.anthropic.com/v1",
+      "website": "https://console.anthropic.com",
+      "protocol": "anthropic",
+      "api_key_guide": {
+        "title": "获取 Anthropic API Key",
+        "steps": [
+          "访问 https://console.anthropic.com 注册账号",
+          "进入 API Keys 页面，点击「Generate key」",
+          "绑定手机号（新用户有$5免费额度）",
+          "将生成的 sk-ant-... 密钥填入端点配置的 API Key 字段"
+        ],
+        "docs_url": "https://docs.anthropic.com"
+      }
+    },
+    {
+      "id": "google",
+      "name": "Google DeepMind",
+      "base_url": "https://generativelanguage.googleapis.com/v1beta",
+      "website": "https://aistudio.google.com",
+      "protocol": "gemini",
+      "api_key_guide": {
+        "title": "获取 Google Gemini API Key",
+        "steps": [
+          "访问 https://aistudio.google.com 登录Google账号",
+          "点击「Get API Key」",
+          "免费层级慷慨，适合开发测试",
+          "将生成的 AIza... 密钥填入端点配置的 API Key 字段"
+        ],
+        "docs_url": "https://ai.google.dev/docs"
+      }
+    },
+    {
+      "id": "xai",
+      "name": "xAI (Grok)",
+      "base_url": "https://api.x.ai/v1",
+      "website": "https://x.ai/api",
+      "protocol": "openai",
+      "api_key_guide": {
+        "title": "获取 xAI Grok API Key",
+        "steps": [
+          "访问 https://x.ai/api 注册xAI开发者账号",
+          "进入 API Keys 页面创建密钥",
+          "支持信用卡支付",
+          "将生成的 xai-... 密钥填入端点配置的 API Key 字段"
+        ],
+        "docs_url": "https://docs.x.ai"
+      }
+    },
+    {
+      "id": "mistral",
+      "name": "Mistral AI",
+      "base_url": "https://api.mistral.ai/v1",
+      "website": "https://console.mistral.ai",
+      "protocol": "openai",
+      "api_key_guide": {
+        "title": "获取 Mistral API Key",
+        "steps": [
+          "访问 https://console.mistral.ai 注册账号",
+          "进入 API Keys 页面，点击「Create key」",
+          "新用户有免费额度",
+          "将生成的密钥填入端点配置的 API Key 字段"
+        ],
+        "docs_url": "https://docs.mistral.ai"
+      }
+    },
+    {
+      "id": "deepseek",
+      "name": "DeepSeek（深度求索）",
+      "base_url": "https://api.deepseek.com",
+      "website": "https://platform.deepseek.com",
+      "protocol": "openai",
+      "api_key_guide": {
+        "title": "获取 DeepSeek API Key",
+        "steps": [
+          "访问 https://platform.deepseek.com 注册账号",
+          "进入 API Keys 页面，点击「创建 API Key」",
+          "充值（最低几元即可，性价比极高）",
+          "将生成的 sk-... 密钥填入端点配置的 API Key 字段"
+        ],
+        "docs_url": "https://api-docs.deepseek.com"
+      }
+    },
+    {
+      "id": "qwen",
+      "name": "阿里云通义千问（Qwen）",
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "website": "https://bailian.console.aliyun.com",
+      "protocol": "openai",
+      "api_key_guide": {
+        "title": "获取通义千问 API Key（DashScope）",
+        "steps": [
+          "访问 https://bailian.console.aliyun.com 登录阿里云账号",
+          "进入模型广场，开通需要的模型",
+          "进入 API Key 管理页面，创建密钥",
+          "国内用户需实名认证",
+          "将生成的 sk-... 密钥填入端点配置的 API Key 字段",
+          "注意：国内用户 Base URL 为 https://dashscope.aliyuncs.com/compatible-mode/v1，国际用户为 https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+        ],
+        "docs_url": "https://help.aliyun.com/zh/model-studio"
+      }
+    },
+    {
+      "id": "zhipu",
+      "name": "智谱AI（Zhipu AI）",
+      "base_url": "https://open.bigmodel.cn/api/paas/v4",
+      "website": "https://open.bigmodel.cn",
+      "protocol": "openai",
+      "api_key_guide": {
+        "title": "获取智谱AI API Key",
+        "steps": [
+          "访问 https://open.bigmodel.cn 注册账号",
+          "进入 API Keys 页面，创建密钥",
+          "新用户有免费额度",
+          "将生成的密钥填入端点配置的 API Key 字段"
+        ],
+        "docs_url": "https://docs.bigmodel.cn"
+      }
+    },
+    {
+      "id": "moonshot",
+      "name": "Moonshot AI（月之暗面 / Kimi）",
+      "base_url": "https://api.moonshot.cn/v1",
+      "website": "https://platform.moonshot.cn",
+      "protocol": "openai",
+      "api_key_guide": {
+        "title": "获取 Kimi API Key",
+        "steps": [
+          "访问 https://platform.moonshot.cn 注册开发者账号",
+          "进入 API Key 管理页面，创建密钥",
+          "国内用户需实名认证",
+          "将生成的密钥填入端点配置的 API Key 字段",
+          "注意：国际版 Base URL 为 https://api.moonshot.ai/v1"
+        ],
+        "docs_url": "https://platform.moonshot.cn/docs"
+      }
+    },
+    {
+      "id": "bytedance",
+      "name": "字节跳动豆包（ByteDance）",
+      "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+      "website": "https://console.volcengine.com/ark",
+      "protocol": "openai",
+      "api_key_guide": {
+        "title": "获取豆包 API Key（火山引擎）",
+        "steps": [
+          "访问 https://console.volcengine.com/ark 登录火山引擎控制台",
+          "进入 Ark 大模型服务，创建推理接入点（绑定模型）",
+          "进入 API Key 管理，创建密钥",
+          "需实名认证（企业/个人）",
+          "将生成的密钥和推理接入点ID填入端点配置",
+          "注意：豆包需通过endpoint_id而非模型名调用"
+        ],
+        "docs_url": "https://www.volcengine.com/docs/82379"
+      }
+    },
+    {
+      "id": "minimax",
+      "name": "MiniMax（稀宇科技）",
+      "base_url": "https://api.minimaxi.com/v1",
+      "website": "https://platform.minimaxi.com",
+      "protocol": "openai",
+      "api_key_guide": {
+        "title": "获取 MiniMax API Key",
+        "steps": [
+          "访问 https://platform.minimaxi.com 注册账号",
+          "进入 API Keys 页面，创建密钥",
+          "新用户有免费额度",
+          "将生成的密钥填入端点配置的 API Key 字段"
+        ],
+        "docs_url": "https://platform.minimaxi.com/docs"
+      }
+    },
+    {
+      "id": "stepfun",
+      "name": "阶跃星辰（Stepfun）",
+      "base_url": "https://api.stepfun.com/v1",
+      "website": "https://platform.stepfun.com",
+      "protocol": "openai",
+      "api_key_guide": {
+        "title": "获取阶跃星辰 API Key",
+        "steps": [
+          "访问 https://platform.stepfun.com 注册账号",
+          "进入控制台 API Keys 页面，创建密钥",
+          "将生成的密钥填入端点配置的 API Key 字段"
+        ],
+        "docs_url": "https://platform.stepfun.com/docs"
+      }
+    }
+  ],
+  "models": [
+    {
+      "id": "gpt-5.5",
+      "provider_id": "openai",
+      "name": "gpt-5.5",
+      "capabilities": [
+        "chat",
+        "function-calling",
+        "structured_output",
+        "vision",
+        "reasoning",
+        "streaming",
+        "code"
+      ],
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_price_per_1k": 0.005,
+      "output_price_per_1k": 0.03,
+      "description": "GPT-5.5. OpenAI 2026年旗舰模型。Agent自动化/终端操作的SOTA，Terminal-Bench 2.0第一名(82.7%)。综合能力强，工具调用稳定。"
+    },
+    {
+      "id": "gpt-5.4",
+      "provider_id": "openai",
+      "name": "gpt-5.4",
+      "capabilities": [
+        "chat",
+        "function-calling",
+        "structured_output",
+        "vision",
+        "reasoning",
+        "streaming",
+        "code"
+      ],
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_price_per_1k": 0.0025,
+      "output_price_per_1k": 0.015,
+      "description": "GPT-5.4. 高性能通用模型，性价比优于GPT-5.5。适合大多数编程和推理任务。"
+    },
+    {
+      "id": "gpt-5.2",
+      "provider_id": "openai",
+      "name": "gpt-5.2",
+      "capabilities": [
+        "chat",
+        "function-calling",
+        "structured_output",
+        "streaming",
+        "code"
+      ],
+      "context_window": 256000,
+      "max_output_tokens": 32000,
+      "input_price_per_1k": 0.00125,
+      "output_price_per_1k": 0.005,
+      "description": "GPT-5.2. 中端通用模型，平衡性能和成本。"
+    },
+    {
+      "id": "gpt-4o",
+      "provider_id": "openai",
+      "name": "gpt-4o",
+      "capabilities": [
+        "chat",
+        "function-calling",
+        "structured_output",
+        "vision",
+        "streaming",
+        "code"
+      ],
+      "context_window": 128000,
+      "max_output_tokens": 16384,
+      "input_price_per_1k": 0.0025,
+      "output_price_per_1k": 0.01,
+      "description": "GPT-4o. 多模态经典模型。视觉理解出色，图像分析场景首选。"
+    },
+    {
+      "id": "gpt-4o-mini",
+      "provider_id": "openai",
+      "name": "gpt-4o-mini",
+      "capabilities": [
+        "chat",
+        "function-calling",
+        "structured_output",
+        "streaming",
+        "code"
+      ],
+      "context_window": 128000,
+      "max_output_tokens": 16384,
+      "input_price_per_1k": 0.00015,
+      "output_price_per_1k": 0.0006,
+      "description": "GPT-4o Mini. 轻量低成本模型。适合简单对话、分类、摘要等低复杂度任务。"
+    },
+    {
+      "id": "o4-mini",
+      "provider_id": "openai",
+      "name": "o4-mini",
+      "capabilities": [
+        "chat",
+        "function-calling",
+        "reasoning",
+        "streaming",
+        "code"
+      ],
+      "context_window": 200000,
+      "max_output_tokens": 100000,
+      "input_price_per_1k": 0.0011,
+      "output_price_per_1k": 0.0044,
+      "description": "推理专项模型。擅长数学、逻辑推理、复杂编程问题。注意：启用推理时可能不支持function-calling。"
+    },
+    {
+      "id": "text-embedding-3-small",
+      "provider_id": "openai",
+      "name": "text-embedding-3-small",
+      "capabilities": [
+        "embedding"
+      ],
+      "context_window": 8191,
+      "max_output_tokens": 0,
+      "input_price_per_1k": 0.00002,
+      "output_price_per_1k": 0,
+      "description": "Embedding 3 Small. 轻量向量嵌入模型。512/1536维度可选，性价比最高的嵌入方案。"
+    },
+    {
+      "id": "text-embedding-3-large",
+      "provider_id": "openai",
+      "name": "text-embedding-3-large",
+      "capabilities": [
+        "embedding"
+      ],
+      "context_window": 8191,
+      "max_output_tokens": 0,
+      "input_price_per_1k": 0.00013,
+      "output_price_per_1k": 0,
+      "description": "Embedding 3 Large. 高精度向量嵌入模型。256/1024/3072维度可选，检索精度最高。"
+    },
+    {
+      "id": "claude-opus-4-8",
+      "provider_id": "anthropic",
+      "name": "claude-opus-4-8",
+      "capabilities": [
+        "chat",
+        "function-calling",
+        "vision",
+        "reasoning",
+        "streaming",
+        "code"
+      ],
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_price_per_1k": 0.005,
+      "output_price_per_1k": 0.025,
+      "description": "Claude Opus 4.8. Anthropic 2026年旗舰。SWE-Bench编码88.6%，多文件编程最强。Agent可靠性和代码质量最高的模型之一。"
+    },
+    {
+      "id": "claude-sonnet-4-6",
+      "provider_id": "anthropic",
+      "name": "claude-sonnet-4-6",
+      "capabilities": [
+        "chat",
+        "function-calling",
+        "vision",
+        "reasoning",
+        "streaming",
+        "code"
+      ],
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_price_per_1k": 0.003,
+      "output_price_per_1k": 0.015,
+      "description": "Claude Sonnet 4.6. 平衡性能与成本。日常编码和Agent任务的推荐选择，性价比优于Opus。"
+    },
+    {
+      "id": "claude-haiku-4-5",
+      "provider_id": "anthropic",
+      "name": "claude-haiku-4-5",
+      "capabilities": [
+        "chat",
+        "function-calling",
+        "vision",
+        "streaming",
+        "code"
+      ],
+      "context_window": 200000,
+      "max_output_tokens": 8192,
+      "input_price_per_1k": 0.0008,
+      "output_price_per_1k": 0.004,
+      "description": "Claude Haiku 4.5. 快速轻量模型。适合简单任务、分类、快速响应场景，Anthropic系列最低成本。"
+    },
+    {
+      "id": "gemini-3.1-pro",
+      "provider_id": "google",
+      "name": "gemini-3.1-pro",
+      "capabilities": [
+        "chat",
+        "function-calling",
+        "vision",
+        "reasoning",
+        "streaming",
+        "code",
+        "audio"
+      ],
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_price_per_1k": 0.002,
+      "output_price_per_1k": 0.012,
+      "description": "Gemini 3.1 Pro. Google 2026年旗舰。GPQA Diamond科学推理第一名(94.3%)。原生多模态最强(视频/音频/图像/文本)，性价比极高。"
+    },
+    {
+      "id": "gemini-3.1-flash",
+      "provider_id": "google",
+      "name": "gemini-3.1-flash",
+      "capabilities": [
+        "chat",
+        "function-calling",
+        "vision",
+        "streaming",
+        "code",
+        "audio"
+      ],
+      "context_window": 1000000,
+      "max_output_tokens": 32000,
+      "input_price_per_1k": 0.00015,
+      "output_price_per_1k": 0.0006,
+      "description": "Gemini 3.1 Flash. 快速版多模态模型。1M上下文窗口+极低成本，大批量处理场景首选。"
+    },
+    {
+      "id": "gemini-2.5-pro",
+      "provider_id": "google",
+      "name": "gemini-2.5-pro",
+      "capabilities": [
+        "chat",
+        "function-calling",
+        "vision",
+        "reasoning",
+        "streaming",
+        "code"
+      ],
+      "context_window": 1000000,
+      "max_output_tokens": 64000,
+      "input_price_per_1k": 0.00125,
+      "output_price_per_1k": 0.01,
+      "description": "Gemini 2.5 Pro. 成熟稳定的推理模型。大上下文推理和复杂分析场景。"
+    },
+    {
+      "id": "text-embedding-004",
+      "provider_id": "google",
+      "name": "text-embedding-004",
+      "capabilities": [
+        "embedding"
+      ],
+      "context_window": 2048,
+      "max_output_tokens": 0,
+      "input_price_per_1k": 0.00002,
+      "output_price_per_1k": 0,
+      "description": "Gemini Embedding 004. Google最新嵌入模型，768维输出。"
+    },
+    {
+      "id": "grok-4.3",
+      "provider_id": "xai",
+      "name": "grok-4.3",
+      "capabilities": [
+        "chat",
+        "function-calling",
+        "vision",
+        "reasoning",
+        "streaming",
+        "code"
+      ],
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_price_per_1k": 0.00125,
+      "output_price_per_1k": 0.0025,
+      "description": "Grok 4.3. xAI 2026年5月发布的最新旗舰。较Grok 4.20性价比提升40%。原生视频输入+始终开启推理。抗幻觉能力强(78% AA-Omniscience)。"
+    },
+    {
+      "id": "grok-4.1-fast",
+      "provider_id": "xai",
+      "name": "grok-4.1-fast",
+      "capabilities": [
+        "chat",
+        "function-calling",
+        "streaming",
+        "code"
+      ],
+      "context_window": 2000000,
+      "max_output_tokens": 32000,
+      "input_price_per_1k": 0.0002,
+      "output_price_per_1k": 0.0005,
+      "description": "Grok 4.1 Fast. 超大上下文(2M)+极低成本。高吞吐量工作场景，支持实时X平台搜索。"
+    },
+    {
+      "id": "grok-code-fast-1",
+      "provider_id": "xai",
+      "name": "grok-code-fast-1",
+      "capabilities": [
+        "chat",
+        "function-calling",
+        "streaming",
+        "code"
+      ],
+      "context_window": 256000,
+      "max_output_tokens": 32000,
+      "input_price_per_1k": 0.0002,
+      "output_price_per_1k": 0.0015,
+      "description": "Grok Code Fast 1. 编码专项快速模型。IDE集成和代码Agent场景，100+ tps速度。"
+    },
+    {
+      "id": "mistral-large",
+      "provider_id": "mistral",
+      "name": "mistral-large",
+      "capabilities": [
+        "chat",
+        "function-calling",
+        "vision",
+        "streaming",
+        "code"
+      ],
+      "context_window": 256000,
+      "max_output_tokens": 32000,
+      "input_price_per_1k": 0.002,
+      "output_price_per_1k": 0.006,
+      "description": "Mistral Large 3. Mistral旗舰模型。欧洲首选，多语言能力强，支持视觉理解。"
+    },
+    {
+      "id": "mistral-small",
+      "provider_id": "mistral",
+      "name": "mistral-small",
+      "capabilities": [
+        "chat",
+        "function-calling",
+        "streaming",
+        "code"
+      ],
+      "context_window": 128000,
+      "max_output_tokens": 16000,
+      "input_price_per_1k": 0.0002,
+      "output_price_per_1k": 0.0006,
+      "description": "Mistral Small 4. 轻量快速模型。延迟敏感的API场景，欧洲合规首选。"
+    },
+    {
+      "id": "codestral",
+      "provider_id": "mistral",
+      "name": "codestral",
+      "capabilities": [
+        "chat",
+        "function-calling",
+        "streaming",
+        "code"
+      ],
+      "context_window": 256000,
+      "max_output_tokens": 32000,
+      "input_price_per_1k": 0.0003,
+      "output_price_per_1k": 0.0009,
+      "description": "Codestral. 编码专项模型。代码生成/补全/FIM（Fill-in-the-Middle），IDE集成优化。"
+    },
+    {
+      "id": "mistral-embed",
+      "provider_id": "mistral",
+      "name": "mistral-embed",
+      "capabilities": [
+        "embedding"
+      ],
+      "context_window": 8000,
+      "max_output_tokens": 0,
+      "input_price_per_1k": 0.0001,
+      "output_price_per_1k": 0,
+      "description": "Mistral Embed. Mistral嵌入模型，1024维输出。欧洲数据合规场景首选嵌入方案。"
+    },
+    {
+      "id": "deepseek-v4-pro",
+      "provider_id": "deepseek",
+      "name": "deepseek-v4-pro",
+      "capabilities": [
+        "chat",
+        "function-calling",
+        "reasoning",
+        "streaming",
+        "code"
+      ],
+      "context_window": 1000000,
+      "max_output_tokens": 384000,
+      "input_price_per_1k": 0.000435,
+      "output_price_per_1k": 0.00087,
+      "description": "DeepSeek V4 Pro. DeepSeek 2026年4月发布的最新旗舰。1.6T MoE架构，1M上下文。SWE-Bench编码80.6%，价格仅为GPT-5.5的1/34。MIT开源，性价比之王。不支持vision。"
+    },
+    {
+      "id": "deepseek-v4-flash",
+      "provider_id": "deepseek",
+      "name": "deepseek-v4-flash",
+      "capabilities": [
+        "chat",
+        "function-calling",
+        "streaming",
+        "code"
+      ],
+      "context_window": 1000000,
+      "max_output_tokens": 384000,
+      "input_price_per_1k": 0.00014,
+      "output_price_per_1k": 0.00028,
+      "description": "DeepSeek V4 Flash. 极致性价比快速版。1M上下文+超低价格，输出仅为GPT-5.5的1/100。大批量/低成本场景的首选。"
+    },
+    {
+      "id": "deepseek-r1",
+      "provider_id": "deepseek",
+      "name": "deepseek-r1",
+      "capabilities": [
+        "reasoning",
+        "streaming"
+      ],
+      "context_window": 128000,
+      "max_output_tokens": 32000,
+      "input_price_per_1k": 0,
+      "output_price_per_1k": 0,
+      "description": "DeepSeek R1. 推理专用模型。纯推理链(CoT)，数学/逻辑/编程难题。注意：不支持function-calling和structured_output。"
+    },
+    {
+      "id": "qwen3.7-max",
+      "provider_id": "qwen",
+      "name": "qwen3.7-max",
+      "capabilities": [
+        "chat",
+        "function-calling",
+        "vision",
+        "reasoning",
+        "streaming",
+        "code"
+      ],
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_price_per_1k": 0,
+      "output_price_per_1k": 0,
+      "description": "Qwen3.7 Max. 阿里2026年5月旗舰推理模型。SWE-Bench Pro编码排行第一。中文能力SOTA，国产最强综合模型。需联系阿里获取最新定价。仅支持按量计费。"
+    },
+    {
+      "id": "qwen3.6-plus",
+      "provider_id": "qwen",
+      "name": "qwen3.6-plus",
+      "capabilities": [
+        "chat",
+        "function-calling",
+        "vision",
+        "streaming",
+        "code",
+        "embedding"
+      ],
+      "context_window": 1000000,
+      "max_output_tokens": 32000,
+      "input_price_per_1k": 0.0004,
+      "output_price_per_1k": 0.0024,
+      "description": "Qwen3.6 Plus. 通用主力模型。1M上下文，同时支持embedding，中文场景综合能力强。"
+    },
+    {
+      "id": "qwen3.6-flash",
+      "provider_id": "qwen",
+      "name": "qwen3.6-flash",
+      "capabilities": [
+        "chat",
+        "function-calling",
+        "streaming",
+        "code"
+      ],
+      "context_window": 1000000,
+      "max_output_tokens": 32000,
+      "input_price_per_1k": 0.000096,
+      "output_price_per_1k": 0.000384,
+      "description": "Qwen3.6 Flash. 快速低成本模型。1M上下文+极低价格，轻量任务和批量处理首选。"
+    },
+    {
+      "id": "qwen3-embedding",
+      "provider_id": "qwen",
+      "name": "qwen3-embedding",
+      "capabilities": [
+        "embedding"
+      ],
+      "context_window": 8000,
+      "max_output_tokens": 0,
+      "input_price_per_1k": 0.000096,
+      "output_price_per_1k": 0,
+      "description": "Qwen3 Embedding. 通义千问嵌入模型，中文语义理解出色。国内场景嵌入首选。"
+    },
+    {
+      "id": "glm-5.2",
+      "provider_id": "zhipu",
+      "name": "glm-5.2",
+      "capabilities": [
+        "chat",
+        "function-calling",
+        "vision",
+        "reasoning",
+        "streaming",
+        "code",
+        "image-generation"
+      ],
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_price_per_1k": 0.0014,
+      "output_price_per_1k": 0.0044,
+      "description": "GLM-5.2. 智谱2026年6月最新旗舰。753B MoE架构，MIT开源。GPQA Diamond推理91.2%，支持图像生成。国产开源模型性能天花板。"
+    },
+    {
+      "id": "glm-5.1",
+      "provider_id": "zhipu",
+      "name": "glm-5.1",
+      "capabilities": [
+        "chat",
+        "function-calling",
+        "vision",
+        "reasoning",
+        "streaming",
+        "code"
+      ],
+      "context_window": 1000000,
+      "max_output_tokens": 64000,
+      "input_price_per_1k": 0,
+      "output_price_per_1k": 0,
+      "description": "GLM-5.1. 智谱前代旗舰模型。稳定可靠，中文理解能力强。需联系智谱获取最新定价。"
+    },
+    {
+      "id": "glm-5-turbo",
+      "provider_id": "zhipu",
+      "name": "glm-5-turbo",
+      "capabilities": [
+        "chat",
+        "function-calling",
+        "streaming",
+        "code"
+      ],
+      "context_window": 256000,
+      "max_output_tokens": 32000,
+      "input_price_per_1k": 0,
+      "output_price_per_1k": 0,
+      "description": "GLM-5 Turbo. 快速版GLM-5。低延迟场景和高吞吐API服务场景。需联系智谱获取最新定价。"
+    },
+    {
+      "id": "kimi-k2.6",
+      "provider_id": "moonshot",
+      "name": "kimi-k2.6",
+      "capabilities": [
+        "chat",
+        "function-calling",
+        "vision",
+        "reasoning",
+        "streaming",
+        "code"
+      ],
+      "context_window": 262144,
+      "max_output_tokens": 32000,
+      "input_price_per_1k": 0,
+      "output_price_per_1k": 0,
+      "description": "Kimi K2.6. 月之暗面最新旗舰。视觉+推理能力强，超长上下文处理(262K)。中文互联网内容理解出色。需联系Moonshot获取最新定价。"
+    },
+    {
+      "id": "kimi-k2.7-code",
+      "provider_id": "moonshot",
+      "name": "kimi-k2.7-code",
+      "capabilities": [
+        "chat",
+        "function-calling",
+        "streaming",
+        "code"
+      ],
+      "context_window": 256000,
+      "max_output_tokens": 32000,
+      "input_price_per_1k": 0.000131,
+      "output_price_per_1k": 0.00055,
+      "description": "Kimi K2.7 Code. 编码专项模型。编程速度和代码质量优化，编码场景的Kimi首选。"
+    },
+    {
+      "id": "doubao-seed-1.6",
+      "provider_id": "bytedance",
+      "name": "doubao-seed-1.6",
+      "capabilities": [
+        "chat",
+        "function-calling",
+        "reasoning",
+        "streaming",
+        "code"
+      ],
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_price_per_1k": 0,
+      "output_price_per_1k": 0,
+      "description": "豆包Seed 1.6. 字节跳动旗舰推理模型。1M上下文+深度推理，国内性价比极高。需在火山引擎控制台创建推理接入点后使用。"
+    },
+    {
+      "id": "doubao-pro-1.5",
+      "provider_id": "bytedance",
+      "name": "doubao-pro-1.5",
+      "capabilities": [
+        "chat",
+        "function-calling",
+        "vision",
+        "streaming",
+        "code"
+      ],
+      "context_window": 256000,
+      "max_output_tokens": 32000,
+      "input_price_per_1k": 0,
+      "output_price_per_1k": 0,
+      "description": "豆包Pro 1.5. 通用主力模型。视觉理解+256K上下文，日常编程和问答场景。需在火山引擎创建推理接入点。"
+    },
+    {
+      "id": "doubao-lite-1.5",
+      "provider_id": "bytedance",
+      "name": "doubao-lite-1.5",
+      "capabilities": [
+        "chat",
+        "function-calling",
+        "streaming",
+        "code"
+      ],
+      "context_window": 256000,
+      "max_output_tokens": 16000,
+      "input_price_per_1k": 0,
+      "output_price_per_1k": 0,
+      "description": "豆包Lite 1.5. 超低成本轻量模型。约￥0.3/1M输入，大批量简单任务首选。需在火山引擎创建推理接入点。"
+    },
+    {
+      "id": "minimax-m3",
+      "provider_id": "minimax",
+      "name": "minimax-m3",
+      "capabilities": [
+        "chat",
+        "function-calling",
+        "vision",
+        "streaming",
+        "code"
+      ],
+      "context_window": 1000000,
+      "max_output_tokens": 32000,
+      "input_price_per_1k": 0.0003,
+      "output_price_per_1k": 0.0012,
+      "description": "MiniMax M3. MiniMax最新旗舰。1M上下文+视觉理解，国产高性价比选择。价格约为GPT-5.5的1/25。"
+    },
+    {
+      "id": "minimax-m2",
+      "provider_id": "minimax",
+      "name": "minimax-m2",
+      "capabilities": [
+        "chat",
+        "function-calling",
+        "streaming",
+        "code"
+      ],
+      "context_window": 128000,
+      "max_output_tokens": 16000,
+      "input_price_per_1k": 0.000248,
+      "output_price_per_1k": 0.00099,
+      "description": "MiniMax M2. 稳定可靠的通用模型。API服务稳定，中文对话流畅自然。"
+    },
+    {
+      "id": "step-3",
+      "provider_id": "stepfun",
+      "name": "step-3",
+      "capabilities": [
+        "chat",
+        "function-calling",
+        "vision",
+        "streaming",
+        "code"
+      ],
+      "context_window": 256000,
+      "max_output_tokens": 32000,
+      "input_price_per_1k": 0,
+      "output_price_per_1k": 0,
+      "description": "Step-3. 阶跃星辰旗舰模型。视觉理解+长上下文+函数调用。需联系阶跃获取最新定价。"
+    },
+    {
+      "id": "step-3-mini",
+      "provider_id": "stepfun",
+      "name": "step-3-mini",
+      "capabilities": [
+        "chat",
+        "function-calling",
+        "streaming",
+        "code"
+      ],
+      "context_window": 128000,
+      "max_output_tokens": 16000,
+      "input_price_per_1k": 0,
+      "output_price_per_1k": 0,
+      "description": "Step-3 Mini. 高效性价比模型。低延迟+低成本，简单编程和对话场景。"
+    }
+  ],
+  "use_cases": [
+    {
+      "scenario": "最强编码能力",
+      "primary": "claude-opus-4-8",
+      "fallback": "deepseek-v4-pro",
+      "note": "Claude Opus 4.8 SWE-Bench 88.6%，DeepSeek V4 Pro 80.6%但价格仅1/34"
+    },
+    {
+      "scenario": "Agent自动化/工具调用",
+      "primary": "gpt-5.5",
+      "fallback": "claude-sonnet-4-6",
+      "note": "GPT-5.5 Terminal-Bench 82.7%，工具调用最稳定"
+    },
+    {
+      "scenario": "科学推理/学术研究",
+      "primary": "gemini-3.1-pro",
+      "fallback": "claude-opus-4-8",
+      "note": "Gemini 3.1 Pro GPQA Diamond 94.3%"
+    },
+    {
+      "scenario": "成本极致优化",
+      "primary": "deepseek-v4-flash",
+      "fallback": "gpt-4o-mini",
+      "note": "DeepSeek V4 Flash输出$0.28/1M，仅为GPT-5.5的1/100"
+    },
+    {
+      "scenario": "中文内容创作",
+      "primary": "qwen3.7-max",
+      "fallback": "glm-5.2",
+      "note": "Qwen3.7 Max中文SOTA，GLM-5.2紧追其后"
+    },
+    {
+      "scenario": "图像理解/多模态",
+      "primary": "gemini-3.1-pro",
+      "fallback": "gpt-5.5",
+      "note": "Gemini原生多模态最强，支持视频/音频/图像/文本"
+    },
+    {
+      "scenario": "自部署/离线/开源",
+      "primary": "deepseek-v4-pro",
+      "fallback": "glm-5.2",
+      "note": "两者均为MIT开源，可私有化部署"
+    },
+    {
+      "scenario": "向量嵌入",
+      "primary": "text-embedding-3-small",
+      "fallback": "qwen3-embedding",
+      "note": "OpenAI嵌入最成熟，Qwen嵌入中文更优"
+    },
+    {
+      "scenario": "超长文档处理(200K+)",
+      "primary": "claude-opus-4-8",
+      "fallback": "gemini-3.1-pro",
+      "note": "两者均1M窗口，Claude长文理解更精细"
+    },
+    {
+      "scenario": "低成本编码助手",
+      "primary": "deepseek-v4-flash",
+      "fallback": "grok-code-fast-1",
+      "note": "极致性价比编码，适合个人开发者和批量任务"
+    },
+    {
+      "scenario": "国内合规首选",
+      "primary": "qwen3.7-max",
+      "fallback": "glm-5.2",
+      "note": "数据不出境，国内API直接访问，法规最合规"
+    }
+  ],
+  "pricing_note": "价格为2026年6月快照。国际供应商以美元(USD)/1000 tokens计。国内供应商以人民币(CNY)/1000 tokens计（已从各平台人民币报价直接记录，未换算）。标记为0的需联系供应商获取最新定价。",
+  "provider_currency": {
+    "openai": "USD",
+    "anthropic": "USD",
+    "google": "USD",
+    "xai": "USD",
+    "mistral": "USD",
+    "deepseek": "CNY",
+    "qwen": "CNY",
+    "zhipu": "CNY",
+    "moonshot": "CNY",
+    "bytedance": "CNY",
+    "minimax": "CNY",
+    "stepfun": "CNY"
+  },
+  "_note": "name字段即为API调用时的模型标识符(如deepseek-v4-flash)，description含人类可读标签。"
+}

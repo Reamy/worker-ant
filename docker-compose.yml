@@ -1,0 +1,84 @@
+# 工蚁系统 Docker Compose
+# 启动: docker compose up -d
+# 查看: docker compose logs -f
+# 停止: docker compose down
+
+services:
+  ans-server:
+    build:
+      context: .
+      target: ans
+    image: worker-ant/ans-server:latest
+    container_name: worker-ant-ans
+    ports:
+      - '3001:3001'
+    environment:
+      - ANS_SERVER_PORT=3001
+      - ANS_ENCRYPTION_KEY=${ANS_ENCRYPTION_KEY}
+      - ANS_API_KEYS=${ANS_API_KEYS:-dev-key:dev-secret}
+    volumes:
+      - ans-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://localhost:3001/api/v1/health').then(r=>r.ok?process.exit(0):process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  worker-ant-server:
+    build:
+      context: .
+      target: server
+    image: worker-ant/server:latest
+    container_name: worker-ant-waserver
+    ports:
+      - '9411:9411'
+    environment:
+      - WA_SERVER_PORT=9411
+      - WA_JWT_SECRET=${WA_JWT_SECRET}
+      - ANS_SERVER_URL=http://ans-server:3001
+      - ANS_API_KEY=${ANS_API_KEY:-dev-key}
+      - ANS_SECRET_KEY=${ANS_SECRET_KEY:-dev-secret}
+      - ANS_ENCRYPTION_KEY=${ANS_ENCRYPTION_KEY}
+      - ANS_GATEWAY_KEY=${ANS_GATEWAY_KEY}
+    volumes:
+      - waserver-data:/app/data
+    restart: unless-stopped
+    depends_on:
+      ans-server:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://localhost:9411/api/v1/admin/health').then(r=>r.ok?process.exit(0):process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  worker-ant-web:
+    build:
+      context: .
+      target: web
+    image: worker-ant/web:latest
+    container_name: worker-ant-web
+    ports:
+      - '9410:9410'
+    environment:
+      - NEXT_PUBLIC_WA_API_URL=http://localhost:9411
+    restart: unless-stopped
+    depends_on:
+      - worker-ant-server
+
+volumes:
+  ans-data:
+  waserver-data:
