@@ -18,12 +18,17 @@ import type { TaskStatus } from '@worker-ant/shared-types';
 // zx_20261012_1 批四: 删除项目的级联 SQL 收为**一处真源**（见下方 `deleteProjectCascade`）——
 //   此前只在 `project:delete` 内联一份；示例项目删除要走同一条路，故提取共用（禁"两条删除路各写一份"）。
 import { tombstoneMemoriesBy, MEM_DELETE_REASONS } from './memory-lifecycle.js';
+import { packagedUserDataDir } from './app-paths.js';
 
 let _dataDir: string | null = null;
 
 export function setProjectDataDir(dir: string): void { _dataDir = dir; }
 
-function getDataDir(): string { return _dataDir ?? path.resolve(process.cwd(), '../../data'); }
+function getDataDir(): string {
+  if (_dataDir) return _dataDir;
+  const packagedRoot = packagedUserDataDir();
+  return packagedRoot ?? path.resolve(process.cwd(), '../../data');
+}
 function getProjectsDir(): string { return path.join(getDataDir(), 'projects'); }
 
 /**

@@ -148,6 +148,27 @@ function mkDeadSpawn(spy: SpawnSpy, stderrText: string): typeof spawn {
   }) as unknown as typeof spawn;
 }
 
+/**
+ * 假 spawn：**启动本身失败**（真实形态是 `child.on('error')` 异步事件，不是同步抛）。
+ *
+ * 为什么需要它：`cwd` 不存在时的 ENOENT 走的是异步 `error` 事件，旧实现没接 ⇒
+ *   变成进程级未捕获异常，等待循环也收不到 `exit`（实测打包版首启）。同步抛的替身照不出这一态。
+ */
+function mkErrorSpawn(spy: SpawnSpy, err: Error): typeof spawn {
+  return ((_cmd: string, _args: string[], _opts: unknown) => {
+    spy.calls++;
+    const errCbs: Array<(e: Error) => void> = [];
+    const child = {
+      pid: undefined,
+      stderr: { on: () => child.stderr },
+      on: (ev: string, cb: (e: Error) => void) => { if (ev === 'error') errCbs.push(cb); return child; },
+      kill: () => true,
+    };
+    queueMicrotask(() => { for (const cb of errCbs) cb(err); });
+    return child;
+  }) as unknown as typeof spawn;
+}
+
 /** 计 tick 的 sleep：第 4 次即抛（若"一死即返"失效，这里**当场红**，而不是挂死整个套件）。 */
 function mkCountingSleep(state: { n: number }): () => Promise<void> {
   return async (): Promise<void> => {
@@ -671,6 +692,40 @@ async function main(): Promise<void> {
     h2eq([rPkg.started, seenPkg[0]?.ANS_API_KEYS, seenPkg[0]?.ELECTRON_RUN_AS_NODE], [true, 'wa_pkg:pkg-secret', '1'],
       'H2-12 ★★打包版代起：**既**带 `ELECTRON_RUN_AS_NODE` **又**发凭据（M2 注入在打包分支同样成立）');
     stopManagedAns();
+
+    // ── 首启目录自建 + 异步 error 不泄漏 ────────────────────────────────────
+    //  实测（0.2.1 候选包首启）：`<userData>/ans/apps` 尚不存在，spawn 以 ENOENT 失败；
+    //  旧实现无 `error` 监听 ⇒ 进程级未捕获异常，ANS 永远代起不来。
+    const E_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'rr-ans-err-'));
+    const E_ENTRY = path.join(E_DIR, 'index.js');
+    fs.writeFileSync(E_ENTRY, '');
+    const E_CWD = path.join(E_DIR, 'ans', 'apps'); // 刻意**不**预先创建
+
+    // (a) cwd 由代起侧建好（正常启动路径的前提）
+    const dirState = { n: 0 };
+    await ensureAnsStarted({ baseUrl: LOCAL }, {
+      autoStart: true, isDev: false, packaged: { entry: E_ENTRY, cwd: E_CWD },
+      fetchImpl: refusedFetch, spawnImpl: mkSpawn({ calls: 0, killed: [] }), readyTimeoutMs: 0, sleepImpl: noSleep,
+    });
+    h2(fs.existsSync(E_CWD), 'H2-21 ★代起前自建 `cwd`（首启时 `<userData>/ans/apps` 不存在，不建则 spawn ENOENT）');
+    stopManagedAns();
+
+    // (b) 异步 error 如实归 `spawn-failed`，且 `started:false`（进程从未起来）
+    const errSpy: SpawnSpy = { calls: 0, killed: [] };
+    const rErr = await ensureAnsStarted({ baseUrl: LOCAL }, {
+      autoStart: true, isDev: false, packaged: { entry: E_ENTRY, cwd: E_CWD },
+      fetchImpl: refusedFetch, spawnImpl: mkErrorSpawn(errSpy, new Error('spawn ENOENT')),
+      readyTimeoutMs: 60_000, sleepImpl: mkCountingSleep(dirState),
+    });
+    h2eq([rErr.started, rErr.reachable, rErr.reason], [false, false, 'spawn-failed'],
+      'H2-22 ★★spawn 异步 `error` ⇒ `spawn-failed` 且 `started:false`（此前：未捕获异常 + 空等成 start-timeout）');
+    h2(/spawn error: spawn ENOENT/.test(rErr.stderrTail ?? ''), 'H2-23 失败原因随结果回（`stderrTail` 为据）');
+
+    const sup = RD(`${A}/src/main/core/ans-supervisor.ts`);
+    h2(/child\.on\('error'/.test(sup) && /mkdirSync\(cmd\.cwd/.test(sup),
+      'H2-24 静态接线：`error` 监听与 `cwd` 自建都在生产函数里（不是只在替身里的自我印证）');
+
+    fs.rmSync(E_DIR, { recursive: true, force: true });
 
     // ── 静态接线（接口一致性：算出路径 == 随包落点，改一处必弄红）────────────
     const mi = RD(`${A}/src/main/index.ts`);

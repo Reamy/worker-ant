@@ -16,7 +16,7 @@
  *      一死即报因（`child-exited` / `native-abi-mismatch`）并附 stderr 遗言，不久拖成 `start-timeout`。
  */
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { ansApiKeysEnvValue, type AnsCredPair } from './ans-signed-request.js';
@@ -264,15 +264,30 @@ export async function ensureAnsStarted(creds: { baseUrl: string } & Partial<AnsC
   // 子进程遗言与死讯（声明于 try 外，供下方等待循环据实判因）。
   let stderrTail = '';
   let exited = false;
+  let spawnFailed = false;
   let livedMs: number | null = null; // 存活时长（死时记；用于区分"秒退"与"活了很久才死"）
   let notifyExit: () => void = () => { /* spawn 成功后替换 */ };
   const exitedPromise = new Promise<void>((resolve) => { notifyExit = resolve; });
 
   const spawnAt = Date.now();
   try {
+    // 打包版首启时 `<userData>/ans/apps` 还不存在：直接 spawn 会以 cwd ENOENT 失败
+    //   （实测 0.2.1 候选包首启抛未捕获 `spawn … ENOENT`，ANS 永远代起不来）。
+    //   cwd 由本函数保证存在，调用方不必各自记得先建目录。
+    mkdirSync(cmd.cwd, { recursive: true });
     const child = (opts.spawnImpl ?? spawn)(cmd.cmd, cmd.args, {
       cwd: cmd.cwd, env: cmd.env, stdio: ['ignore', 'ignore', 'pipe'], detached: false,
     } as SpawnOptions);
+    // spawn 的失败有**同步抛**与**异步 error 事件**两态；后者不接住就是未捕获异常
+    //   （ENOENT/EACCES 走这条），且不会发 exit ⇒ 等待循环空转到 start-timeout，名实不符。
+    child.on('error', (err: Error) => {
+      spawnFailed = true;
+      stderrTail = `${stderrTail}spawn error: ${err.message}`.slice(-STDERR_TAIL_MAX);
+      exited = true;
+      livedMs = Date.now() - spawnAt;
+      notifyExit();
+      if (managedChild === child) { managedChild = null; managedPid = null; }
+    });
     // zx_20261006 M2：接住遗言——原实现把 stdio 的 stderr 位设为 ignore，子进程崩溃的原因整个扔掉，
     //   只剩一句 20s 后的 `start-timeout`（把"早死了"说成"慢"）。
     child.stderr?.on('data', (chunk: unknown) => {
@@ -296,6 +311,12 @@ export async function ensureAnsStarted(creds: { baseUrl: string } & Partial<AnsC
   const deadline = Date.now() + (opts.readyTimeoutMs ?? 20_000);
   while (Date.now() < deadline) {
     if (exited) {
+      // spawn 本身失败（异步 error 事件）：如实回 `spawn-failed`，且 `started:false`
+      //   ——进程根本没起来，不能记成"起过又死了"。
+      if (spawnFailed) {
+        lastReason = 'spawn-failed';
+        return { started: false, reachable: false, reason: 'spawn-failed', stderrTail };
+      }
       // zx_20261009 M5：ABI 不符有两种到场方式——① 遗言里带 `NODE_MODULE_VERSION`（Node 打印后退出）；
       //   ② **秒退且 stderr 全空**（原生模块加载即被信号杀掉）。旧实现只认 ①，真 ABI 冲突于是落到
       //   笼统的 `child-exited`（用户拿不到"先跑 pnpm dev:ans"那条自救提示）。此处并认两态。

@@ -230,8 +230,10 @@ export function initAdminIpc(db: Database.Database, healthDeps: AdminHealthDeps 
     try {
       const fs = await import('node:fs');
       const path = await import('node:path');
-      // Determine log directory
-      const logDir = path.resolve(process.cwd(), '../../data/logs');
+      // 日志目录与数据目录同源（打包版 cwd 是 `/`，不能再按 cwd 推）。
+      const logDir = healthDeps.dataDir
+        ? path.join(healthDeps.dataDir, 'logs')
+        : path.resolve(process.cwd(), '../../data/logs');
       const logs: string[] = [];
       try {
         const files = fs.readdirSync(logDir).filter(f => f.endsWith('.log')).sort().reverse();

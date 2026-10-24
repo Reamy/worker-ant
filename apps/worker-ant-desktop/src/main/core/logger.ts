@@ -1,6 +1,7 @@
 import pino from 'pino';
 import path from 'node:path';
 import fs from 'node:fs';
+import { packagedUserDataDir } from './app-paths.js';
 
 let _logDir: string | null = null;
 
@@ -24,8 +25,20 @@ export function setLogDir(dir: string): void {
   fs.mkdirSync(dir, { recursive: true });
 }
 
+/**
+ * 日志目录：显式设过则用之；打包版落 `<userData>/logs`（cwd 是 `/`，按 cwd 上溯会落到
+ * `/data/logs`——pino-roll worker 起不来，此后每条日志重复抛 `ENOENT mkdir '/data'`）；
+ * 其余（dev/rr）维持仓库 `data/logs`。
+ *
+ * 在**模块求值期**就要定案：40 处 `const logger = createLogger(...)` 都在 import 阶段执行，
+ * 早于 `main/index.ts` 函数体，故不能靠那里的 `setLogDir(...)` 事后注入。
+ */
 function getLogDir(): string {
-  return _logDir ?? path.resolve(process.cwd(), '../../data/logs');
+  if (_logDir) return _logDir;
+  const packagedRoot = packagedUserDataDir();
+  return packagedRoot
+    ? path.join(packagedRoot, 'logs')
+    : path.resolve(process.cwd(), '../../data/logs');
 }
 
 const isDev = process.env.NODE_ENV !== 'production';

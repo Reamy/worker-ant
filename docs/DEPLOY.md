@@ -62,7 +62,7 @@ pnpm --filter @worker-ant/desktop pack
 # 3. 生成 macOS 安装包（走签名 + 公证）
 cd apps/worker-ant-desktop && pnpm dist:mac
 # 输出: release/工蚁-<version>-mac-arm64.dmg / .zip
-# 上传前复制为 ASCII 文件名（如 worker-ant-0.2.0-mac-arm64.dmg）
+# 上传前复制为 ASCII 文件名（如 worker-ant-0.2.1-mac-arm64.dmg）
 ```
 
 打包后**必须还原 Node ABI**（否则 `pnpm dev:ans` 无法加载原生模块）：
@@ -91,11 +91,11 @@ bash scripts/rebuild-ans-native.sh
 
 ```bash
 # 产物文件名用 ASCII（避免上传/下载链路的编码问题）
-gh release create v0.2.0 \
-  release/worker-ant-0.2.0-mac-arm64.dmg \
-  release/worker-ant-0.2.0-mac-arm64.zip \
+gh release create v0.2.1 \
+  release/worker-ant-0.2.1-mac-arm64.dmg \
+  release/worker-ant-0.2.1-mac-arm64.zip \
   --repo Reamy/worker-ant \
-  --title "工蚁 v0.2.0 — macOS 签名并公证" \
+  --title "工蚁 v0.2.1 — 修复首次启动崩溃" \
   --notes-file <发布说明.md>
 ```
 

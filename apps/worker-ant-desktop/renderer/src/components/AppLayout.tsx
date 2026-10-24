@@ -4,7 +4,7 @@ import { LogOut, BellRing } from 'lucide-react';
 // zx_20261013_1 批三: 导航表提为**一处真源**（`lib/navConfig`）——侧栏与首启导览消费同一个数组，
 //   不再各自持有入口清单（导览词表由此派生，见 `tourEntries()`）。
 import { NAV_GROUPS } from '../lib/navConfig';
-import { im } from '../lib/ipc';
+import { im, license } from '../lib/ipc';
 import { useActivity } from '../lib/activity';
 import { imReminderChannel, isImRoute, imInboundNotice } from '../lib/im-reminder';
 import NotificationBell from './NotificationBell';
@@ -24,6 +24,9 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   // zx_20260914 M1-3(海德格尔·在场): IM 导航红点——未读只在 main 算一次（`computeImUnread`），
   //   这里**只接收 main 推来的那一个数**（`im.unread`），绝不自己加减。见方案 §批 M1-B.1（方案①有竞态）。
   const [imUnread, setImUnread] = useState(0);
+  // 侧栏版本号**不写死**：走 `app:version`（main 侧 `app.getVersion()` 唯一真源），
+  //   写死的字面量每次发版就过期（0.2.0 就曾把首启崩溃版显示成"已更新"的样子）。
+  const [appVersion, setAppVersion] = useState('');
   // zx_20261002 M1: IM 跨页提醒（**原生横幅**那一路）——窗口不可见时，入站消息经系统通知送达。
   //   「该走哪条通道」由纯判据 `imReminderChannel` 定：不可见→native（此处），可见不在 IM 页→toast
   //   （`lib/toast.tsx`），可见且在本页→none。两条路互斥，不重复打扰。
@@ -41,6 +44,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (window.electronAPI?.isElectron) {
       window.electronAPI.getToken().then(t => { if (t) setUser(decodeToken(t) || {}); });
+      license.appVersion().then(setAppVersion).catch(() => { /* 通道未注册时留空 */ });
     } else {
       const t = localStorage.getItem('token');
       if (t) setUser(decodeToken(t) || {});
@@ -101,7 +105,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
         <div className="p-3 border-t border-gray-700 space-y-2">
           {user.email && <p className="text-xs text-gray-400 truncate">{user.email}{user.role && <span className="ml-1 text-gray-500">({user.role})</span>}</p>}
           <button onClick={handleLogout} className="flex items-center gap-2 text-xs text-gray-400 hover:text-white transition-colors w-full"><LogOut className="w-3 h-3" />退出登录</button>
-          <p className="text-xs text-gray-600">v0.2.0</p>
+          {appVersion && <p className="text-xs text-gray-600">v{appVersion}</p>}
         </div>
       </aside>
       <main className="flex-1 flex flex-col min-w-0">

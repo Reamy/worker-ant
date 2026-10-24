@@ -10,11 +10,19 @@
  *   依赖的契约，**不得改**。本模块只把这份目录的**持有与解析**收到一处，不改名、不换路。
  */
 import path from 'node:path';
+import { packagedUserDataDir } from './app-paths.js';
 
 let _notificationDir = '';
 export function setNotificationDir(dir: string): void { _notificationDir = dir; }
 
-/** 通知目录的**唯一**解析式：显式设过则用之，否则退回 dev 布局的 `../../data/notification_payloads`。 */
+/**
+ * 通知目录的**唯一**解析式：显式设过则用之；否则打包版落 `<userData>/notification_payloads`
+ *   （cwd 是 `/`），dev/rr 仍退回 `../../data/notification_payloads`。
+ */
 export function resolveNotificationDir(): string {
-  return _notificationDir || path.join(process.cwd(), '../../data/notification_payloads');
+  if (_notificationDir) return _notificationDir;
+  const packagedRoot = packagedUserDataDir();
+  return packagedRoot
+    ? path.join(packagedRoot, 'notification_payloads')
+    : path.join(process.cwd(), '../../data/notification_payloads');
 }

@@ -1,6 +1,6 @@
 import { ipcMain } from 'electron';
 import type Database from 'better-sqlite3';
-import { ProjectEngine, TaskManager, deleteProjectCascade, removeProjectDataDir, resolveProjectOwnerId, taskStatsByProject } from '../core/project-engine.js';
+import { ProjectEngine, TaskManager, deleteProjectCascade, removeProjectDataDir, resolveProjectOwnerId, setProjectDataDir, taskStatsByProject } from '../core/project-engine.js';
 import { interruptTask, assessCompletionQuality } from '../core/agent-executor.js';
 // zx_20260917 M5-1: 四个作业谓词已迁 `core/task-jobs.ts`（`task-chain` 也要用，留在 scheduler 会互引成环）
 import { cleanupTaskExecutionJobs, hasPendingExecutionJob, isTerminalTask, supersedeExecutionJobs } from '../core/task-jobs.js';
@@ -143,6 +143,9 @@ function statSizeBytes(filePath: unknown): number | null {
 //   `project:delete` 要清 `data/projects/<id>/`、"删项目弹窗"要如实给出该路径，二者都需要它。
 //   此前本文件拿不到数据目录（清盘之事无从谈起）。
 export function initProjectIpc(db: Database.Database, dataDir: string, memoryGetter?: () => import('../core/memory-manager.js').MemoryManager | undefined): void {
+  // 打包版 cwd 是 `/`，`ProjectEngine.create` 的 `projects/<id>` 兜底路径此前会落成 `/data/projects`。
+  //   与 `initImIpc` 同一形：数据目录由**装配层**注入，core 不再自己猜 cwd。
+  setProjectDataDir(dataDir);
   initDaemonSupervisor(db);
   const projects = new ProjectEngine(db);
   const tasks = new TaskManager(db);
