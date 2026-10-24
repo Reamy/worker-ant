@@ -1,0 +1,55 @@
+{
+  "name": "worker-ant",
+  "license": "AGPL-3.0-only",
+  "private": true,
+  "packageManager": "pnpm@9.15.4",
+  "engines": {
+    "node": ">=22.21.1"
+  },
+  "scripts": {
+    "dev": "bash scripts/rebuild-ans-native.sh && pnpm --filter @worker-ant/ans-server dev",
+    "dev:ans": "bash scripts/rebuild-ans-native.sh && pnpm --filter @worker-ant/ans-server dev",
+    "desktop:dev": "pnpm --filter @worker-ant/desktop dev",
+    "desktop:dev:full": "echo '🐜 请用 Terminal.app（非IDE终端）启动：' && echo '' && echo '  终端1: pnpm dev:ans' && echo '  终端2: cd apps/worker-ant-desktop && bash run.sh'",
+    "desktop:build": "pnpm --filter @worker-ant/desktop build",
+    "build": "turbo build",
+    "lint": "turbo lint",
+    "typecheck": "turbo typecheck",
+    "test": "turbo test",
+    "rr:all": "node scripts/run-rr-all.mjs",
+    "smoke:phase-a": "tsup scripts/smoke-phase-a.ts --format esm --platform node --target node22 --external @worker-ant/ans-client --external ai --external @ai-sdk/openai --external pino --external pino-pretty --external pino-roll --out-dir apps/worker-ant-desktop/dist-smoke --clean && node apps/worker-ant-desktop/dist-smoke/smoke-phase-a.mjs",
+    "smoke:maturity-negative": "tsup scripts/smoke-maturity-negative.ts --format esm --platform node --target node22 --external @worker-ant/ans-client --external ai --external @ai-sdk/openai --external pino --external pino-pretty --external pino-roll --out-dir apps/worker-ant-desktop/dist-smoke --clean && node apps/worker-ant-desktop/dist-smoke/smoke-maturity-negative.mjs",
+    "smoke:task-outcome": "tsup scripts/smoke-task-outcome.ts --format esm --platform node --target node22 --external @worker-ant/ans-client --external ai --external @ai-sdk/openai --external pino --external pino-pretty --external pino-roll --out-dir apps/worker-ant-desktop/dist-smoke --clean && node apps/worker-ant-desktop/dist-smoke/smoke-task-outcome.mjs",
+    "smoke:staleness": "tsup scripts/smoke-staleness.ts --format esm --platform node --target node22 --external @worker-ant/ans-client --external ai --external @ai-sdk/openai --external pino --external pino-pretty --external pino-roll --out-dir apps/worker-ant-desktop/dist-smoke --clean && node apps/worker-ant-desktop/dist-smoke/smoke-staleness.mjs",
+    "smoke:effectiveness-playbook": "tsup scripts/smoke-effectiveness-playbook.ts --format esm --platform node --target node22 --external @worker-ant/ans-client --external ai --external @ai-sdk/openai --external pino --external pino-pretty --external pino-roll --out-dir apps/worker-ant-desktop/dist-smoke --clean && node apps/worker-ant-desktop/dist-smoke/smoke-effectiveness-playbook.mjs",
+    "smoke:applicability": "tsup scripts/smoke-applicability.ts --format esm --platform node --target node22 --external @worker-ant/ans-client --external ai --external @ai-sdk/openai --external pino --external pino-pretty --external pino-roll --out-dir apps/worker-ant-desktop/dist-smoke --clean && node apps/worker-ant-desktop/dist-smoke/smoke-applicability.mjs",
+    "smoke:application": "tsup scripts/smoke-application.ts --format esm --platform node --target node22 --external @worker-ant/ans-client --external ai --external @ai-sdk/openai --external pino --external pino-pretty --external pino-roll --out-dir apps/worker-ant-desktop/dist-smoke --clean && node apps/worker-ant-desktop/dist-smoke/smoke-application.mjs",
+    "smoke:limiting-belief": "tsup scripts/smoke-limiting-belief.ts --format esm --platform node --target node22 --external @worker-ant/ans-client --external ai --external @ai-sdk/openai --external pino --external pino-pretty --external pino-roll --out-dir apps/worker-ant-desktop/dist-smoke --clean && node apps/worker-ant-desktop/dist-smoke/smoke-limiting-belief.mjs",
+    "smoke:processing-depth": "tsup scripts/smoke-processing-depth.ts --format esm --platform node --target node22 --external @worker-ant/ans-client --external ai --external @ai-sdk/openai --external pino --external pino-pretty --external pino-roll --out-dir apps/worker-ant-desktop/dist-smoke --clean && node apps/worker-ant-desktop/dist-smoke/smoke-processing-depth.mjs",
+    "smoke:task-goal": "tsup scripts/smoke-task-goal.ts --format esm --platform node --target node22 --external @worker-ant/ans-client --external ai --external @ai-sdk/openai --external pino --external pino-pretty --external pino-roll --out-dir apps/worker-ant-desktop/dist-smoke --clean && node apps/worker-ant-desktop/dist-smoke/smoke-task-goal.mjs",
+    "smoke:pending-confirmation": "tsup scripts/smoke-pending-confirmation.ts --format esm --platform node --target node22 --external @worker-ant/ans-client --external ai --external @ai-sdk/openai --external pino --external pino-pretty --external pino-roll --out-dir apps/worker-ant-desktop/dist-smoke --clean && node apps/worker-ant-desktop/dist-smoke/smoke-pending-confirmation.mjs",
+    "smoke:principal-contradiction": "tsup scripts/smoke-principal-contradiction.ts --format esm --platform node --target node22 --external @worker-ant/ans-client --external ai --external @ai-sdk/openai --external pino --external pino-pretty --external pino-roll --out-dir apps/worker-ant-desktop/dist-smoke --clean && node apps/worker-ant-desktop/dist-smoke/smoke-principal-contradiction.mjs",
+    "smoke:task-mgmt-fixes": "tsup scripts/smoke-task-mgmt-fixes.ts --format esm --platform node --target node22 --out-dir apps/worker-ant-desktop/dist-smoke --clean && node apps/worker-ant-desktop/dist-smoke/smoke-task-mgmt-fixes.mjs",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "better-sqlite3",
+      "electron",
+      "sharp"
+    ],
+    "overrides": {
+      "@electron/node-gyp": "10.2.0-electron.2"
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "concurrently": "^10.0.3",
+    "prettier": "^3.4.0",
+    "tsup": "^8.3.0",
+    "turbo": "^2.3.0",
+    "typescript": "^5.7.0"
+  }
+}

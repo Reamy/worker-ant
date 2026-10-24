@@ -1,0 +1,202 @@
+{
+  "_provenance": {
+    "source": "data/worker-ant-server.db · wa_projects.context_json.im_commands",
+    "projectId": "fb4bf825-50fe-4e78-bfc0-573a10882d4b",
+    "projectName": "A股智能投资顾问",
+    "snapshotAt": "2026-09-11",
+    "shape": "object(keyword -> {script,label})；json_array_length 恒 0，须用 json_each 计数",
+    "count": 47,
+    "note": "zx_20260911_4 M3-1 rr 的真库入参快照；逐字取自真库，未改写。"
+  },
+  "im_commands": {
+    "A股预热": {
+      "script": "python3 scripts/warmup_crawl.py",
+      "label": "A股预热"
+    },
+    "A股盘前简报": {
+      "script": "python3 premarket_workflow.py",
+      "label": "盘前简报"
+    },
+    "A股开盘播报": {
+      "script": "python3 scripts/market_open_broadcast.py",
+      "label": "开盘播报"
+    },
+    "A股收盘快报": {
+      "script": "python3 scripts/scheduled_broadcast.py",
+      "label": "收盘快报"
+    },
+    "A股持仓概况": {
+      "script": "python3 scripts/portfolio_overview.py",
+      "label": "持仓概况"
+    },
+    "A股今日信号": {
+      "script": "python3 scripts/decision_signals_summary.py",
+      "label": "今日信号"
+    },
+    "A股止损检查": {
+      "script": "python3 scripts/stop_loss_check.py",
+      "label": "止损检查"
+    },
+    "A股选股推荐": {
+      "script": "python3 scripts/stock_recommendation.py",
+      "label": "选股推荐"
+    },
+    "A股自选排名": {
+      "script": "python3 scripts/watchlist_ranking.py",
+      "label": "自选排名"
+    },
+    "A股盘前跳空": {
+      "script": "python3 scripts/preopen_gap_check.py",
+      "label": "盘前跳空"
+    },
+    "A股止损设定": {
+      "script": "python3 scripts/stop_loss_setup.py",
+      "label": "止损设定"
+    },
+    "A股交易计划": {
+      "script": "python3 scripts/trade_plan.py",
+      "label": "交易计划"
+    },
+    "A股量价分析": {
+      "script": "python3 scripts/volume_price_analysis.py",
+      "label": "量价分析"
+    },
+    "A股减仓计划": {
+      "script": "python3 scripts/reduce_priority.py",
+      "label": "减仓计划"
+    },
+    "投顾诊断": {
+      "script": "python3 scripts/quick_diagnosis.py",
+      "label": "投顾诊断"
+    },
+    "投顾帮助": {
+      "script": "python3 scripts/help.py",
+      "label": "投顾帮助"
+    },
+    "投顾建议": {
+      "script": "python3 scripts/what_to_do.py",
+      "label": "投顾建议"
+    },
+    "A股市场研判": {
+      "script": "python3 scripts/market_regime.py",
+      "label": "市场研判"
+    },
+    "A股智能选股": {
+      "script": "python3 scripts/smart_stock_picker.py",
+      "label": "智能选股"
+    },
+    "A股止损记录": {
+      "script": "python3 scripts/stop_loss_tracker.py",
+      "label": "止损记录"
+    },
+    "A股风险评估": {
+      "script": "python3 scripts/risk_engine.py",
+      "label": "风险评估"
+    },
+    "A股风险监控": {
+      "script": "python3 scripts/risk_monitor.py",
+      "label": "风险监控"
+    },
+    "A股买入建议": {
+      "script": "python3 scripts/entry_confirmation.py",
+      "label": "三层确认入场+仓位计算"
+    },
+    "A股持仓风险": {
+      "script": "python3 scripts/risk_daily_report.py",
+      "label": "持仓止损距离+行业集中度"
+    },
+    "A股出场复盘": {
+      "script": "python3 -c \"from scripts.exit_monitor import format_weekly_summary,get_weekly_exits;print(format_weekly_summary(get_weekly_exits()))\"",
+      "label": "周度出场胜率统计"
+    },
+    "A股午间简报": {
+      "script": "python3 scripts/midday_workflow.py",
+      "label": "午间简报"
+    },
+    "A股周度回顾": {
+      "script": "python3 scripts/weekly_review.py",
+      "label": "周度回顾"
+    },
+    "A股月度报告": {
+      "script": "python3 scripts/signal_accuracy.py",
+      "label": "月度报告"
+    },
+    "投顾回测报告": {
+      "script": "python3 scripts/auto_backtest.py",
+      "label": "回测报告"
+    },
+    "投顾策略优化": {
+      "script": "python3 scripts/strategy_optimizer.py",
+      "label": "策略权重自适应优化"
+    },
+    "A股日内预警": {
+      "script": "python3 scripts/intraday_alert.py",
+      "label": "日内预警"
+    },
+    "投顾回测": {
+      "script": "python3 scripts/simple_backtest.py",
+      "label": "简化回测"
+    },
+    "投顾参数校准": {
+      "script": "python3 scripts/param_calibrator.py",
+      "label": "参数校准"
+    },
+    "投顾策略权重": {
+      "script": "python3 scripts/strategy_weight_calibrator.py",
+      "label": "策略权重校准"
+    },
+    "A股执行追踪": {
+      "script": "python3 scripts/execution_tracker.py",
+      "label": "执行追踪"
+    },
+    "投顾今日机会": {
+      "script": "python3 scripts/signal_aggregator.py --top 10",
+      "label": "多因子信号聚合Top10"
+    },
+    "投顾行动指南": {
+      "script": "python3 scripts/daily_action_guide.py --phase morning --top 3",
+      "label": "盘前行动指南(Top3+四要素+风险)【新】"
+    },
+    "A股盘中快报": {
+      "script": "python3 scripts/daily_action_guide.py --phase midday",
+      "label": "盘中决策快报(出场+盈亏)【新】"
+    },
+    "A股盘后复盘": {
+      "script": "python3 scripts/daily_action_guide.py --phase close",
+      "label": "盘后复盘精简(出场+策略)【新】"
+    },
+    "A股盈亏": {
+      "script": "python3 scripts/pnl_summary.py",
+      "label": "盈亏汇总"
+    },
+    "A股今日复盘": {
+      "script": "python3 scripts/postclose_workflow.py",
+      "label": "完整盘后复盘(大盘+信号+估值等)",
+      "timeout_seconds": 1800
+    },
+    "荐股绩效": {
+      "script": "python3 scripts/performance_report.py",
+      "label": "荐股绩效"
+    },
+    "投顾决策快照": {
+      "script": "python3 scripts/recommendation_snapshot_entry.py",
+      "label": "统一决策快照(荐股四要素)"
+    },
+    "A股执行纠偏": {
+      "script": "python3 scripts/execution_check.py --always-write",
+      "label": "执行纠偏核对"
+    },
+    "/healthcheck": {
+      "script": "python3 scripts/healthcheck.py",
+      "label": "全量一致性巡检(命令↔脚本↔DB三方一致)"
+    },
+    "/theme_approve": {
+      "script": "python3 scripts/theme_pool_admin.py approve",
+      "label": "确认候选热点子主题并入静态池(候选清单待确认)"
+    },
+    "/theme_reject": {
+      "script": "python3 scripts/theme_pool_admin.py reject",
+      "label": "拒绝候选热点子主题(30日内冷却不再进候选)"
+    }
+  }
+}

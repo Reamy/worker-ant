@@ -1,0 +1,108 @@
+appId: com.worker-ant.desktop
+productName: 工蚁
+copyright: Copyright © 2026
+
+directories:
+  output: release
+  buildResources: assets
+
+files:
+  # 运行期必需（缺一即白屏 / 无托盘图标）：
+  #   dist/**           → tsup 产物（main + preload），index.ts 由此起
+  #   renderer/dist/**  → vite 产物（GUI），index.ts 以 file:// 加载 index.html
+  #   assets/**         → 运行期图标，tray.ts 读 assets/tray-icon.png
+  # ⚠ 一旦写了 include 模式，electron-builder 的缺省 `**/*` **即被取代**（官方文档 contents.md），
+  #   故以上三项须显式列出。`package.json` 与**生产** node_modules 仍恒被包含（自动），
+  #   故这里**不要**再写 `node_modules/**/*`——那是正向模式，对 node_modules 匹配器无效
+  #   （getNodeModuleFileMatcher 只采纳 `!` 前缀），却会让 app 匹配器下探软链。
+  - dist/**/*
+  - renderer/dist/**/*
+  - assets/**/*
+  - package.json
+  # ⚠ pnpm workspace 软链：`node_modules/@worker-ant/ans-client` → `packages/ans-client`。
+  #   遍历会跟随软链拿到 `packages/ans-client/.turbo/…`，其路径既不在 appDir 下、又不含
+  #   `node_modules` 段 ⇒ app-builder-lib 的 getRelativePath 直接抛 "must be under …"。
+  #   只采纳 `!` 的排除模式能挡住它（且不误伤生产依赖本身）。
+  - "!**/.turbo/**"
+  - "!**/*.log"
+  - "!**/tsconfig.tsbuildinfo"
+  - "!node_modules/.cache/**"
+
+asar:
+  # smartUnpack 会自动把含 `.node`/`.dylib`/`.so` 等二进制的模块解包到 app.asar.unpacked
+  # （见 app-builder-lib 的 unpackDetector.detectUnpackedDirs：凡 `isLibOrExe(file)` 即解包）。
+  # better-sqlite3 / bcrypt 的原生模块由此覆盖，**无需**再列 asarUnpack。
+  smartUnpack: true
+
+# 随包 ANS 运行时（zx_20261009 M3 路线甲）——"干净机器双击即用"的第一跳：
+#   桌面在打包版下代起本地 ANS（`ELECTRON_RUN_AS_NODE=1 process.execPath Resources/ans-server/dist/index.js`，
+#   见 core/ans-supervisor.ts 的 packaged 分支）。**不进 asar**——它是**独立进程**，须是磁盘上真实的
+#   node_modules 树（asar 内的路径无法作为子进程的解析根）。
+#   `from: ans-runtime` 由 `scripts/stage-ans-runtime.mjs` 生成（build ANS + 补 dist/data + pnpm deploy
+#   闭包 + 闭包内 electron-rebuild 成 Electron ABI）；`to: ans-server` ⇒ `Contents/Resources/ans-server/`。
+#   ⚠ 安装件因此**增大约 100MB**（如实说体积：依赖闭包 106MB，其中 better-sqlite3 28MB / date-fns 26MB）。
+extraResources:
+  - from: ans-runtime
+    to: ans-server
+  # AGPL-3.0 原文随包（About 面板与「设置 → 系统信息」只指路；许可**文本**须随安装件一起交付）。
+  # 落点 `工蚁.app/Contents/Resources/LICENSE`，Finder 里可见。
+  - from: ../../LICENSE
+    to: LICENSE
+
+# ⚠ 不要在此再写 asarUnpack（如 better-sqlite3）。显式 asarUnpack 会让 AsarPackager 拿到一个
+#   非空的 unpackPattern，而该匹配器以 appDir 为根；pnpm workspace 软链
+#   `node_modules/@worker-ant/ans-client → packages/ans-client` 的真实路径既不在 appDir 下、
+#   又不含 `node_modules` 段 ⇒ getRelativePath 直接抛 "must be under …" 而**整包失败**。
+#   （getFileMatchers 返回 null 时 unpackPattern 为 null，该匹配器根本不会被调用。）
+#   只留 smartUnpack：原生模块照样解包，软链包照常进 asar。
+
+mac:
+  category: public.app-category.developer-tools
+  icon: assets/icon.icns
+  target:
+    - dmg
+    - zip
+  artifactName: ${productName}-${version}-mac-${arch}.${ext}
+  entitlements: build/entitlements.mac.plist
+  hardenedRuntime: true
+  # 2026-10-24：Apple 开发者账号已通过，Developer ID 证书已导入本机钥匙串。
+  #   显式写死 identity（不靠自动挑选）——本机钥匙串里还有一张用途不符的证书，
+  #   自动挑选会选错并被 codesign 拒绝。
+  #   ⚠ electron-builder 25 要求**不带** "Developer ID Application:" 前缀；写了前缀会直接报错。
+  identity: "Reamy Yang (XRZNWLDU86)"
+  # 公证（notarization）：没有凭据时 electron-builder 只记一条 warn 并**跳过**，
+  #   产物仍是已签名但未公证的包（用户首次打开会被 Gatekeeper 拦）。
+  #   故**发布**走 `pnpm dist:mac`（先校验凭据再构建），不要用裸 `dist` 出发布件。
+  #   凭据三选一（见 macOptions.d.ts）：
+  #     ① APPLE_API_KEY + APPLE_API_KEY_ID + APPLE_API_ISSUER（推荐）
+  #     ② APPLE_ID + APPLE_APP_SPECIFIC_PASSWORD + APPLE_TEAM_ID（XRZNWLDU86）
+  #     ③ APPLE_KEYCHAIN_PROFILE（+ 可选 APPLE_KEYCHAIN）——xcrun notarytool store-credentials 生成
+  notarize: true
+
+win:
+  icon: assets/icon.ico
+  target:
+    - nsis
+  artifactName: ${productName}-${version}-win-${arch}.${ext}
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+
+linux:
+  icon: assets/icon.png
+  target:
+    - AppImage
+    - deb
+  category: Development
+  artifactName: ${productName}-${version}-linux-${arch}.${ext}
+
+# M4/M20: GitHub 公开仓**已建立**（`Reamy/worker-ant`，2026-10-11），owner/repo 已填**真值**。
+#   仍**保持注释**直至**首个 release 发布**——`provider: github` 的自动更新 feed 取自
+#   releases 里的 `latest.yml`，仓存在但无 release 时**仍会 404**。首个 release 产出后
+#   （投放三 B1-M18）取消注释即可启用。如实原则：宁可不配置，也不留一个会 404 的假 feed。
+#   （本仓 **`origin` 仍指向阿里云 Codeup**；GitHub 远端名为 **`github`**：`git@github.com:Reamy/worker-ant.git`。）
+# publish:
+#   provider: github
+#   owner: Reamy
+#   repo: worker-ant

@@ -1,0 +1,79 @@
+# Node.js
+node_modules
+**/node_modules/
+.pnpm-store
+dist
+**/dist/
+.tgz
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+.local/
+tmp/
+
+# IDE
+*.iml
+.idea
+.vscode/
+*.swp
+*.swo
+
+# AI Agent
+.claude/
+.agent/
+.agents/
+.qwen/
+.mcp.json
+
+# Reference projects
+/参考/
+
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Build output
+**/*.tsbuildinfo
+**/.tsup/
+.turbo/
+.next/
+
+# Desktop release
+apps/worker-ant-desktop/release/
+# 随包 ANS 运行时（scripts/stage-ans-runtime.mjs 生成；106MB 依赖闭包，由打包步骤重建，不入库）
+apps/worker-ant-desktop/ans-runtime/
+
+# 开源导出产物（scripts/publish-oss.ts 默认输出目录）
+/release/
+
+# App data
+/data/
+
+# logs
+**/logs/
+
+# ANS
+**/.ans/
+!apps/ans-server/src/data/recommended-models.json
+!apps/ans-server/src/data/recommended-marketplaces.json
+**/workspace/
+**/.wechat-personal/
+dist-runtime/
+dist-smoke/
+.tmp-install/
+
+# zx_20261011_2: 双 clone 实机 E2E 的 Electron userData（run.sh 经 WA_ELECTRON_UDATA 指向）
+**/.electron-udata/
+
+# License signing key (private — never commit; 即便误落 data/ 外也挡住)
+**/license-signing-key*.pem
+
+# 本机 node-gyp 生成物（含绝对路径，勿入库）
+build/config.gypi
+.gstack/
