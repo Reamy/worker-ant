@@ -39,7 +39,7 @@
 
 ### 方式一：安装包（macOS，当前可用）
 
-从 [GitHub Releases v0.2.1](https://github.com/Reamy/worker-ant/releases/tag/v0.2.1) 下载 `worker-ant-0.2.1-mac-arm64.dmg`（或 `.zip`），双击挂载、把「工蚁」拖进「应用程序」即可。已完成 Developer ID 签名与 Apple 公证，首次打开无需右键绕过；校验值（SHA-256）见 Release 页面。**v0.2.0 安装包存在首次启动即崩的缺陷，请勿再使用。**
+从 [GitHub Releases v0.2.2](https://github.com/Reamy/worker-ant/releases/tag/v0.2.2) 下载 `worker-ant-0.2.2-mac-arm64.dmg`（或 `.zip`），双击挂载、把「工蚁」拖进「应用程序」即可。已完成 Developer ID 签名与 Apple 公证，首次打开无需右键绕过；校验值（SHA-256）见 Release 页面。**v0.2.0 安装包存在首次启动即崩的缺陷，请勿再使用。** v0.2.2 修复了退出后残留 ANS 进程、首次启动未进入安装向导两个问题；自动更新尚未启用，已装 v0.2.1 的用户请手动下载覆盖安装。
 
 - 系统要求：**macOS 13+，Apple Silicon（arm64）**。Intel Mac 与 Windows 版本暂未提供。
 - 首次启动会进入**安装向导**：填模型 API Key（或指向自建网关）→ 自检 ANS 连接 → 建一个项目 → 用一句话描述任务。
@@ -122,7 +122,7 @@ cd apps/worker-ant-desktop && bash run.sh
 | **Team（团队授权包）**  | ¥599/月 · ¥5990/年（每包，≤20 节点） | 20 个本机账号、最多 20 台协同节点；设备发现与控制、AI 终端意图接入、审计视图与 CSV 导出、团队共享库、项目画像共享 |
 | **企业私有化**          | 定制（规划中，暂不提供）             | 内网部署 + SLA                                                                                                    |
 
-> **购买**：[面包多店铺](https://mbd.pub/o/author-bW2ZlHFtZg==/work)——Pro 月付 / 年付 / 早鸟终身；团队授权包月付 / 年付。企业版暂不售卖。团队包为人工开通（收齐 ≤20 台机器指纹后签发，须带到期日）。macOS 安装包已完成 **Developer ID 签名**（Team XRZNWLDU86）**并经 Apple 公证**（notarytool `Accepted`，票据已装订；包内应用 `spctl` 为 `accepted / Notarized Developer ID`）。**已发布**：[下载 macOS 版（Apple Silicon）](https://github.com/Reamy/worker-ant/releases/tag/v0.2.1)——dmg / zip 均在该 Release，校验值（SHA-256）见页面。当前只提供 macOS arm64（macOS 13+），暂无 Windows 与 Intel Mac 版本。桌面端自带 14 天 Pro 试用。
+> **购买**：[面包多店铺](https://mbd.pub/o/author-bW2ZlHFtZg==/work)——Pro 月付 / 年付 / 早鸟终身；团队授权包月付 / 年付。企业版暂不售卖。团队包为人工开通（收齐 ≤20 台机器指纹后签发，须带到期日）。macOS 安装包已完成 **Developer ID 签名**（Team XRZNWLDU86）**并经 Apple 公证**（notarytool `Accepted`，票据已装订；包内应用 `spctl` 为 `accepted / Notarized Developer ID`）。**已发布**：[下载 macOS 版（Apple Silicon）](https://github.com/Reamy/worker-ant/releases/tag/v0.2.2)——dmg / zip 均在该 Release，校验值（SHA-256）见页面。当前只提供 macOS arm64（macOS 13+），暂无 Windows 与 Intel Mac 版本。桌面端自带 14 天 Pro 试用。
 >
 > 上表的能力**当前都在桌面端可兑现**（档位闸与引擎同仓，可自行核对）。云端协作服务尚未发布，发布时会在本表更新——不以未交付的能力作卖点。**本仓库（桌面端 + 引擎）始终开源**。
 

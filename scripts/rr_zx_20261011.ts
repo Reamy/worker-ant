@@ -373,11 +373,13 @@ async function main(): Promise<void> {
       'M7-4 清后复位清单（不清空则重复 stop 清到已清句柄——虽无害，账也要平）');
 
     // 3. `before-quit` 次序单调：立旗 → 收尾 → flush → 硬退
+    //    zx_20261024_4 追补：`app.exit(0)` 在本机**卡在 Electron 原生退出序列**（rr_zx_20261024_4 Z-6），
+    //    末步改 `hardExit(0)`（`process.reallyExit`）。真源换了载体 ⇒ 断言重定向到新载体，非放宽。
     const bqText = blockOf(/^app\.on\('before-quit'/);
-    const order = ['markShuttingDown(', 'await stopCore()', 'flushLoggersSync(', 'app.exit(0)']
+    const order = ['markShuttingDown(', 'await stopCore()', 'flushLoggersSync(', 'hardExit(0)']
       .map((s) => bqText.indexOf(s));
     ok(order.every((p) => p >= 0) && order.every((p, i) => i === 0 || p > order[i - 1]!),
-      'M7-5 ★★退出次序单调：`markShuttingDown()` → `await stopCore()` → `flushLoggersSync()` → `app.exit(0)`'
+      'M7-5 ★★退出次序单调：`markShuttingDown()` → `await stopCore()` → `flushLoggersSync()` → `hardExit(0)`'
       + '（旗在最前=收尾期异常静默；flush 在硬退前=末几行不丢）', order.join('<'));
 
     // 4. `resilience`：收尾期 `uncaughtException` **进处理体即静默 return**

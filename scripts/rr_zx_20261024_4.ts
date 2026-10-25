@@ -12,6 +12,8 @@
  *   Z-3 接线那一跳：装配层把 dataDir 交给 core（`initProjectIpc` / `admin:logs`）
  *   Z-4 两侧标本：打包版优先 userData；dev/rr 的仓库 `data/` 兜底**仍在**
  *   Z-5 版本显示：侧栏版本走 `app:version` 真源，不再写死字面量（0.2.0 曾把崩溃版显示成"已更新"）
+ *   Z-6 退出：托管 ANS 的回收要真的收掉（SIGTERM 不理 ⇒ 补 SIGKILL）+ 进程要真的结束
+ *       （实测 `app.exit(0)`/`app.quit()` 卡在 Electron 原生退出序列，改用 `process.reallyExit`）
  *
  * 纪律（承 CLAUDE.md 与 auto-memory）：
  *   · 直引生产函数（被删/改名即编译期失败，不扫字符串冒充）。
@@ -21,8 +23,10 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import type { spawn as SpawnFn } from 'node:child_process';
 import { packagedUserDataDir } from '../apps/worker-ant-desktop/src/main/core/app-paths.js';
 import { resolveNotificationDir } from '../apps/worker-ant-desktop/src/main/core/notify-dir.js';
+import { ensureAnsStarted, stopManagedAnsAndWait, ansSupervisorState } from '../apps/worker-ant-desktop/src/main/core/ans-supervisor.js';
 import { checkBuildPins, stripKeepingLines } from './lib/rr-pins.js';
 
 let pass = 0;
@@ -116,22 +120,85 @@ function groupZ5(): void {
   ok(/\{appVersion &&/.test(src), '取到才渲染（浏览器态/通道缺失时不显示假版本）');
 }
 
+// ── Z-6 退出 ──────────────────────────────────────────────────────────
+/** 假子进程：`obeys-term` 收到 SIGTERM 即当退出；`ignores-term` 装作没听见（打包版 ANS 的实测形态）。 */
+function mkSupervisorSpawn(behaviour: 'obeys-term' | 'ignores-term', killed: string[]): typeof SpawnFn {
+  return ((_cmd: string, _args: readonly string[], _opts: unknown) => {
+    const exitCbs: Array<() => void> = [];
+    const child = {
+      pid: 4242,
+      stderr: { on: () => child.stderr },
+      on: (ev: string, cb: () => void) => { if (ev === 'exit') exitCbs.push(cb); return child; },
+      once: (ev: string, cb: () => void) => { if (ev === 'exit') exitCbs.push(cb); return child; },
+      kill: (sig: string) => {
+        killed.push(sig);
+        if (behaviour === 'obeys-term' && sig === 'SIGTERM') for (const cb of exitCbs) cb();
+        return true;
+      },
+    };
+    return child;
+  }) as unknown as typeof SpawnFn;
+}
+
+const LOCAL_URL = 'http://127.0.0.1:27183';
+const refusedFetch = (async () => { throw new Error('ECONNREFUSED'); }) as unknown as typeof fetch;
+
+async function groupZ6(): Promise<void> {
+  console.log('\n【Z-6】退出：ANS 要真的收掉，进程要真的结束');
+
+  // 静态：退出末步不再等 Electron 的关闭握手
+  const mi = stripped(`${A}/index.ts`);
+  const quitBlock = (mi.match(/app\.on\('before-quit'[\s\S]*?\n\}\);/) || [''])[0];
+  ok(quitBlock.length > 0, '定位到 before-quit 处理块');
+  ok(/hardExit\(0\)/.test(quitBlock), 'before-quit 末步走 `hardExit(0)`');
+  ok(!/app\.exit\(0\)/.test(quitBlock), 'before-quit 里不再有 `app.exit(0)`（实测本机不退）');
+  ok(/reallyExit/.test(mi), '`hardExit` 用 `process.reallyExit`（Electron 覆盖过的 `process.exit` 同样会卡）');
+  const sup = stripped(`${A}/core/ans-supervisor.ts`);
+  ok(/export async function stopManagedAnsAndWait/.test(sup) && /'SIGKILL'/.test(sup),
+    '回收走 `stopManagedAnsAndWait`：SIGTERM 收不掉则补 SIGKILL');
+
+  // 行为·一侧：子进程不理会 SIGTERM ⇒ 宽限期到补 SIGKILL
+  const killedA: string[] = [];
+  const rA = await ensureAnsStarted({ baseUrl: LOCAL_URL }, {
+    autoStart: true, isDev: true, repoRoot: root, fetchImpl: refusedFetch,
+    spawnImpl: mkSupervisorSpawn('ignores-term', killedA), readyTimeoutMs: 0,
+  });
+  eq([rA.started, rA.reachable, rA.reason], [true, false, 'start-timeout'], '前提：托管子进程已拉起（等待窗口为 0）');
+  eq(await stopManagedAnsAndWait({ graceMs: 20 }), true, '回收已托管的子进程 ⇒ true');
+  eq(killedA, ['SIGTERM', 'SIGKILL'], '不理会 SIGTERM ⇒ 宽限期后补 SIGKILL（否则退出后残留「工蚁」进程）');
+  eq(ansSupervisorState().managed, false, '回收后托管状态归零');
+
+  // 行为·另一侧：子进程肯走 SIGTERM ⇒ 不该吃 SIGKILL
+  const killedB: string[] = [];
+  await ensureAnsStarted({ baseUrl: LOCAL_URL }, {
+    autoStart: true, isDev: true, repoRoot: root, fetchImpl: refusedFetch,
+    spawnImpl: mkSupervisorSpawn('obeys-term', killedB), readyTimeoutMs: 0,
+  });
+  eq(await stopManagedAnsAndWait({ graceMs: 50 }), true, '回收肯走的子进程 ⇒ true');
+  eq(killedB, ['SIGTERM'], '肯走 SIGTERM 的子进程只收 TERM，不补 KILL（先礼后兵的另一侧）');
+  eq(await stopManagedAnsAndWait({ graceMs: 20 }), false, '无托管子进程 ⇒ 如实回 false');
+}
+
 function groupP(): void {
   console.log('\n【P】build 钉（P1–P6 共用真源）');
   checkBuildPins(ok, { rootDir: root });
 }
 
-try {
-  groupZ1();
-  groupZ2();
-  groupZ3();
-  groupZ4();
-  groupZ5();
-  groupP();
-} catch (e) {
-  fail++;
-  console.error(`  FAIL 套件异常：${(e as Error)?.stack || String(e)}`);
-} finally {
-  console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
-  process.exit(fail === 0 ? 0 : 1);
+async function main(): Promise<void> {
+  try {
+    groupZ1();
+    groupZ2();
+    groupZ3();
+    groupZ4();
+    groupZ5();
+    await groupZ6();
+    groupP();
+  } catch (e) {
+    fail++;
+    console.error(`  FAIL 套件异常：${(e as Error)?.stack || String(e)}`);
+  } finally {
+    console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
+    process.exit(fail === 0 ? 0 : 1);
+  }
 }
+void main();

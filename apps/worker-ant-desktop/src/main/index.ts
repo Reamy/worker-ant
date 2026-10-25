@@ -124,6 +124,20 @@ function trackShutdownTimer<T extends NodeJS.Timeout>(t: T): T {
   return t;
 }
 
+/**
+ * 收尾之后的最后一步：真正结束进程。
+ *
+ * 2026-10-24 实测（v0.2.1 打包版）：`app.exit(0)` 与 `app.quit()` 都会卡在 Electron 的
+ * 原生退出序列里——`stopCore()` 已跑完（DB 关、ANS 收、日志冲），主线程也回到事件循环，
+ * 进程却一直活着；用户只能再从外部发一次 Quit（或强制退出）。既然该做的都做完了，
+ * 就不该把"能不能退出"押在 Electron 的关闭握手上。
+ */
+function hardExit(code: number): never {
+  const p = process as unknown as { reallyExit?: (c: number) => never };
+  if (typeof p.reallyExit === 'function') return p.reallyExit(code);
+  return process.exit(code);
+}
+
 async function startCore(): Promise<void> {
   console.log('[工蚁] 核心引擎已就绪（单进程 IPC 模式）');
   updateTrayStatus('running');
@@ -136,7 +150,7 @@ async function stopCore(): Promise<void> {
   for (const t of shutdownTimers) { try { clearInterval(t); } catch { /* 已清/无效句柄，忽略 */ } }
   shutdownTimers.length = 0;
   // zx_20261005 M21: 回收**本进程拉起的** ANS（用户自配的服务不动）。
-  try { const { stopManagedAns } = await import('./core/ans-supervisor.js'); if (stopManagedAns()) console.log('[工蚁] 已回收本机托管的 ANS'); } catch { /* 未托管/已退出 */ }
+  try { const { stopManagedAnsAndWait } = await import('./core/ans-supervisor.js'); if (await stopManagedAnsAndWait()) console.log('[工蚁] 已回收本机托管的 ANS'); } catch { /* 未托管/已退出 */ }
   // zx_20261014_4 批一: 关**入站门**（有界关闭；未起/已关为幂等空操作）。
   try { stopInboundGate(); } catch { /* 未起/已关 */ }
   // zx_20261016_1 批一: 关**控制路径**的 MQTT 连接（修复前恒不关停 ⇒ broker 侧连接数不回落）。
@@ -1221,6 +1235,6 @@ app.on('before-quit', async (event) => {
     await stopCore();
     // 收尾已毕：把各 transport worker 的缓冲冲出，再硬退（否则末几行日志随进程消失而丢）。
     flushLoggersSync();
-    app.exit(0);
+    hardExit(0);
   }
 });

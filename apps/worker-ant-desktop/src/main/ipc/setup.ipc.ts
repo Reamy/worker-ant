@@ -10,6 +10,8 @@
  */
 import { ipcMain } from 'electron';
 import type Database from 'better-sqlite3';
+import { ansStartInFlight, probeAns } from '../core/ans-supervisor.js';
+import { waitWhileAnsStarting } from '../core/ans-start-grace.js';
 import { ansSignedRequest, resolveAnsCreds } from '../core/ans-signed-request.js';
 import { assessSetup } from '../core/first-run.js';
 import { probeModelAvailability, type ModelProbe } from '../core/model-availability.js';
@@ -43,7 +45,18 @@ export function initSetupIpc(db: Database.Database, dataDir: string): void {
    */
   ipcMain.handle('setup:state', async () => {
     try {
-      return { data: await assessSetup(db, resolveAnsCreds(db), () => probeModel(db)) };
+      const creds = resolveAnsCreds(db);
+      return {
+        data: await assessSetup(db, creds, () => probeModel(db), {
+          // 打包版首启：ANS 由 supervisor **异步**代起，渲染层一挂载就问到这儿 ⇒ 探针必 ECONNREFUSED。
+          // 只在「本机正在代起」时有界等它监听（远端/未开代起 ⇒ 立即返回，不拖慢既有路径）。
+          // 等法在 `core/ans-start-grace.ts`；判据仍只有 `assessSetup` 一处。
+          beforeProbe: () => waitWhileAnsStarting({
+            reachable: () => probeAns(creds.baseUrl),
+            startInFlight: ansStartInFlight,
+          }),
+        }),
+      };
     } catch (err) {
       return { error: { code: 'INTERNAL', message: (err as Error).message } };
     }

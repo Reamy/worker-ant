@@ -11,6 +11,10 @@
  *   ④ `probeModelAvailability` **生产入参**（2026-10-12 实机回归闸）：喂 ANS 的**分页信封**
  *      `{data:[...],total,limit,offset}` ⇒ 目录条数正确（旧实现只认裸数组 ⇒ 信封被当空目录 ⇒
  *      首屏误报"尚无可用模型"）；并反证裸数组与信封**逐字段一致**、空信封仍判 0。
+ *   ⑤ `assessSetup` 的 `beforeProbe` 钩子（zx_20261024_4 追补）：**只在要探的那一格**调、抛错不拦路、
+ *      且真能翻转结论（两侧标本：同一个新用户，钩子让 ANS "起来" ⇒ 从 fail-open 的 false 变 true）。
+ *   ⑥ `waitWhileAnsStarting`（`core/ans-start-grace.ts`）：没人拉 ⇒ 立即返；有人拉 ⇒ 有界等；
+ *      代起收场 ⇒ 立即交棒；可达即停。全程注入时钟，不真等、不碰网络。
  *
  * §M2 接线（渲染层首屏空态）
  *   `setup.ipc.ts` 真调 `assessSetup` 且经 `ansSignedRequest` 打 `/api/v1/models`；
@@ -35,6 +39,7 @@ import {
   deriveModelAvailability, extractModelCatalog, parseModelCapabilities, probeModelAvailability, type ModelProbe,
 } from '../apps/worker-ant-desktop/src/main/core/model-availability.js';
 import { ANS_DEFAULTS, type AnsCreds } from '../apps/worker-ant-desktop/src/main/core/ans-signed-request.js';
+import { waitWhileAnsStarting } from '../apps/worker-ant-desktop/src/main/core/ans-start-grace.js';
 
 let pass = 0; let fail = 0;
 function ok(cond: boolean, label: string, detail?: string): void {
@@ -69,10 +74,18 @@ function mkProjectDb(n: number): { prepare(sql: string): { get(): unknown } } {
 }
 const DEV_CREDS: AnsCreds = { baseUrl: ANS_DEFAULTS.url, apiKey: ANS_DEFAULTS.apiKey, secretKey: ANS_DEFAULTS.secretKey };
 const USER_CREDS: AnsCreds = { baseUrl: 'https://ans.example.com', apiKey: 'real-key', secretKey: 'real-secret' };
+/** 打包版首启的实况：本机地址 + 自举随机凭据（与 dev-key 缺省不同 ⇒ `ansUserConfigured=true`）。 */
+const LOCAL_CREDS: AnsCreds = { baseUrl: 'http://127.0.0.1:27183', apiKey: 'minted-key', secretKey: 'minted-secret' };
 
 /** 造一个探针返回（`read` 默认 ok）。 */
 function probeOf(p: Partial<ModelProbe>): ModelProbe {
   return { read: 'ok', note: '', catalog: 0, available: 0, hasChat: false, hasEmbedding: false, ...p };
+}
+
+/** 注入时钟：`sleep` 同步推进假钟 ⇒ 等待逻辑可确定性地跑完（G-4：不真等）。 */
+function fakeClock(): { now(): number; sleep(ms: number): Promise<void> } {
+  let t = 0;
+  return { now: () => t, sleep: async (ms: number) => { t += ms; } };
 }
 
 async function main(): Promise<void> {
@@ -192,6 +205,107 @@ async function main(): Promise<void> {
       'M1-3c `assessSetup` 是 `firstRunState` 的**超集**（三旧字段 + model）');
   }
 
+  // ═══ M1-④ `assessSetup` 的 `beforeProbe` 钩子（zx_20261024_4 追补）════════════
+  // 病根（2026-10-25 实测）：打包版首启 ANS 由 supervisor **异步**代起；渲染层一挂载就问 `setup:state`，
+  //   模型探针必 ECONNREFUSED ⇒ fail-open 退回旧判据；本地自举凭据又让 `ansUserConfigured=true` ⇒
+  //   `needsSetup=false`，真新用户直接落到空 Dashboard。钩子只决定"**什么时候问**"，判据仍只有一处。
+  console.log('\n【M1-④】`beforeProbe`：只决定"何时问"、不参与判据（只在要探的格调用）');
+  {
+    // 要探的格：钩子先于探针、且恰一次。
+    const order: string[] = [];
+    let r = await assessSetup(mkProjectDb(0), LOCAL_CREDS, async () => {
+      order.push('probe'); return probeOf({ catalog: 41, available: 0 });
+    }, { beforeProbe: async () => { order.push('hook'); } });
+    eq(order, ['hook', 'probe'], 'M1-4a 要探的格：`beforeProbe` 恰一次且在探针**之前**');
+    ok(r.needsSetup === true, 'M1-4b 钩子不改变判据：等完照样按真断（无可用 chat ⇒ 弹）');
+
+    // 不探的格①：有项目 ⇒ 结论已定，钩子零调用（不给老用户白等）。
+    let hooks = 0;
+    await assessSetup(mkProjectDb(5), LOCAL_CREDS, async () => probeOf({ hasChat: true }),
+      { beforeProbe: async () => { hooks++; } });
+    ok(hooks === 0, 'M1-4c ★省等待：**有项目**格不调钩子', `hooks=${hooks}`);
+
+    // 不探的格②：未真配 ANS（dev 缺省）⇒ 旧判据已在拦，钩子零调用。
+    hooks = 0;
+    await assessSetup(mkProjectDb(0), DEV_CREDS, async () => probeOf({ hasChat: true }),
+      { beforeProbe: async () => { hooks++; } });
+    ok(hooks === 0, 'M1-4d ★省等待：**未配 ANS** 格不调钩子', `hooks=${hooks}`);
+
+    // 钩子抛错 ⇒ 吞掉照探（"等不到"不等于"不判"）。
+    let probed = 0;
+    r = await assessSetup(mkProjectDb(0), LOCAL_CREDS, async () => {
+      probed++; return probeOf({ catalog: 41, available: 0 });
+    }, { beforeProbe: async () => { throw new Error('grace boom'); } });
+    eq({ p: probed, n: r.needsSetup }, { p: 1, n: true },
+      'M1-4e 钩子抛错 ⇒ 吞掉并照常探模型（判据不受影响）');
+
+    // ★两侧标本：同一个新用户（无项目 + 本机自举凭据 + 41 模型 0 可用），差别只在"探之前 ANS 起来没有"。
+    let ansUp = false;
+    const racyProbe = async () => (ansUp
+      ? probeOf({ catalog: 41, available: 0 })                 // 已监听：读得动、无可用 chat
+      : probeOf({ read: 'error', note: 'ECONNREFUSED' }));     // 未监听：读不动 ⇒ fail-open
+    const noHook = await assessSetup(mkProjectDb(0), LOCAL_CREDS, racyProbe);
+    eq(noHook.needsSetup, false,
+      'M1-4f ★病象（无钩子）：探针跑到 ANS 监听之前 ⇒ 读不动 ⇒ fail-open **不拦**（真新用户落到空白 Dashboard）');
+    ansUp = false;
+    const hooked = await assessSetup(mkProjectDb(0), LOCAL_CREDS, racyProbe, {
+      beforeProbe: async () => { ansUp = true; },              // 有界等到 ANS 监听
+    });
+    eq(hooked.needsSetup, true,
+      'M1-4g ★治法（有钩子）：等 ANS 监听后再探 ⇒ 读得动且无可用 chat ⇒ **进安装向导**');
+  }
+
+  // ═══ M1-⑤ `waitWhileAnsStarting` 行为（注入时钟，不真等、不碰网络）════════════
+  console.log('\n【M1-⑤】`waitWhileAnsStarting`：没人拉立即返 / 有界等 / 收场交棒 / 可达即停');
+  {
+    const clock = fakeClock();
+
+    // a：没人在拉 ⇒ 立即返回，探都不探（远端/未开代起路径不拖慢）。
+    let reached = 0;
+    await waitWhileAnsStarting({ reachable: async () => { reached++; return false; }, startInFlight: () => false, ...clock });
+    eq(reached, 0, 'M1-5a 无代起 ⇒ **零探零等**（不拖慢既有路径）');
+
+    // b：有人拉 ∧ 已可达 ⇒ 首次即返（一探）。
+    reached = 0;
+    await waitWhileAnsStarting({
+      reachable: async () => { reached++; return true; }, startInFlight: () => true, ...clock, pollMs: 250, timeoutMs: 1_000,
+    });
+    eq(reached, 1, 'M1-5b 已可达 ⇒ 第一次探到就返（不空转）');
+
+    // c：可达在第三次探（t=500ms）出现 ⇒ 停在那里。
+    reached = 0;
+    const c = fakeClock();
+    await waitWhileAnsStarting({
+      reachable: async () => { reached++; return reached >= 3; },
+      startInFlight: () => true, ...c, pollMs: 250, timeoutMs: 10_000,
+    });
+    eq({ reached, t: c.now() }, { reached: 3, t: 500 }, 'M1-5c 可达后即停：第三次探（500ms）命中便交棒');
+
+    // d：代起收场（第二次探后 inFlight=false）⇒ 立即交棒，不等满上限。
+    reached = 0;
+    let inflight = true;
+    const d = fakeClock();
+    await waitWhileAnsStarting({
+      reachable: async () => { reached++; if (reached === 2) inflight = false; return false; },
+      startInFlight: () => inflight, ...d, pollMs: 250, timeoutMs: 10_000,
+    });
+    eq({ reached, t: d.now() }, { reached: 2, t: 250 }, 'M1-5d 代起收场即刻交棒（失败/急停不拖成无期）');
+
+    // e：始终不可达且代起不收场 ⇒ 由上限兜底（有界）。
+    reached = 0;
+    const e = fakeClock();
+    await waitWhileAnsStarting({
+      reachable: async () => { reached++; return false; },
+      startInFlight: () => true, ...e, pollMs: 250, timeoutMs: 1_000,
+    });
+    eq({ reached, t: e.now() }, { reached: 4, t: 1_000 }, 'M1-5e **有界**：上限到即收（4 探 / 1000ms），不无期空转');
+
+    // f：默认参数（不注入 now/sleep）也不抛；代起在首探前已收场 ⇒ 一次即返（不落真等待）。
+    let calls = 0;
+    await waitWhileAnsStarting({ reachable: async () => { calls++; return false; }, startInFlight: () => calls === 0 });
+    ok(calls === 1, 'M1-5f 默认真钟路径：首探后见代起已收场 ⇒ 一次即返', `calls=${calls}`);
+  }
+
   // ═══ M2 接线（main + 渲染层 + 产物）════════════════════════════════════════
   console.log('\n【M2】接线：main 调真源 + 渲染层首屏空态**上屏到产物**');
   {
@@ -202,6 +316,15 @@ async function main(): Promise<void> {
       'M2-3 模型探测经**全仓唯一出路** `ansSignedRequest` 打 `/api/v1/models`');
     const FIRSTRUN = RD(`${A}/src/main/core/first-run.ts`);
     ok(/export async function assessSetup/.test(FIRSTRUN), 'M2-4 `first-run.ts` 导出 `assessSetup`');
+
+    // zx_20261024_4 追补：钩子须**真接在 IPC 上**——只建 `ans-start-grace.ts` 不接线则全量照样全绿。
+    ok(/beforeProbe\s*:/.test(SETUP_IPC) && /waitWhileAnsStarting\(/.test(SETUP_IPC),
+      'M2-7 `setup:state` 接上 `beforeProbe: waitWhileAnsStarting(...)`（不是只建模块不接线）');
+    ok(/startInFlight:\s*ansStartInFlight/.test(SETUP_IPC) && /reachable:\s*\(\)\s*=>\s*probeAns\(/.test(SETUP_IPC),
+      'M2-8 两项依赖都取自生产真源（`ansStartInFlight` / `probeAns`），不在 IPC 里另判一次');
+    const GRACE_SRC = stripKeepingLines(RD(`${A}/src/main/core/ans-start-grace.ts`)).join('\n');
+    ok(!/from 'electron'/.test(GRACE_SRC) && !/from 'node:/.test(GRACE_SRC),
+      'M2-9 `ans-start-grace.ts` 零 electron / 零 node:*（rr 直引真实现，依赖全注入）');
 
     const DASH = RD(`${A}/renderer/src/pages/DashboardPage.tsx`);
     ok(/模型未就绪/.test(DASH) && /setup:model-availability|modelAvailability/.test(DASH),

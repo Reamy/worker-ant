@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import type Database from 'better-sqlite3';
 import { ANS_DEFAULT_BASE_URL } from '@worker-ant/shared-types';
 import { resolveAnsCreds, ansCredentialsConfigured, ansRuntimeIsDev } from '../core/ans-signed-request.js';
-import { ensureAnsStarted, stopManagedAns, ansSupervisorState, findRepoRoot } from '../core/ans-supervisor.js';
+import { ensureAnsStarted, stopManagedAnsAndWait, ansSupervisorState, findRepoRoot } from '../core/ans-supervisor.js';
 
 // 本模块被 tsup **并进** `dist/main/index.js` 单一入口 ⇒ 此处 `import.meta.url` 与 `main/index.ts`
 //   的 `__dirname` 同值（`.../dist/main`），故 `findRepoRoot` 派生结果一致。
@@ -63,7 +63,7 @@ export function initAnsIpc(db: Database.Database): void {
   /** 停止**本进程拉起的** ANS（用户配置的既有服务不动）。 */
   ipcMain.handle('ans:stop', async () => {
     try {
-      return { data: { stopped: stopManagedAns() } };
+      return { data: { stopped: await stopManagedAnsAndWait() } };
     } catch (err) {
       return { error: { code: 'INTERNAL', message: (err as Error).message } };
     }

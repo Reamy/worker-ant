@@ -220,10 +220,22 @@ export interface EnsureOpts extends LaunchOpts, ProbeOpts {
 let managedChild: ChildProcess | null = null;
 let managedPid: number | null = null;
 let lastReason: StartReason | 'idle' = 'idle';
+let startInFlight = 0;
 
 /** 托管现状（供 IPC 上屏：是否由本机托管 / 子进程 PID / 最近一次判断因）。 */
 export function ansSupervisorState(): { managed: boolean; pid: number | null; reason: string } {
   return { managed: managedChild !== null, pid: managedPid, reason: lastReason };
+}
+
+/**
+ * 是否**正有一次 `ensureAnsStarted` 在跑**（拉起的同步段已进、尚未收场）。
+ *
+ * 2026-10-25 实测：打包版首启时渲染层与代起并发——`setup:state` 的模型探针常跑到 ANS 监听之前，
+ *   拿到 ECONNREFUSED 就按 fail-open 判"不拦"，真新用户于是绕过安装向导。首启判据据此**有界等**它
+ *   （`core/ans-start-grace.ts`）。与 `managed` 分家：`managed` 答"子进程在不在"，本判据答"此刻有没有人在拉"。
+ */
+export function ansStartInFlight(): boolean {
+  return startInFlight > 0;
 }
 
 /** 全局急停（rr/CI 用；任何 autoStart 都不生效）。 */
@@ -234,13 +246,23 @@ function autoStartKilled(): boolean {
 const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /**
+ * 对外入口——只多一层「本次拉起仍在进行」的计数（`ansStartInFlight()`），供首启判据在模型探针前
+ * 有界等待（`core/ans-start-grace.ts`）。其余语义全在 `ensureAnsStartedOnce`。
+ */
+export async function ensureAnsStarted(creds: { baseUrl: string } & Partial<AnsCredPair>, opts: EnsureOpts = {}): Promise<StartResult> {
+  startInFlight++;
+  try { return await ensureAnsStartedOnce(creds, opts); }
+  finally { startInFlight--; }
+}
+
+/**
  * 确保 ANS 可用：可达即返回；不可达且满足"本地 ∧ 有入口 ∧ 开关开"才拉起，并**有界等待**到可达。
  * 任意一步不满足都**如实回因**（不抛、不静默）。
  *
  * zx_20261009 M2：`creds` 除 `baseUrl` 外可带身份两半——**确要代起**时随子进程 env 下发
  *   `ANS_API_KEYS`（ANS 侧 env 回退即认），"服务是我起的"于是"客户端也认得出我"。缺任一半 ⇒ 不注入。
  */
-export async function ensureAnsStarted(creds: { baseUrl: string } & Partial<AnsCredPair>, opts: EnsureOpts = {}): Promise<StartResult> {
+async function ensureAnsStartedOnce(creds: { baseUrl: string } & Partial<AnsCredPair>, opts: EnsureOpts = {}): Promise<StartResult> {
   const fetchImpl = opts.fetchImpl ?? fetch;
   const probe = () => probeAns(creds.baseUrl, { fetchImpl, timeoutMs: opts.timeoutMs });
 
@@ -336,5 +358,28 @@ export function stopManagedAns(): boolean {
   if (!managedChild) return false;
   try { managedChild.kill('SIGTERM'); } catch { /* 已退出 */ }
   managedChild = null; managedPid = null;
+  return true;
+}
+
+/**
+ * 退出路径专用的回收：先礼后兵——SIGTERM 之后有界等它自己走，等不到再补 SIGKILL。
+ *
+ * 打包版 ANS 是 `ELECTRON_RUN_AS_NODE` 的 Electron 二进制：**实测不响应 SIGTERM**
+ * （2026-10-24 发信号后 3s 仍存活，`sample` 显示它照常空转在事件循环里）。
+ * 只发 SIGTERM 的旧版于是每次退出都留下一个名为「工蚁」的孤儿进程——从用户视角看
+ * 就是"退出了但工蚁还在跑"。
+ */
+export async function stopManagedAnsAndWait(opts: { graceMs?: number } = {}): Promise<boolean> {
+  const child = managedChild;
+  if (!child) return false;
+  let graceTimer: NodeJS.Timeout | undefined;
+  const gone = new Promise<boolean>((resolve) => {
+    if (typeof child.once !== 'function') { resolve(true); return; }
+    child.once('exit', () => { if (graceTimer) clearTimeout(graceTimer); resolve(true); });
+    graceTimer = setTimeout(() => resolve(false), opts.graceMs ?? 1_000);
+  });
+  stopManagedAns();
+  const exited = await gone;
+  if (!exited) { try { child.kill('SIGKILL'); } catch { /* 已退出 */ } }
   return true;
 }

@@ -74,17 +74,30 @@ export interface SetupAssessment extends FirstRunState {
 /**
  * 首启评估——渲染层判"要不要弹安装向导 + 首屏要不要提示缺模型"的**唯一读出**。
  * `probe` 是惰性 thunk：调用方（`setup.ipc.ts`）喂入走 `ansSignedRequest` 的那一跳；本模块据基底**决定是否调用它**。
+ *
+ * `opts.beforeProbe`（zx_20261024_4 追补）：**只决定"什么时候问"**，不参与任何判定。打包版首启时 ANS 由
+ *   supervisor 异步代起，探针会在它监听之前 ECONNREFUSED ⇒ fail-open 让真新用户绕过向导。此钩子让调用方
+ *   在探针前有界等一会儿（真等法在 `core/ans-start-grace.ts`，本模块零依赖故不内联）。
+ *   ⚠ 只在真正要探的那一格才调用（其余格省一次无谓等待）；钩子自身抛错也吞掉——**判不了≠拦**。
  */
+export interface AssessSetupOpts {
+  beforeProbe?: () => Promise<void>;
+}
+
 export async function assessSetup(
   db: FirstRunDb | null | undefined,
   creds: AnsCreds,
   probe: () => Promise<ModelProbe>,
+  opts: AssessSetupOpts = {},
 ): Promise<SetupAssessment> {
   const base = firstRunState(db, creds);
   // ① 只在「无项目 ∧ 已真配 ANS」这一格探模型——其余格结论已定，省一次网络往返。
   const shouldProbe = !base.hasProject && base.ansUserConfigured;
   let model: ModelProbe | null = null;
   if (shouldProbe) {
+    if (opts.beforeProbe) {
+      try { await opts.beforeProbe(); } catch { /* 等不到就照常探——探针自己会如实报 read */ }
+    }
     try { model = await probe(); } catch { model = null; }
   }
   // ② 只有在"读得动模型"时才据模型改写判据；否则退回旧判据（fail-open）。

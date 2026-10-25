@@ -47,7 +47,7 @@ import { checkBuildPins, stripKeepingLines } from './lib/rr-pins.js';
 // G-1：判据引用的生产符号**全部静态导入** ⇒ 被删/改名即**编译期失败**（而非"扫了个空、静默假绿"）。
 import { ANS_DEFAULT_HOST, ANS_DEFAULT_PORT, ANS_DEFAULT_BASE_URL } from '../packages/shared-types/src/ans-defaults.js';
 import {
-  isLocalUrl, probeAns, resolveAnsLaunchCommand, ensureAnsStarted, stopManagedAns, ansSupervisorState,
+  isLocalUrl, probeAns, resolveAnsLaunchCommand, ensureAnsStarted, stopManagedAns, ansSupervisorState, ansStartInFlight,
   resolveTsxCli, findRepoRoot,
 } from '../apps/worker-ant-desktop/src/main/core/ans-supervisor.js';
 // zx_20261009「自己人」握手批（H1）：凭据一处真源 + 代起即发凭据——G-1 一律调生产导出。
@@ -466,6 +466,33 @@ async function main(): Promise<void> {
     eq(silentState.n, 1, 'M5-2 同上：一死即返（秒退不被拖成 `start-timeout`）');
     eq((rSilent.stderrTail ?? ''), '', 'M5-3 如实回空遗言（不编造"证据"；归因是形态学的，与遗言两回事）');
 
+    // (11b) zx_20261024_4 追补：`ansStartInFlight()` —— 首启判据"此刻有没有人在拉"的**唯一读出**。
+    //   病根：打包版首启渲染层与异步代起并发，模型探针跑到 ANS 监听之前 ⇒ fail-open 放行真新用户。
+    //   `core/ans-start-grace.ts` 据此有界等待；须真做到"进同步段即为真、全部收场才为假"。
+    {
+      let release1!: () => void;
+      const gate1 = new Promise<void>((r) => { release1 = r; });
+      const gatedFetch1 = (async () => { await gate1; throw new Error('ECONNREFUSED'); }) as unknown as AnyFetch;
+      let release2!: () => void;
+      const gate2 = new Promise<void>((r) => { release2 = r; });
+      const gatedFetch2 = (async () => { await gate2; throw new Error('ECONNREFUSED'); }) as unknown as AnyFetch;
+
+      eq(ansStartInFlight(), false, 'M21-3ax 静默态 ⇒ 无代起在拉（基线 0）');
+      // `autoStart:false` ⇒ 探针一失败即回 `disabled`，不 spawn。
+      const p1 = ensureAnsStarted({ baseUrl: LOCAL }, { autoStart: false, fetchImpl: gatedFetch1 });
+      eq(ansStartInFlight(), true, 'M21-3ay ★一进同步段即为真（渲染层此刻问，能如实读到"有人在拉"）');
+      const p2 = ensureAnsStarted({ baseUrl: LOCAL }, { autoStart: false, fetchImpl: gatedFetch2 });
+      release1();
+      await p1;
+      eq(ansStartInFlight(), true, 'M21-3az ★计数语义：一次已收场、另一次仍在拉 ⇒ 仍为真（不被先收场的清掉）');
+      release2();
+      await p2;
+      eq(ansStartInFlight(), false, 'M21-3ba 全部收场 ⇒ 归零（有界等待据此交棒）');
+      // 反证：失败/未开启的收场也要归零（不是"只在成功路径清"）。
+      await ensureAnsStarted({ baseUrl: LOCAL }, { autoStart: false, fetchImpl: refusedFetch });
+      eq(ansStartInFlight(), false, 'M21-3bb 反证：`disabled` 收场后同样归零（finally 语义，两条出口一致）');
+    }
+
     // (12) M5 桌面侧「说得清」：401（未认证）/ 读失败 / 真无模型 **三分**（病：把没认证说成没配模型）
     //   zx_20261010 M3 扩参后同钉（签名 `{models}` → `{catalog, available, hasChat, hasEmbedding}`）。
     const authLine = probeModelsLine({ read: 'auth', note: 'ANS request failed (401): {"error":{"code":"UNAUTHORIZED"}}', catalog: 0, available: 0, hasChat: false, hasEmbedding: false });
@@ -512,7 +539,9 @@ async function main(): Promise<void> {
     //   现钉「**经单源读**」（`readBoolSetting(… 'ans_auto_start')`）——键名在场 + 走同一判据，两件同钉。
     crit('M21', /readBoolSetting\([^)]*'ans_auto_start'/.test(mi),
       'M21-3an 应用层开关 `ans_auto_start` **经 settings-bool 单源读取**（不得用裸 `!== \'false\'` 旁路）');
-    crit('M21', /stopManagedAns\(\)/.test(mi), 'M21-3ao 退出接线 `stopManagedAns()`（回收本机托管的 ANS）');
+    // 改钉更强载体（v0.2.1 退出修复）：退出路径改用 `stopManagedAnsAndWait()`——它才是"退出时
+    //   真正把托管 ANS 收干净"的那个（SIGTERM 收不掉会在宽限期后补 SIGKILL）。
+    crit('M21', /await stopManagedAnsAndWait\(\)/.test(mi), 'M21-3ao 退出接线 `await stopManagedAnsAndWait()`（回收本机托管的 ANS 并等它真的走）');
     crit('M21', /isDev/.test(mi) && /repoRoot/.test(mi),
       'M21-3ap 传入 `isDev`/`repoRoot`（打包版据此如实回 `no-entry`）');
 

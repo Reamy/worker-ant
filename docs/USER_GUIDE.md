@@ -41,9 +41,10 @@
 
 ### 方式一：安装包（macOS）
 
-从 [GitHub Releases v0.2.1](https://github.com/Reamy/worker-ant/releases/tag/v0.2.1) 下载
-`worker-ant-0.2.1-mac-arm64.dmg`（或 `.zip`），挂载后把「工蚁」拖进「应用程序」。
+从 [GitHub Releases v0.2.2](https://github.com/Reamy/worker-ant/releases/tag/v0.2.2) 下载
+`worker-ant-0.2.2-mac-arm64.dmg`（或 `.zip`），挂载后把「工蚁」拖进「应用程序」。
 **v0.2.0 安装包首次启动会报 `ENOENT mkdir '/data'` 并崩溃，请勿使用。**
+v0.2.2 修复了退出后残留 ANS 进程、首次启动未进入安装向导两个问题；自动更新尚未启用，已装 v0.2.1 的用户请手动下载覆盖安装。
 
 - 系统要求：**macOS 13+，Apple Silicon（arm64）**。暂不提供 Intel Mac 与 Windows 版本。
 - 安装包已完成 Developer ID 签名并经 Apple 公证，首次打开无需右键绕过。
