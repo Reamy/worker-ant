@@ -15,7 +15,8 @@ import { UNVERIFIED_REASON_LABEL, isUnjudgedReason, type AcceptanceCheckLike } f
 // zx_20260915 P0-1: 暂停成因码同理——横幅分型读 main 侧同一常量，不在渲染层手抄 'no_output'
 // zx_20260917 M2: 另二十个码的人话也同源——`pauseReasonLabel` 是词表唯一一处，`recordedPauseReason`
 // 是"读出账上因由原文"的唯一读点；此前横幅只认得 `no_output`，其余一律显示"已暂停"，用户在 GUI 同样读不到因。
-import { PAUSE_REASON_NO_OUTPUT, pauseReasonLabel, recordedPauseReason } from '../../../src/main/core/pause-reason.js';
+// zx_20261028_1 M5: 暂停附注（`$.pause_note`）的读点同源——渲染层不手抄键名，有才显示。
+import { PAUSE_REASON_NO_OUTPUT, pauseReasonLabel, recordedPauseReason, recordedPauseNote } from '../../../src/main/core/pause-reason.js';
 // zx_20260914 M2-1(王阳明·知行合一): 正文「读得动」——本页预览块与列表页/抽屉共用同一渲染器
 import MarkdownSubset from '../lib/markdown-subset';
 // zx_20260913 M3-5/M3-4: 前置阻塞态判据与"序号→id"映射的**唯一真源**（renderer 是词表的第二个落点，故跨 root 引同一份代码）
@@ -40,14 +41,23 @@ import { TASK_STATUS_LABEL, statusText } from '../lib/status-view';
 // zx_20260930 M4-2: 列表**批次大小**与"这一批之后还有没有下一页"的判据，与成果页/项目详情页**同一份**
 //   （renderer 是词表的第二个落点，故不得在本页再写一遍 `rows.length < 100`）。
 import { LIST_PAGE_SIZE, pageExhausted } from '../lib/list-page';
-// zx_20261011_4 M4: 外派徽标的人话（`orchestrationLabel`）与 N5 如实边界文案（`REMOTE_RESULT_CAVEAT`）
+// zx_20261011_4 M4: 外派徽标的人话（`orchestrationLabel`）与 N5 如实边界文案（`remoteResultNote` 的回落档）
 //   取协同展示域**一处真源**（renderer 是词表的第二个落点，须跨 root 引真函数，不在页面里手抄）。
-import { orchestrationLabel, REMOTE_RESULT_CAVEAT, type RemoteTaskBadge } from '../lib/node-view';
+import { orchestrationLabel, remoteReceiptOf, remoteResultNote, type RemoteTaskBadge } from '../lib/node-view';
 // zx_20261016_3 M33-b（四因·目的因）: 「哪几因叫什么名字、算不算缺」取**一处真源**（`core/four-causes.ts`，
 //   零 import 故跨 root 引得动，与 `healing-outcome.ts` 同形）——本页不得手抄四因词表。
 import { fourCauseOf } from '../../../src/main/core/four-causes.js';
+// M4「四个账说清」：来路人话与列表页同引一份；终态集合取 main 的唯一真源（零 import，可跨端引）
+import { taskSourceLabel } from '../lib/task-source';
+import { isTerminalStatus } from '../../../src/main/core/task-jobs.js';
+// zx_20261030_2 M7「示」: 形态来源/覆盖与 core 同键。仅引类型（编译期擦除）——`task-archetype.ts`
+//   运行时依赖 logger/tool-registry（pino/fs），不可拉进 renderer。
+import type { ArchetypeSource, TaskArchetype } from '../../../src/main/core/task-archetype.js';
 
-interface TaskItem { id: string; project_id: string; title: string; description: string; status: string; priority: number; source: string; parent_task_id?: string; depends_on?: string; acceptance_criteria?: string; context_json?: string; aggregate_version?: number; created_at: string; updated_at: string; }
+interface TaskItem { id: string; project_id: string; title: string; description: string; status: string; priority: number; source: string; parent_task_id?: string; depends_on?: string; acceptance_criteria?: string;
+  // 同一接口服务两处载荷：详情本体走 `task:get`（整行，带 context_json）；列表走 `task:list`
+  //   （zx_20261028_2 M2 起只带摘录键 context_digest，不再整份 ctx）。读前置因由只用后者。
+  context_json?: string; context_digest?: string; aggregate_version?: number; created_at: string; updated_at: string; }
 interface ConvItem { id: string; role: string; content: string; tool_calls?: string; token_count?: number; created_at: string; }
 // zx_20260911_2 M4b(Q1 名实相符·展示补齐): task:get 以 SELECT * 取产出物行 ⇒ is_primary/acceptance_verified 本就在载荷中(字段可读而无人读)
 interface DelivItem { id: string; name: string; type: string; status: string; file_path?: string; created_at: string; is_primary?: number; acceptance_verified?: number;
@@ -62,6 +72,24 @@ const AWAIT_TYPE_LABEL: Record<string, string> = { ask_user:'询问', path_appro
 //   `ATTACHMENT_STATUS_LABEL`。之所以用 `Record<AttachmentOutcomeStatus, string>` 而非手抄三态：
 //   main 侧将来加第四态时这里**编译期**就报错，不会静默渲染成一片留白。
 const ATT_TONE: Record<AttachmentOutcomeStatus, string> = { inlined:'bg-green-100 text-green-700', omitted:'bg-gray-100 text-gray-600', failed:'bg-red-100 text-red-600' };
+
+// zx_20261030_2 M7（「示」）: 形态来源的人话——与 core `ArchetypeSource` 同键；新增态这里编译期即报错。
+const ARCHETYPE_SOURCE_LABEL: Record<ArchetypeSource, string> = {
+  keyword: '关键词命中', family: '相似度判定', fallback: '长度兜底',
+  semantic: '语义识别', calibrated: '历史校准', node: '节点指定', manual: '手动指定',
+};
+// 手动覆盖的六档（值与 core `ARCHETYPE_BUDGETS` 同键）。中文名与 `ADAPTIVE_STRATEGIES.label` 一致，
+//   但那份模块运行时要 pino/fs，故只能在此列一份；「按默认」= 空串，提交时写 null 清除覆盖。
+const ARCHETYPE_OVERRIDE_OPTIONS: Array<{ value: TaskArchetype; label: string }> = [
+  { value: 'code', label: '编码实现' },
+  { value: 'research', label: '调查研究' },
+  { value: 'document', label: '文档生成' },
+  { value: 'analysis', label: '数据分析' },
+  { value: 'configuration', label: '配置管理' },
+  { value: 'conversation', label: '对话交互' },
+];
+const isToolCallRow = (c: { role: string; content?: string }): boolean =>
+  c.role === 'system' && (c.content || '').startsWith('[工具调用]');
 
 function formatToken(n: number | undefined | null): string { if (!n) return '0'; if (n>=1_000_000) return (n/1_000_000).toFixed(2)+'M'; if (n>=1_000) return (n/1_000).toFixed(1)+'K'; return String(n); }
 function formatTime(s: string | undefined | null): string {
@@ -151,6 +179,8 @@ export default function TaskDetailPage() {
   const [error, setError] = useState('');
   const [showCreate, setShowCreate] = useState(false);
   const [newTask, setNewTask] = useState({ title: '', description: '', acceptance_criteria: '', planTaskId: '' });
+  // M4：no_criteria 面板的补填草稿（只存输入，提交走既有 task:update）
+  const [criteriaDraft, setCriteriaDraft] = useState('');
   // zx_20260914 M0.6: 子任务创建同样两层——在途标志（体验）+ 本次表单会话的幂等键（判据层输入）。
   const [creating, setCreating] = useState(false);
   const createReqIdRef = useRef('');
@@ -713,8 +743,16 @@ export default function TaskDetailPage() {
   }
   async function handleInject(taskId: string) { const text = injectText.trim(); if (!text) return; try { await tasks.inject(taskId, text); setInjectText(''); setShowInject(false); loadProject(); } catch (e) { reportAction(e); } }
   async function handleInjectDirect(taskId: string, text: string) { const t = text.trim(); if (!t) return; try { await tasks.inject(taskId, t); loadProject(); } catch (e) { reportAction(e); } }
+  // M4：非终态任务的「补填验收标准」——复用既有 task:update，不新造 IPC；终态任务不给入口（补填不回溯本次执行）
+  async function handleSaveCriteria(taskId: string) {
+    const text = criteriaDraft.trim();
+    if (!text || !beginAction()) return;
+    try { await tasks.update(taskId, { acceptance_criteria: text }); setCriteriaDraft(''); await loadProject(); }
+    catch (e) { reportAction(e); } finally { endAction(); }
+  }
   async function handleSaveGoal(taskId: string) { const text = goalEditText.trim(); if (!text) return; try { const existing = goalInfo; await tasks.context(taskId, { task_goal: { goal: text, success_criteria: existing?.success_criteria || '', investigate: existing?.investigate || [] } }); setShowGoalEdit(false); setGoalInfo(prev => prev ? { ...prev, goal: text } : { goal: text, success_criteria: '', investigate: [], principalContradiction: '' }); } catch (e) { reportAction(e); } }
-  async function handleDelete(taskId: string) { if (!confirm('确定删除此任务？对话记录和产出物将被清除。')) return; try { await tasks.delete(taskId); navigate('/tasks'); } catch (e) { reportAction(e); } }
+  // zx_20261027_2 M1/M2: 归档态同样可删；删除清整棵子树（main 侧会拒绝含未结束成员的子树并点名）。
+  async function handleDelete(taskId: string) { if (!confirm('确定删除此任务？其全部子任务、对话记录和产出物将被一并清除。')) return; try { await tasks.delete(taskId); navigate('/tasks'); } catch (e) { reportAction(e); } }
   // zx_20261013_1 批二(K7): 「挂附件」——选本地文件挂到**本任务**（main 侧一条链：`im-media` 落盘 + `appendTaskAttachments` 写 `context_json.attachments`）。
   //   挂上后**下一次执行/回复**即被装配进上下文（无需立刻重跑）；逐件独立成败如实回报（成功件数 + 失败逐条带真因）。
   async function handleAttachFiles(taskId: string) {
@@ -742,6 +780,16 @@ export default function TaskDetailPage() {
     } catch (e) { reportAction(e); } finally { setCreating(false); }
   }
   async function handleSaveContext() { if (!selectedId) return; try { await tasks.context(selectedId, { max_tokens_per_task: Number(ctxForm.max_tokens_per_task) || undefined, max_cost_usd_per_task: Number(ctxForm.max_cost_usd_per_task) || undefined }); setShowContext(false); selectTask(selectedId); } catch (e) { reportAction(e); } }
+  // zx_20261030_2 M7: 形态覆盖随选随写（沿用 `task:context` 合并写，不新增通道）；空选择写 null，
+  //   引擎侧按非法值忽略 ⇒ 等价于「按默认」。只影响下一次运行，本轮已落的账不重算。
+  async function handleArchetypeOverride(next: string) {
+    const id = selectedId || task?.id;
+    if (!id) return;
+    try {
+      await tasks.context(id, { archetype_override: next ? next : null });
+      await selectTask(id);
+    } catch (e) { reportAction(e); }
+  }
   async function handlePreviewDeliv(d: DelivItem) { try { const r = await invoke<Record<string, unknown>>('deliverable:preview', d.id); const rd = r as unknown as Record<string, unknown>; const content = String(rd.content_snapshot || rd.content || ''); const filePath = rd.file_path as string | undefined; setDelivPreview({ name: d.name, type: d.type, content, filePath, fileExists: rd.file_exists === true, version: Number(rd.version) || undefined }); } catch {} }
 
   const ctx = (() => { try { return JSON.parse(task?.context_json||'{}'); } catch { return {}; } })();
@@ -875,6 +923,14 @@ export default function TaskDetailPage() {
   const bgReviewTokens = bgReviewUsage && typeof bgReviewUsage.estTokens === 'number' ? bgReviewUsage.estTokens : null;
   const effectiveBudget = ctx?.budget_max_tokens as number | undefined;
   const archetypeLabel = ctx?.archetype_label as string | undefined;
+  // zx_20261030_2 M7: 凭什么判成这个——来源与理由由引擎同一笔账落下；来源不认识的旧值按"无"处理，不印英文码。
+  const archetypeSource = ctx?.archetype_source as ArchetypeSource | undefined;
+  const archetypeSourceLabel = archetypeSource && ARCHETYPE_SOURCE_LABEL[archetypeSource] ? ARCHETYPE_SOURCE_LABEL[archetypeSource] : '';
+  const archetypeReason = typeof ctx?.archetype_reason === 'string' ? (ctx.archetype_reason as string) : '';
+  // 覆盖只在六档之内才认（非法/旧值一律回「按默认」）。
+  const archetypeOverride = ARCHETYPE_OVERRIDE_OPTIONS.some(o => o.value === ctx?.archetype_override)
+    ? (ctx.archetype_override as string)
+    : '';
   const finalizeChecks = ctx?.finalize_checks as string[] | undefined;
   const outputValidations = ctx?.output_validations as Array<{ file: string; sufficient: boolean; confidence: number; missingAspects?: string[]; suggestion?: string }> | undefined;
   // zx_20260906_2 批2 (2026-09-06): 验收标准逐条核对证据——finalize 验收 LLM 逐条 {criterion,passed,reason} 落 ctxJson.acceptance_check，此面板逐条可复盘
@@ -901,6 +957,8 @@ export default function TaskDetailPage() {
   // 空串 = 账上未记因由（M1 收口前的存量直写点）——此时**如实说"因未记录"**，不静默留白、不编一个原因。
   const pauseReasonCode = task?.status === 'paused' ? recordedPauseReason(task.context_json) : '';
   const pauseReasonText = pauseReasonLabel(pauseReasonCode);
+  // zx_20261028_1 M5：暂停附注（如停摆说明）。此前 `$.pause_note` 有写点、**零读点**——写下的处置指引无人看见。
+  const pauseNote = task?.status === 'paused' ? recordedPauseNote(task.context_json) : '';
   // zx_20260930 M11-5: `stabilizing`（烹小鲜冷却暂态）的成因就在 `context_json.status_changes` 里——
   //   条数如实数出来给用户看，而不是只丢一句"稳定观察中"让人自己去猜为什么。窗口/阈值与
   //   `project-engine.updateStatus` 的 `COOLING_WINDOW_MS`/`MAX_CHANGES` 同值（那边不可从 renderer import，
@@ -982,7 +1040,7 @@ export default function TaskDetailPage() {
     depIds,
     (id) => taskList.find((t) => t.id === id)?.status,
     (id) => taskNameOf(id),
-    (id) => taskList.find((t) => t.id === id)?.context_json,
+    (id) => taskList.find((t) => t.id === id)?.context_digest,
   );
   // M3-4: 前置可编辑——候选=同项目、非自身、非归档、且未在前置内
   const depCandidates = taskList.filter((t) => t.project_id === task?.project_id && t.id !== task?.id && t.status !== 'archived' && !depIds.includes(t.id));
@@ -1188,10 +1246,12 @@ export default function TaskDetailPage() {
                 {task.status==='paused' && !awaitingInput && <div className="p-2 mb-3 bg-orange-50 border border-orange-300 rounded-lg"><div className="flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-orange-500 animate-pulse"/><span className="text-sm text-orange-800 font-medium">{pausedNoOutput ? '未达交付（无产出证据）' : (pauseReasonText ? `已暂停：${pauseReasonText}` : '已暂停（因未记录）')}</span><span className="text-xs text-orange-600">{pausedNoOutput ? '收口时未发现任何真实产出证据（无落盘成果、无交付物登记、无写入类工具调用）——已暂停而非标完成。若确有产出，请核验后「恢复」；若确认无需产出，可点「完成」。' : '执行已挂起，可恢复继续'}</span><button onClick={()=>handleResume(task.id)} disabled={actionLocked} className="ml-auto flex items-center gap-1 px-2 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"><RotateCcw className="w-3 h-3"/>恢复</button></div>
                   {/* zx_20260923 M7-c（G15）: 横幅内联附言——承 G15 口径订正，「附言」此前只在动作栏那处模态框可达，
                       本批补的是**横幅里这一处缺口**。走的是既有的那个恢复方法，后端零改动。 */}
+                  {/* zx_20261028_1 M5「停」：暂停附注（停摆说明含逐子停因与三条处置）——有才显示，原样换行。 */}
+                  {pauseNote && <p className="mt-2 text-xs text-orange-900 whitespace-pre-wrap break-words bg-orange-100/60 rounded p-2">{pauseNote}</p>}
                   <div className="flex items-center gap-2 mt-2"><input value={bannerReply} onChange={e=>setBannerReply(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')handleResumeWithNote(task.id);}} className="flex-1 px-2 py-1 border border-orange-200 rounded text-xs bg-white" placeholder="附言（可选）：告诉它恢复后要注意什么，随本次恢复注入执行"/><button onClick={()=>handleResumeWithNote(task.id)} disabled={!bannerReply.trim()||actionLocked} className="shrink-0 px-2 py-1 bg-teal-600 text-white rounded text-xs hover:bg-teal-700 disabled:opacity-50 disabled:cursor-not-allowed">附言并恢复</button></div></div>}
                 <div className="flex items-start justify-between mb-3">
                   <div>
-                    <div className="flex items-center gap-2 mb-1 flex-wrap"><h3 className="font-semibold text-lg">{task.title}</h3><button type="button" onClick={(e) => { e.stopPropagation(); navigate(`/activity?obj=${task.id}`); }} title="该任务活动时间线" className="shrink-0 p-0.5 text-gray-400 hover:text-blue-500"><History className="w-4 h-4" /></button>{ownMs[0]?<button type="button" onClick={(e)=>{e.stopPropagation();navigate(`/tasks/${String(ownMs[0].plan_task_id)}`);}} className="text-[10px] px-1.5 py-0.5 rounded bg-teal-50 text-teal-700 hover:bg-teal-100 shrink-0" title={`所属方案里程碑 ${ownMs[0].milestone}：${ownMs[0].status}`}>方案 {ownMs[0].milestone}: {ownMs[0].status==='done'?'已落地':ownMs[0].status==='doing'?'进行中':'待实施'}</button>:null}<span className={`text-xs px-2 py-0.5 rounded-full ${STATUS_COLOR[task.status]||'bg-gray-100'}`}>{statusText(TASK_STATUS_LABEL, task.status)}</span>{acceptanceFailed && <span title={`账上验收有 ${(acceptanceCheck!.failed ?? []).length} 条判据未达成（共 ${acceptanceCheck!.criteria_total ?? 0} 条）——「已完成」不等于「已验收」，详见下方验收块`} className="cursor-help text-[10px] px-1.5 py-0.5 rounded-full border border-red-200 bg-red-50 text-red-600 font-medium">✗ 验收 {(acceptanceCheck!.failed ?? []).length} 条未达</span>}{archetypeLabel&&<span className="text-xs px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600">{archetypeLabel}</span>}{taskEstimate?.basedOn ? <span title={`基于 ${taskEstimate.basedOn} 个相似历史任务预估`} className="text-xs px-1.5 py-0.5 rounded-full bg-cyan-50 text-cyan-600">预估 {formatToken(taskEstimate.tokens)} / {taskEstimate.steps}步</span> : null}{PRIORITY_LABEL[task.priority] && <span className="text-xs text-orange-500 font-medium">{PRIORITY_LABEL[task.priority]}</span>}{completionQuality&&<span title={completionQuality.feedback||''} className={`cursor-help text-xs px-1.5 py-0.5 rounded-full font-medium ${(completionQuality.score||0)>=80?'bg-green-100 text-green-700':(completionQuality.score||0)>=60?'bg-yellow-100 text-yellow-700':(completionQuality.score||0)>=40?'bg-orange-100 text-orange-700':'bg-red-100 text-red-600'}`}>★{completionQuality.score}分</span>}{autoCompletedNoOutput && <span title="该任务被直接标记完成但未产出真实成果（update_task_status 工具），未经 finalize 成果门禁——请人工复核" className="cursor-help text-[10px] px-1.5 py-0.5 rounded-full border border-red-200 bg-red-50 text-red-600 font-medium">⚠ 未达成果门禁</span>}{budgetUsage!=null&&<span className={`text-xs px-1.5 py-0.5 rounded-full ${budgetUsage>=0.95?'bg-red-100 text-red-700':budgetUsage>=0.7?'bg-yellow-100 text-yellow-700':'bg-blue-100 text-blue-700'}`}>{Math.round(budgetUsage*100)}%预算</span>}{displayTokens!=null&&<span className="text-xs text-gray-400">{displayTokens>=1000?(displayTokens/1000).toFixed(1)+'K':String(displayTokens)} tokens</span>}{costEstimate?.cost!=null&&<span title={`本次执行成本估算（¥）${costEstimate.cost>0?'':'· 所选模型单价为 0/未计费'}${costEstimate.model?` · 模型 ${costEstimate.model}`:''}`} className="text-xs text-gray-500">💰{costEstimate.cost>0?`¥${costEstimate.cost.toFixed(4)}`:`¥0${costEstimate.model?`(${costEstimate.model})`:''}`}</span>}{preludeTokens!=null&&<span className="text-xs text-purple-400" title="任务开始前的需求理解预读消耗（主要矛盾+立志+需求卡「三调合一」单次预读），不计入步进 token"> · 预读~{formatToken(preludeTokens)}</span>}{sideTokensCe!=null&&sideTokensCe>0&&<span className="text-xs text-amber-500" title="本次执行内旁路子 LLM（验收/内容校验/目标偏离核对）的估算 token，已并入上方总 token（账实相符）"> · 旁路~{formatToken(sideTokensCe)}</span>}{bgReviewTokens!=null&&bgReviewTokens>0&&<span className="text-xs text-purple-300" title="任务完成后后台复盘（background-review：三元组+记忆提取+复盘+行动转化）的估算 token，独立于执行预算"> · 复盘~{formatToken(bgReviewTokens)}</span>}</div>
+                    <div className="flex items-center gap-2 mb-1 flex-wrap"><h3 className="font-semibold text-lg">{task.title}</h3><button type="button" onClick={(e) => { e.stopPropagation(); navigate(`/activity?obj=${task.id}`); }} title="该任务活动时间线" className="shrink-0 p-0.5 text-gray-400 hover:text-blue-500"><History className="w-4 h-4" /></button>{ownMs[0]?<button type="button" onClick={(e)=>{e.stopPropagation();navigate(`/tasks/${String(ownMs[0].plan_task_id)}`);}} className="text-[10px] px-1.5 py-0.5 rounded bg-teal-50 text-teal-700 hover:bg-teal-100 shrink-0" title={`所属方案里程碑 ${ownMs[0].milestone}：${ownMs[0].status}`}>方案 {ownMs[0].milestone}: {ownMs[0].status==='done'?'已落地':ownMs[0].status==='doing'?'进行中':'待实施'}</button>:null}<span className={`text-xs px-2 py-0.5 rounded-full ${STATUS_COLOR[task.status]||'bg-gray-100'}`}>{statusText(TASK_STATUS_LABEL, task.status)}</span>{acceptanceFailed && <span title={`账上验收有 ${(acceptanceCheck!.failed ?? []).length} 条判据未达成（共 ${acceptanceCheck!.criteria_total ?? 0} 条）——「已完成」不等于「已验收」，详见下方验收块`} className="cursor-help text-[10px] px-1.5 py-0.5 rounded-full border border-red-200 bg-red-50 text-red-600 font-medium">✗ 验收 {(acceptanceCheck!.failed ?? []).length} 条未达</span>}{archetypeLabel&&<span className="text-xs px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600 cursor-help" title={[`形态：${archetypeLabel}`, archetypeSourceLabel&&`来源：${archetypeSourceLabel}`, archetypeReason&&`依据：${archetypeReason}`].filter(Boolean).join('\n')}>形态：{archetypeLabel}{archetypeSourceLabel?` · ${archetypeSourceLabel}`:''}</span>}{archetypeReason&&<span className="text-xs text-gray-400 max-w-[260px] truncate" title={archetypeReason}>依据：{archetypeReason}</span>}{taskEstimate?.basedOn ? <span title={`基于 ${taskEstimate.basedOn} 个相似历史任务预估`} className="text-xs px-1.5 py-0.5 rounded-full bg-cyan-50 text-cyan-600">预估 {formatToken(taskEstimate.tokens)} / {taskEstimate.steps}步</span> : null}{PRIORITY_LABEL[task.priority] && <span className="text-xs text-orange-500 font-medium">{PRIORITY_LABEL[task.priority]}</span>}{completionQuality&&<span title={completionQuality.feedback||''} className={`cursor-help text-xs px-1.5 py-0.5 rounded-full font-medium ${(completionQuality.score||0)>=80?'bg-green-100 text-green-700':(completionQuality.score||0)>=60?'bg-yellow-100 text-yellow-700':(completionQuality.score||0)>=40?'bg-orange-100 text-orange-700':'bg-red-100 text-red-600'}`}>★{completionQuality.score}分</span>}{autoCompletedNoOutput && <span title="该任务被直接标记完成但未产出真实成果（update_task_status 工具），未经 finalize 成果门禁——请人工复核" className="cursor-help text-[10px] px-1.5 py-0.5 rounded-full border border-red-200 bg-red-50 text-red-600 font-medium">⚠ 未达成果门禁</span>}{budgetUsage!=null&&<span className={`text-xs px-1.5 py-0.5 rounded-full ${budgetUsage>=0.95?'bg-red-100 text-red-700':budgetUsage>=0.7?'bg-yellow-100 text-yellow-700':'bg-blue-100 text-blue-700'}`}>{Math.round(budgetUsage*100)}%预算</span>}{displayTokens!=null&&<span className="text-xs text-gray-400">{displayTokens>=1000?(displayTokens/1000).toFixed(1)+'K':String(displayTokens)} tokens</span>}{costEstimate?.cost!=null&&<span title={`本次执行成本估算（¥）${costEstimate.cost>0?'':'· 所选模型单价为 0/未计费'}${costEstimate.model?` · 模型 ${costEstimate.model}`:''}`} className="text-xs text-gray-500">💰{costEstimate.cost>0?`¥${costEstimate.cost.toFixed(4)}`:`¥0${costEstimate.model?`(${costEstimate.model})`:''}`}</span>}{preludeTokens!=null&&<span className="text-xs text-purple-400" title="任务开始前的需求理解预读消耗（主要矛盾+立志+需求卡「三调合一」单次预读），不计入步进 token"> · 预读~{formatToken(preludeTokens)}</span>}{sideTokensCe!=null&&sideTokensCe>0&&<span className="text-xs text-amber-500" title="本次执行内旁路子 LLM（验收/内容校验/目标偏离核对）的估算 token，已并入上方总 token（账实相符）"> · 旁路~{formatToken(sideTokensCe)}</span>}{bgReviewTokens!=null&&bgReviewTokens>0&&<span className="text-xs text-purple-300" title="任务完成后后台复盘（background-review：三元组+记忆提取+复盘+行动转化）的估算 token，独立于执行预算"> · 复盘~{formatToken(bgReviewTokens)}</span>}</div>
                     {/* B2: 模板匹配依据——为什么套用了这个模板拆解 */}
                     {matchedInfo && <p className="text-[11px] text-indigo-600 mb-1 flex items-center gap-1.5 flex-wrap"><span className="font-medium">🧩 模板拆解</span><span className="text-gray-400">模板 {matchedInfo.tpl}</span>{matchedInfo.method === 'semantic' ? <span className="px-1.5 py-0.5 rounded-full bg-indigo-50 text-indigo-600">语义匹配{matchedInfo.sim != null ? ` 相似度 ${matchedInfo.sim}` : ''}</span> : <span className="px-1.5 py-0.5 rounded-full bg-blue-50 text-blue-600">关键词匹配</span>}{matchedInfo.field ? <span className="px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-600">命中{matchedInfo.field === 'title' ? '标题' : '描述'}</span> : null}{matchedInfo.kw.length > 0 && <span className="text-gray-500">命中: {matchedInfo.kw.join('、')}</span>}</p>}
                     {/* zx_20261002 M7: 引擎路拆解溯源——无模板者由"引擎自动拆解"补上，不再恒隐藏（依据见会话流 [智能拆解]） */}
@@ -1244,6 +1304,7 @@ export default function TaskDetailPage() {
                 <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-gray-400">
                   <div className="flex items-center gap-1"><Clock className="w-3 h-3"/>创建: {formatTime(task.created_at)}</div>
                   <div className="flex items-center gap-1"><TrendingUp className="w-3 h-3"/>更新: {formatTime(task.updated_at)}</div>
+                  <div className="flex items-center gap-1">来源: {taskSourceLabel(task.source)}</div>
                   {task.depends_on && <div className="flex items-center gap-1 flex-wrap col-span-2"><GitBranch className="w-3 h-3"/>前置依赖: {depIds.map((did) => (
                     <button key={did} type="button" onClick={() => navigate(`/tasks/${did}`)} title={`跳转前置任务：${taskNameOf(did)}`} className="text-blue-500 hover:text-blue-700 hover:underline">{taskNameOf(did)}</button>
                   ))}</div>}
@@ -1297,7 +1358,7 @@ export default function TaskDetailPage() {
                       执行中(executing/running)刻意不给——须先「中止」，弃在途任务等于弃掉一个还在跑的东西，先停再弃。 */}
                   {['pending','planning','paused','failed','stabilizing'].includes(task.status) && <button onClick={() => handleArchive(task.id)} disabled={actionLocked} title="归档（放弃）——弃 ≠ 败：它不再计入失败，也不阻塞父任务收口" className="flex items-center gap-1 px-3 py-1 bg-gray-500 text-white rounded text-xs hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed"><Archive className="w-3 h-3"/>归档</button>}
                   {task.status==='completed' && <button onClick={() => handleRetry(task.id)} disabled={actionLocked} title="重新执行" className="flex items-center gap-1 px-3 py-1 bg-purple-600 text-white rounded text-xs hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed"><RotateCcw className="w-3 h-3"/>重新执行</button>}
-                  {(task.status==='completed'||task.status==='failed') && <button onClick={() => handleDelete(task.id)} disabled={actionLocked} title="删除" className="flex items-center gap-1 px-3 py-1 bg-red-500 text-white rounded text-xs hover:bg-red-600 disabled:opacity-50 disabled:cursor-not-allowed"><Trash2 className="w-3 h-3"/>删除</button>}
+                  {(task.status==='completed'||task.status==='failed'||task.status==='archived') && <button onClick={() => handleDelete(task.id)} disabled={actionLocked} title="删除" className="flex items-center gap-1 px-3 py-1 bg-red-500 text-white rounded text-xs hover:bg-red-600 disabled:opacity-50 disabled:cursor-not-allowed"><Trash2 className="w-3 h-3"/>删除</button>}
                 </div>
                 {/* Phase C: 执行中追加输入内联框 */}
                 {showInject && (task.status==='executing'||task.status==='running') && <div className="flex items-center gap-2 mt-2"><input value={injectText} onChange={e=>setInjectText(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'){handleInject(task.id);}}} className="flex-1 px-2 py-1 border rounded text-xs" placeholder="输入要注入的提示，回车提交（任务将软中断并带此输入继续）"/><button onClick={()=>handleInject(task.id)} disabled={!injectText.trim()} className="px-2 py-1 bg-cyan-600 text-white rounded text-xs hover:bg-cyan-700 disabled:opacity-50">注入</button></div>}
@@ -1456,6 +1517,14 @@ export default function TaskDetailPage() {
                       <div className="border-l-2 border-amber-200 bg-amber-50/50 pl-3 py-2 text-xs text-amber-800">
                         <p className="font-medium">未设验收标准（未验收）</p>
                         <p className="mt-0.5 text-amber-700">该任务创建时未填验收标准，无从核对——「已完成」不等于「已验收」。如需可核对的结论，请补填验收标准后重跑该任务。</p>
+                        {isTerminalStatus(task.status) ? (
+                          <p className="mt-1.5 text-amber-600">补填不会回溯本次执行：本次结论仍按「未设验收」记账。</p>
+                        ) : (
+                          <div className="mt-2 flex items-center gap-2">
+                            <input value={criteriaDraft} onChange={e=>setCriteriaDraft(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')handleSaveCriteria(task.id);}} placeholder="补写可核对的验收标准" className="flex-1 px-2 py-1 border border-amber-200 rounded text-xs bg-white text-amber-900"/>
+                            <button type="button" onClick={()=>handleSaveCriteria(task.id)} disabled={!criteriaDraft.trim()||actionLocked} className="shrink-0 px-2 py-1 bg-amber-600 text-white rounded text-xs hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed">补填验收标准</button>
+                          </div>
+                        )}
                       </div>
                     ) : acceptanceCheck.reason === 'no_user_criteria' ? (
                       // zx_20260916 M1（维特根斯坦·家族相似 / 道德经·七十一章「知不知，上」）:
@@ -1645,15 +1714,21 @@ export default function TaskDetailPage() {
                           <button type="button" title="打开子任务" onClick={()=>navigate(`/tasks/${c.id}`)} className="shrink-0 text-gray-400 hover:text-blue-600">↗</button>
                         </div>
                         {/* zx_20261011_4 M4: 远端回传摘要下钻——如实标注 N5 边界（远端自报 ≠ 本机复核） */}
-                        {c.remote && openRemote===c.id && (
-                          <div className="text-[11px] text-gray-500 bg-indigo-50/60 border border-indigo-100 rounded px-2 py-1 ml-2 mb-1">
-                            <span className="text-indigo-700">{REMOTE_RESULT_CAVEAT}</span>
-                            {c.remote.summary
-                              ? <span> · 远端摘要：{c.remote.summary}</span>
-                              : <span> · 远端尚未回传摘要</span>}
-                            {c.remote.resultAt && <span className="ml-1 text-gray-400">（回传于 {c.remote.resultAt}）</span>}
-                          </div>
-                        )}
+                        {/* zx_20261030_1 M4：回执核对三态（核对通过/自报不全/核对失败）；旧行无回执 ⇒ 回落旧边界话 */}
+                        {c.remote && openRemote===c.id && (() => {
+                          const receipt = remoteReceiptOf(c.remote.result);
+                          const noteCls = receipt?.verdict === 'verified' ? 'text-emerald-700'
+                            : receipt?.verdict === 'failed' ? 'text-red-600' : 'text-indigo-700';
+                          return (
+                            <div className="text-[11px] text-gray-500 bg-indigo-50/60 border border-indigo-100 rounded px-2 py-1 ml-2 mb-1">
+                              <span className={noteCls}>{remoteResultNote(c.remote.result)}</span>
+                              {c.remote.summary
+                                ? <span> · 远端摘要：{c.remote.summary}</span>
+                                : <span> · 远端尚未回传摘要</span>}
+                              {c.remote.resultAt && <span className="ml-1 text-gray-400">（回传于 {c.remote.resultAt}）</span>}
+                            </div>
+                          );
+                        })()}
                         </Fragment>
                       );
                     })}
@@ -1745,6 +1820,19 @@ export default function TaskDetailPage() {
                 </div>
                 {showContext && (
                   <div className="mt-3 pt-3 border-t space-y-2">
+                    {/* zx_20261030_2 M7: 形态手动覆盖（六档 + 按默认）；只影响下一次运行 */}
+                    <div>
+                      <label className="text-xs font-medium">执行形态（覆盖）</label>
+                      <select
+                        value={archetypeOverride}
+                        onChange={(e) => { void handleArchetypeOverride(e.target.value); }}
+                        className="w-full px-2 py-1 border rounded text-xs mt-0.5 bg-white"
+                      >
+                        <option value="">按默认（自动判定）</option>
+                        {ARCHETYPE_OVERRIDE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                      </select>
+                      <p className="text-[10px] text-gray-500 mt-0.5">仅对下一次运行生效，不影响本轮已落的账。</p>
+                    </div>
                     <div className="grid grid-cols-2 gap-2">
                       <div><label className="text-xs font-medium">Token 预算</label><input type="number" value={ctxForm.max_tokens_per_task} onChange={e => setCtxForm({...ctxForm, max_tokens_per_task: e.target.value})} className="w-full px-2 py-1 border rounded text-xs mt-0.5" placeholder="如 100000" /></div>
                       <div><label className="text-xs font-medium">费用预算（¥ 人民币/任务）</label><input type="number" step="0.01" value={ctxForm.max_cost_usd_per_task} onChange={e => setCtxForm({...ctxForm, max_cost_usd_per_task: e.target.value})} className="w-full px-2 py-1 border rounded text-xs mt-0.5" placeholder="留空 = 不设金额闸" /></div>
@@ -1863,7 +1951,15 @@ export default function TaskDetailPage() {
                     // 判据取真函数（不是"内容里有没有某个词"的就地正则），故 M5 之后新增的代拟首标自动跟上。
                     <div key={c.id} className={`p-3 rounded-lg text-sm ${isEngineDraftedTurn(c.content)?'bg-slate-50 ml-4 border border-dashed border-slate-200':c.role==='user'?'bg-blue-50 ml-4':c.role==='assistant'?'bg-gray-50 mr-4':c.role==='system'?'bg-yellow-50 mx-4 text-xs':''}`}>
                       <div className="flex items-center gap-2 mb-1"><span className="text-xs font-medium text-gray-400">{isEngineDraftedTurn(c.content) ? '引擎' : c.role}</span>{c.token_count?<span className="text-xs text-gray-300">{formatToken(c.token_count)} tokens</span>:null}<span className="text-xs text-gray-300">{formatTime(c.created_at)}</span></div>
-                      <p className="whitespace-pre-wrap text-gray-700">{c.content?.slice(0,3000)}{(c.content?.length||0)>3000?'...':''}</p>
+                      {isToolCallRow(c) ? (
+                        // zx_20261030_2 M7: `[工具调用] …` 系统行默认折叠为一行摘要，展开看全文（只动展示，不动数据）
+                        <details className="mt-0.5">
+                          <summary className="cursor-pointer text-xs text-gray-500 truncate" title="点击展开工具调用全文">{(c.content || '').split('\n')[0]!.slice(0, 200)}</summary>
+                          <pre className="whitespace-pre-wrap text-gray-600 mt-1 max-h-60 overflow-y-auto">{c.content}</pre>
+                        </details>
+                      ) : (
+                        <p className="whitespace-pre-wrap text-gray-700">{c.content?.slice(0,3000)}{(c.content?.length||0)>3000?'...':''}</p>
+                      )}
                       {c.tool_calls && <details className="mt-1"><summary className="text-xs text-blue-500 cursor-pointer font-mono">🔧 工具调用</summary><pre className="text-xs text-blue-600 mt-1 bg-blue-50 p-2 rounded overflow-x-auto">{c.tool_calls.slice(0,500)}</pre></details>}
                     </div>
                   ))}

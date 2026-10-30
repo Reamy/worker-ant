@@ -29,6 +29,15 @@ import { countSeats } from './seat-quota.js';
 import { deriveMachineConcurrency, resolveMachineConcurrencyLimit, type AccountingDb } from './task-accounting.js';
 import { tierCatalog, type TierCatalogRow } from './tier-catalog.js';
 import { fetchNodes } from './node-list.js';
+// zx_20261030_1 M5「限」：容量维度的计数与上限（与动作面同一把尺，不另立计数）。
+import {
+  countApprovedTerminals,
+  countDevices,
+  countMaxKnowledgeCardsInAnyProject,
+  countTeamLibraryMemories,
+  type CapacityDb,
+} from './tier-capacity.js';
+import { listA2AServers } from './a2a-runtime.js';
 
 /** 用量里的能力行——逐项取 `tier-catalog` 的本档对照行（键/名/是否包含/升级档位皆不另立）。 */
 export interface TierUsageFeature {
@@ -48,6 +57,14 @@ export interface TierUsageCounts {
   concurrency: { perProjectMax: number; machineLimit: number };
   /** 本机账号（席位）——只数本机 `wa_users`；跨机不可聚合，界面称「本机账号」。 */
   seats: { used: number; limit: number };
+  /** zx_20261030_1 M5「限」：五项容量维度（`limit === 0` = 不限），与动作面的闸同一把尺。 */
+  devices: { used: number; limit: number };
+  externalTerminals: { used: number; limit: number };
+  a2aServers: { used: number; limit: number };
+  /** 团队共享库导入的记忆总条数（`wa_memories(source='team_library')`）。 */
+  teamLibraryMemories: { used: number; limit: number };
+  /** 知识卡按**项目**判容量 ⇒ 取所有项目中单项目最大张数，附该档上限。 */
+  knowledgeCards: { maxInProject: number; limit: number };
   features: TierUsageFeature[];
 }
 
@@ -131,6 +148,15 @@ export function tierUsageCounts(
     projects: { used: db ? countProjects(db) : 0, limit: limits.maxProjects },
     concurrency: { perProjectMax: limits.maxProjectConcurrency, machineLimit: machine },
     seats: { used: db ? countSeats(db) : 0, limit: limits.maxMembers },
+    // 容量维度：无库（浏览器态/演示）一律如实 0；A2A 是运行期内存态，与库无关。
+    devices: { used: db ? countDevices(db as unknown as CapacityDb) : 0, limit: limits.maxDevices },
+    externalTerminals: { used: db ? countApprovedTerminals(db as unknown as CapacityDb) : 0, limit: limits.maxExternalTerminals },
+    a2aServers: { used: listA2AServers().length, limit: limits.maxA2AServers },
+    teamLibraryMemories: { used: db ? countTeamLibraryMemories(db as unknown as CapacityDb) : 0, limit: limits.maxTeamLibraryMemories },
+    knowledgeCards: {
+      maxInProject: db ? countMaxKnowledgeCardsInAnyProject(db as unknown as CapacityDb) : 0,
+      limit: limits.maxKnowledgeCardsPerProject,
+    },
     features: featureRowsOf(tier),
   };
 }
@@ -157,8 +183,17 @@ export function upgradeDifferences(from: LicenseTier, to?: LicenseTier | null): 
   const quotas: string[] = [];
   if (a.maxProjects !== b.maxProjects) quotas.push(b.maxProjects === 0 ? '不限项目' : `${b.maxProjects} 个项目`);
   if (a.maxProjectConcurrency !== b.maxProjectConcurrency) quotas.push(`并发 ${b.maxProjectConcurrency}`);
-  // zx_20261023_1「称」: 升级差异卖**可跨机兑现的**节点数；席位只数本机账号，不作为升级收益列示。
+  // zx_20261023_1「称」: 升级差异卖**可跨机兑现的**节点数。
   if (a.maxNodes !== b.maxNodes) quotas.push(b.maxNodes === 0 ? '不限协同节点' : `${b.maxNodes} 台协同节点`);
+  // zx_20261027_3 M3：本机账号同样是档位实差——此前只用于计数、升级面板看不见。
+  //   措辞沿用「本机账号」（zx_20261023_1 口径），不写「席位」。
+  if (a.maxMembers !== b.maxMembers) quotas.push(b.maxMembers === 0 ? '不限本机账号' : `本机账号 ${b.maxMembers}`);
+  // zx_20261030_1 M5「限」：容量维度同样只列**确实不同**的项（0 = 不限，不写成 "0 台"）。
+  if (a.maxDevices !== b.maxDevices) quotas.push(b.maxDevices === 0 ? '不限设备登记' : `设备登记 ${b.maxDevices} 台`);
+  if (a.maxExternalTerminals !== b.maxExternalTerminals) quotas.push(b.maxExternalTerminals === 0 ? '不限外部终端' : `外部终端 ${b.maxExternalTerminals} 台`);
+  if (a.maxA2AServers !== b.maxA2AServers) quotas.push(b.maxA2AServers === 0 ? '不限 A2A 服务' : `A2A 服务 ${b.maxA2AServers} 个`);
+  if (a.maxKnowledgeCardsPerProject !== b.maxKnowledgeCardsPerProject) quotas.push(b.maxKnowledgeCardsPerProject === 0 ? '不限每项目知识卡' : `每项目知识卡 ${b.maxKnowledgeCardsPerProject} 张`);
+  if (a.maxTeamLibraryMemories !== b.maxTeamLibraryMemories) quotas.push(b.maxTeamLibraryMemories === 0 ? '不限团队共享记忆' : `团队共享记忆 ${b.maxTeamLibraryMemories} 条`);
 
   return { toTier: target, toLabel: TIER_LABEL[target], capabilities, quotas };
 }

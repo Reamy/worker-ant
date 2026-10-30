@@ -1086,9 +1086,18 @@ CREATE INDEX idx_order_payment_trade_no ON t_order_payment (trade_no);
       'M5-S1 **标记一处真源**：字面量 `[快照已截断]` 在 `world-snapshot.ts`（去注释）**恰 1 处**'
       + '（常量定义；产出侧与分派侧都引用它，不各写一份）',
       `实测 ${countOcc(wsCode, "'[快照已截断]'")} 处 · 扫描面 ${wsCode.split('\n').length} 行`);
-    crit('M5', countOcc(wsCode, '[WARN] 世界模型审计') === 1 && countOcc(wsCode, '[INFO] 世界模型审计') === 1,
-      'M5-S2 **两级各一处落点**：审计结论分派到 checks 的 warn 行与 info 行各恰 1 处（不重复、不漏）',
-      `WARN ${countOcc(wsCode, '[WARN] 世界模型审计')} · INFO ${countOcc(wsCode, '[INFO] 世界模型审计')}`);
+    // zx_20261028_2 M1：新增一条**提前返回**支路（before 引用取不到 ⇒ 如实记"未做判定"），
+    //   它是固定整句、不接 issues/infos。故判据从"前缀各 1 处"改钉**分派行的插值形状**：
+    //   分派必须是 `${warns.join` / `${infos.join` 两处、各恰 1；旁支必须是那条固定整句、恰 1；
+    //   且 世界模型审计 的 checks.push 行**总共只有这 3 行**（多一行即旁路，少一行即漏派）。
+    const wsPushLines = wsCode.split('\n').filter((l) => l.includes('checks.push(') && l.includes('世界模型审计'));
+    const wsWarnDispatch = wsPushLines.filter((l) => l.includes('[WARN] 世界模型审计：${warns.join')).length;
+    const wsInfoDispatch = wsPushLines.filter((l) => l.includes('[INFO] 世界模型审计：${infos.join')).length;
+    const wsFixedInfo = wsPushLines.filter((l) => l.includes("'[INFO] 世界模型审计：执行前快照不可读，未做增删判定'")).length;
+    crit('M5', wsWarnDispatch === 1 && wsInfoDispatch === 1 && wsFixedInfo === 1 && wsPushLines.length === 3,
+      'M5-S2 **两级各一处落点 + 旁支固定整句**：warn/info 分派行各恰 1（按插值形状判，合并即破）；'
+      + '不可读旁支是固定整句恰 1（不接 issues/infos）；此类 push 行总数恰 3（不重复、不漏、无旁路）',
+      `分派 WARN ${wsWarnDispatch} · INFO ${wsInfoDispatch} · 旁支 ${wsFixedInfo} · 总数 ${wsPushLines.length}`);
     crit('M5', countOcc(wsCode, 'if (warns.length > 0)') === 2 && wsCode.includes('{ taskId, issues: warns }'),
       'M5-S3 **分派真接上**：入 checks 与写会话两条路各由 `warns.length > 0` 把门，且日志记的是 `warns` 不是全量',
       `守卫 ${countOcc(wsCode, 'if (warns.length > 0)')} 处`);
@@ -1176,10 +1185,16 @@ CREATE INDEX idx_order_payment_trade_no ON t_order_payment (trade_no);
     // ⚠ zx_20260929 M9：**收口门那条调用**随收尾段落到 `core/exec-close.ts` ⇒ 执行体侧取并集（减工具段）。
     //   两处仍**分别**取面、各判"恰一处"：**不得**整份换成含工具段的 `engineSrc()`——
     //   finalize 门那处（M8 后落在 `control-finalize.ts`）会被同时计进两侧，从"各一处"退化成"合计 ≥1"，是放宽。
-    crit('M7', countOcc(execSideCode, 'validateOutput(ansClient as never, abs, arch)') === 1
-      && countOcc(controlCode, 'validateOutput(ansClient as never, abs, arch)') === 1,
-      'M7-I **两条门禁同形**：收口门（执行体侧）与 finalize 门（工具侧）都只传 (client, 文件, 判型)，其后无任何题面参数',
-      `收口 ${countOcc(execSideCode, 'validateOutput(ansClient as never, abs, arch)')} 处 · finalize ${countOcc(controlCode, 'validateOutput(ansClient as never, abs, arch)')} 处 · 扫描面 ${execSideLines}+${controlCode.split('\n').length} 行`);
+    // zx_20261028_2 M3 **就地改钉（非放宽）**：逐文件串行（单文件各 30s abort）改为有界并发的一批问完。
+    //   旧形状 `validateOutput(client, abs, arch)` 在新码里**必须为 0**——两侧都只走批量面、各恰 1 处；
+    //   "批量恰 1 且直呼恰 0" 比旧"直呼恰 1"约束更强（不会退化成"既批量又逐个"）。
+    const batchCall = (code: string) => countOcc(code, 'validateOutputs(ansClient as never, ');
+    const perFileCall = (code: string) => countOcc(code, 'validateOutput(ansClient as never, ');
+    crit('M7', batchCall(execSideCode) === 1 && batchCall(controlCode) === 1
+      && perFileCall(execSideCode) === 0 && perFileCall(controlCode) === 0,
+      'M7-I **两条门禁同形**：收口门（执行体侧）与 finalize 门（工具侧）都只走一次有界并发的批量校验，'
+      + '判型随每条目标走、其后无任何题面参数；逐文件直呼 `validateOutput` 已全部离场',
+      `收口 批量${batchCall(execSideCode)}/直呼${perFileCall(execSideCode)} · finalize 批量${batchCall(controlCode)}/直呼${perFileCall(controlCode)} · 扫描面 ${execSideLines}+${controlCode.split('\n').length} 行`);
     // ⚠ 判据须认得"车牌照"，不是"这几个字"：`SELECT title, description FROM wa_tasks` 在
     //   `control-finalize.ts`（M8 后 finalize 门所在）里另有 4 处**正当**用途（验收标准 / 任务行查询 …），拿它扫全文件必得一片假红。
     //   故**按符号切块**到那条门禁自身（起于 `const finalizeTargets`，止于该 `try` 的 `catch`），
@@ -1194,10 +1209,11 @@ CREATE INDEX idx_order_payment_trade_no ON t_order_payment (trade_no);
     const iF7End = controlCode.indexOf('const failedPend = failedChildren(db, taskId);');
     const gate7 = iF7 < 0 || iF7End < iF7 ? '' : controlCode.slice(iF7, iF7End);
     crit('M7', gate7.length > 300
-      && countOcc(gate7, 'validateOutput(ansClient as never, abs, arch)') === 1,
-      'M7-J **扫描面自证**：切块对准了那条门禁本身（含唯一的收口门调用点、块长 > 300 字符）'
+      && countOcc(gate7, 'validateOutputs(ansClient as never, ') === 1
+      && countOcc(gate7, 'validateOutput(ansClient as never, ') === 0,
+      'M7-J **扫描面自证**：切块对准了那条门禁本身（含唯一的批量校验调用点、块长 > 300 字符）'
       + '——切错块/切空会让下一条断言假绿',
-      `块长 ${gate7.length} 字符 · 块内调用 ${countOcc(gate7, 'validateOutput(ansClient as never, abs, arch)')} 处`);
+      `块长 ${gate7.length} 字符 · 块内批量调用 ${countOcc(gate7, 'validateOutputs(ansClient as never, ')} 处 · 直呼 ${countOcc(gate7, 'validateOutput(ansClient as never, ')} 处`);
     crit('M7', countOcc(gate7, 'fText') === 0 && countOcc(gate7, 'fRow') === 0
       && countOcc(gate7, 'SELECT title, description FROM wa_tasks') === 0,
       'M7-J **为取题面而多查的那次库查询一并拆除**——门禁块内不留"读了不用"的死输入'

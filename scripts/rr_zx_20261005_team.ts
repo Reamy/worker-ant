@@ -8,8 +8,9 @@
  * ─────────────────────────────────────────────────────────────────────────────
  * §M22 判据（批六）——「Team 档软闸」（管子·度量衡 / 维特根斯坦·同一把尺）。
  *   **一处真源** `core/team-gate.ts`（零 electron，rr 直跑）：`resolveTeamGate` / `teamFeatureRefusal`。
- *   解锁 ⇔ 生效档位为 Team **或** 试用期内（`kind === 'trial'`）——试用档位落 pro，
- *   故判据须**特判 kind**，不能只看 `tier === 'team'`（否则试用被误锁，与裁定相反）。
+ *   解锁 ⇔ 生效档位为 Team **或** 试用期内（`kind === 'trial'`）——试用授予档由价目表
+ *   `trial.grantsTier` 宣称（zx_20261027_3 M3 起为 team），故判据仍**特判 kind**，
+ *   不只看 `tier === 'team'`（否则将来换授予档即被误锁，与裁定相反）。
  *   三态**两侧标本**：无许可/Pro（非试用）⇒ 锁；试用/Team ⇒ 放行。
  *   三处接线（index.ts 启动 / nodes.ipc / devices.ipc / tools/device.ts）各**只调它**，不另写档位判断。
  *
@@ -39,6 +40,8 @@ import { isNodeEnrolled } from '../apps/worker-ant-desktop/src/main/core/node-he
 import {
   NODE_SETTING_KEYS, ensureNodeIdentity, writeNodeSetting, type NodeSettingDb,
 } from '../apps/worker-ant-desktop/src/main/core/node-identity.js';
+// zx_20261027_3 M3「试得真」：试用授予档以价目表为真源（`trial.grantsTier`），本脚本按它派生期望。
+import { tierCatalog } from '../apps/worker-ant-desktop/src/main/core/tier-catalog.js';
 
 let pass = 0; let fail = 0;
 
@@ -77,8 +80,10 @@ const TEST_PUBLIC_PEM = TEST_KEYS.publicKey.export({ type: 'spki', format: 'pem'
 
 const NOW = new Date('2026-10-05T00:00:00.000Z');
 const FP = 'AAAA-BBBB-CCCC-DDDD';
+// zx_20261029_2 M6：Team 件**带到期**（生产签发形状）——`verifyLicense` 现已拒永久 Team；
+//   固定写远期（不随墙钟漂）以免断言只在某时间窗为真。
 const payload = (over: Partial<LicensePayload> = {}): LicensePayload => ({
-  v: 1, tier: 'team', subject: '测试被许可人', issuedAt: '2026-10-01T00:00:00.000Z', expiresAt: null, devices: [], ...over,
+  v: 1, tier: 'team', subject: '测试被许可人', issuedAt: '2026-10-01T00:00:00.000Z', expiresAt: '2099-01-01T00:00:00.000Z', devices: [], ...over,
 });
 const sign = (p: LicensePayload): string => encodeLicense(p, TEST_PRIVATE_PEM);
 
@@ -94,13 +99,13 @@ function main(): void {
     ok(!!refNone && refNone.includes(TIER_LABEL.community),
       'M22-2 ★拒因**如实**：含档位名（由 `TIER_LABEL` 真源派生，不抄字面量）', refNone ?? '');
 
-    // ── 开的一侧之一：试用期（tier 落 pro，故须特判 kind） ──
+    // ── 开的一侧之一：试用期（zx_20261027_3 M3 起授予档落 `trial.grantsTier`；判据仍特判 kind） ──
     const trialDb = licDb({ [LICENSE_SETTING_KEYS.trialStartedAt]: new Date(NOW.getTime() - 86_400_000).toISOString() });
     const gTrial = resolveTeamGate(trialDb, { now: NOW, fingerprint: FP });
-    eq([gTrial.unlocked, gTrial.tier], [true, 'pro'],
-      'M22-3 ★★试用中（tier=pro、kind=trial）⇒ **放行**（若判据只看 tier===\'team\'，这条即红——与裁定相反）');
+    eq([gTrial.unlocked, gTrial.tier], [true, tierCatalog().trial.grantsTier],
+      'M22-3 ★★试用中（kind=trial、tier＝价目表宣称的授予档）⇒ **放行**（判据仍特判 kind，不随档位字样漂移）');
     eq(teamFeatureRefusal(trialDb, 'device_control', { now: NOW, fingerprint: FP }), null,
-      'M22-4 ★试用放行证：`teamFeatureRefusal` 返回 null（试用＝专业版能力，本轮明令放行）');
+      'M22-4 ★试用放行证：`teamFeatureRefusal` 返回 null（试用＝团队版能力，本轮明令放行）');
 
     // ── 开的一侧之二：Team 许可 ──
     const teamDb = licDb({ [LICENSE_SETTING_KEYS.key]: sign(payload({ tier: 'team' })) });
@@ -113,7 +118,8 @@ function main(): void {
     const gPro = resolveTeamGate(proDb, { now: NOW, fingerprint: FP, publicKeyPem: TEST_PUBLIC_PEM });
     eq([gPro.unlocked, gPro.tier], [false, 'pro'],
       'M22-6 ★★两侧标本：Pro 许可（非试用）⇒ **锁定**（若判据写成"非 community 即放行"，这条即红）');
-    const refPro = teamFeatureRefusal(proDb, 'device_discovery', { now: NOW, fingerprint: FP, publicKeyPem: TEST_PUBLIC_PEM });
+    // zx_20261029_2 M6：`device_discovery` 已移往 Pro 闸；此处改钉 Team 的 `device_control`（同一意图：Pro 被拒且文案含当前档位）。
+    const refPro = teamFeatureRefusal(proDb, 'device_control', { now: NOW, fingerprint: FP, publicKeyPem: TEST_PUBLIC_PEM });
     ok(!!refPro && refPro.includes(TIER_LABEL.pro),
       'M22-7 拒因指向**当前**档位（Pro 的被拒文案含"专业版"，不拿团队版文案糊弄）', refPro ?? '');
 
@@ -131,7 +137,8 @@ function main(): void {
     //   **按新载体重定向**（逐成员枚举 + 逐成员人话名，**不放宽**）：新增一员即须同时在
     //   `TEAM_FEATURE_LABEL` 补人话名、穷举其接线与面板落点（承 feedback_retarget_assertions_to_stronger_source；
     //   G-5 读**原文**）。原来是"恰三项"的幻数计数——换成逐成员枚举后，加/删任一员都红。
-    const TEAM_MEMBERS = ['multi_node', 'device_discovery', 'device_control', 'external_terminal', 'audit_view', 'audit_export', 'team_library', 'project_profile_share'] as const;
+    // zx_20261029_2 M6：`device_discovery` **移出** Team 词表（归 Pro）；此处逐成员核对 8→7。
+    const TEAM_MEMBERS = ['multi_node', 'device_control', 'external_terminal', 'audit_view', 'audit_export', 'team_library', 'project_profile_share'] as const;
     eq([...TEAM_FEATURES], [...TEAM_MEMBERS],
       'M22-9 ★能力词表**逐成员枚举**（唯一定义处；新增一员须补人话名 + 穷举接线/面板落点）');
     for (const f of TEAM_MEMBERS) {
@@ -164,7 +171,8 @@ function main(): void {
     //   zx_20261018_1 批一再 +1（confirm-auto-dispatch，首次入网引导的**写口**——写"建单即派"设置，同属 multi_node）
     //   ——**重定向到新真源**（与设备出口同一范式），
     //   非放宽：逐 handler 取体核闸、逐成员枚举回码，新增写口漏闸即红（承 feedback_retarget_assertions_to_stronger_source）。
-    const NODE_GATED = ['nodes:update', 'nodes:enroll', 'nodes:request-token', 'nodes:dispatch', 'nodes:answer-question', 'nodes:delete', 'nodes:confirm-auto-dispatch'];
+    //   zx_20261030_1 M3 再 +1（request-cancel，叫停是协同动作，同属 multi_node——此前漏登，本套件首跑即红）。
+    const NODE_GATED = ['nodes:update', 'nodes:enroll', 'nodes:request-token', 'nodes:dispatch', 'nodes:answer-question', 'nodes:delete', 'nodes:confirm-auto-dispatch', 'nodes:request-cancel'];
     const nodeBodyOf = (h: string): string => {
       const i = NIPC.indexOf(`ipcMain.handle('${h}'`);
       if (i < 0) return '';
@@ -182,8 +190,13 @@ function main(): void {
       NODE_GATED.map((h) => `${h}=${nodeBodyOf(h).includes("code: 'TEAM_REQUIRED'")}`).join(' · '));
     eq((NIPC.match(/code: 'TEAM_REQUIRED'/g) ?? []).length, NODE_GATED.length,
       'M22-16b 回码总数＝动作出口数（由 `NODE_GATED.length` 派生——多一处（漏闸仍有回码）或少一处（闸内不回码）皆红）');
-    eq((NIPC.match(/resolveTeamGate\(licDb\)/g) ?? []).length, 2,
-      'M22-17 `nodes:list` / `nodes:card` **各算一次** gate（只读出口带 gate；锁定即不触 ANS）');
+    // zx_20261030_1 M4：`nodes:cluster` 也是只读出口（同一把尺：锁定即不触 ANS）⇒ 逐出口枚举，非幻数。
+    const NODE_READ_GATED = ['nodes:list', 'nodes:card', 'nodes:cluster'];
+    ok(NODE_READ_GATED.every((h) => nodeBodyOf(h).includes('resolveTeamGate(licDb)')),
+      'M22-17 `nodes:list` / `nodes:card` / `nodes:cluster` **各算一次** gate（只读出口带 gate；锁定即不触 ANS）',
+      NODE_READ_GATED.map((h) => `${h}=${nodeBodyOf(h).includes('resolveTeamGate(licDb)')}`).join(' · '));
+    eq((NIPC.match(/resolveTeamGate\(licDb\)/g) ?? []).length, NODE_READ_GATED.length,
+      'M22-17b gate 计算总数＝只读出口数（由枚举派生——多一处（白算）或少一处（漏带 gate）皆红）');
 
     // ── devices IPC：动作出口各一道闸 + 只读出口带 gate ──
     // zx_20261017_1 批八重定向（承 feedback_retarget_assertions_to_stronger_source：改钉更强的新真源，不放宽）：
@@ -193,13 +206,18 @@ function main(): void {
     //   由幻数计数改为**逐 handler 枚举 + 逐 handler 核对档位映射**（多一处漏闸 / 映射错档皆红）。
     //   zx_20261023_5 批三再 +1：`devices:miio_token` 的**写**支（落凭据、开控制通道）同属 Team「设备控制」；
     //   只读支（查"有没有/是否密文"）不设闸——故该 handler 体里恰出现一次闸。⇒ 5→6。
-    const DEVICE_GATED: Array<[string, string]> = [
-      ['devices:discover', 'device_discovery'],
+    // zx_20261029_2 M6「阶梯」：拆成两组——**发现/云同步归 Pro**（`device_discovery`，回 `PRO_REQUIRED`），
+    //   **授权/控制/意图执行/token 写口归 Team**（`device_control`，回 `TEAM_REQUIRED`）。
+    //   两组各自逐 handler 枚举 + 逐条核对闸函数与回码，不合并成一句"设备能力"。
+    const DEVICE_TEAM_GATED: Array<[string, string]> = [
       ['devices:authorize', 'device_control'],
       ['devices:control', 'device_control'],
-      ['devices:cloud_sync', 'device_discovery'],
       ['devices:intent_execute', 'device_control'],
       ['devices:miio_token', 'device_control'],
+    ];
+    const DEVICE_PRO_GATED: Array<[string, string]> = [
+      ['devices:discover', 'device_discovery'],
+      ['devices:cloud_sync', 'device_discovery'],
     ];
     const deviceBodyOf = (h: string): string => {
       const i = DIPC.indexOf(`ipcMain.handle('${h}'`);
@@ -207,17 +225,28 @@ function main(): void {
       const j = DIPC.indexOf('ipcMain.handle(', i + 10);
       return DIPC.slice(i, j < 0 ? DIPC.length : j);
     };
-    const deviceGateOf = (h: string, f: string): boolean => deviceBodyOf(h).includes(`teamFeatureRefusal(licDb, '${f}')`);
-    ok(DEVICE_GATED.every(([h, f]) => deviceGateOf(h, f)),
-      'M22-18 ★设备动作出口**逐 handler 枚举**且档位映射正确（discover/cloud_sync→device_discovery；authorize/control→device_control——漏一处＝可绕过的尺）',
-      DEVICE_GATED.map(([h, f]) => `${h}=${deviceGateOf(h, f)}`).join(' · '));
-    eq((DIPC.match(/teamFeatureRefusal\(/g) ?? []).length, DEVICE_GATED.length,
-      'M22-18b 闸总数＝枚举出的动作出口数（多一处漏闸仍回码 / 少一处闸内不回码皆红）');
-    ok(DEVICE_GATED.every(([h]) => deviceBodyOf(h).includes("code: 'TEAM_REQUIRED'")),
-      'M22-19 ★每道设备动作闸**逐 handler 如实回** `TEAM_REQUIRED`（钉 `code:` 调用形状）',
-      DEVICE_GATED.map(([h]) => `${h}=${deviceBodyOf(h).includes("code: 'TEAM_REQUIRED'")}`).join(' · '));
-    eq((DIPC.match(/code: 'TEAM_REQUIRED'/g) ?? []).length, DEVICE_GATED.length,
-      'M22-19b 回码总数＝设备动作出口数（由枚举派生）');
+    const deviceTeamGateOf = (h: string, f: string): boolean => deviceBodyOf(h).includes(`teamFeatureRefusal(licDb, '${f}')`);
+    const deviceProGateOf = (h: string, f: string): boolean => deviceBodyOf(h).includes(`proFeatureRefusal(licDb, '${f}')`);
+    ok(DEVICE_TEAM_GATED.every(([h, f]) => deviceTeamGateOf(h, f)),
+      'M22-18 ★设备**控制**出口逐 handler 枚举且映射 Team 闸（authorize/control/intent_execute/miio_token→device_control）',
+      DEVICE_TEAM_GATED.map(([h, f]) => `${h}=${deviceTeamGateOf(h, f)}`).join(' · '));
+    ok(DEVICE_PRO_GATED.every(([h, f]) => deviceProGateOf(h, f)),
+      'M22-18c ★设备**发现**出口逐 handler 枚举且映射 Pro 闸（discover/cloud_sync→device_discovery）',
+      DEVICE_PRO_GATED.map(([h, f]) => `${h}=${deviceProGateOf(h, f)}`).join(' · '));
+    eq((DIPC.match(/teamFeatureRefusal\(/g) ?? []).length, DEVICE_TEAM_GATED.length,
+      'M22-18b Team 闸总数＝枚举出的控制出口数（多一处漏闸仍回码 / 少一处闸内不回码皆红）');
+    eq((DIPC.match(/proFeatureRefusal\(/g) ?? []).length, DEVICE_PRO_GATED.length,
+      'M22-18d Pro 闸总数＝枚举出的发现出口数（同上，由枚举派生）');
+    ok(DEVICE_TEAM_GATED.every(([h]) => deviceBodyOf(h).includes("code: 'TEAM_REQUIRED'")),
+      'M22-19 ★每道设备控制闸**逐 handler 如实回** `TEAM_REQUIRED`（钉 `code:` 调用形状）',
+      DEVICE_TEAM_GATED.map(([h]) => `${h}=${deviceBodyOf(h).includes("code: 'TEAM_REQUIRED'")}`).join(' · '));
+    eq((DIPC.match(/code: 'TEAM_REQUIRED'/g) ?? []).length, DEVICE_TEAM_GATED.length,
+      'M22-19b 回码总数＝设备控制出口数（由枚举派生）');
+    ok(DEVICE_PRO_GATED.every(([h]) => deviceBodyOf(h).includes("code: 'PRO_REQUIRED'")),
+      'M22-19c ★每道设备发现闸**逐 handler 如实回** `PRO_REQUIRED`',
+      DEVICE_PRO_GATED.map(([h]) => `${h}=${deviceBodyOf(h).includes("code: 'PRO_REQUIRED'")}`).join(' · '));
+    eq((DIPC.match(/code: 'PRO_REQUIRED'/g) ?? []).length, DEVICE_PRO_GATED.length,
+      'M22-19d Pro 回码总数＝设备发现出口数（由枚举派生）');
     // zx_20261023_5 批三：只读出口 +2（渠道目录 / 渠道预检向导要用 gate 决定"列不列"）⇒
     //   由幻数 1 改为**逐只读出口枚举**：每个都算一次 gate，且总数与枚举数相等（多一处漏算/少一处多算皆红）。
     const DEVICE_GATE_READERS = ['devices:list', 'devices:channels', 'devices:channel_auth'];
@@ -226,6 +255,12 @@ function main(): void {
       DEVICE_GATE_READERS.map((h) => `${h}=${deviceBodyOf(h).includes('resolveTeamGate(licDb)')}`).join(' · '));
     eq((DIPC.match(/resolveTeamGate\(licDb\)/g) ?? []).length, DEVICE_GATE_READERS.length,
       'M22-20b gate 计算总数＝只读出口枚举数（由枚举派生）');
+    // zx_20261029_2 M6：同样三个只读出口**另带 Pro 闸**（面板分别显示"看不了/动不了"）。
+    ok(DEVICE_GATE_READERS.every((h) => deviceBodyOf(h).includes('resolveProGate(licDb)')),
+      'M22-20c 只读出口逐 handler 枚举：台账/渠道目录/渠道预检各回 `discoveryGate`（Pro 闸）',
+      DEVICE_GATE_READERS.map((h) => `${h}=${deviceBodyOf(h).includes('resolveProGate(licDb)')}`).join(' · '));
+    eq((DIPC.match(/resolveProGate\(licDb\)/g) ?? []).length, DEVICE_GATE_READERS.length,
+      'M22-20d Pro gate 计算总数＝只读出口枚举数（由枚举派生）');
 
     // ── 工具体：闸在入口，K-6 编排不动 ──
     // zx_20261018_1 批五：新增 `device_intent` 工具（意图落计划并立即执行）——同为 Team「设备控制」写口
@@ -273,7 +308,8 @@ function main(): void {
       'M22-24 渲染层引 main 真源 `team-gate`（**仅类型**，打包期擦除——不手抄镜像一份）');
     // zx_20261023_5 批三：渠道目录/预检两个回包也带 gate（向导据此决定"列不列"）⇒ 3→5；
     //   由幻数改为**逐 payload 枚举 + 总数相等**（新增回包漏带 gate 即红）。
-    const GATED_PAYLOADS = ['NodesListPayload', 'NodeCardPayload', 'DevicesListPayload', 'DeviceChannelsPayload', 'DeviceChannelAuthPayload'];
+    // zx_20261030_1 M4：集群聚合回包同样带 gate（锁定档也要能"看得见"集群概览的锁定态）⇒ 5→6。
+    const GATED_PAYLOADS = ['NodesListPayload', 'NodeCardPayload', 'DevicesListPayload', 'DeviceChannelsPayload', 'DeviceChannelAuthPayload', 'NodesClusterPayload'];
     ok(GATED_PAYLOADS.every((name) => {
       const i = RIPC.indexOf(`export interface ${name} `);
       if (i < 0) return false;

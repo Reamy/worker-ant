@@ -29,13 +29,14 @@ export function liveStateOf(status: Record<string, unknown> | null | undefined):
     state: typeof live.state === 'string' ? live.state : '',
     attributes: attrs != null && typeof attrs === 'object' && !Array.isArray(attrs) ? (attrs as Record<string, unknown>) : {},
     at: typeof live.at === 'string' ? live.at : '',
-    source: live.source === 'attributes' ? 'attributes' : 'state',
+    source: live.source === 'attributes' ? 'attributes' : live.source === 'provider' ? 'provider' : 'state',
     ...(typeof live.attributes_error === 'string' && live.attributes_error ? { attributes_error: live.attributes_error } : {}),
   };
 }
 
-/** 上行消息的**来源人话**（工具与面板同一句；不写"设备在线"——那是可用性主题的事）。 */
+/** 状态**来源人话**（工具与面板同一句；不写"设备在线"——那是可用性主题的事）。 */
 export function liveSourceLabel(source: DeviceLiveState['source']): string {
+  if (source === 'provider') return '直查 · 云 Provider / 米家 miIO';
   return source === 'attributes' ? 'MQTT 订阅 · 属性主题（jattr）' : 'MQTT 订阅 · 状态主题（state）';
 }
 

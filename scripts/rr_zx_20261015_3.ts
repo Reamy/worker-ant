@@ -73,6 +73,7 @@ const SELF_ROUND = path.basename(__filename).replace(/^rr_/, '').replace(/\.ts$/
 const SCHEMA = `
 CREATE TABLE wa_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT DEFAULT (datetime('now')));
 CREATE TABLE wa_devices (id TEXT PRIMARY KEY, name TEXT DEFAULT '', alias TEXT DEFAULT '', room TEXT DEFAULT '', kind TEXT DEFAULT 'unknown',
+  kind_class TEXT NOT NULL DEFAULT '',
   protocol TEXT NOT NULL, address TEXT NOT NULL, port INTEGER, capabilities_json TEXT DEFAULT '[]',
   controllable INTEGER DEFAULT 0, authorized INTEGER DEFAULT 0, status_json TEXT,
   first_seen TEXT DEFAULT (datetime('now')), last_seen TEXT DEFAULT (datetime('now')), online INTEGER);

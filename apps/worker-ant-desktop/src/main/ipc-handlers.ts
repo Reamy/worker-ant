@@ -2,6 +2,15 @@ import { ipcMain, safeStorage } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
 import type { AnsClient } from '@worker-ant/ans-client';
+import { proFeatureRefusal } from './core/pro-gate.js';
+import type { LicenseSettingDb } from './core/license.js';
+
+/**
+ * zx_20261029_2 M6：插件**安装**是专业版能力（`pro-gate.ts` 的 `plugin_install`）。
+ *   闸只拦这一跳；浏览/搜索/详情/卸载/启停不挂闸（社区档照样看得到整市场）。
+ *   路径形状写死成正则而非 `path.includes`——`/api/v1/plugins/x/uninstall` 之类不得被误伤。
+ */
+const PLUGIN_INSTALL_PATH = /^\/api\/v1\/plugins\/[^/?#]+\/install(?:\?.*)?$/;
 
 const TOKEN_KEY = 'wa_access_token';
 const REFRESH_KEY = 'wa_refresh_token';
@@ -60,6 +69,13 @@ export function registerIpcHandlers(): void {
   });
 
   async function ansCall(method: 'get'|'post'|'put'|'delete', path: string, body?: unknown) {
+    // zx_20261029_2 M6：**先闸后发**——档位不够时不把请求递给 ANS（否则远端先装了、本地再拒，
+    //   账就烂了）。判据取 `pro-gate.ts` 一处真源；`_dbForAns` 尚未就绪（null）按 community 处理，
+    //   与 `resolveLicenseState` 的 fail-open 同向：锁能力，不崩产品。
+    if (method === 'post' && PLUGIN_INSTALL_PATH.test(path)) {
+      const refusal = proFeatureRefusal(_dbForAns as LicenseSettingDb | null, 'plugin_install');
+      if (refusal) return { error: { code: 'PRO_REQUIRED', message: refusal } };
+    }
     try {
       const ans = await getAnsClient();
       if (method === 'get' || method === 'delete') return await ans[method](path);

@@ -1466,10 +1466,14 @@ CREATE TABLE wa_jobs (
     //   仅按新分布回填文件数与落点（病根=手写 exclude，未动）。
     //   zx_20261018_2 批七：巩固簇迁至 `core/memory-consolidation.ts`，两个调用点随之搬家
     //   （memory-manager 12→10、memory-consolidation 0→2）——同样**总量与"零手写"两钉不变**，仅回填分布。
-    crit('M6', totalHits === 20 && defHits === 1 && callFiles.length === 7 && handWritten.length === 0,
-      'M6-4 **档的唯一真源**：去注释面 `auxModelRequest(` 全 `src/main` 恰 **20** 处 = **1 定义 + 19 调用**，'
-      + '调用点落在 **7 个文件**（agent-executor 3 / memory-consolidation 2 / memory-kg 1 / memory-manager 10 / output-validator 1 / jobs 1 / task-decompose 1），'
-      + '且**除档自身外零处**手写 `excludeCapabilities: [\'reasoning\']`——病根正是这 19 处曾各写一份、'
+    //   zx_20261029_1「知」：新增辅助路调用点 `core/project-brief-job.ts`（读仓生成项目须知，balanced）
+    //   ⇒ 总量 20→21（定义仍 1、调用 20）、文件数 7→8；**"零手写 exclude"这一定钉不变**。
+    //   zx_20261029_2「通」：新增辅助路调用点 `core/intent-model-plan.ts`（规则未中时由模型出计划）
+    //   ⇒ 总量 21→22（定义仍 1、调用 21）、文件数 8→9；**"零手写 exclude"这一定钉不变**。
+    crit('M6', totalHits === 22 && defHits === 1 && callFiles.length === 9 && handWritten.length === 0,
+      'M6-4 **档的唯一真源**：去注释面 `auxModelRequest(` 全 `src/main` 恰 **22** 处 = **1 定义 + 21 调用**，'
+      + '调用点落在 **9 个文件**（agent-executor 3 / memory-consolidation 2 / memory-kg 1 / memory-manager 10 / output-validator 1 / jobs 1 / task-decompose 1 / project-brief-job 1 / intent-model-plan 1），'
+      + '且**除档自身外零处**手写 `excludeCapabilities: [\'reasoning\']`——病根正是这些调用处曾各写一份、'
       + '与主路口径互斥；**数字是钉**：新加调用点会让此处变红，逼人回来确认它确实走了本档',
       `扫描面 ${m6src.length} 个 .ts；总命中 ${totalHits}（定义 ${defHits} + 调用 ${totalHits - defHits}）；`
       + `分布 ${callFiles.map((s) => `${s.rel}=${s.n}`).join(' ')}；手写 exclude 违规 ${handWritten.length} 处${handWritten.length ? `：${handWritten.join(', ')}` : ''}`);

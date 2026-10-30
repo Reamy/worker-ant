@@ -27,9 +27,11 @@ import type { AppliedDomainPack } from './domain-pack.js';
 import { readProjectProfile } from './project-profile.js';
 import type { StoredProjectProfile } from './project-profile.js';
 // zx_20261023_5 批二: 知识蒸馏卡的**消费侧读口**（薄委托）；Pro 闸与选卡算法只在 `knowledge-cards.ts` 一处。
-import { listActiveKnowledgeCards, KNOWLEDGE_CARD_FEATURE } from './knowledge-cards.js';
-import type { KnowledgeCard } from './knowledge-cards.js';
+import { cardOutcomeStats, listActiveKnowledgeCards, KNOWLEDGE_CARD_FEATURE } from './knowledge-cards.js';
+import type { CardOutcomeStat, KnowledgeCard } from './knowledge-cards.js';
 import { proFeatureRefusal } from './pro-gate.js';
+// zx_20261029_1「知」: 预读带一句项目须知概述（读不到就照旧，不因缺须知而少预读）。
+import { loadProjectBrief } from './project-brief.js';
 // zx_20260930 M5: 复盘的**提示词**由 `memory-write.ts` 的纯函数定（按终态分叉 + 无事实则不编），
 //   本文件不再就地拼一段"只认成功"的提示词。类型 `FailureRecord` 亦取自那里。
 import { buildTaskReviewPrompt, failureAnchors, isAttributable } from './memory-write.js';
@@ -786,6 +788,14 @@ export class MemoryManager {
   }
 
   /**
+   * zx_20261027_3 M6a: 本项目知识卡的**使用成效**（按卡 id）——注入侧据此微调排序。
+   * 薄委托到 `knowledge-cards.ts`；只读、不过档位闸（无卡时列表为空，成效自然用不上）。
+   */
+  knowledgeCardStats(projectId: string): Map<string, CardOutcomeStat> {
+    return cardOutcomeStats(this.db, projectId);
+  }
+
+  /**
    * zx_20261021_3 批一: 某项目**已启用**的领域包（按启用时序；坏包跳过）。
    * 薄委托到 `domain-pack.ts`——本模块不另抄 SQL/解析。
    */
@@ -1424,7 +1434,7 @@ export class MemoryManager {
    * 池上界是**硬界**而非那把尺：它在"单任务记满 WM_POOL_CAP 条"时才触发（正常任务远不到），
    * 触发时按值淘汰（不是任意/最旧）。注入侧的**焦点择要**另在 `memory-context.ts` 落账。
    */
-  addWorkingMemory(taskId: string, content: string): void {
+  addWorkingMemory(taskId: string, content: string, evidence?: { file_path?: string; verified?: boolean }): void {
     try {
       const row = this.db.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get(taskId) as { context_json: string } | undefined;
       if (!row) return;
@@ -1433,8 +1443,19 @@ export class MemoryManager {
       const text = content.slice(0, 500);
       const ts = new Date().toISOString();
       const hit = wm.find((w) => w.content === text);
-      if (hit) { hit.n = (hit.n ?? 1) + 1; hit.ts = ts; }
-      else wm.push({ content: text, ts, n: 1 });
+      if (hit) {
+        hit.n = (hit.n ?? 1) + 1;
+        hit.ts = ts;
+        // zx_20261027_1 M5: 复述可给出处，但**只升不降**——已核验的结论不会因再记一次（无出处）被降级。
+        if (evidence?.file_path && !hit.file_path) hit.file_path = evidence.file_path;
+        if (evidence?.verified) hit.verified = true;
+      } else {
+        wm.push({
+          content: text, ts, n: 1,
+          ...(evidence?.file_path ? { file_path: evidence.file_path } : {}),
+          ...(evidence?.verified ? { verified: true } : {}),
+        });
+      }
       if (wm.length > WM_POOL_CAP) {
         const ranked = rankWorkingMemory(wm, {
           taskText: this.getTaskText(taskId), keywordsOf: extractKeywords, nowMs: Date.now(),
@@ -1466,7 +1487,8 @@ export class MemoryManager {
 
   /** A1 (2026-09-02): 工作记忆 → 长期记忆巩固门（Atkinson-Shiffrin：工作记忆经巩固转入长期记忆）。
    * 任务终止（completed/failed）时调用：把 agent 执行中显式记录的工作记忆（note 工具 → context_json.working_memory，
-   * 随任务结束即消失）去重后写入 wa_memories（source='working_memory:*'，type='episodic'，experience='direct'），
+   * 随任务结束即消失）去重后写入 wa_memories（source='working_memory:*'，type='episodic'；
+   * experience 按出处落 `direct`/`inferred`——zx_20261027_1 M5 起不再一律 direct），
    * 附任务标题+成败上下文，使本次执行的关键笔记沉淀为后续相似任务可召回的长期记忆。
    * 去重：按内容哈希分槽（sameSourceReplace），重跑/恢复同一笔记合并不重复，不同笔记各自独立。
    * 返回沉淀条数。
@@ -1483,11 +1505,31 @@ export class MemoryManager {
       for (const item of wm) {
         const note = (item.content || '').trim();
         if (note.length < 10) continue; // 过短笔记无沉淀价值（避免噪声记忆）
-        const memoryContent = `[${success ? '成功' : '失败'}任务「${title}」工作笔记] ${note.slice(0, 500)}`;
+        // zx_20261027_1 M5（维特根斯坦「不要想，要看」）: 出处决定权重。
+        //   此前一律 `experience: 'direct'`——agent 的**推断**与"读过文件后得出的结论"同权，
+        //   而检索侧 `experienceBoost` 恰好给 direct 加权 ⇒ 未核验的经验被反复放大。
+        //   现按工作记忆项自带出处落 `direct` / `inferred`，正文前缀如实标注（`[已核验]` 只指文件读过）。
+        const verified = item.verified === true;
+        const grade = verified ? '[已核验]' : '[推断]';
+        const memoryContent = `[${success ? '成功' : '失败'}任务「${title}」工作笔记]${grade} ${note.slice(0, 500)}`;
         const source = `working_memory:${taskId.slice(0, 8)}:${this._hashString(note)}`;
         const replaced = this.sameSourceReplace(projectId, source, memoryContent, success ? '工作记忆沉淀（任务成功）' : '工作记忆沉淀（任务失败）');
         if (!replaced) {
-          this.storeText({ project_id: projectId, task_id: taskId, type: 'episodic', content: memoryContent, source, experience: 'direct', valence: success ? 'positive' : 'negative' });
+          this.storeText({
+            project_id: projectId, task_id: taskId, type: 'episodic', content: memoryContent, source,
+            experience: verified ? 'direct' : 'inferred',
+            evidence: item.file_path || verified ? { file_path: item.file_path, verified } : undefined,
+            valence: success ? 'positive' : 'negative',
+          });
+        } else if (verified) {
+          // 同源重放：只在"本次已核验"时把旧账**升**为 direct（只升不降——旧 direct 不因本次无出处被降级）。
+          try {
+            const er = this.db.prepare('SELECT context_json FROM wa_memories WHERE id = ?').get(replaced) as { context_json?: string } | undefined;
+            const ec = JSON.parse(er?.context_json || '{}') as Record<string, unknown>;
+            ec.experience = 'direct';
+            ec.evidence = { file_path: item.file_path, verified: true };
+            this.db.prepare('UPDATE wa_memories SET context_json = ? WHERE id = ?').run(JSON.stringify(ec), replaced);
+          } catch { /* 升级失败不阻断沉淀 */ }
         }
         promoted++;
       }
@@ -2322,7 +2364,11 @@ export class MemoryManager {
       // zx_20261021_4 批二: 预读带项目上下文 + 反虚构硬约束（读不到项目行照常预读，只少这几行）。
       const project = (() => {
         try {
-          return this.db.prepare('SELECT name, description, working_dir FROM wa_projects WHERE id = ?').get(projectId) as PreludeProjectContext | undefined;
+          const row = this.db.prepare('SELECT name, description, working_dir FROM wa_projects WHERE id = ?').get(projectId) as PreludeProjectContext | undefined;
+          if (!row) return undefined;
+          // zx_20261029_1「知」: 只取概述一句（≤200 字）；须知读不到/没有成功版则不加。
+          const summary = String(loadProjectBrief(this.db, projectId)?.brief?.summary ?? '').trim().slice(0, 200);
+          return summary ? { ...row, brief_summary: summary } : row;
         } catch { return undefined; }
       })();
       const prompt = buildPreludePrompt({ title, description, acceptance, needCard, req, skeleton, project });

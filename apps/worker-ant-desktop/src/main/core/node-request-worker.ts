@@ -55,34 +55,64 @@ export function categoryToolFace(category: string): { archetype: TaskArchetype |
   return { archetype, tools: availableToolNames(archetype) };
 }
 
-/** 一次执行的结局（回传 `status` 只允许两档；`result` 原样交回请求方）。 */
+/**
+ * 一次执行的结局（回传 `status` 三档；`result` 原样交回请求方）。
+ * zx_20261030_1 M3「止」：`cancelled` = 派活方叫停后**真停**的如实回报（既不是完成，也不是失败）。
+ */
 export interface RequestRunResult {
-  status: 'done' | 'error';
+  status: 'done' | 'error' | 'cancelled';
   result: Record<string, unknown>;
 }
 
 /**
+ * zx_20261030_1 M2「见」：执行体→派活方的**进度**回调——`step` 为已完成步数，`total` 未知即 `null`
+ * （界面据此说"第 N/M 步"或"已进行 X 分钟"，不编百分比）。
+ */
+export type ProgressReporter = (p: { step: number; total: number | null; note: string }) => void;
+
+/**
  * 执行器（注入点）：真机接任务引擎（建一件本机内建任务并跑），回归喂假。
  * 收 `tools`（该档工具名单）与 `archetype`——执行方据此**限定工具面**，而不是拿到整机。
+ * 第 4 参 `progress`（M2，**可选**）：执行体在步进时调用；不接也不报 ⇒ 派活方显示「对方未上报进度」。
  */
 export type RequestRunner = (
   req: AnsNodeRequest,
   tools: string[],
   archetype: TaskArchetype,
+  progress?: ProgressReporter,
+  /**
+   * zx_20261030_1 M3「止」：**叫停探针**（可选）。执行体在检查点调用；返回 `true` 即须**真停**
+   *   在途执行并如实回传 `cancelled`。不传 ⇒ 不支持停止（旧执行体），跑完按真实结局回传。
+   */
+  cancelled?: () => Promise<boolean>,
 ) => Promise<RequestRunResult>;
 
 /** 拉取 / 回传接口（注入点）：真机走 `ans-client`，回归喂假。 */
 export interface RequestIo {
   list(nodeId: string): Promise<AnsNodeRequest[]>;
-  report(id: string, report: { node_id: string; status: 'done' | 'error'; result?: Record<string, unknown> }): Promise<unknown>;
+  report(id: string, report: { node_id: string; status: 'done' | 'error' | 'cancelled'; result?: Record<string, unknown> }): Promise<unknown>;
+  /**
+   * zx_20261030_1 M2：上报进度（**可选**——旧调用方不实现也能编译；缺省即"不上报"，界面如实说）。
+   * 失败**由实现方自己吞并记因**（进度是尽力而为，不该把一件正在跑的活报死）。
+   */
+  progress?(id: string, p: { node_id: string; step: number; total: number | null; note: string }): Promise<unknown>;
+  /**
+   * zx_20261030_1 M3：查询派活方**是否已叫停**（`GET /requests/:id` 的 `cancel_requested`）。
+   * **可选**——旧调用方不实现即"不支持停止"，执行方会跑完并按真实结局回传（界面如实说，不谎称已停）。
+   * 查询失败按"未叫停"处理（拉不到 ≠ 已停；一件正在跑的活不该因探针失败被判停）。
+   */
+  cancelStatus?(id: string): Promise<boolean>;
 }
 
 export interface NodeRequestEvent {
   type: 'node.request_received' | 'node.request_completed';
   requestId: string;
   category: string;
-  /** 回传终态时携带（`received` 时为 `undefined`）。 */
-  status?: 'done' | 'error';
+  /**
+   * 回传终态时携带（`received` 时为 `undefined`）。
+   * zx_20261030_1 M3：新增 `cancelled`——派活方叫停后真停的如实回报（既不是完成，也不是失败）。
+   */
+  status?: 'done' | 'error' | 'cancelled';
   result?: Record<string, unknown>;
   /** 请求方 key 前缀（`received` 时即带上，便于 M13 面板即刻显示"谁派的"）。 */
   requesterKeyPrefix: string;
@@ -151,8 +181,19 @@ export function startNodeRequestWorker(opts: NodeRequestWorkerOpts): NodeRequest
         if (!face.archetype) {
           outcome = { status: 'error', result: { error: `unsupported category: ${req.category}` } };
         } else {
+          // M2：进度上报**尽力而为**——`io.progress` 缺省（旧调用方）即不上报；失败只吞不抛
+          //   （一件正在跑的活不该因"进度没送出去"而被判失败）。
+          const reportProgress: ProgressReporter = (p) => {
+            if (!io.progress) return;
+            void io.progress(req.id, { node_id: nodeId, step: p.step, total: p.total, note: p.note }).catch(() => { /* 进度是尽力而为 */ });
+          };
+          // M3：叫停探针——`io.cancelStatus` 缺省（旧调用方）即不支持停止；探针失败按"未叫停"
+          //   （拉不到 ≠ 已停，不能凭探针故障把在跑的活判停）。
+          const cancelProbe = io.cancelStatus
+            ? () => io.cancelStatus!(req.id).catch(() => false)
+            : undefined;
           try {
-            outcome = await runner(req, face.tools, face.archetype);
+            outcome = await runner(req, face.tools, face.archetype, reportProgress, cancelProbe);
           } catch (e) {
             outcome = { status: 'error', result: { error: (e as Error)?.message || String(e) } };
           }

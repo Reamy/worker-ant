@@ -176,6 +176,7 @@ const PROJECT_IPC_SRC = `${A}/src/main/ipc/project.ipc.ts`;
 const DEVICE_DDL = `
   CREATE TABLE wa_devices (
     id TEXT PRIMARY KEY, name TEXT DEFAULT '', alias TEXT DEFAULT '', room TEXT DEFAULT '', kind TEXT DEFAULT 'unknown',
+    kind_class TEXT NOT NULL DEFAULT '',
     protocol TEXT NOT NULL, address TEXT NOT NULL, port INTEGER,
     capabilities_json TEXT DEFAULT '[]', controllable INTEGER DEFAULT 0,
     authorized INTEGER DEFAULT 0, status_json TEXT,
@@ -854,8 +855,10 @@ async function main(): Promise<void> {
     crit('M10', /eventBus\.on\('device\.discovered',\s*async \(e\) => \{ forwardToRenderer\('device\.discovered'/.test(idxSrc)
       && /eventBus\.on\('device\.status_changed',\s*async \(e\) => \{ forwardToRenderer\('device\.status_changed'/.test(idxSrc),
       `M10-B **转发到位**：\`index.ts\` 两条 \`forwardToRenderer\`（不转发则面板收不到实时刷新）。`);
-    crit('M10', /initDevicesIpc\(db\)/.test(idxSrc) && /import \{ initDevicesIpc \} from '\.\/ipc\/devices\.ipc\.js'/.test(idxSrc),
-      `M10-B' **IPC 挂上**：\`index.ts\` 引并调 \`initDevicesIpc(db)\`。`);
+    // zx_20261029_2 M2：`initDevicesIpc` 现收第二个参数（模型兜底的取模型口）——本断言随之钉更强形状：
+    //   **db 作第一实参**且**确有第二实参**（不是无参调用、不是把 getter 当第一参塞进去）。
+    crit('M10', /initDevicesIpc\(db,\s*[A-Za-z_$][\w$]*\)/.test(idxSrc) && /import \{ initDevicesIpc \} from '\.\/ipc\/devices\.ipc\.js'/.test(idxSrc),
+      `M10-B' **IPC 挂上**：\`index.ts\` 引并调 \`initDevicesIpc(db, <getAnsClient>)\`（db 第一参 + 取模型口第二参）。`);
     crit('M10', !/startDeviceDiscovery\(/.test(idxSrc),
       `M10-B'' **发现不自动起**：\`index.ts\` **不**在开机时调 \`startDeviceDiscovery\`——扫描局域网是用户显式动作（面板按钮）。`);
 
@@ -949,12 +952,14 @@ async function main(): Promise<void> {
   console.log('\n【M12】批四 · 中转队列（管子·势 / 孙子·以逸待劳；AI 终端 → ANS → 工蚁 → 回传）');
   {
     // 状态机字面量在册（收窄函数与枚举同处）。
-    // zx_20261011_1 M4：状态机增 `awaiting_answer`（可答中间态，非终态）——此断言的**钉点同步上移**到
-    //   新全表（承"改旧断言＝改钉更强的新真源，不是放宽"：枚举面变大，钉的是更大的面，强度只增不减）。
-    crit('M12', NODE_REQUEST_STATUSES.join(',') === 'pending,assigned,awaiting_answer,done,error'
-      && isNodeRequestStatus('assigned') && isNodeRequestStatus('awaiting_answer') && !isNodeRequestStatus('__bogus__'),
-      `M12-A **状态机在册**：\`pending → assigned → awaiting_answer → done/error\`（M4 增可答中间态）；`
-      + `收窄函数两侧标本（'assigned'/'awaiting_answer' 真 / '__bogus__' 假）。`,
+    // zx_20261011_1 M4：状态机增 `awaiting_answer`（可答中间态，非终态）；zx_20261030_1 M3 再增
+    //   `cancelled`（叫停后真停的终态）——此断言的**钉点同步上移**到新全表（承"改旧断言＝改钉更强的
+    //   新真源，不是放宽"：枚举面变大，钉的是更大的面，强度只增不减）。
+    crit('M12', NODE_REQUEST_STATUSES.join(',') === 'pending,assigned,awaiting_answer,done,error,cancelled'
+      && isNodeRequestStatus('assigned') && isNodeRequestStatus('awaiting_answer') && isNodeRequestStatus('cancelled')
+      && !isNodeRequestStatus('__bogus__'),
+      `M12-A **状态机在册**：\`pending → assigned ↔ awaiting_answer → done/error/cancelled\`（M4 增可答中间态，M3 增叫停终态）；`
+      + `收窄函数两侧标本（'assigned'/'awaiting_answer'/'cancelled' 真 / '__bogus__' 假）。`,
       NODE_REQUEST_STATUSES.join(','));
 
     // 选目标唯一处 + pending→assigned 那一跳（死档之治）。
@@ -1023,10 +1028,17 @@ async function main(): Promise<void> {
       && pinnedArchetype(null) === null && pinnedArchetype('not json') === null,
       `M12-E **声明锁原型两侧标本**：合法档 ⇒ 用；无 \`node_archetype\` / 非法档 / 非 JSON ⇒ \`null\`（回落原分类，既存任务零回归）。`);
     const ae = strip(AGENT_EXECUTOR_SRC);
-    crit('M12', /const pinned = pinnedArchetype\(task\.context_json\)/.test(ae)
-      && /pinned \?\? classifyArchetype\(/.test(ae) && /pinned \?\? calibrateArchetype\(/.test(ae)
+    // zx_20261030_2 M1/M2（名随其实）：判定改为**带来源的决策对象**——钉更强的新载体：
+    //   ① 判定入口是 `resolvePinnedArchetype`（`pinnedArchetype` 仅余包装）；
+    //   ② 分类被 pinned 挡住（`pinnedDec ?? classifyArchetypeDetailed`）；
+    //   ③ 校准结果被 pinned 覆盖（`pinnedDec?.archetype ?? calibrated`，且 `calibrated` 真调用）；
+    //   ④ 最终收窄仍读 `archetype`。四条同钉，比原先"字面量 pinned ?? f()"更强。
+    crit('M12', /const pinnedDec = resolvePinnedArchetype\(task\.context_json\)/.test(ae)
+      && /pinnedDec \?\? classifyArchetypeDetailed\(/.test(ae)
+      && /const calibrated = calibrateArchetype\(/.test(ae)
+      && /pinnedDec\?\.archetype \?\? calibrated/.test(ae)
       && /narrowToolFace\(archetype, tools/.test(ae),
-      `M12-E' **接线三处**：\`pinned\` 同时挡住 \`classifyArchetype\` 与 \`calibrateArchetype\`，最终 \`narrowToolFace(archetype,…)\` 真收窄——`
+      `M12-E' **接线三处**：\`pinnedDec\` 同时挡住 \`classifyArchetypeDetailed\` 与 \`calibrateArchetype\`，最终 \`narrowToolFace(archetype,…)\` 真收窄——`
       + `只读一处则声明会在求值点被悄悄推翻（与没声明无异）。`);
     const allNames = toolRegistry.listNames();
     const toolsObj = Object.fromEntries(allNames.map((n) => [n, {}]));

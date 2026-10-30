@@ -7,7 +7,7 @@
  * `create_task` / `edit_file` / `register_deliverable` / `send_message_to_task` … 都对 `paused` 一无所知。
  *
  * 两个刻意的边界（承既有裁定「守卫只拦会改变世界的动作，不拦表态」）：
- *  - 只拦**会改变世界**的 34 件（文件/交付物/任务树/记忆/项目/子代理/设备/MCP/shell）；
+ *  - 只拦**会改变世界**的那批（文件/交付物/任务树/记忆/项目/子代理/设备/MCP/shell；逐件见下表）；
  *  - **不拦表态**：`ask_user`（请求用户）、`escalate_to_human`（请求人类）、`interrupt`（叫停）、
  *    `decide`（只读聚合）——把它们也拒掉，等于暂停中的任务连"我有问题要问/我要停"都说不出口。
  *  - 只读工具一律不受影响：暂停后仍可读盘、读库、看任务——**看**不是越界。
@@ -54,6 +54,7 @@ export const WORLD_MUTATING_TOOLS = [
   'call_mcp_tool',
   'skill',
   'spawn_subagent',
+  'await_subagents',
   'spawn_debate',
   'recruit_swarm',
   // device —— 控制与意图

@@ -25,6 +25,8 @@ import {
 import { ARCHETYPE_TOOL_CATEGORIES, availableToolNames } from './task-archetype.js';
 import { listDevices, type DeviceDb } from './device-registry.js';
 import type { NodeIdentity } from './node-identity.js';
+// zx_20261029_2 M3：能力摘要（意图 + 设备类目）取**能力词汇唯一来源**——与门牌/A2A 卡同一份映射。
+import { peerCapabilitySummary } from './capability-vocabulary.js';
 
 /**
  * 本机**做不做得了**某一类目——逐类目的**唯一判据**。
@@ -60,5 +62,14 @@ export function deriveNodeCategories(db: DeviceDb): NodeCardCategory[] {
  * 不在此另采一次——"卡上的平台"与"status 里的平台"必须是同一次采集的同值。
  */
 export function buildNodeCard(identity: NodeIdentity, db: DeviceDb, platform: string): NodeCard {
-  return { name: identity.name, node_id: identity.id, platform, categories: deriveNodeCategories(db) };
+  const devices = listDevices(db);
+  return {
+    name: identity.name,
+    node_id: identity.id,
+    platform,
+    categories: deriveNodeCategories(db),
+    // zx_20261029_2 M3：远端调度据此知道"这台节点能接舒适意图、屋里有灯/窗帘/空调"，
+    //   但仍看不到实例（房间/地址/授权态一律不上卡）。`unknown` 不列（不算一类能力）。
+    ...peerCapabilitySummary(devices),
+  };
 }

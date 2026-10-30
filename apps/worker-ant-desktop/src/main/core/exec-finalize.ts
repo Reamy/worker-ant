@@ -35,6 +35,7 @@ import {
   blockFailedChildrenCompletion, blockNoOutputCompletion, realOutputEvidence,
 } from './agent-executor.js';
 import type { AgentContext } from './agent-executor.js';
+import { writeMilestoneDone, backfillBoardRemainderToSelf, type MilestoneChangedEvent } from './task-accounting.js';
 
 const logger = createLogger('exec-finalize');
 
@@ -150,6 +151,17 @@ export function finalizeRunClose(o: {
     return { content: finalContent, steps: stepCount };
   }
   db.prepare("UPDATE wa_tasks SET status = 'completed', updated_at = datetime('now') WHERE id = ?").run(taskId);
+  // zx_20261027_1 M2（毛选「抓而不紧，等于不抓」）: 里程碑落地此前**只在 finalize_task 与
+  //   update_task_status 两个出口**发生，走 run_close 收口的任务从不写板——而 run_close 恰是
+  //   撞步数/预算顶后的常规出口。同一件事、三个出口、两笔账。
+  //   此处与另两处**同一个函数、同一个 emit 形状**（不另写判据）；best-effort 不阻断收口。
+  //   ⚠ 位置：标 completed **之后**（只有真完成才落 done）、完成事件**之前**（库与事件同刻）。
+  try {
+    const msCtx = JSON.parse((db.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get(taskId) as { context_json?: string } | undefined)?.context_json || '{}');
+    const emitMs = (e: MilestoneChangedEvent): void => { eventBus.emit('project.milestone_changed', e).catch(() => {}); };
+    writeMilestoneDone(db, taskId, msCtx, emitMs);
+    backfillBoardRemainderToSelf(db, taskId, msCtx, emitMs);
+  } catch { /* 里程碑回写 best-effort（与 finalize/update_task_status 同口径） */ }
   // zx_20260916_3 M2（O-E · 同一把尺·两个出口同一处置 / 毛选「抓而不紧等于不抓」）: 探针处置此前**只在 finalize 工具内**
   //   （见 `finalize_task` 内 :1466 那段），走 run_close 收口的任务**完全没有**处置——同一批产出物因"走哪条收口路"
   //   而命运不同：finalize 收口的会把文件移走，run_close 收口的原样留在用户工作树里。这正是 zx_20260915 P0-2(b)

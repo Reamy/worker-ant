@@ -165,16 +165,118 @@ function readSettingRaw(db: Database.Database, key: string): string | null {
 }
 
 /**
+ * zx_20261027_3 M4「批了就用」：**自我优化规则**的唯一设置键。
+ * 此前 `rule` 类提案只停在 `approved`（「尚无应用器」）——批了却什么也没发生，
+ * 人工闸成了"点了没反应"。现由 `applyProposal` 真写入 JSON 字符串数组，执行期由
+ * `buildTaskContext` 注入 system 块（`readSelfEvolveRules` 是唯一读出口）。
+ */
+export const SELF_EVOLVE_RULES_KEY = 'agent.self_rules';
+/** 规则清单上限（条 / 单条字数 / 注入块总字数）——超限**拒写**或**整条丢弃**，不截半条。 */
+export const SELF_EVOLVE_MAX_RULES = 10;
+export const SELF_EVOLVE_MAX_RULE_CHARS = 600;
+export const SELF_RULES_BLOCK_MAX_CHARS = 2000;
+export const SELF_RULES_HEADING = '## 自我优化规则（人工批准，须遵守）';
+
+/**
+ * 读生效中的自我优化规则（**唯一读出口**；缺表/坏 JSON/非数组一律 `[]`，不抛）。
+ * ⚠ 读侧宽容、写侧严格：`applyProposal` 遇到坏值**拒绝覆盖**（坏值可能是手改遗留，静默抹掉=毁数据）。
+ */
+export function readSelfEvolveRules(db: Database.Database): string[] {
+  try {
+    const raw = readSettingRaw(db, SELF_EVOLVE_RULES_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw) as unknown;
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
+      .map((x) => x.trim());
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 把规则拼成执行期 system 块（纯函数，rr 直测）。
+ * 总字数超 `maxChars` ⇒ 从**后往前整条丢弃**并在块尾如实说明丢了几条——
+ * 半条规则比没有更危险（模型会照着半句走）。
+ */
+export function buildSelfRulesBlock(
+  rules: readonly string[],
+  maxChars = SELF_RULES_BLOCK_MAX_CHARS,
+): { text: string; dropped: number } {
+  if (rules.length === 0) return { text: '', dropped: 0 };
+  const lines = rules.map((r) => `- ${r.replace(/\s+/g, ' ').trim()}`).filter((l) => l.length > 2);
+  const kept: string[] = [];
+  let used = SELF_RULES_HEADING.length;
+  for (const line of lines) {
+    if (used + line.length + 1 > maxChars) break;
+    kept.push(line);
+    used += line.length + 1;
+  }
+  const dropped = lines.length - kept.length;
+  const tail = dropped > 0 ? `\n（另有 ${dropped} 条规则超出上下文预算，本次未注入）` : '';
+  if (kept.length === 0) return { text: '', dropped };
+  return { text: `${SELF_RULES_HEADING}\n${kept.join('\n')}${tail}`, dropped };
+}
+
+/**
+ * `rule` 类提案的应用器（zx_20261027_3 M4）：载荷 `{ text }`，真写入 `agent.self_rules` 数组。
+ * 拒绝写入的四种情形都**如实带原因**、状态停在 `approved`（不假装生效）：
+ *   · 缺 `text`；· 单条超 `SELF_EVOLVE_MAX_RULE_CHARS`；· 已在清单中（去重）；· 已达 `SELF_EVOLVE_MAX_RULES` 条。
+ * 另：现有值**不是字符串数组**（手改遗留/坏 JSON）⇒ 拒绝覆盖——写入侧严格，宁可不动也不毁旧值。
+ */
+function applyRuleProposal(db: Database.Database, row: SelfEvolveProposal): DecideResult & { rollbackPoint?: string } {
+  let payload: { text?: unknown } = {};
+  try { payload = JSON.parse(row.payload_json || '{}') as { text?: unknown }; } catch { /* 坏载荷按缺 text 处置 */ }
+  const text = typeof payload.text === 'string' ? payload.text.trim() : '';
+  if (!text) return { ok: false, status: 'approved', detail: '已批准；但提案载荷缺 text，无从应用' };
+  if (text.length > SELF_EVOLVE_MAX_RULE_CHARS) {
+    return { ok: false, status: 'approved', reason: 'rule_too_long', detail: `已批准；但规则 ${text.length} 字超过上限 ${SELF_EVOLVE_MAX_RULE_CHARS} 字，未生效` };
+  }
+  const previous = readSettingRaw(db, SELF_EVOLVE_RULES_KEY);
+  let existing: string[] = [];
+  if (previous !== null) {
+    try {
+      const parsed = JSON.parse(previous) as unknown;
+      if (!Array.isArray(parsed) || parsed.some((x) => typeof x !== 'string')) throw new Error('not_string_array');
+      existing = (parsed as string[]).map((x) => x.trim()).filter(Boolean);
+    } catch {
+      return { ok: false, status: 'approved', reason: 'rules_unreadable', detail: '已批准；但现有规则不是字符串数组，拒绝覆盖（防止毁掉旧值）' };
+    }
+  }
+  if (existing.includes(text)) {
+    return { ok: false, status: 'approved', reason: 'rule_duplicated', detail: '已批准；该规则已在生效清单中，未重复写入' };
+  }
+  if (existing.length >= SELF_EVOLVE_MAX_RULES) {
+    return { ok: false, status: 'approved', reason: 'rule_limit', detail: `已批准；但规则已达上限 ${SELF_EVOLVE_MAX_RULES} 条，未生效（请先回滚旧规则）` };
+  }
+  try {
+    const next = [...existing, text];
+    db.prepare("INSERT OR REPLACE INTO wa_settings (key, value, updated_at) VALUES (?, ?, datetime('now'))").run(SELF_EVOLVE_RULES_KEY, JSON.stringify(next));
+    return {
+      ok: true,
+      status: 'applied',
+      rollbackPoint: JSON.stringify({ setting_key: SELF_EVOLVE_RULES_KEY, previous }),
+      detail: `已应用：自我优化规则（现共 ${next.length} 条）`,
+    };
+  } catch (err) {
+    return { ok: false, status: 'approved', reason: `apply_failed: ${String(err)}`, detail: `应用失败：${String(err)}` };
+  }
+}
+
+/**
  * 应用一条提案（**唯一 apply 实现**；只由 `decideProposal{approve}` 调用——**无任何定时/自动路径**）。
  *
- * ⚠ **只有 `threshold` 有应用器**。`skill`/`rule` 目前无真生产者（台账里出现只会是人工投的），
- *   对它们**不假装已生效**：回 `approved` 并如实说"尚无应用器"——`applied` 这个状态必须意味着
+ * ⚠ **`threshold` 与 `rule` 有应用器**（zx_20261027_3 M4 起 `rule` 真写入
+ *   `agent.self_rules` 并由执行期注入）。`skill` 仍无真生产者（台账里出现只会是人工投的），
+ *   对它**不假装已生效**：回 `approved` 并如实说"尚无应用器"——`applied` 这个状态必须意味着
  *   "引擎行为真的变了"，否则它就成了又一个"标高而实空"。
  *
  * ⚠ **回滚点存的是"旧值本身"**：旧值**不存在** ⇒ 存 `previous: null`，回滚时**删键**（恢复"不存在"），
  *   而不是写回一个等价的默认值——"10 分钟"与"没设过"在账上、在设置页上都不是一回事。
  */
 function applyProposal(db: Database.Database, row: SelfEvolveProposal): DecideResult & { rollbackPoint?: string } {
+  if (row.kind === 'rule') return applyRuleProposal(db, row);
   if (row.kind !== 'threshold') {
     return { ok: false, status: 'approved', detail: `已批准；但 \`${row.kind}\` 类提案尚无应用器（不假装已生效）` };
   }

@@ -213,6 +213,27 @@ export function resolveTaskProducedFile(db: TaskOutcomeDb, taskId: string): Prod
   }
 }
 
+/**
+ * 本任务名下的**产出清单**（仅元数据：`name`/`type`，不读盘不搬文件）——zx_20261030_1 M4 起供
+ * relay 完成回传携带（派活方据此做回执核对）。
+ *
+ * ⚠ 放在本模块与 `resolveTaskProducedFile` 同处：产出物的**取数只此一处**，
+ *   `node-request-runner` 不再自带 `FROM wa_deliverables WHERE task_id` 的内联查询。
+ * ⚠ 只列 `wa_deliverables.task_id=本任务` 的行（改写既存件的版本归属由 `resolveTaskProducedFile` 另判）；
+ *   无库/无行 ⇒ `[]`（"没报"≠编一条）。
+ */
+export function readDeliveredOutputs(db: TaskOutcomeDb, taskId: string): Array<{ name: string; type: string }> {
+  try {
+    const rows = db.prepare(
+      'SELECT name, type FROM wa_deliverables WHERE task_id = ? ORDER BY created_at ASC',
+    ).all(taskId) as Array<{ name?: unknown; type?: unknown }>;
+    return rows.map((r) => ({
+      name: typeof r.name === 'string' ? r.name : '',
+      type: typeof r.type === 'string' ? r.type : '',
+    }));
+  } catch { return []; }
+}
+
 /** 收口摘要的**前两级**命中结果（末级"末条回话"各调用方版面不同，见 `readOutcome` / `buildCompletionNotice`）。 */
 export interface ResolvedOutcome {
   source: 'file' | 'summary';

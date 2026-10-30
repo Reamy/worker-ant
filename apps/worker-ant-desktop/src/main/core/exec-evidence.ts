@@ -128,9 +128,16 @@ export function collectEvidence(db: Database.Database, taskId: string): Evidence
   }).map((f) => f.file);
   let validations = '';
   try {
-    const ctxr = JSON.parse((db.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get(taskId) as { context_json: string } | undefined)?.context_json || '{}') as { output_validations?: Array<{ file: string; sufficient?: boolean; status?: string }> };
+    const ctxr = JSON.parse((db.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get(taskId) as { context_json: string } | undefined)?.context_json || '{}') as { output_validations?: Array<{ file: string; sufficient?: boolean; status?: string; reason?: string }> };
     const ov = Array.isArray(ctxr.output_validations) ? ctxr.output_validations : [];
-    if (ov.length) validations = `[内容校验]\n${ov.map(v => `- ${v.file}: ${v.sufficient ? '充分' : `不充分(${v.status ?? 'insufficient'})`}`).join('\n')}`;
+    // zx_20261028_2 M3：三态如实——`unknown`（辅助模型超时/不可用/内容不可解码）此前被渲染成「充分」，
+    //   把"没问出来"冒充成"问过了且合格"。今按 `status` 先判，再退回快检结论。
+    const mark = (v: { sufficient?: boolean; status?: string; reason?: string }): string => {
+      if (v.status === 'unknown') return `未核(${v.reason || '辅助模型不可用'})`;
+      if (v.status === 'insufficient' || v.sufficient === false) return `不充分(${v.reason || v.status || 'insufficient'})`;
+      return '充分';
+    };
+    if (ov.length) validations = `[内容校验]\n${ov.map(v => `- ${v.file}: ${mark(v)}`).join('\n')}`;
   } catch { /* 校验结论读取失败跳过 */ }
   return { convs: convs.map(c => c.content || ''), deliverables, docFiles: rankedDocFiles, validations };
 }

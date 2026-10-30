@@ -22,6 +22,8 @@ import { knowledge } from '../lib/ipc';
 import type { KnowledgeProfileView } from '../../../src/main/ipc/knowledge.ipc.js';
 import type { KnowledgeExportResult } from '../../../src/main/core/knowledge-export.js';
 import type { KnowledgeInjectionStats, ProjectKnowledgePreview } from '../../../src/main/core/project-knowledge.js';
+// zx_20261027_3 M6a: 卡 + 结局账的形状同引 main core 真源（仅类型，打包期擦除）。
+import type { KnowledgeCardUsage } from '../../../src/main/core/knowledge-cards.js';
 import type {
   KnowledgeImportMode,
   KnowledgeImportRecord,
@@ -35,6 +37,7 @@ export default function KnowledgePackCard({ projectId }: { projectId: string }) 
   const [imports, setImports] = useState<KnowledgeImportRecord[]>([]);
   const [imported, setImported] = useState<KnowledgeImportResult | null>(null);
   const [profile, setProfile] = useState<KnowledgeProfileView | null>(null);
+  const [cards, setCards] = useState<KnowledgeCardUsage[]>([]);
   const [mode, setMode] = useState<KnowledgeImportMode>('merge');
   const [busy, setBusy] = useState<'preview' | 'export' | 'import' | 'profile' | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -45,16 +48,19 @@ export default function KnowledgePackCard({ projectId }: { projectId: string }) 
     try {
       // zx_20261018_1 批七 R-66：预览与注入成效一起读（两路互不依赖，并行取）。
       // zx_20261022_3 批七：导入账同批取（三路并行）。
-      const [p, s, h, pf] = await Promise.all([
+      const [p, s, h, pf, kc] = await Promise.all([
         knowledge.preview(projectId),
         knowledge.stats(projectId),
         knowledge.imports(projectId),
         knowledge.profile(projectId),
+        // M6a: 卡与结局账（Pro 档才有卡；社区档为空表 ⇒ 本段不显示）。
+        knowledge.cards(projectId),
       ]);
       setPreview(p);
       setStats(s);
       setImports(h);
       setProfile(pf);
+      setCards(kc);
       setError(null);
     } catch (e) {
       setError((e as Error).message);
@@ -197,6 +203,30 @@ export default function KnowledgePackCard({ projectId }: { projectId: string }) 
         </p>
       )}
 
+      {/* zx_20261027_3 M6a: 每张卡的结局账——"注入 N / 成 M / 败 K"是这张卡被用过的真实结局，
+          样本 ≥3 才参与选卡微调（一两件偶发任务不改写经验）。 */}
+      {cards.length > 0 && (
+        <div className="mt-2 border-t pt-2">
+          <p className="text-xs font-medium text-gray-600 mb-1">
+            项目知识卡
+            <span className="text-[10px] font-normal text-gray-400 ml-1.5">
+              {cards.length} 张 · 样本 ≥3 的卡按成/败微调注入先后（确定性规则，不调模型）
+            </span>
+          </p>
+          <ul className="space-y-1">
+            {cards.map((c) => (
+              <li key={c.id} className="text-[11px] text-gray-600 flex items-start gap-2">
+                <span className="shrink-0 rounded px-1 py-0.5 bg-indigo-50 text-indigo-700 border border-indigo-200 text-[10px]">{c.kindLabel}</span>
+                <span className="flex-1 break-words">{c.text}</span>
+                <span className="shrink-0 text-[10px] text-gray-400" title="这张卡被注入的次数 / 注入后任务成功与失败数">
+                  注入 {c.injected} · 成 {c.completed} / 败 {c.failed}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {/* zx_20261022_3 批八：项目画像——确定性派生（零 LLM），生成/启停**不挂档位闸**（社区档照常自用）。 */}
       <div className="mt-2 border-t pt-2">
         <div className="flex items-center justify-between">
@@ -276,6 +306,7 @@ export default function KnowledgePackCard({ projectId }: { projectId: string }) 
             </p>
             <p className="text-[10px] text-gray-400">
               画像注入 {profile.stats.injections} 次 · 成功 {profile.stats.completed} / 失败 {profile.stats.failed}
+              {profile.history > 0 && <span> · 历史版本 {profile.history}（自动跟随前的旧版留痕）</span>}
             </p>
           </div>
         )}

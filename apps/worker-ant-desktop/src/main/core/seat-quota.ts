@@ -31,7 +31,9 @@ export class SeatLimitError extends Error {
     readonly max: number,
     readonly tier: LicenseTier,
   ) {
-    super(`${TIER_LABEL[tier]}席位已满（${used}/${max}）。已有成员不受影响；升级档位可增加席位。`);
+    // zx_20261029_2 M6 文案统一：对外一律称「本机账号」（席位只数本机 `wa_users`，跨机不可聚合，
+    //   zx_20261023_1「称」已把卖点换成协同节点；此处是**拒因文案**的最后一口旧词）。
+    super(`${TIER_LABEL[tier]}本机账号已满（${used}/${max}）。已有账号不受影响；升级档位可增加上限。`);
     this.name = 'SeatLimitError';
   }
 }

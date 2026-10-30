@@ -130,7 +130,7 @@ code {
 .brand:hover {
   text-decoration: none;
 }
-/* 品牌标 = 应用图标本尊（白底 3D 工蚁，不透明）。圆角 + 细边让它贴住页面而不显成一块白斑。 */
+/* 品牌标 = 应用图标本尊（白底圆角 WA 蚂蚁字标，圆角外透明）。圆角 + 细边让它贴住页面而不显成一块白斑。 */
 .brand-mark {
   width: 26px;
   height: 26px;

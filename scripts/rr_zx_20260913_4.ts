@@ -151,8 +151,13 @@ console.log('\n[S0 M4 五处接线（源码级；反证＝旧写法喂同一判�
     'M4-4 历史裁剪走外置纯函数 `truncateHistoryTail`（回归可跑真实现，非复刻）');
   ok(!/while \(dropCount < replay\.length - 1 && total > CTX_HISTORY_TAIL_MAX_CHARS\)/.test(ae),
     'M4-4 反证：旧内联裁剪循环已除（不再各写一份）');
-  ok(ae.includes('return paginateReadFile(full, { offset: args.offset, limit: args.limit }).text;'),
-    'M4-5 read_file 分页走外置纯函数 `paginateReadFile`');
+  // zx_20261027_1 M4：分页结果改为先落 `page`（截断事实要入册留痕），锚点按新形状重定向并**加强**：
+  //   仍走同一外置纯函数，且 truncated 的真假必须分别入册/出册——只取 `.text` 恰好会把该事实丢掉。
+  ok(ae.includes('const page = paginateReadFile(full, { offset: args.offset, limit: args.limit });')
+    && ae.includes('if (page.truncated) deps.truncatedReads?.add(resolvedFp);')
+    && ae.includes('else deps.truncatedReads?.delete(resolvedFp);')
+    && ae.includes('return page.text;'),
+    'M4-5 read_file 分页走外置纯函数 `paginateReadFile`（截断事实真入册/出册，不止取文本）');
   ok(!/const READ_MAX = 50_000;/.test(ae),
     'M4-5 反证：旧内联 `READ_MAX`/先切后分页的实现已除（字符尺与行尺不再错位）');
 

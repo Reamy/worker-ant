@@ -31,6 +31,13 @@ export interface ShellOpts {
   timeoutMs: number;
   /** 单条流（stdout / stderr 各自）的收集上限，字节 */
   maxBuffer: number;
+  /**
+   * zx_20261029_3 M3：子进程已起（`spawn` 事件）时回调，POSIX 下 `pgid = pid`。
+   * 只记账不干预——回调抛错也被吞，绝不改变命令的执行与返回形状。
+   */
+  onSpawn?: (info: { pid: number | undefined }) => void;
+  /** 命令落幕（close/error 后恰一次）。同上：抛错吞掉。 */
+  onSettle?: (info: { exitCode: number | null; timedOut: boolean }) => void;
 }
 
 /** 超时后先礼后兵：SIGTERM 之后给 2s 宽限，再 SIGKILL */
@@ -79,7 +86,20 @@ export function runShellCommand(command: string, opts: ShellOpts): Promise<Shell
     child.stdout?.on('data', (d: Buffer) => { stdout = take(stdout, d, () => { stdoutTruncated = true; }); });
     child.stderr?.on('data', (d: Buffer) => { stderr = take(stderr, d, () => { stderrTruncated = true; }); });
 
+    child.on('spawn', () => {
+      try { opts.onSpawn?.({ pid: child.pid }); } catch { /* 记账失败不阻断命令 */ }
+    });
+
+    let settled = false;
     const finish = (exitCode: number | null, spawnError?: Error) => {
+      if (!settled) {
+        settled = true;
+        // spawn 失败时不会发 'spawn' 事件 ⇒ 这里补一次（pid 为空），让账上如实记"没跑起来"
+        if (child.pid == null) {
+          try { opts.onSpawn?.({ pid: undefined }); } catch { /* 同上 */ }
+        }
+        try { opts.onSettle?.({ exitCode, timedOut }); } catch { /* 同上 */ }
+      }
       clearTimeout(timer);
       if (killTimer) clearTimeout(killTimer);
       const ok = !timedOut && exitCode === 0 && !spawnError;

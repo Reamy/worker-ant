@@ -204,7 +204,12 @@ ok(accCode.includes('if (milestoneFromTitle(r.title) === milestone) return r.id;
 ok(accCode.includes('ORDER BY updated_at DESC'), '反向取数确定化（消掉原 LIMIT 1 的不确定性）');
 // 正向两处亦收敛到同一函数
 ok((accCode.match(/milestoneFromTitle\(/g) || []).length >= 3, `正向两处 + 反向一处共用同一判据（引用 ${(accCode.match(/milestoneFromTitle\(/g) || []).length} 次）`);
-ok((accCode.match(/\/\^M\(\\d\+\)\/\.exec/g) || []).length === 1, '★仓内 /^M(\\d+)/ 仅剩判据定义内一处');
+// zx_20261027_1 M1：判据由内联 `/^M(\d+)/` 收敛为**具名词形真源**（支持可选小数段，`M2.5` 不再读成 `M2`）。
+//   旧锚点钉的是被淘汰的语法形状；按符号重定向到新真源并**加强**（定义恰一处 + 前缀判据真用它 + 小数段在册）。
+ok((accCode.match(/MILESTONE_NUM_SOURCE\s*=\s*String\.raw/g) || []).length === 1
+  && accCode.includes('(?:\\.\\d+)?')
+  && (accCode.match(/new RegExp\(MILESTONE_PREFIX_SOURCE\)/g) || []).length >= 1,
+  '★里程碑号词形只剩 MILESTONE_NUM_SOURCE 一处真源（前缀判据真用它，含可选小数段）');
 ok(acc.includes('「显式关联优先」这条判据的唯一入口') && acc.includes('① finalize 的回写'), '注释改为可核验的事实描述（列四个调用点 + 交叉引用反向入口）');
 
 // ─────────────────────────────────────────────────────────────
@@ -225,10 +230,12 @@ const titleRegexSites: string[] = [];
 const globSites: string[] = [];
 for (const f of files) {
   const c = stripComments(fs.readFileSync(f, 'utf-8'));
-  if (c.includes('/^M(\\d+)/.exec')) titleRegexSites.push(path.relative(MAIN, f));
+  // zx_20261027_1 M1：不再钉被淘汰的 `/^M(\d+)/.exec` 语法外壳——扫面改为**里程碑号词形本身**，
+  //   任何私写的 `M\d+`（无论包在字面量正则、String.raw 还是 new RegExp 里）都会落进这一格。
+  if (c.includes('M\\d+')) titleRegexSites.push(path.relative(MAIN, f));
   if (c.includes('title GLOB')) globSites.push(path.relative(MAIN, f));
 }
-ok(titleRegexSites.length === 1 && titleRegexSites[0] === 'core/task-accounting.ts', `★全 main 仅 1 处 /^M(\\d+)/.exec（判据定义本身）`, titleRegexSites.join(',') || '(无)');
+ok(titleRegexSites.length === 1 && titleRegexSites[0] === 'core/task-accounting.ts', `★全 main 仅 task-accounting 一处出现里程碑号词形 M\\d+（判据真源本身）`, titleRegexSites.join(',') || '(无)');
 ok(globSites.length === 0, '★全 main 无 title GLOB（旧反向谓词零残留）', globSites.join(',') || '(无)');
 
 // ─────────────────────────────────────────────────────────────

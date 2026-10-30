@@ -22,9 +22,12 @@
  *   #    --expires 省略 或 --perpetual ⇒ 永久（expiresAt=null；**团队档不签永久**，见下）
  *   #    --expires YYYY-MM-DD ⇒ 该日在**目标时区**的 23:59:59.999（缺省=签发机本地时区）
  *   #    --tz Asia/Shanghai ⇒ 按买受人所在时区取当日末（IANA 时区名）；证书内写显式偏移
- *   #    --devices 省略 ⇒ 不绑设备（任何机器可激活）
+ *   #    --devices 省略 ⇒ community/pro 不绑设备（任何机器可激活）；**team 省略则拒签**——
+ *   #      一包一证、绑定节点；确需不绑定请显式加 `--any-device`（会打警告）。
  *   #    --devices 可绑台数按档位：community/pro ≤3；**team（团队授权包）≤20**，与协同节点上限同源。
  *   #    ⚠ `--tier team` **必须带 --expires**（按包月/年销售，到期续签；不签永久）。
+ *   #    --early-bird ⇒ 早鸟终身（一次性买断 Pro 终身，永久件，不接受 --expires/--perpetual）；
+ *   #      每次签发在 `data/early-bird-redemptions.jsonl` 记一行，满 `EARLY_BIRD.seats` 席即拒签。
  *   #    --key <path> 换私钥路径；--pubkey <path> 覆盖自证用公钥（默认本仓内嵌，供轮换预检/自测）
  *
  *   # 3) 复核一份许可（用当前内嵌公钥验；**不碰私钥**，可对收到的文件反向查）
@@ -43,12 +46,18 @@ import {
 } from '../apps/worker-ant-desktop/src/main/core/license.js';
 
 import { LICENSE_TIERS, isLicenseTier, TIER_LABEL, type LicenseTier } from '../apps/worker-ant-desktop/src/main/core/feature-limits.js';
+import { EARLY_BIRD } from '../apps/worker-ant-desktop/src/main/core/pricing.js';
+import {
+  countRedemptions, earlyBirdRefusal, earlyBirdRemaining, redemptionLine,
+} from '../apps/worker-ant-desktop/src/main/core/early-bird.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 /** 私钥**默认**落点（gitignored）。`--key <path>` 可改；不入库是纪律，换路径同样不入库。 */
 const DEFAULT_KEY_PATH = path.join(ROOT, 'data', 'license-signing-key.pem');
 /** 公钥块（`--gen-keys` 重写它）。 */
 const LICENSE_TS = path.join(ROOT, 'apps', 'worker-ant-desktop', 'src', 'main', 'core', 'license.ts');
+/** 早鸟名额台账（gitignored 的 `data/`；一行一签，`earlyBirdRefusal` 按它判满席）。 */
+const EARLY_BIRD_LEDGER = path.join(ROOT, 'data', 'early-bird-redemptions.jsonl');
 
 const DEVICE_FP_RE = /^[0-9A-F]{4}(-[0-9A-F]{4}){3}$/;
 
@@ -179,8 +188,36 @@ function issue(opts: Map<string, string>, keyPath: string, pubPem: string): void
   const cap = licenseDeviceCap(tier);
   if (devices.length > cap) die(`设备数 ${devices.length} 超出 ${TIER_LABEL[tier]}上限 ${cap} 台`);
   for (const d of devices) if (!DEVICE_FP_RE.test(d)) die(`设备指纹形状不符（应 XXXX-XXXX-XXXX-XXXX）：${d}`);
+  // zx_20261029_2 M6 空档④：团队包「一包一证、绑定节点」是销售形态，**默认拒签空白绑定**——
+  //   `devices` 空 + 未显式 `--any-device` ⇒ 拒；opt-in 了也留一句警告（分发对象仍须自己控制）。
+  if (devices.length === 0) {
+    if (tier === 'team' && !opts.has('any-device')) {
+      die('团队授权包须带 --devices（一包一证、绑定节点）；确需「不绑定=任意机器可激活」请显式加 --any-device');
+    }
+    console.warn('⚠ 未绑定设备：该许可可在任意机器激活（请自行控制分发对象）');
+  }
 
-  const expiresAt = normalizeExpires(opts.get('expires'), opts.has('perpetual') || opts.has('no-expire'), opts.get('tz'));
+  // zx_20261029_2 M6 空档⑤：早鸟终身=一次性买断 Pro 终身（永久件），名额按 `EARLY_BIRD.seats` 真源卡住。
+  const earlyBird = opts.has('early-bird');
+  if (earlyBird) {
+    if (tier !== EARLY_BIRD.appliesTier) {
+      die(`--early-bird 是「${EARLY_BIRD.label}」，能力档固定为 ${TIER_LABEL[EARLY_BIRD.appliesTier]}；实得 --tier ${tier}`);
+    }
+    if (opts.has('expires') || opts.has('perpetual') || opts.has('no-expire')) {
+      die('--early-bird 是「一次性买断 Pro 终身」⇒ 签发即永久，不接受 --expires/--perpetual');
+    }
+  }
+  const redeemed = earlyBird && fs.existsSync(EARLY_BIRD_LEDGER)
+    ? countRedemptions(fs.readFileSync(EARLY_BIRD_LEDGER, 'utf-8'))
+    : 0;
+  if (earlyBird) {
+    const refusal = earlyBirdRefusal(redeemed);
+    if (refusal) die(refusal);
+  }
+
+  const expiresAt = earlyBird
+    ? null
+    : normalizeExpires(opts.get('expires'), opts.has('perpetual') || opts.has('no-expire'), opts.get('tz'));
   if (tier === 'team' && expiresAt === null) {
     die('团队授权包必须带 --expires（按月/年销售，到期续签）——不签永久团队许可');
   }
@@ -208,8 +245,19 @@ function issue(opts: Map<string, string>, keyPath: string, pubPem: string): void
     fs.writeFileSync(outPath, lic + '\n');
     console.log(`✓ 许可已写入 ${path.relative(ROOT, outPath)}`);
   }
+  // 早鸟名额**签成才记账**（自证不过/拒签都不会走到这里，名额不会被白占）。
+  if (earlyBird) {
+    fs.mkdirSync(path.dirname(EARLY_BIRD_LEDGER), { recursive: true });
+    fs.appendFileSync(EARLY_BIRD_LEDGER, redemptionLine({
+      at: payload.issuedAt, subject: payload.subject, tier, expiresAt, devices: devices.length,
+    }));
+    console.log(`✓ 早鸟名额已登记：${path.relative(ROOT, EARLY_BIRD_LEDGER)}`);
+  }
   console.log(`\n档位：${TIER_LABEL[tier]}（${tier}）｜被许可人：${payload.subject}｜到期：${payload.expiresAt ?? '永久'}`);
   console.log(`绑定设备：${devices.length ? devices.join(', ') : '（不绑设备）'}｜本档上限 ${cap} 台`);
+  if (earlyBird) {
+    console.log(`早鸟名额：已登记 ${redeemed + 1}/${EARLY_BIRD.seats}，余 ${earlyBirdRemaining(redeemed + 1)} 席`);
+  }
   console.log('\n──── 许可文本（把这段发给用户）────');
   console.log(lic);
 }

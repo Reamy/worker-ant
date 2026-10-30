@@ -12,7 +12,9 @@
  *
  * ⚠ 零网络依赖（纯 DB 读）⇒ 受控回归可直引跑真实现（同 `node-call-log.ts` 范式）。
  */
-import type { NodeAnswer, NodeQuestion } from '@worker-ant/shared-types';
+import type { NodeAnswer, NodeQuestion, NodeRequestProgress } from '@worker-ant/shared-types';
+// zx_20261030_1 M2：进度真源在 ANS；本机只在读回时抄一份内存投影（见该模块头注释）。
+import { dispatchProgress } from './node-progress-cache.js';
 
 /** 读事件日志的最小库接口（使本模块可脱 better-sqlite3 被 rr 直跑）。 */
 export interface DispatchLogDb {
@@ -34,8 +36,8 @@ export interface NodeDispatchRecord {
   dispatchedAt: string;
   /** 收口时刻（`result` 的 `occurred_at`）；未收口为 `null`。 */
   resultAt: string | null;
-  /** 聚合态：`pending`（只派出）/ `done`/`error`。 */
-  status: 'pending' | 'done' | 'error';
+  /** 聚合态：`pending`（只派出）/ `done` / `error` / `cancelled`（派活方叫停后真停，既非完成也非失败）。 */
+  status: 'pending' | 'done' | 'error' | 'cancelled';
   result: Record<string, unknown> | null;
   /** 耗时（毫秒）＝收口 − 派出；两时刻缺一即 `null`（不编一个 0 冒充"瞬时完成"）。 */
   durationMs: number | null;
@@ -48,6 +50,11 @@ export interface NodeDispatchRecord {
    *   与 `status` **分开**：`status` 答"这单走到哪一步"（派/回），`questionStatus` 答"这一问答没答"。
    */
   questionStatus: 'asked' | 'answered' | null;
+  /**
+   * zx_20261030_1 M2：执行方**最近上报的进度**（读回时从 ANS 抄来；未读回 / 对端未上报 ⇒ `null`）。
+   *   只在未收口（`status === 'pending'`）时透出——终态没有"进行中"可言。
+   */
+  progress: NodeRequestProgress | null;
 }
 
 function parseJson(s: unknown): Record<string, unknown> {
@@ -97,6 +104,7 @@ export function listNodeDispatchRecords(db: DispatchLogDb, limit = 50): NodeDisp
       question: null,
       answer: null,
       questionStatus: null,
+      progress: null,
     };
     if (p.category !== undefined) rec.category = String(p.category);
     if (p.targetNodeId !== undefined && p.targetNodeId !== null) rec.targetNodeId = String(p.targetNodeId);
@@ -107,7 +115,8 @@ export function listNodeDispatchRecords(db: DispatchLogDb, limit = 50): NodeDisp
       rec.dispatchedAt = r.occurred_at;
     } else if (r.event_type === 'node.request_result') {
       rec.resultAt = r.occurred_at;
-      rec.status = p.status === 'error' ? 'error' : 'done';
+      // M3：三档如实分——`cancelled` 不并入 `done`（"停了"不等于"办成了"），也不并入 `error`（不是失败）。
+      rec.status = p.status === 'error' ? 'error' : p.status === 'cancelled' ? 'cancelled' : 'done';
       rec.result = p.result && typeof p.result === 'object' && !Array.isArray(p.result) ? (p.result as Record<string, unknown>) : null;
     } else if (r.event_type === 'node.request_question') {
       // B 端提问 ⇒ 待我答（`asked`）。问题形状由 `node.request_question` 载荷携（`question`/`options`）。
@@ -128,6 +137,8 @@ export function listNodeDispatchRecords(db: DispatchLogDb, limit = 50): NodeDisp
       const b = Date.parse(rec.resultAt);
       rec.durationMs = Number.isFinite(a) && Number.isFinite(b) ? Math.max(0, b - a) : null;
     }
+    // M2：只有"还在路上"的单才透出进度（真源在 ANS，本机只是读回时抄的那一份）。
+    rec.progress = rec.status === 'pending' ? dispatchProgress(rec.requestId) : null;
   }
   // 最近派出在前（无派出的排最后，靠 requestId 稳定序）。
   out.sort((x, y) => (y.dispatchedAt || '').localeCompare(x.dispatchedAt || '') || x.requestId.localeCompare(y.requestId));

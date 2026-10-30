@@ -11,7 +11,7 @@
  *
  * ⚠ **软闸（K-3）**：锁定**不删数据、不拦在跑**，只是**该能力不可用**（产品照常可用，fail-open 方向——
  *   判库读不到 ⇒ community ⇒ 锁，但**产品本身**不崩，预览/注入等核心任务路不受影响）。
- * ⚠ **解锁档位＝Pro 及以上**；**试用期内也放行**（试用＝专业版能力）。试用态 `tier` 落 `pro`，
+ * ⚠ **解锁档位＝Pro 及以上**；**试用期内也放行**（zx_20261027_3 M3 起试用＝**团队版能力**，试用态 `tier` 落 `team`），
  *   判据仍**特判 `kind === 'trial'`**——与 `team-gate.ts` 同一写法，免得将来试用态换档位语义时两处漂移。
  * ⚠ 零 electron 依赖（只用一个最小 db 接口）——rr 直跑真判据；`now`/`fingerprint` 可注入（不依赖墙钟）。
  */
@@ -38,8 +38,16 @@ import { resolveLicenseState, type LicenseSettingDb, type LicenseState, type Res
  * `knowledge_cards`（zx_20261023_5 批二）的接线：`core/knowledge-cards.ts` 的 `distillKnowledgeCards`
  *   与 `recordPitfallCandidate`（生成动作口）· `MemoryManager.listKnowledgeCards`（执行期注入口）。
  *   **降档不回收已生成的卡**：卡留在表里，只是当前档位不再注入——与领域包同一把尺。
+ * `device_discovery`（zx_20261029_2 M6「阶梯」）的接线：`ipc/devices.ipc.ts` 的
+ *   `devices:discover` / `devices:cloud_sync` / `devices:channels` / `devices:channel_auth`
+ *   （发现与渠道接入）· `core/device-channel.ts` 的 `channelUnlocked`（渠道级档位判据）。
+ *   **只读台账 `devices:list` 照常回**；**控制**（authorize/control/intent_execute）仍归 Team
+ *   （`team-gate.ts` 的 `device_control`）——两档各管一段，不合并成一句"设备能力"。
+ * `plugin_install`（zx_20261029_2 M6）的接线：`main/ipc-handlers.ts` 的 `ansCall`——
+ *   仅拦 `POST /api/v1/plugins/<id>/install` 这一跳；**浏览/搜索/详情/卸载/启停不挂闸**
+ *   （社区档照样能看整市场，只是装不进来；已装的插件降档后照常可用——与"闸只挡搬运"同一把尺）。
  */
-export const PRO_FEATURES = ['knowledge_export', 'knowledge_import', 'image_vision', 'long_video', 'long_document', 'domain_pack', 'knowledge_cards'] as const;
+export const PRO_FEATURES = ['knowledge_export', 'knowledge_import', 'image_vision', 'long_video', 'long_document', 'domain_pack', 'knowledge_cards', 'device_discovery', 'plugin_install'] as const;
 export type ProFeature = (typeof PRO_FEATURES)[number];
 
 /** 人话能力名（界面/拒因直接上屏用；键类型取 `ProFeature` ⇒ 漏一项是编译期错）。 */
@@ -59,6 +67,10 @@ export const PRO_FEATURE_LABEL: Record<ProFeature, string> = {
   domain_pack: '领域包（跨项目携带项目经验）',
   // 说清它买到的是什么：**确定性蒸馏的一小把卡**（不是训练出来的小模型），开工前只注入最用得上的几张。
   knowledge_cards: '项目知识卡（蒸馏卡注入）',
+  // zx_20261029_2 M6: 买到的是**看**——发现并入台账、只读状态；**控制是另一档**（Team），不并进这一句。
+  device_discovery: '设备发现（只读台账）',
+  // 只卖「安装」这一跳：浏览/搜索/详情对任何档位开放，已装的插件不受降档影响。
+  plugin_install: '市场插件安装',
 };
 
 /** 软闸裁定（界面直接上屏 `detail`；`unlocked` 供动作层放手/拦下）。 */

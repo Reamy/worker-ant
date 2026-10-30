@@ -23,6 +23,7 @@ import { createSocket, type Socket } from 'node:dgram';
 import type { AnsDevice, DiscoveredDevice } from '../device-registry.js';
 import type { ProviderControlResult, ProviderStateResult } from '../device-provider.js';
 import type { DiscoveryIo } from '../device-discovery.js';
+import { kindClassOf } from '../device-kind.js';
 
 /** miIO 固定端口（UDP）。 */
 export const MIIO_PORT = 54321;
@@ -299,13 +300,17 @@ export function miioDidOf(dev: Pick<AnsDevice, 'capabilities'>): number {
 }
 
 /** 发现结果 ⇒ 台账候选（did 存进 capabilities，供控制时填包头）。 */
-export function miioDiscovered(input: { address: string; deviceId?: number; port?: number; name?: string }): DiscoveredDevice {
+export function miioDiscovered(input: { address: string; deviceId?: number; port?: number; name?: string; model?: string | null }): DiscoveredDevice {
   const did = typeof input.deviceId === 'number' && input.deviceId > 0 && input.deviceId !== MIIO_UNKNOWN_DID ? input.deviceId : null;
   const hex = did != null ? did.toString(16).padStart(8, '0') : null;
   const capabilities = ['miio', ...(did != null ? [`miio:did:${did}`] : [])];
+  // zx_20261029_2 M1: 广播 hello 不含 model ⇒ 没 model 就是 `unknown`（如实"品类未识别"）；
+  //   配了 token 的设备在状态刷新时经 `miio.info` 补 model 后再归一（见 `miioDeviceModel`）。
+  const kindClass = kindClassOf({ kind: 'unknown', protocol: 'miio', model: input.model ?? null });
   return {
     name: String(input.name ?? '').trim() || (hex ? `米家设备 ${hex}` : `米家设备 ${input.address}`),
     kind: 'unknown',
+    ...(kindClass !== 'unknown' ? { kindClass } : {}),
     protocol: 'miio',
     address: input.address,
     port: input.port ?? MIIO_PORT,
@@ -419,6 +424,38 @@ export async function miioDeviceState(dev: AnsDevice, deps: MiioControlDeps = {}
   const second = await ask('get_prop', COMMON_PROPS);
   if (second.ok) return { ok: true, state: second.state };
   return { ok: false, error: `状态查询失败（get_status：${first.error}；get_prop：${second.error}）` };
+}
+
+/**
+ * 查设备型号（`miio.info`）——**只用于品类归一**（zx_20261029_2 M1）。
+ * 无 token / 查询失败 / 回包无 model ⇒ `null`（不猜型号；品类保持 `unknown`）。
+ * ⚠ 不改变 `miioDeviceState` 的结果形状：这是另一问，失败不外溢成"设备离线"。
+ */
+export async function miioDeviceModel(dev: AnsDevice, deps: MiioControlDeps = {}): Promise<string | null> {
+  const token = tokenOf(dev.address, deps);
+  if (!token) return null;
+  try {
+    const packet = encodeMiioPacket({
+      deviceId: miioDidOf(dev),
+      stamp: deps.stamp,
+      token,
+      payload: { id: deps.msgId ?? nextMsgId(), method: 'miio.info', params: [] },
+    });
+    const reply = await (deps.transport ?? udpMiioTransport()).request({
+      address: dev.address,
+      port: dev.port ?? MIIO_PORT,
+      packet,
+      timeoutMs: deps.timeoutMs ?? 5_000,
+    });
+    const decoded = decodeMiioPacket(reply, token);
+    if (!decoded.ok) return null;
+    const payload = decoded.payload as { result?: unknown } | null;
+    const result = payload?.result;
+    const model = result && typeof result === 'object' ? (result as { model?: unknown }).model : result;
+    return typeof model === 'string' && model.trim() ? model.trim() : null;
+  } catch {
+    return null;
+  }
 }
 
 // ==================== 发现 ====================

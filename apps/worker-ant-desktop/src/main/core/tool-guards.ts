@@ -11,6 +11,8 @@
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import type { Stats } from 'node:fs';
+// 多段层要在**每一段**上复跑同一个意图分类器（见 `evaluateMultiSegment`）——分类规则只此一处。
+import { classifyBashCommand } from './sandbox.js';
 
 /**
  * E12 引号感知的管道切分：shell 里**只有引号外的裸 `|` 才是管道**。
@@ -68,6 +70,147 @@ export const SHELL_REJECT_CHARS: Record<ShellTool, readonly string[]> = {
   execute_command: [';', '&', '|', '`', '$', '\n'],
   bash: ['\n', ';', '&', '`'],
 };
+
+/**
+ * zx_20261029_3 M5（维特根斯坦·语言游戏）：多段命令的**分隔符**与段数上限——
+ * 切分与工具能力简报**同读这两个常量**，不各写一份（写死段数=下一轮必假的哑雷）。
+ */
+export const MULTI_SEGMENT_SEPARATORS = ['&&', '||', ';'] as const;
+export const MAX_SHELL_SEGMENTS = 8;
+
+/**
+ * 引号感知的分段：只切引号外的 `;` / `&&` / `||`。
+ *
+ * 为什么不能简单 `split(/;|&&|\|\|/)`：`git commit -m "a;b"` 里的分号是**字符串内容**，
+ * 切开后段首 token 成 `b"`，判据从此读的不是同一条命令。与 `splitShellPipes` 同一套引号/转义跟踪。
+ * 单个 `&`、单个 `|` **不是**分隔符——它们留给字符层去拒（后台 `cmd &`、管道），
+ * 免得"支持分段"顺手把这两样也放开了。
+ */
+export function splitShellSegments(command: string): string[] {
+  const segs: string[] = [];
+  let cur = '';
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!;
+    if (quote) {
+      cur += ch;
+      if (ch === '\\' && quote === '"') {
+        if (i + 1 < command.length) { cur += command[i + 1]!; i++; }
+      } else if (ch === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'") { quote = ch; cur += ch; continue; }
+    if (ch === '\\') { cur += ch; if (i + 1 < command.length) { cur += command[i + 1]!; i++; } continue; }
+    if (ch === ';') { segs.push(cur); cur = ''; continue; }
+    if ((ch === '&' || ch === '|') && command[i + 1] === ch) { segs.push(cur); cur = ''; i++; continue; }
+    cur += ch;
+  }
+  segs.push(cur);
+  return segs;
+}
+
+/**
+ * 段内的被拒字符（引号感知）。与 `firstRejectedShellChar` 的分工：
+ * 后者是**整串字符层**（`engine.shell_advice_honest` 那条文案判据仍读它，语义不动）；
+ * 本函数只在多段层的**每一段**上跑，故引号内的分隔符得以放行——
+ * 但双引号内的 `$`/反引号**仍然生效**（shell 在双引号里照样展开），故只有单引号是全字面量。
+ */
+function firstRejectedCharInSegment(seg: string, tool: ShellTool): string | null {
+  const set = new Set(SHELL_REJECT_CHARS[tool]);
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < seg.length; i++) {
+    const ch = seg[i]!;
+    if (quote === "'") { if (ch === "'") quote = null; continue; }
+    if (quote === '"') {
+      if (ch === '\\') { i++; continue; }
+      if (ch === '"') { quote = null; continue; }
+      if (set.has(ch) && (ch === '$' || ch === '`' || ch === '\n')) return ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'") { quote = ch; continue; }
+    if (ch === '\\') { i++; continue; }
+    if (set.has(ch)) return ch;
+  }
+  return null;
+}
+
+/** 剥掉段首的分组符/空白：`(sudo x` 的首 token 是 `sudo`，不是 `(sudo`。 */
+function stripLeadingGroups(seg: string): string {
+  return seg.replace(/^[\s({]+/, '');
+}
+
+export interface MultiSegmentFailure {
+  /** 出问题的那一段（整串级的失败为空串） */
+  segment: string;
+  /** 段序号（0-based；整串级为 -1） */
+  segmentIndex: number;
+  /** 被拒字符（字符层失败时给出，其余为 null） */
+  char: string | null;
+  advice: string;
+  payload: Record<string, unknown>;
+}
+
+export type MultiSegmentVerdict = { ok: true; segments: string[] } | ({ ok: false } & MultiSegmentFailure);
+
+/**
+ * zx_20261029_3 M5：多段命令的**逐段**判定（纯函数，零 electron）。
+ *
+ * 病根：`execute_command` 只见整串首 token——`cd /x && sudo apt install x` 的首 token 是 `cd`，
+ * 于是「首 token 不是 sudo」被当成「这条命令不是 sudo」。语法（有分隔符）与权限（要 sudo）是两件事。
+ *
+ * 顺序：整串破坏性 → 切段（引号感知）→ 段数上限 → 逐段
+ * `破坏性 → 剥分组符取首 token → 解释器 → classifyBashCommand → 段内被拒字符`。
+ * 整串**原检查**（DESTROY/整串 classify/解释器）在调用点仍先跑；本函数是**加一道**，不是替代。
+ * 返回值里的 `payload` 与既有拒绝形状一致，调用点直接 `JSON.stringify`。
+ */
+export function evaluateMultiSegment(command: string, tool: ShellTool, cwd: string): MultiSegmentVerdict {
+  const fail = (
+    segment: string, segmentIndex: number, payload: Record<string, unknown>, advice: string, char: string | null = null,
+  ): MultiSegmentVerdict => ({ ok: false, segment, segmentIndex, char, advice, payload });
+
+  if (DESTROY_PATTERNS.some((p) => command.includes(p))) {
+    return fail('', -1, { error: '破坏性命令被拦截，禁止执行' }, '破坏性命令被拦截，禁止执行。');
+  }
+  const segments = splitShellSegments(command).map((s) => s.trim()).filter(Boolean);
+  if (segments.length === 0) return fail('', -1, { error: '命令为空。' }, '命令为空。');
+  if (segments.length > MAX_SHELL_SEGMENTS) {
+    const advice = `命令共 ${segments.length} 段（按 ${MULTI_SEGMENT_SEPARATORS.map((s) => `「${s}」`).join('/')} 切分），`
+      + `超过单次上限 ${MAX_SHELL_SEGMENTS} 段。请拆成多次单独调用。`;
+    return fail('', -1, { error: advice, segmentCount: segments.length }, advice);
+  }
+
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i]!;
+    if (DESTROY_PATTERNS.some((p) => seg.includes(p))) {
+      return fail(seg, i, { error: '破坏性命令被拦截，禁止执行' }, '破坏性命令被拦截，禁止执行。');
+    }
+    const head = stripLeadingGroups(seg);
+    const name = head.split(/\s+/)[0]?.split('/').pop()?.toLowerCase() || '';
+    if (['sh', 'bash', 'zsh'].includes(name)) {
+      return fail(seg, i, {
+        requires_privilege: true,
+        command,
+        message: '禁止直接执行shell解释器。请使用 ask_user 请求用户批准，用户批准后用 run_privileged 执行。',
+      }, '禁止直接执行 shell 解释器。');
+    }
+    const intent = classifyBashCommand(head);
+    if (intent === 'Destructive') {
+      return fail(seg, i, { error: '破坏性命令被沙箱拦截（rm/mkfs/dd 等）' }, '破坏性命令被沙箱拦截。');
+    }
+    if (intent === 'SystemAdmin') {
+      const advice = '系统管理命令被沙箱拦截（sudo/apt/docker 等）。请用 ask_user→run_privileged 请求批准。';
+      return fail(seg, i, { error: advice }, advice);
+    }
+    const ch = firstRejectedCharInSegment(seg, tool);
+    if (ch) {
+      const advice = shellRejectAdvice(ch, tool, cwd);
+      return fail(seg, i, shellRejectPayloadForChar(ch, tool, cwd), advice, ch);
+    }
+  }
+  return { ok: true, segments };
+}
 
 /** 该工具**按字符**拒绝的第一个字符（按命令中的出现顺序）；无则 `null`。 */
 export function firstRejectedShellChar(command: string, tool: ShellTool): string | null {
@@ -169,6 +312,9 @@ export function buildToolConstraintBrief(): string {
       + `按字符不支持 ${fmt('bash')}；另有命令替换 \`$()\` 与重定向亦不支持。`,
     `- \`execute_command\` = 通用命令（**可 \`cd\`、可写操作**）；**不支持 \`|\` 管道**；`
       + `按字符不支持 ${fmt('execute_command')}。`,
+    `- \`execute_command\` 的分段（开关 \`engine.shell_multi_segment\` 开启时）：可用 `
+      + `${MULTI_SEGMENT_SEPARATORS.map((s) => `「${s}」`).join('/')} 连接，最多 ${MAX_SHELL_SEGMENTS} 段；`
+      + '**每一段**都按同一套判据逐段检查（限制只看首段不算数）。后台 `&`、管道、命令替换、换行仍不支持。',
     '- 两者的工作目录**都已是本任务的项目目录**，一般**无需 `cd`**；写文件一律用 `write_file`/`edit_file`。',
   ].join('\n');
 }

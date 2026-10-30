@@ -216,9 +216,12 @@ const rendererPage = fs.readFileSync(path.join(RENDERER, 'pages/TemplatesPage.ts
 ok(/\btest: \(title: string, description\?: string\)/.test(rendererIpc)
   && /tplIpc\.test\(testTitle, testDesc\)/.test(rendererPage),
   'B-4 前端→后端对齐：renderer 的 `test(title, description)` 与页面两栏输入同形（不是"一头改了另一头没改"）');
-ok(/skip: 'explicit_subtasks' \| 'planning_intent' \| null/.test(rendererIpc)
-  && /setTestSkip\(r\.skip\)/.test(rendererPage),
-  'B-5 `skip` 一路回传到界面（"本可命中但不会拆"这一态此前一个字都不说，用户无法据此改输入）');
+// zx_20261028_2 M4 重定向（按**更强**真源钉形状，非放宽）：第三态 `repair_intent` 也必须进 renderer 的
+//   联合类型——否则界面拿到该值会落进 `else` 分支，把"修复意图"说成"规划意图"。
+ok(/skip: 'explicit_subtasks' \| 'planning_intent' \| 'repair_intent' \| null/.test(rendererIpc)
+  && /setTestSkip\(r\.skip\)/.test(rendererPage)
+  && /'repair_intent'/.test(rendererPage),
+  'B-5 `skip` 一路回传到界面且三态齐全（`repair_intent` 在类型与页面文案两处都在场）');
 const detail = fs.readFileSync(path.join(RENDERER, 'pages/TaskDetailPage.tsx'), 'utf-8');
 ok(/c\.matched_field as 'title' \| 'description' \| undefined/.test(detail) && /命中\{matchedInfo\.field/.test(detail),
   'B-6 任务详情页透出「命中标题/命中描述」（描述现在能独立命中，用户须看得见是命中在哪一侧）');

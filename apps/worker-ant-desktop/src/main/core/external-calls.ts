@@ -26,6 +26,7 @@ import { teamFeatureRefusal } from './team-gate.js';
 import type { LicenseSettingDb } from './license.js';
 // zx_20261018_1 批二「意」：意图协议（词表/校验）+ 计划账（resolve 与 execute 之间的那本账）。
 import { INTENT_CAPABILITY, publicIntents, validateIntent } from './intent-protocol.js';
+import { deviceKindClassOf, type DeviceKindClass } from './device-kind.js';
 import {
   claimIntentPlan,
   createIntentPlan,
@@ -48,26 +49,29 @@ export interface ExternalCallDb {
 
 /**
  * 能力白名单——**唯一定义处**。
- * 两项，**安全语义不同**（zx_20261018_1 批一「通」）：
+ * 三项，**安全语义不同**（zx_20261018_1 批一「通」；zx_20261027_3 M5b 增任务请求）：
  *   · `device_control` ——**原始动作**（turn_on/set…），由终端自己决定按哪个动作、哪台设备。
  *   · `intent_control` ——**自然语言意图**（"把客厅灯打开"），由本机解析成计划再执行。
+ *   · `task_request`   ——**一整件任务**（一段任务描述 + 验收标准），交本机任务引擎排队执行、回摘要。
  * 故 **IM 审批默认只给 `intent_control`**（见 `DEFAULT_TERMINAL_CAPABILITIES`）：一句话的意图经过本机解析，
- * 比让终端直发原始动作更可控；原始动作须用户在桌面闸里**显式勾选**（承 zx_20261018_1 D-2）。
+ * 比让终端直发原始动作更可控；原始动作与任务请求须用户在桌面闸里**显式勾选**（承 zx_20261018_1 D-2）。
  * 新增一项须**穷举两侧读点**：白名单（这里）∩ 用户批准（`capabilities_json`）——二者都过才放行。
  */
-export const EXTERNAL_CAPABILITIES = ['device_control', 'intent_control'] as const;
+export const EXTERNAL_CAPABILITIES = ['device_control', 'intent_control', 'task_request'] as const;
 export type ExternalCapability = (typeof EXTERNAL_CAPABILITIES)[number];
 
 /** 人话能力名（面板/回执直接上屏用；键类型取 `ExternalCapability` ⇒ 漏一项是编译期错）。 */
 export const EXTERNAL_CAPABILITY_LABEL: Record<ExternalCapability, string> = {
   device_control: '设备控制',
   intent_control: '意图控制',
+  task_request: '任务请求',
 };
 
 /** 人话风险说明（审批面板逐项上屏；**与 label 同源同表**，不另立一份词表）。 */
 export const EXTERNAL_CAPABILITY_NOTE: Record<ExternalCapability, string> = {
   device_control: '原始动作：终端自己决定对哪台设备下发什么动作。默认不给，须在此显式勾选。',
   intent_control: '自然语言意图：终端说一句要做什么，由本机解析成计划再执行。默认授予。',
+  task_request: '交一整件任务给本机排队执行（占用本机算力与任务队列）。默认不给，须在此显式勾选；同一终端同时只允许 1 件在途。',
 };
 
 export function isExternalCapability(cap: string): cap is ExternalCapability {
@@ -98,9 +102,10 @@ export function offeredCapabilities(): OfferedCapability[] {
  * **`/invoke` 可原始调用的能力**（zx_20261018_1 批一 D-2）——刻意**窄于** `EXTERNAL_CAPABILITIES`：
  * `intent_control` 是"把一句话交给本机解析"，不是"让终端直接下命令"；它**不可**经 `/invoke` 直调，
  * 否则"默认授予的意图能力"就成了绕过原始动作显式授权（`device_control` 须桌面勾选）的后门。
+ * `task_request`（M5b）可直调：它本就是"交一整件任务"的入口，与意图协议不是同一条路。
  * 本项须与 `EXTERNAL_CAPABILITIES` 分开，不靠注释约定（维特根斯坦·意义即用法：词怎么被用，才是它的意思）。
  */
-export const INVOKE_CAPABILITIES = ['device_control'] as const;
+export const INVOKE_CAPABILITIES = ['device_control', 'task_request'] as const;
 export type InvokeCapability = (typeof INVOKE_CAPABILITIES)[number];
 
 export function isInvocableCapability(cap: string): cap is InvokeCapability {
@@ -188,22 +193,38 @@ export function listExternalCalls(db: ExternalCallDb, limit = 50): ExternalCallR
 
 /* ── 能力面（门外看什么 / 门外能做什么）────────────────────────────────────── */
 
-/** 脱敏设备行（罗尔斯·无知之幕）——**只此三样**：叫什么 / 是什么 / 能做什么。 */
+/**
+ * 脱敏设备行（罗尔斯·无知之幕）——**只此五样**：叫什么 / 自述 kind / 归一类目 / 房间 / 能做什么。
+ *
+ * zx_20261029_2 M3：加 `kind_class` 与 `room`。二者只在**配对后**的 `/capabilities` 出现
+ * （门外门牌只有类目计数，没有实例）——终端据此把自己的话落到"哪间屋、哪类设备"，
+ * 不必认识每个协议的原始词；`kind` 仍原样保留（自述是设备说的话，不改写）。
+ */
 export interface RedactedDevice {
   /** "我们叫它什么"（别名优先，回退自述名）——与面板/工具**同一把尺**（`device-name.ts`）。 */
   call_name: string;
   kind: string;
+  /** 归一类目（`kind_class`，真源 `device-kind.ts`；旧行缺列时现算）。 */
+  kind_class: DeviceKindClass;
+  /** 用户指派的房间名（未指派 ⇒ 空串）。 */
+  room: string;
   /** 设备自述的能力清单（service type / TXT 键派生；不自造）。 */
   actions: string[];
 }
 
 /**
- * 台账 → 脱敏清单。⚠ 这里**刻意只挑三样**：`address` / `port` / `protocol` / `status_json` /
+ * 台账 → 脱敏清单。⚠ 这里**刻意只挑五样**：`address` / `port` / `protocol` / `status_json` /
  *   `authorized` / `controllable` **一律不出门**（网络坐标与授权态是门内之物）。
  *   要新增对外字段，须先在**无知之幕**下问一句"门外的人真的需要它吗"，再改这里（唯一出入口）。
  */
 export function redactedDevices(devices: AnsDevice[]): RedactedDevice[] {
-  return devices.map((d) => ({ call_name: deviceCallName(d), kind: d.kind, actions: [...d.capabilities] }));
+  return devices.map((d) => ({
+    call_name: deviceCallName(d),
+    kind: d.kind,
+    kind_class: deviceKindClassOf(d),
+    room: d.room ?? '',
+    actions: [...d.capabilities],
+  }));
 }
 
 export interface ExternalCapabilitiesPayload {
@@ -217,11 +238,18 @@ export interface ExternalCapabilitiesPayload {
   devices: RedactedDevice[];
 }
 
-/** 意图规划结果——解析器（`home-intent.ts`，批五接上）与本模块之间的**唯一形状**。 */
+/** 计划由谁排出（zx_20261029_2 M2）：规则表优先，规则排不出才请模型补一步棋。 */
+export type IntentPlanSource = 'rule' | 'model';
+
+/**
+ * 意图规划结果——解析器（`home-intent.ts`，批五接上）与本模块之间的**唯一形状**。
+ * `source` / `message`（zx_20261029_2 M2）为**可选**：老路径（`planHomeComfort` 直返）不带，
+ * 只有 `resolveComfortIntent` 才补——失败时给一句**可行动**的下一步，成功时如实标"谁排的"。
+ */
 export type IntentResolveOutcome =
-  | { ok: true; steps: IntentStep[]; skipped: IntentSkip[] }
-  | { ok: false; reason: 'needs_clarification'; candidates: string[]; skipped?: IntentSkip[] }
-  | { ok: false; reason: string; skipped?: IntentSkip[] };
+  | { ok: true; steps: IntentStep[]; skipped: IntentSkip[]; source?: IntentPlanSource }
+  | { ok: false; reason: 'needs_clarification'; candidates: string[]; skipped?: IntentSkip[]; source?: IntentPlanSource; message?: string }
+  | { ok: false; reason: string; skipped?: IntentSkip[]; source?: IntentPlanSource; message?: string };
 
 export interface IntentResolveInput {
   intent: string;
@@ -230,6 +258,22 @@ export interface IntentResolveInput {
 
 /** 门端点回包（形状与 `inbound-gate.InboundResult` **同形**：`{status, body}`）。 */
 export interface ExternalCapabilityResult { status: number; body: unknown }
+
+/** zx_20261027_3 M5b：「任务请求」的入参上限（与审批面板/文档同一口径）。 */
+export const TASK_REQUEST_MAX_PROMPT = 4000;
+export const TASK_REQUEST_MAX_ACCEPTANCE = 2000;
+
+export interface TaskRequestInput {
+  prompt: string;
+  acceptanceCriteria: string;
+  /** 发起者身份——装配层可据此把任务记到"外部终端"名下。 */
+  terminalId: string;
+}
+
+/** 一件外部任务请求的结局——**失败也回 `taskId`**（便于追责，不交白卷）。 */
+export type TaskRequestOutcome =
+  | { ok: true; taskId: string; taskStatus: string; summary: string }
+  | { ok: false; taskId?: string; taskStatus?: string; summary?: string; error: string };
 
 /** "控一台设备"那一跳的注入面——真实现由 `main/index.ts` 装配（本模块不引 `tools/device.ts`）。 */
 export interface ExternalCapabilityDeps {
@@ -248,8 +292,14 @@ export interface ExternalCapabilityDeps {
    * 意图 → 计划步骤（确定性规则表在 `home-intent.ts`，批五接上）。
    * 未装配 ⇒ resolve 如实回 503 `intent_resolver_unavailable`（不编空计划）。
    * ⚠ 入参**只有** `intent` 与校验后的 `params`——`utterance` 不进来（R-20）。
+   * zx_20261029_2 M2：允许异步——模型兜底是一次真网络调用，同步解析器照旧直接返回。
    */
-  resolveIntentSteps?(input: IntentResolveInput): IntentResolveOutcome;
+  resolveIntentSteps?(input: IntentResolveInput): IntentResolveOutcome | Promise<IntentResolveOutcome>;
+  /**
+   * zx_20261027_3 M5b：执行一次 `task_request`——交本机任务引擎跑（生产接线＝`makeRelayRunner`：
+   * 「建任务 → 入队 → 等终态 → 回摘要」）。未装配 ⇒ **503 `task_runner_unavailable`**（不假装跑过）。
+   */
+  runTask?(input: TaskRequestInput): Promise<TaskRequestOutcome>;
   /** 注入时刻（rr 用；生产不传 ⇒ 真实时刻）。 */
   now?(): Date;
   /**
@@ -286,6 +336,8 @@ function asRecord(v: unknown): Record<string, unknown> {
  *      403 且留痕（`capability_not_invocable`）；
  *   ④ 该终端获批——用户批准时**没勾**这项即 403 且留痕（`capability_not_granted`）；
  *   ⑤ 执行 → 留痕（`ok` / `denied` / `error`）。
+ *   `task_request` 另加**单终端同时 1 件**的在途闸（超 ⇒ 429 `busy`，同样留痕）——防一个终端把本机任务队列打满；
+ *   其载荷校验（空 prompt / 超长）在闸后 ⇒ 400 且**不**留痕（烂请求不污染账）。
  * ⚠ 缺 `capability` 字段 ⇒ 400 且**不**留痕（那不是一次"能力调用尝试"，是一条烂请求——别污染账）。
  */
 export function createExternalCapabilityPort(
@@ -293,6 +345,8 @@ export function createExternalCapabilityPort(
   deps: ExternalCapabilityDeps,
 ): ExternalCapabilityPort {
   const refusal = () => teamFeatureRefusal(db, 'external_terminal');
+  /** M5b：每个终端**同时 1 件**任务请求在途（进程内即可——重启后无在途任务，如实不 pretend）。 */
+  const taskInFlight = new Set<string>();
   /** 留痕唯一写口的**旁挂观察**（zx_20261018_2 批六）——先落库，再通知；观察者异常不打断调用。 */
   const record = (entry: Parameters<typeof recordExternalCall>[1]): string => {
     const id = recordExternalCall(db, entry);
@@ -305,6 +359,69 @@ export function createExternalCapabilityPort(
       });
     } catch { /* 观察者异常不打断调用（真相已落库） */ }
     return id;
+  };
+
+  /**
+   * `task_request` 的执行路（M5b）——闸序的前四步已由 `invoke` 走过，这里只做**载荷校验 → 在途闸 → 执行 → 留痕**。
+   * 请求过了闸但执行没成 ⇒ **200 + `ok:false`**（与设备传动失败同形，不当协议错误），`taskId` 照回。
+   */
+  const runTaskRequest = async (
+    terminalId: string,
+    inner: Record<string, unknown>,
+    remoteAddr?: string,
+  ): Promise<ExternalCapabilityResult> => {
+    const capability = 'task_request';
+    const prompt = typeof inner.prompt === 'string' ? inner.prompt.trim() : '';
+    const acceptance = typeof inner.acceptance_criteria === 'string' ? inner.acceptance_criteria.trim() : '';
+    // 烂请求不落账（与缺 `capability` 同族）：先校验，再谈在途闸/执行/留痕。
+    if (!prompt) return { status: 400, body: { error: 'prompt_required' } };
+    if (prompt.length > TASK_REQUEST_MAX_PROMPT) {
+      return { status: 400, body: { error: 'prompt_too_long', limit: TASK_REQUEST_MAX_PROMPT } };
+    }
+    if (acceptance.length > TASK_REQUEST_MAX_ACCEPTANCE) {
+      return { status: 400, body: { error: 'acceptance_criteria_too_long', limit: TASK_REQUEST_MAX_ACCEPTANCE } };
+    }
+    // 留痕只存**截断摘要**（账本不该变成终端任务的全文堆放处）；全文已在任务描述里。
+    const traceArgs = { prompt: prompt.slice(0, 500), acceptance_criteria: acceptance.slice(0, 500) };
+    if (taskInFlight.has(terminalId)) {
+      record({ terminalId, capability, args: traceArgs, result: 'denied', reason: 'busy', remoteAddr });
+      return { status: 429, body: { error: 'busy', detail: '同一终端同时只允许 1 件任务请求在途' } };
+    }
+    const runner = deps.runTask;
+    if (!runner) {
+      record({ terminalId, capability, args: traceArgs, result: 'error', reason: 'task_runner_unavailable', remoteAddr });
+      return { status: 503, body: { error: 'task_runner_unavailable' } };
+    }
+    taskInFlight.add(terminalId);
+    try {
+      let outcome: TaskRequestOutcome;
+      try {
+        outcome = await runner({ prompt, acceptanceCriteria: acceptance, terminalId });
+      } catch (e) {
+        record({ terminalId, capability, args: traceArgs, result: 'error', reason: 'task_runner_failed', remoteAddr });
+        return { status: 502, body: { error: 'task_runner_failed', message: (e as Error)?.message || String(e) } };
+      }
+      if (outcome.ok) {
+        record({ terminalId, capability, args: traceArgs, result: 'ok', remoteAddr });
+        return { status: 200, body: { ok: true, taskId: outcome.taskId, taskStatus: outcome.taskStatus, summary: outcome.summary } };
+      }
+      record({
+        terminalId, capability, args: traceArgs, result: 'error',
+        reason: `task_${outcome.taskStatus || 'failed'}`, remoteAddr,
+      });
+      return {
+        status: 200,
+        body: {
+          ok: false,
+          taskId: outcome.taskId ?? '',
+          taskStatus: outcome.taskStatus ?? '',
+          summary: outcome.summary ?? '',
+          error: outcome.error,
+        },
+      };
+    } finally {
+      taskInFlight.delete(terminalId);
+    }
   };
 
   return {
@@ -345,6 +462,11 @@ export function createExternalCapabilityPort(
       if (!allowed.includes(capability)) {
         record({ terminalId, capability, args: inner, result: 'denied', reason: 'capability_not_granted', remoteAddr });
         return { status: 403, body: { error: 'capability_not_granted', capability } };
+      }
+
+      // M5b：任务请求是**另一条执行路**（交本机任务引擎跑），前四道闸与设备控制同族，之后各走各的。
+      if (capability === 'task_request') {
+        return runTaskRequest(terminalId, inner, remoteAddr);
       }
 
       const action = typeof inner.action === 'string' ? inner.action : '';
@@ -405,7 +527,7 @@ export function createExternalCapabilityPort(
       let outcome: IntentResolveOutcome;
       try {
         // ⚠ 只传 intent + 校验后的 params；`utterance` 不进来（R-20）。
-        outcome = planner({ intent: v.intent, params: v.params });
+        outcome = await planner({ intent: v.intent, params: v.params });
       } catch (e) {
         record({ terminalId, capability, args: asRecord(body), result: 'error', reason: 'intent_resolver_failed', remoteAddr });
         return { status: 500, body: { error: 'intent_resolver_failed', message: (e as Error)?.message || String(e) } };
@@ -416,16 +538,19 @@ export function createExternalCapabilityPort(
           terminalId, capability, args: asRecord(body), result: 'denied', reason, remoteAddr,
         });
         // 被略过的设备照实带回（"为什么没做它"——与成功回包同一字段名，不静默丢）。
+        // zx_20261029_2 M2：`message` 是给门外看的**可行动**下一步（不再只回一个机器码）。
         const skipped = outcome.skipped ?? [];
+        const message = outcome.message ? { message: outcome.message } : {};
         if (reason === 'needs_clarification' && 'candidates' in outcome) {
-          return { status: 409, body: { error: 'needs_clarification', candidates: outcome.candidates, skipped } };
+          return { status: 409, body: { error: 'needs_clarification', candidates: outcome.candidates, skipped, ...message } };
         }
-        return { status: 409, body: { error: reason, skipped } };
+        return { status: 409, body: { error: reason, skipped, ...message } };
       }
       const now = deps.now?.() ?? new Date();
       const plan = createIntentPlan(db, {
         terminalId, capability, params: v.params,
-        steps: outcome.steps, skipped: outcome.skipped, now,
+        steps: outcome.steps, skipped: outcome.skipped,
+        source: outcome.source ?? 'rule', now,
       });
       record({
         terminalId, capability,
@@ -434,7 +559,11 @@ export function createExternalCapabilityPort(
       });
       return {
         status: 200,
-        body: { planId: plan.id, expiresIn: INTENT_PLAN_TTL_SEC, steps: outcome.steps, skipped: outcome.skipped },
+        body: {
+          planId: plan.id, expiresIn: INTENT_PLAN_TTL_SEC,
+          steps: outcome.steps, skipped: outcome.skipped,
+          source: outcome.source ?? 'rule',
+        },
       };
     },
 

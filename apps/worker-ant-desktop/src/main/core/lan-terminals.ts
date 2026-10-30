@@ -18,6 +18,8 @@
  *   `SilenceDb` 是最小库接口，rr 传内存库即可跑真实现。
  */
 import { createHash } from 'node:crypto';
+import { teamFeatureRefusal } from './team-gate.js';
+import type { LicenseSettingDb } from './license.js';
 
 /** 浏览的服务类型——与工蚁自己的 `_workerant._tcp` **区分**（谁发现谁，看服务名）。 */
 export const LAN_TERMINAL_SERVICE_TYPE = 'workerant-terminal';
@@ -288,6 +290,89 @@ export function isTerminalBrowseRunning(): boolean {
 /** 起不来的**因**（`null` = 正常）；UI 据此如实说明"列表空"是没人还是看不见。 */
 export function terminalBrowseError(): string | null {
   return browseError;
+}
+
+// ── 常驻发现：随入站门起停（zx_20261029_2 M4）────────────────────────────────
+//
+// 病根：浏览此前只在「协同面板」打开时由 `external:lanList` 惰性拉起（`ensureLanBrowse`）——
+//   用户不打开那一页，门外广播的终端就**永远看不见**。M4 改为**常驻**：入站门开启且 Team 解锁即起，
+//   关门即停；面板只读状态，不再兼任"开关"。
+
+/** 常驻发现归属的 Team 能力（M4 明确用 `multi_node`；所有 Team 能力同闸同解）。 */
+export const LAN_BROWSE_FEATURE = 'multi_node' as const;
+
+/**
+ * 常驻发现的**实况**（只读）：`running` 是浏览真在跑；未跑的原因分开如实说——
+ * `locked`（Team 未解锁）/ `door_open=false`（入站门没开）/ `error`（起了但 mDNS 报错）。
+ */
+export interface TerminalBrowseStatusPayload {
+  running: boolean;
+  error: string | null;
+  locked: boolean;
+  door_open: boolean;
+  detail: string;
+}
+
+/** 起停面：`main/index.ts` 在入站门开/关的**同一条路**上调用（不另写一份起停次序）。 */
+export interface TerminalBrowseLifecycle {
+  /** 满足「Team 解锁 ∧ 入站门在监听」才起；返回是否已在跑。 */
+  start(): boolean;
+  stop(): void;
+  status(): TerminalBrowseStatusPayload;
+}
+
+export interface TerminalBrowseLifecycleOpts {
+  io?: TerminalBrowseIo;
+  /** 入站门是否**真在监听**（由装配层注入 `isInboundRunning`；缺省视为已开，便于单测）。 */
+  isDoorRunning?: () => boolean;
+  /** 每收一条新广播回调（面板据此即时刷新；本模块不触 event-bus）。 */
+  onDiscovered?: (item: LanPendingTerminal) => void;
+}
+
+/**
+ * 绑定一个库与门态，产出常驻发现的起停控制器（**唯一编排**）。
+ * 幂等：已在跑时 `start()` 不再重起（重复 start 会丢掉已听到的列表）；`stop()` 未起即空操作。
+ */
+export function createTerminalBrowseLifecycle(
+  db: SilenceDb & LicenseSettingDb,
+  opts: TerminalBrowseLifecycleOpts = {},
+): TerminalBrowseLifecycle {
+  const isDoorRunning = opts.isDoorRunning ?? (() => true);
+
+  const status = (): TerminalBrowseStatusPayload => {
+    const locked = teamFeatureRefusal(db, LAN_BROWSE_FEATURE) != null;
+    const doorOpen = isDoorRunning();
+    const running = isTerminalBrowseRunning();
+    const error = terminalBrowseError();
+    let detail: string;
+    if (locked) {
+      detail = '局域网常驻发现属团队版能力（本机当前档位未解锁）。';
+    } else if (!doorOpen) {
+      detail = '入站门未开——常驻发现随入站门起停，先在「协同面板」页开启入站门。';
+    } else if (error) {
+      detail = `局域网常驻发现未能启动：${error}`;
+    } else if (running) {
+      detail = '局域网常驻发现在运行（广播中的 AI 终端会进入待接入列表，30 秒无广播即消失）。';
+    } else {
+      detail = '入站门已开，但局域网常驻发现尚未启动。';
+    }
+    return { running, error, locked, door_open: doorOpen, detail };
+  };
+
+  const start = (): boolean => {
+    if (teamFeatureRefusal(db, LAN_BROWSE_FEATURE)) return false;
+    if (!isDoorRunning()) return false;
+    if (isTerminalBrowseRunning()) return true;
+    try { pruneLanSilences(db); } catch { /* 清过期静默失败不拦浏览 */ }
+    startTerminalBrowse({
+      ...(opts.io ? { io: opts.io } : {}),
+      isSilenced: (t: LanIdentity) => isLanTerminalSilenced(db, t),
+      ...(opts.onDiscovered ? { onDiscovered: opts.onDiscovered } : {}),
+    });
+    return isTerminalBrowseRunning();
+  };
+
+  return { start, stop: stopTerminalBrowse, status };
 }
 
 /**

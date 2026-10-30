@@ -94,5 +94,8 @@ export function initPacksIpc(db: Database.Database): void {
     }
   });
 
+  // zx_20261030_1 M6「荐」: 候选包的两个通道住在 `knowledge.ipc.ts`（与知识收件箱其余三通道同处），
+  //   通道名沿用 `packs:*`（renderer 取值不变）；本文件仍只做五个基础通道。
+
   console.log('[IPC] Domain pack handlers registered');
 }

@@ -6,7 +6,7 @@ import { getToolFrequencyStats, getFailureClusters } from '../core/observability
 import { eventBus } from '../core/event-bus.js';
 import type { MemoryManager, MemoryEntry } from '../core/memory-manager.js';
 import { projectQualityStats, buildPlanMilestoneLine } from '../core/project-analytics.js';
-import { resolveTaskMilestoneLink, resolveMilestoneImplementer, backfillDescendantSchemeRef } from '../core/task-accounting.js';
+import { resolveTaskMilestoneLink, resolveMilestoneImplementer, backfillDescendantSchemeRef, milestoneTokenRegex } from '../core/task-accounting.js';
 import { imChannelEnabledSql } from '../core/im/im-channel-status.js';
 // zx_20260914 M2-3①(罗尔斯·同一把尺): doc 探针判据的**唯一实现**（方案原文称之为"第三份手抄"，
 //   实测为两处内联拷贝 :52/:176）——本文件改为引用，不再自带副本。
@@ -453,7 +453,7 @@ export function initAdminIpc(db: Database.Database, healthDeps: AdminHealthDeps 
         if (!d.file_path) continue;
         let c = '';
         try { c = fs.readFileSync(d.file_path, 'utf-8'); } catch { continue; }
-        const re = /\bM\d+\b/g; let mm;
+        const re = milestoneTokenRegex(); let mm;
         while ((mm = re.exec(c)) !== null) found.add(mm[0]);
       }
       const msList = [...found].sort();

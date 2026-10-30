@@ -288,11 +288,18 @@ async function main(): Promise<void> {
     d.prepare("INSERT INTO wa_tasks (id,project_id,parent_task_id,title,status) VALUES ('P',?, '', '父任务', 'paused')").run(PROJ);
     addPending(d, 'C1', { title: '外派子任务', parent: 'P' });
     markRemoteAssigned(d as unknown as never, 'C1', { nodeId: 'n-peer', requestId: 'rq-1' }, iso(NOW_MS - 60_000));
+    // zx_20261030_1 M4：派单本身会在台账留痕（生产上 emit 即写事件）——回执核对的「本机台账有痕」一项据此成立。
+    d.prepare("INSERT INTO wa_event_log (aggregate_type, aggregate_id, event_type, payload) VALUES ('task','C1','node.dispatch','{}')").run();
 
     const events: Array<{ type: string; data: Record<string, unknown> }> = [];
     const enqueued: Array<{ type: string; payload: Record<string, unknown> }> = [];
     const deps = {
-      io: readIo(ansReq({ id: 'rq-1', status: 'done', result: { taskStatus: 'completed', summary: '远端已做完' } })),
+      // zx_20261030_1 M4：done 回传按**生产新形状**给（`taskId`/`taskStatus`/`outputs`）——
+      //   回执核对要能对得上本单，旧形状（只有 taskStatus）现在会被如实判"任务号不符"。
+      io: readIo(ansReq({
+        id: 'rq-1', status: 'done',
+        result: { taskId: 'C1', taskStatus: 'completed', outputs: [{ name: '报告.md', type: 'document' }], summary: '远端已做完' },
+      })),
       emit: (type: string, data: Record<string, unknown>) => { events.push({ type, data }); return true; },
       enqueue: async (type: string, payload: Record<string, unknown>) => { enqueued.push({ type, payload }); return ''; },
       now: () => NOW_MS,
@@ -306,8 +313,9 @@ async function main(): Promise<void> {
     eq([typeof cc[REMOTE_RESULT_KEY], cc[REMOTE_SUMMARY_KEY], typeof cc[REMOTE_RESULT_AT_KEY]],
       ['object', '远端任务态：completed', 'string'],
       'C-1d ★回传结果/摘要/时刻落进 context（面板可下钻 ∧ 父逐子简报取得到——同一处真源）');
-    ok(notesOf(d, 'C1').some((s) => s.includes('未复核')),
-      'C-1e ★★N5 如实边界：system 留痕含「远端自报完成，本机未复核」（不冒充"本机验收通过"）');
+    // zx_20261030_1 M4：N5 边界升级为**三态回执核对**——留痕须带核对结论与"未重跑其产出"这一如实边界。
+    ok(notesOf(d, 'C1').some((s) => s.includes('回执核对通过') && s.includes('未重跑其产出')),
+      'C-1e ★★N5 如实边界：system 留痕含核对结论 ∧「未重跑其产出」（不冒充"本机验收通过"）');
     eq([statusOf(d, 'P'), enqueued.map((e) => e.type)], ['pending', ['resume-ai-task']],
       'C-1f ★★父任务经**既有** `checkParentTaskAfterChildDone` **真恢复** `pending` ∧ 入队 `resume-ai-task`（复用机制，不新增）');
 
@@ -545,10 +553,14 @@ async function main(): Promise<void> {
     const TDP = CODE(`${A}/renderer/src/pages/TaskDetailPage.tsx`);
     ok(/orchestrationLabel\(c\.remote, c\.status, remoteNameOf\)/.test(TDP),
       'F-4 ★接线：任务详情子任务行渲染徽标经 `orchestrationLabel`（判据一处，非页面内联拼串）');
-    ok(/\{REMOTE_RESULT_CAVEAT\}/.test(TDP) && /c\.remote\.summary/.test(TDP),
-      'F-5 ★下钻块**真用** N5 边界文案 ∧ 显示远端摘要（命名即契约：写在屏上的就是断言的那句）');
-    ok(/import \{ orchestrationLabel, REMOTE_RESULT_CAVEAT[^}]*\} from '\.\.\/lib\/node-view'/.test(RD(`${A}/renderer/src/pages/TaskDetailPage.tsx`)),
-      'F-6 两处词表经 import 自 `node-view`（不在页面重抄"已外派给…"或"未复核"文案）');
+    // zx_20261030_1 M4：屏上的边界话由 `remoteResultNote(回执)` 三态派生，仍是同一处真源。
+    ok(/\{remoteResultNote\(c\.remote\.result\)\}/.test(TDP) && /c\.remote\.summary/.test(TDP),
+      'F-5 ★下钻块**真用** `remoteResultNote` 出边界话 ∧ 显示远端摘要（命名即契约：写在屏上的就是断言的那句）');
+    ok(/remoteReceiptOf\(c\.remote\.result\)/.test(TDP),
+      'F-5b ★三态着色同源：下钻块按 `remoteReceiptOf` 的回执结论上色（页面不自判 verdict）');
+    ok(/import \{[^}]*remoteReceiptOf[^}]*remoteResultNote[^}]*\} from '\.\.\/lib\/node-view'/.test(RD(`${A}/renderer/src/pages/TaskDetailPage.tsx`))
+      && /if \(!receipt\) return REMOTE_RESULT_CAVEAT;/.test(NV),
+      'F-6 词表经 import 自 `node-view`（页面不重抄）：历史行无回执 ⇒ `remoteResultNote` 回落到 N5 原句');
 
     // —— Settings：词表由 main 下发，renderer 不手抄 off/auto ——
     const SET = CODE(`${A}/renderer/src/pages/SettingsPage.tsx`);

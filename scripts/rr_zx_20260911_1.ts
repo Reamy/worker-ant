@@ -48,6 +48,8 @@ const exe = stripComments(exeRaw);
 const ovRaw = rd(OV);
 const ov = stripComments(ovRaw);
 const acct = stripComments(rd(ACCT));
+// zx_20261028_2 M3：finalize 门的内容校验移入工具体（`runFinalizeTask`），两门并看须读它。
+const cf = stripComments(rd('apps/worker-ant-desktop/src/main/core/tools/control-finalize.ts'));
 
 (async () => {
   console.log('S0 行为探针：archetypeForFile 判型 / 同一 .py 在两原型下结论不同 / buildDeviationContextBlock / formatInsufficiencyReasons');
@@ -145,15 +147,21 @@ const acct = stripComments(rd(ACCT));
 
   console.log('S1 两条门禁的判型归位（按产物本身，不再按标签/任务原型）');
   {
-    ok((exe.match(/const arch = archetypeForFile\(abs\);/g) || []).length >= 2,
-      '★finalize 门与收口门均逐文件判型（≥2 处）',
-      String((exe.match(/const arch = archetypeForFile\(abs\);/g) || []).length));
+    // zx_20261028_2 M3 **就地改钉（非放宽）**：两条门禁都改走 `validateOutputs` 批量面（有界并发），
+    //   finalize 侧不再有 `const arch = …` 单行（判型在 targets 映射里）⇒ 按旧形状计数必红。
+    //   改钉**更强**的新真源：两侧各**逐文件判型**（判型随每条目标走），且收口门只剩批量调用一处。
+    ok((exe.match(/archetypeForFile\(abs\)/g) || []).length >= 1
+      && cf.includes('archetype: archetypeForFile(abs)'),
+      '★finalize 门与收口门均逐文件判型（各按产物本身）',
+      `收口侧 ${(exe.match(/archetypeForFile\(abs\)/g) || []).length} 处 · finalize 侧映射 ${cf.includes('archetype: archetypeForFile(abs)')}`);
     ok(!exe.includes("abs, fText, 'document')"), '★finalize 门不再硬编码字面量 \'document\'');
     // zx_20260922_1 M7（F9）**就地改钉（非放宽）**：原两条钉的是"第三参跟的是 `arch` 而不是 `archetype`"——
     //   那仍是在钉"**题面被传进去了**，只是后面跟的判型对了"。M7 把"题面"这条入口整个拆掉（`validateOutput`
     //   签名收成三参），故此处改钉**更强**的新真源：调用形状里**根本不再出现任务题面**，判型 `arch` 收尾。
     ok(!exe.includes('`${title} ${description}`, arch)'), '★收口门不再把**任务题面**递给文件判据（旧形状 `${title} ${description}`, arch 已离场）');
-    ok(exe.includes('validateOutput(ansClient as never, abs, arch)'), '收口门调用形状：三参、判型 arch 收尾，其后再无任何题面参数');
+    ok(exe.includes('validateOutputs(ansClient as never, missTargets)')
+      && !exe.includes('validateOutput(ansClient as never, abs, arch)'),
+      '收口门调用形状：批量面一次问完（判型随每条目标），逐文件直呼 `validateOutput` 已离场');
     // ⚠ 不得改写成 `!exe.includes('`${title} ${description}`')`——该表达式在本文件里另有 7 处**正当**用途
     //   （判原型 / 抽声明产出路径 / 记忆分类 …），那样写会扫出一片假红。判据须认得"车牌照"，不是"这两个字"。
   }
@@ -212,10 +220,15 @@ const acct = stripComments(rd(ACCT));
 
   console.log('S5 诊断落库 + 拒收文案带原因 + 通知可达（user 角色）');
   {
-    ok((exe.match(/issues, missingAspects, suggestion/g) || []).length >= 2,
-      '★两条门禁落库均含 issues（≥2 处）', String((exe.match(/issues, missingAspects, suggestion/g) || []).length));
-    ok(exe.includes('issues = v.quickCheck?.issues ?? [];'), '实跑路径取 quickCheck.issues');
-    ok(exe.includes('issues = Array.isArray(hit.entry.issues)') , '缓存复用分支亦带出 issues（否则命中缓存的拒收仍是空反馈）');
+    // zx_20261028_2 M3 **就地改钉（非放宽）**：两门改批量面后，逐文件结果直接取 `r.quickCheck/issues`，
+    //   旧单数 `v.quickCheck` 形状离场。改钉的两侧各自可证伪：finalize 侧落库行含 reason、
+    //   收口侧实判/缓存两条来路都带出 issues。
+    ok(cf.includes('issues, missingAspects, suggestion, reason: r.reason') && exe.includes('issues: r.quickCheck?.issues ?? []'),
+      '★两条门禁落库均含 issues（finalize 侧并落未知原因 reason，收口侧实判来路）',
+      `finalize ${cf.includes('issues, missingAspects, suggestion, reason: r.reason')} · 收口 ${exe.includes('issues: r.quickCheck?.issues ?? []')}`);
+    ok(exe.includes('issues: r.quickCheck?.issues ?? []') && exe.includes('missingAspects: r.llmCheck?.missingAspects ?? []'),
+      '实跑路径取批量校验结果的 quickCheck.issues / llmCheck.missingAspects');
+    ok(exe.includes('issues: Array.isArray(hit.entry.issues)') , '缓存复用分支亦带出 issues（否则命中缓存的拒收仍是空反馈）');
     ok(exe.includes('formatInsufficiencyReasons(insuffReasons)'), 'finalize 拒收文案带出具体原因');
     ok(exe.includes('formatInsufficiencyReasons(contentReasons)'), '收口拒收文案带出具体原因');
     ok(!exe.includes('reasons: contentReasons'), '★不落重复的 deliverable_unfulfilled.reasons（三处生产者同形；原因已由 issues + 会话消息承载，再存一份无人读的即「做了没用上」）');

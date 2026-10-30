@@ -20,6 +20,8 @@ import type Database from 'better-sqlite3';
 import { isNodeEnrolled } from './node-heartbeat.js';
 import { NODE_SETTING_KEYS, readNodeSetting, type NodeSettingDb } from './node-identity.js';
 import { recordAudit, type AuditDb } from './audit-log.js';
+// zx_20261030_1 M2：读回顺手抄一份进度（内存投影；真源在 ANS）。
+import { recordDispatchProgress } from './node-progress-cache.js';
 import { DEFAULT_NODE_ROLE, canDispatch, isNodeRole, type AnsNodeRequest, type NodeRequestSubmit, type NodeRequestStatus } from '@worker-ant/shared-types';
 
 /**
@@ -36,6 +38,11 @@ export interface DispatchIo {
    *   转回 `assigned`（B 端可继续跑），**抛**于失败/无 data。
    */
   answer(id: string, answer: string): Promise<AnsNodeRequest>;
+  /**
+   * zx_20261030_1 M3: `POST /api/v1/nodes/requests/:id/cancel` —— 派活方**叫停**（请求方鉴权），
+   *   **抛**于失败/无 data。回来的状态即 ANS 的真实处置（`cancelled` 已停 / 在跑只置了叫停标志）。
+   */
+  cancel(id: string): Promise<AnsNodeRequest>;
 }
 
 /** 事件出口（真机＝`eventBus.emit`；回归喂假）——与 `NodeRequestWorkerOpts.onEvent` 同一手法。 */
@@ -215,7 +222,16 @@ export async function refreshDispatchResult(
   //   台账行即被钉成 `error`，幂等守卫又挡住重跑后的 `done` ⇒ A 端永远显"失败"，即便 ANS 已 `done`。
   //   故**不落账**：行保持 `pending`、面板继续轮询（`PendingKey` 含它），作答后重跑的 `done` 自然收口。
   const errorAwaitingAnswer = request.status === 'error' && request.question_status === 'asked';
-  if ((request.status === 'done' || request.status === 'error') && !errorAwaitingAnswer && !eventAlreadyRecorded(db, request.id, 'node.request_result')) {
+
+  // zx_20261030_1 M2：读回时**顺手抄进度**（与下面"读回即落账"同一手法，但**不落账**——进度高频，只进内存）。
+  //   终态且非"等答的伪终态" ⇒ 抹掉（收口之后没有进行中可言）；其余照抄（对端未上报即为 `null`，界面如实说）。
+  //   M3：`cancelled` 同属终态（已停，无进行中）。
+  if (!errorAwaitingAnswer && (request.status === 'done' || request.status === 'error' || request.status === 'cancelled')) {
+    recordDispatchProgress(request.id, null);
+  } else {
+    recordDispatchProgress(request.id, request.progress ?? null);
+  }
+  if ((request.status === 'done' || request.status === 'error' || request.status === 'cancelled') && !errorAwaitingAnswer && !eventAlreadyRecorded(db, request.id, 'node.request_result')) {
     try {
       await emit('node.request_result', {
         requestId: request.id,
@@ -289,6 +305,55 @@ export async function answerQuestion(
         answer: input.answer,
       });
     } catch { /* 台账刷新失败不该改作答的结局 */ }
+  }
+
+  return { ok: true, request, note: '' };
+}
+
+/**
+ * zx_20261030_1 M3「止」: 派活方**叫停**一单。**永不抛**——失败装进返回值如实上屏。
+ *
+ * 语义的真源在 ANS（`POST /requests/:id/cancel`），本机只如实转达它回来的那个状态：
+ *   - 该单已到终态 ⇒ 幂等原样回（不翻案）；
+ *   - `pending`（还没人接）⇒ ANS 直接置 `cancelled`。本机**当场落收口事件**（与 `refreshDispatchResult`
+ *     同形、同幂等守卫），不必等下一轮面板轮询才显"已停止"；
+ *   - `assigned`/`awaiting_answer`（对端在跑）⇒ ANS 只置 `cancel_requested`、状态不动。本机此刻
+ *     **不改台账**（还不停，只是"已请求"）；真停由对端执行体在检查点完成并回传 `cancelled`。
+ *     对端是旧版本时不读该位 ⇒ 跑完回真实结局，台账照它回的话说，**不谎称已停**。
+ * ⚠ 不做本地角色闸（同 `answerQuestion`：能派出去的人才收得到这单）。
+ */
+export async function cancelNodeRequest(
+  db: Database.Database,
+  id: string,
+  opts: DispatchOpts = {},
+): Promise<DispatchReadResult> {
+  if (!isNodeEnrolled(db as unknown as NodeSettingDb)) {
+    return { ok: false, request: null, note: 'not-enrolled' };
+  }
+
+  const io = await resolveIo(db, opts.io);
+  const emit = await resolveEmit(opts.emit);
+
+  let request: AnsNodeRequest;
+  try {
+    request = await io.cancel(id);
+  } catch (e) {
+    return { ok: false, request: null, note: (e as Error)?.message || String(e) };
+  }
+
+  if (request.status === 'cancelled') {
+    recordDispatchProgress(request.id, null);
+    if (!eventAlreadyRecorded(db, request.id, 'node.request_result')) {
+      try {
+        await emit('node.request_result', {
+          requestId: request.id,
+          category: request.category,
+          targetNodeId: request.target_node_id,
+          status: request.status,
+          result: request.result,
+        });
+      } catch { /* 台账刷新失败不该改叫停的结局 */ }
+    }
   }
 
   return { ok: true, request, note: '' };

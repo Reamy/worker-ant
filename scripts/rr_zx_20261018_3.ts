@@ -330,7 +330,9 @@ const LIC_OPTS = { now: LIC_NOW, fingerprint: 'AAAA-BBBB-CCCC-DDDD', publicKeyPe
 function licensedSettingsDb(tier: 'pro' | 'team'): LicenseSettingDb {
   const d = settingsDb(null);
   const payload: LicensePayload = {
-    v: 1, tier, subject: '受控回归', issuedAt: '2026-10-01T00:00:00.000Z', expiresAt: null, devices: [],
+    // zx_20261029_2 M6：Team 件须带到期（`verifyLicense` 已拒永久 Team）；固定远期，不随墙钟漂。
+    v: 1, tier, subject: '受控回归', issuedAt: '2026-10-01T00:00:00.000Z',
+    expiresAt: tier === 'team' ? '2099-01-01T00:00:00.000Z' : null, devices: [],
   };
   d.prepare('INSERT INTO wa_settings (key, value) VALUES (?, ?)')
     .run(LICENSE_SETTING_KEYS.key, encodeLicense(payload, TEST_PRIVATE_PEM));
@@ -384,10 +386,12 @@ CREATE TABLE wa_projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, description T
   sandbox_mode TEXT DEFAULT 'workspace', autonomous_mode TEXT DEFAULT 'off',
   created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));
 CREATE TABLE wa_tasks (id TEXT PRIMARY KEY, project_id TEXT, title TEXT NOT NULL, description TEXT DEFAULT '',
-  status TEXT DEFAULT 'pending', context_json TEXT DEFAULT '{}', priority INTEGER DEFAULT 0,
+  status TEXT DEFAULT 'pending', context_json TEXT DEFAULT '{}', workflow_config TEXT DEFAULT '{}',
+  priority INTEGER DEFAULT 0,
   depends_on TEXT DEFAULT '', parent_task_id TEXT DEFAULT '', source TEXT DEFAULT 'user',
   acceptance_criteria TEXT DEFAULT '',
-  created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));
+  created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')),
+  aggregate_version INTEGER DEFAULT 0, quality_score REAL);
 CREATE TABLE wa_memories (id TEXT PRIMARY KEY, project_id TEXT, task_id TEXT, content TEXT NOT NULL,
   embedding TEXT, memory_type TEXT DEFAULT 'episodic', importance REAL DEFAULT 0.5,
   reasoning TEXT DEFAULT '', source TEXT DEFAULT 'agent_execution', user_id TEXT DEFAULT '',
@@ -1628,8 +1632,12 @@ CREATE TABLE wa_audit_events (
       db.prepare("INSERT INTO wa_tasks (id, project_id, title, status, priority, created_at) VALUES (?, 'p-page', ?, 'pending', ?, ?)")
         .run(`pg-${i + 1}`, `pg-${i + 1}`, 5 - i, `2026-10-19 00:00:0${i + 1}`);
     }
-    const mList = ipc.match(/SELECT t\.\*,[\s\S]*?FROM wa_tasks t WHERE t\.project_id = \?[\s\S]*?\$\{page\.sql\}/);
-    ok(!!mList, 'E-2a task:list 的生产 SQL 就地取出（含 `${page.sql}` 分页片段）');
+    // zx_20261028_2 M2：列表改**显式白名单**（不再 `SELECT t.*`，整份 ctx/workflow_config 不上列表），
+    //   故锚点由 `SELECT t.*` 改钉列清单 + `context_digest`——形状更紧：既须是新白名单，
+    //   又须真的带摘录键、且不带 `workflow_config`（旧 `t.*` 形在这里会直接不匹配）。
+    const mList = ipc.match(/SELECT t\.id, t\.project_id,[\s\S]*?FROM wa_tasks t WHERE t\.project_id = \?[\s\S]*?\$\{page\.sql\}/);
+    ok(!!mList && mList[0].includes('context_digest') && !mList[0].includes('t.workflow_config'),
+      'E-2a task:list 的生产 SQL 就地取出（显式白名单 + `context_digest`，不含 workflow_config；含 `${page.sql}` 分页片段）');
     const pageRows = (lim: unknown, off: unknown) => {
       const p = resolvePage(lim, off); // 生产函数 × 生产入参
       const sql = mList![0].replace('${page.sql}', p.sql);
@@ -1869,8 +1877,10 @@ CREATE TABLE wa_audit_events (
     const teamLic = licensedSettingsDb('team');
 
     // ── G-1 Pro 词表 + 三档对照（long_document）──
-    eq([...PRO_FEATURES], ['knowledge_export', 'knowledge_import', 'image_vision', 'long_video', 'long_document', 'domain_pack', 'knowledge_cards'],
-      'G-1a `PRO_FEATURES` 逐成员枚举（zx_20261023_5 批二 `knowledge_cards` 入册）');
+    // zx_20261029_2 M6：`device_discovery` 自 Team 移入本表（设备发现/只读台账归专业版），
+    //   同轮再入册 `plugin_install`（市场插件安装归专业版）。
+    eq([...PRO_FEATURES], ['knowledge_export', 'knowledge_import', 'image_vision', 'long_video', 'long_document', 'domain_pack', 'knowledge_cards', 'device_discovery', 'plugin_install'],
+      'G-1a `PRO_FEATURES` 逐成员枚举（zx_20261023_5 批二 `knowledge_cards` 入册；M6 `device_discovery` / `plugin_install` 入册）');
     eq([...new Set(PRO_FEATURES)].sort(), Object.keys(PRO_FEATURE_LABEL).sort(),
       'G-1a2 ★人话名词表与能力词表**同集**（由 `PRO_FEATURE_LABEL` 派生，加一项须两处同时加）');
     eq(PRO_FEATURE_LABEL.long_document, '长文档分段阅读（PDF 页窗口）',
@@ -1886,10 +1896,11 @@ CREATE TABLE wa_audit_events (
       'G-1f 试用期 ⇒ 放行（与 `proUnlocked` 的 `kind===\'trial\'` 同尺）');
 
     // ── G-2 Team 词表 + 三档对照（audit_export）──
-    // zx_20261022_3 批八：`project_profile_share` 入册（7→8；逐成员枚举仍不放宽）。
+    // zx_20261022_3 批八：`project_profile_share` 入册（7→8）；zx_20261029_2 M6：`device_discovery`
+    //   移出（8→7，归 Pro）——发现/只读台账是专业版能力，本表只管「动」。
     eq([...TEAM_FEATURES],
-      ['multi_node', 'device_discovery', 'device_control', 'external_terminal', 'audit_view', 'audit_export', 'team_library', 'project_profile_share'],
-      'G-2a `TEAM_FEATURES` 逐成员枚举（批七 `audit_export` / zx_20261022_3 批八 `project_profile_share` 入册）');
+      ['multi_node', 'device_control', 'external_terminal', 'audit_view', 'audit_export', 'team_library', 'project_profile_share'],
+      'G-2a `TEAM_FEATURES` 逐成员枚举（批七 `audit_export` / zx_20261022_3 批八 `project_profile_share` 入册；M6 发现移出）');
     eq(TEAM_FEATURE_LABEL.audit_export, '审计导出（CSV）', 'G-2b 人话名如实');
     const comTeamRef = teamFeatureRefusal(comLic, 'audit_export', LIC_OPTS);
     ok(!!comTeamRef && comTeamRef.includes('审计导出') && comTeamRef.includes('社区版'),

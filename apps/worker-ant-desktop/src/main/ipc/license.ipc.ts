@@ -15,6 +15,13 @@ import { recordAudit, type AuditDb } from '../core/audit-log.js';
 import { seatUsage, type SeatUsage } from '../core/seat-quota.js';
 import { pricingRows, EARLY_BIRD, PURCHASE_URL, type PricingPayload } from '../core/pricing.js';
 import { tierCatalog, type TierCatalogPayload } from '../core/tier-catalog.js';
+import {
+  PRO_FEATURES,
+  PRO_FEATURE_LABEL,
+  resolveProGate,
+  proFeatureRefusal,
+  type ProFeature,
+} from '../core/pro-gate.js';
 import { tierUsage, type TierUsagePayload } from '../core/tier-usage.js';
 import { ensureNodeIdentity, type NodeSettingDb } from '../core/node-identity.js';
 import { isCloudEntitlementActive, readCloudEntitlementCache } from '../core/cloud-entitlement.js';
@@ -56,6 +63,20 @@ export interface CloudEntitlementPayload {
   lastErrorAt: string | null;
   /** 合并云端后**实际生效**的档位（界面"当前档位"那一行读的是 `license:status.tier`，二者同源）。 */
   effectiveTier: string;
+}
+
+/**
+ * zx_20261029_2 M6：**单项 Pro 能力**的只读裁定（当前档位能不能用「这一项」）。
+ *   `unlocked` 与 `detail` 直接取自 `pro-gate.ts` 的两个真函数——渲染层不写 `tier === 'pro'` 的判断，
+ *   也不自己拼"需要专业版"的文案（第二落点必漂）。
+ */
+export interface ProFeatureGatePayload {
+  feature: ProFeature;
+  unlocked: boolean;
+  tier: string;
+  tierLabel: string;
+  /** 已启用 ⇒ 「X」已启用。；未启用 ⇒ 与安装动作口被拒时**逐字同文**的拒因。 */
+  detail: string;
 }
 
 /** 权益来源的人话名（词表**一处**；渲染层不自译，免得两侧漂开）。 */
@@ -137,6 +158,31 @@ export function initLicenseIpc(db: Database.Database): void {
   ipcMain.handle('license:catalog', async () => {
     try {
       const payload: TierCatalogPayload = tierCatalog();
+      return { data: payload };
+    } catch (err) {
+      return { error: { code: 'INTERNAL', message: (err as Error).message } };
+    }
+  });
+
+  /**
+   * zx_20261029_2 M6：单项 Pro 能力只读裁定（面板据此**先禁用**，而不是让用户点了再看报错）。
+   *   `feature` 须是 `PRO_FEATURES` 成员；未知键如实回 `UNKNOWN_FEATURE`（不静默当放行）。
+   */
+  ipcMain.handle('license:pro_feature', async (_event, feature: string) => {
+    try {
+      if (!(PRO_FEATURES as readonly string[]).includes(feature)) {
+        return { error: { code: 'UNKNOWN_FEATURE', message: `未知的专业版能力：${feature}` } };
+      }
+      const f = feature as ProFeature;
+      const gate = resolveProGate(db);
+      const refusal = proFeatureRefusal(db, f);
+      const payload: ProFeatureGatePayload = {
+        feature: f,
+        unlocked: refusal === null,
+        tier: gate.tier,
+        tierLabel: gate.tierLabel,
+        detail: refusal ?? `「${PRO_FEATURE_LABEL[f]}」已启用。`,
+      };
       return { data: payload };
     } catch (err) {
       return { error: { code: 'INTERNAL', message: (err as Error).message } };

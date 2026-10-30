@@ -15,6 +15,8 @@ import { resolveTaskMilestoneLink, writeMilestoneDone, backfillBoardRemainderToS
 import { resolveAnsCreds, ansSignedRequest, ansFailureNote } from '../ans-signed-request.js';
 // zx_20261002 M11: 项目调用记账——MCP 调用的**唯一写点**（连接池无 db/项目上下文，故记在调用方）。
 import { recordServiceCall } from '../service-call-ledger.js';
+// zx_20261030_2 M3（孙子·知彼知己）: 「等」的暂停因直接取词表常量，不在工具里手抄字符串。
+import { PAUSE_REASON_CHILDREN_INCOMPLETE } from '../pause-reason.js';
 
 const logger = createLogger('tools-resource');
 
@@ -88,7 +90,44 @@ export function resourceTools(deps: ToolDeps) {
           agentType: args.agentType || null,
           hint: depIds.length > 0
             ? '已创建（pending）——前置完成前不会派发；前置完成后调度器自动启动。若某前置已 failed/归档或已暂停（暂停的前置不会自动解锁，因等子任务而暂停者除外），则不会自动启动，须人工处置。'
-            : '子Agent将独立执行，完成后父任务自动恢复',
+            : '子Agent将独立执行，完成后父任务自动恢复。要在此刻停下来等它，调用 await_subagents（不要用 list_agents 反复轮询）。',
+        });
+      },
+    },
+    // zx_20261030_2 M3（孙子·知彼知己 / 道德经·知止）: 父要等子，须有可表达的「等」。
+    //   病根：只有 list_agents（看），没有 await（等）⇒ 父五次「看」子仍在跑，落成工具循环暂停。
+    //   等 ≠ 失败，也 ≠ 轮询：有在跑的子就置 paused（因 children_incomplete，不传 note ⇒ 不推 IM），
+    //   子全部到站由既有 checkParentTaskAfterChildDone 自动恢复；一个未完成子都没有 ⇒ 拒绝执行且不暂停；
+    //   未完成子已全 paused ⇒ 也不自行等待（父此刻在跑，把事实交还它处置，避免"暂停—唤醒—再暂停"热环）。
+    await_subagents: {
+      description: '等待本任务派出的子Agent全部到站。有在跑的子时本任务进入暂停（因 children_incomplete），它们全部结束后自动恢复；没有未完成子时不暂停、直接返回。等待请用本工具，不要用 list_agents 反复轮询。',
+      parameters: jsonSchema({ type: 'object' as const, properties: {}, required: [] }),
+      execute: async (args: Record<string, unknown> | undefined) => {
+        const extra = Object.keys(args ?? {});
+        if (extra.length > 0) return JSON.stringify({ error: `await_subagents 不接受参数（收到：${extra.join(', ')}）` });
+        const unfinished = db.prepare(
+          "SELECT id, status FROM wa_tasks WHERE parent_task_id = ? AND status NOT IN ('completed','failed','archived') ORDER BY created_at ASC",
+        ).all(taskId) as Array<{ id: string; status: string }>;
+        if (unfinished.length === 0) {
+          return JSON.stringify({ status: 'nothing_to_wait', count: 0, hint: '当前没有在运行的子任务；请直接继续或收口。' });
+        }
+        const running = unfinished.filter((k) => k.status !== 'paused');
+        if (running.length === 0) {
+          return JSON.stringify({
+            status: 'all_paused', count: unfinished.length,
+            hint: `有 ${unfinished.length} 个未完成子任务，且已全部暂停——本任务不再自行等待。请逐个查看其状态并决定：恢复、修复或归档。`,
+          });
+        }
+        const res = deps.pauseTask(db, { taskId, reason: PAUSE_REASON_CHILDREN_INCOMPLETE });
+        if (!res.changed) {
+          return JSON.stringify({
+            status: 'not_paused', count: running.length,
+            hint: '任务当前状态不接受再次暂停（可能已结束或被人工处置）；请直接按其状态收口。',
+          });
+        }
+        return JSON.stringify({
+          status: 'waiting', count: running.length,
+          hint: `已暂停等待 ${running.length} 个子任务；它们全部到站后本任务自动恢复。`,
         });
       },
     },

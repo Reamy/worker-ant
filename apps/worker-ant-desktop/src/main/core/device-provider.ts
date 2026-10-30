@@ -30,6 +30,11 @@ export interface ProviderDevice {
   id: string;
   name: string;
   kind: string;
+  /**
+   * 厂商自己的品类词汇（如涂鸦 `cl/kt/dj`）→ 归一后的派生类目（zx_20261029_2 M1）。
+   * Provider 最懂自己的 category，故在这里算好；缺省 ⇒ 台账按 `kind` 现算。
+   */
+  kindClass?: string;
   capabilities?: string[];
   controllable?: boolean;
 }
@@ -144,6 +149,7 @@ export async function syncProviderDevices(
     const dev: DiscoveredDevice = {
       name: String(candidate.name ?? '').trim() || id,
       kind: String(candidate.kind ?? '').trim() || 'unknown',
+      ...(candidate.kindClass ? { kindClass: String(candidate.kindClass) } : {}),
       protocol: 'cloud',
       address,
       port: null,
@@ -151,6 +157,8 @@ export async function syncProviderDevices(
       controllable: candidate.controllable === true,
     };
     const device = upsertDiscovered(db, dev, now);
+    // zx_20261030_1 M5：容量到顶 ⇒ 新设备未落库（`null`）——跳过它，不计 added/updated（如实不假装同步成功）。
+    if (!device) continue;
     if (existed) updated += 1;
     else added += 1;
     rows.push({ device, isNew: !existed });

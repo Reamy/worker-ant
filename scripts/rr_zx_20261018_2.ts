@@ -1033,9 +1033,9 @@ async function main(): Promise<void> {
       'T-1a ★Pro 词表无重复、既有三项仍在、每键都有上屏人话名（不钉"恰 N 项"这个会随轮次移动的基线）',
       PRO_FEATURES.join(','));
     // zx_20261018_3 批七：新增 `audit_export` ⇒ 6→7；zx_20261022_3 批八新增 `project_profile_share` ⇒ 7→8；
-    //   逐成员枚举仍不放宽。
-    eq([...TEAM_FEATURES], ['multi_node', 'device_discovery', 'device_control', 'external_terminal', 'audit_view', 'audit_export', 'team_library', 'project_profile_share'],
-      'T-1b Team 能力恰八项（与 team-gate 词表同集同序）');
+    //   zx_20261029_2 M6：`device_discovery` 移出本表（归 Pro）⇒ 8→7；逐成员枚举仍不放宽。
+    eq([...TEAM_FEATURES], ['multi_node', 'device_control', 'external_terminal', 'audit_view', 'audit_export', 'team_library', 'project_profile_share'],
+      'T-1b Team 能力恰七项（与 team-gate 词表同集同序；发现归 Pro）');
     const cat = tierCatalog();
     eq(cat.tiers.map((t) => t.tier), [...LICENSE_TIERS], 'T-1c 对照行与 `LICENSE_TIERS` 同集同序');
     const expected = [...PRO_FEATURES, ...TEAM_FEATURES];

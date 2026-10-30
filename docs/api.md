@@ -103,6 +103,11 @@ DELETE /api/v1/nodes/:nodeId
 GET    /api/v1/nodes/requests
 POST   /api/v1/nodes/requests
 GET    /api/v1/nodes/requests/:id
+POST   /api/v1/nodes/requests/:id/result     # 执行方回传终态 done|error|cancelled（首写即定，重复不翻案）
+POST   /api/v1/nodes/requests/:id/progress   # 执行方跑一步报一步 { node_id, step, total?, note? }；终态后迟到上报原样回既有
+POST   /api/v1/nodes/requests/:id/cancel     # 派活方叫停；pending 直置 cancelled，运行中只置 cancel_requested 等对端真停后回传
+POST   /api/v1/nodes/requests/:id/question   # 执行方提问（仅 assigned 态）
+POST   /api/v1/nodes/requests/:id/answer     # 派活方作答（幂等，回到 assigned）
 GET    /api/v1/nodes/enrollment-tokens
 POST   /api/v1/nodes/enrollment-tokens
 DELETE /api/v1/nodes/enrollment-tokens/:token

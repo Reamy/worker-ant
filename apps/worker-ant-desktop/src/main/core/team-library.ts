@@ -22,6 +22,9 @@ import { isTeamItemKind, type TeamItem, type TeamItemKind } from '@worker-ant/sh
 import { parseDomainPackJson } from './domain-pack.js';
 // zx_20261022_3 批八: 画像的结构/校验/落库同出 `core/project-profile.ts`（本模块不另写解析）。
 import { insertImportedProfile, parseProjectProfileJson, readProjectProfile } from './project-profile.js';
+// zx_20261030_1 M5「限」：用户驱动的记忆导入受档位容量闸（机器写入不在此列——见 §1.4）。
+import { resolveLicenseTier } from './license.js';
+import { capacityRefusal, countTeamLibraryMemories } from './tier-capacity.js';
 
 /** 最小库接口（可脱 better-sqlite3 被 rr 直跑）。 */
 export interface TeamLibraryDb {
@@ -325,6 +328,10 @@ export function importItem(
   }
 
   if (kind === 'memory') {
+    // zx_20261030_1 M5「限」：团队共享库**导入**的记忆总条数（`source='team_library'`）受档位上限约束。
+    //   到顶即按本模块既有错误形状拒（`TeamLibraryError`，IPC 原样上屏）；已导入的记忆一条不删。
+    const verdict = capacityRefusal(resolveLicenseTier(db), 'maxTeamLibraryMemories', countTeamLibraryMemories(db));
+    if (!verdict.ok) throw new TeamLibraryError(verdict.note);
     db.prepare(
       'INSERT INTO wa_memories (id, project_id, task_id, content, memory_type, importance, source, reasoning, updated_at) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, datetime(\'now\'))',
     ).run(

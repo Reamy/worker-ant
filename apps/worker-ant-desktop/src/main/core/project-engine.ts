@@ -158,6 +158,10 @@ export function deleteProjectCascade(db: Database.Database, id: string): string[
     db.prepare('DELETE FROM wa_knowledge_imports WHERE project_id = ?').run(id);
     // zx_20261022_3 批八: 画像依附于本项目（不是可携带资产；带走它的形态是导出/Team 共享）。
     db.prepare('DELETE FROM wa_project_profiles WHERE project_id = ?').run(id);
+    // zx_20261027_3 M6b: 画像旧版留痕同样随项目消失（它是回溯料，不是可携带资产）。
+    db.prepare('DELETE FROM wa_project_profile_history WHERE project_id = ?').run(id);
+    // zx_20261029_1「知」: 项目须知是本机对工作目录的一次只读快照，随项目一起消失。
+    db.prepare('DELETE FROM wa_project_briefs WHERE project_id = ?').run(id);
     // zx_20261021_3 批一: 只删**本项目的启用关系**；`wa_domain_packs` 资产**不删**——
     //   源项目消失不该毁掉已经带走的东西（它可能已被别的项目启用、或经共享库流到别处）。
     db.prepare('DELETE FROM wa_project_domain_packs WHERE project_id = ?').run(id);

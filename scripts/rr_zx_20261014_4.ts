@@ -32,6 +32,7 @@ import {
   INBOUND_INVOKE_PATH,
   resolveInboundPort,
   isPrivateAddress,
+  AGENT_CARD_FIELDS,
   buildAgentCard,
   handleInboundRequest,
   startInboundGate,
@@ -42,7 +43,7 @@ import {
 } from '../apps/worker-ant-desktop/src/main/core/inbound-gate.js';
 import { BOOL_SETTING_KEYS, boolSetting, readBoolSetting } from '../apps/worker-ant-desktop/src/main/core/settings-bool.js';
 // zx_20261021_3 批四：门牌扩到六键——能力类目与意图目录**派生**自这两处既有真源。
-import { EXTERNAL_CAPABILITIES, EXTERNAL_CAPABILITY_LABEL } from '../apps/worker-ant-desktop/src/main/core/external-calls.js';
+import { EXTERNAL_CAPABILITIES, EXTERNAL_CAPABILITY_LABEL, EXTERNAL_CAPABILITY_NOTE } from '../apps/worker-ant-desktop/src/main/core/external-calls.js';
 import { publicIntents } from '../apps/worker-ant-desktop/src/main/core/intent-protocol.js';
 // P-1：配对/凭据真源**静态导入**（被删/改名即编译期失败）。
 import {
@@ -375,11 +376,18 @@ async function main(): Promise<void> {
   console.log('\n【G-3】门牌 `agent.json` —— 免凭据：说**类**不说**实例**');
   {
     const card = buildAgentCard('阳台的工蚁', '0.1.0');
-    eq(Object.keys(card).sort(),
-      ['agent_version', 'intents', 'name', 'offered_capabilities', 'pairing', 'protocol'],
-      'G-3a ★门牌顶层恰六键（批四：+offered_capabilities / intents）——无第七样');
+    // zx_20261027_3 M5a：六键 → 标准门牌形状。判据**重定向到单源** `AGENT_CARD_FIELDS`（逐成员、不放宽）。
+    eq(Object.keys(card).sort(), [...AGENT_CARD_FIELDS].sort(),
+      'G-3a ★门牌顶层字段＝`AGENT_CARD_FIELDS` 单源（逐成员；无第七样、也不少一员）');
     eq(card.protocol, INBOUND_PROTOCOL, 'G-3a2 协议标识取真源常量');
     eq(card.pairing.endpoint, INBOUND_PAIR_ENDPOINT, 'G-3a3 配对入口只在门牌上**指路**');
+    eq([card.version, card.agent_version], ['0.1.0', '0.1.0'],
+      'G-3a6 标准字段 `version` 与 `agent_version` 同值（不两说）');
+    eq([card.url, card.capabilities],
+      [null, { streaming: false, pushNotifications: false }],
+      'G-3a7 未给入口地址 ⇒ `url:null`（不编地址）；推流/推送如实报 false');
+    eq(card.skills.map((s) => s.id), card.offered_capabilities.map((c) => c.key),
+      'G-3a8 ★技能条目由能力类目派生（id 逐成员对齐，不手抄）');
     // 类目与意图目录**派生**自既有真源：加一类能力/一个意图，门牌自动跟上（不在此手抄）。
     eq(card.offered_capabilities,
       EXTERNAL_CAPABILITIES.map((k) => ({ key: k, label: EXTERNAL_CAPABILITY_LABEL[k], requires_approval: true })),
@@ -603,11 +611,21 @@ async function main(): Promise<void> {
     // 白名单是"唯一定处的词表"——两侧标本（在册 / 不在册）。
     ok(isExternalCapability('device_control') === true, 'C-1a0 `device_control` 在词表内');
     ok(isExternalCapability('memory_write') === false, 'C-1a0b ★门外能力名**不在**词表');
-    // zx_20261018_1 批一: 白名单增 `intent_control`（授权面），但 `/invoke` 可原始调用面仍**恰一项**——
-    //   两者分开断言：前者是"能授予什么"，后者是"能直调什么"（意图控制只能走意图协议）。
-    eq([...EXTERNAL_CAPABILITIES], ['device_control', 'intent_control'], 'C-1a0c 授予词表**恰两项**（原始动作 + 意图）');
-    eq([...INVOKE_CAPABILITIES], ['device_control'], 'C-1a0c2 `/invoke` 可直调面**恰一项**（意图控制不入直调面）');
-    ok(isInvocableCapability('intent_control') === false, 'C-1a0c3 ★意图控制**不可**经 `/invoke` 直调');
+    // zx_20261018_1 批一: 白名单增 `intent_control`（授权面），`/invoke` 可原始调用面**窄于**它；
+    //   zx_20261027_3 M5b 再增 `task_request`——判据**重定向到边界本身**（不再钉固定长度/固定枚举）：
+    //   授予词表逐成员人话名/说明齐备、直调面 ⊆ 授予面、意图控制**永不**入直调面。
+    for (const c of EXTERNAL_CAPABILITIES) {
+      ok(isExternalCapability(c) && EXTERNAL_CAPABILITY_LABEL[c].length > 0 && EXTERNAL_CAPABILITY_NOTE[c].length > 0,
+        `C-1a0c 授予词表成员人话名/说明齐备：${c}`);
+    }
+    ok(['device_control', 'intent_control', 'task_request'].every((c) => isExternalCapability(c)),
+      'C-1a0c1 ★授予词表三类俱在（原始动作 / 意图 / 任务请求）');
+    eq(INVOKE_CAPABILITIES.filter((c) => !isExternalCapability(c)), [],
+      'C-1a0c2 ★★直调面 ⊆ 授予面（不留"能调不能授"的野路）');
+    ok((INVOKE_CAPABILITIES as readonly string[]).includes('device_control')
+      && (INVOKE_CAPABILITIES as readonly string[]).includes('task_request'),
+      'C-1a0c3 直调面含原始动作与任务请求');
+    ok(isInvocableCapability('intent_control') === false, 'C-1a0c4 ★意图控制**不可**经 `/invoke` 直调');
     eq(EXTERNAL_CAPABILITY_LABEL.device_control, '设备控制', 'C-1a0d 人话能力名如实（键类型穷举 ⇒ 漏一项编译期错）');
 
     // ① 白名单外 ⇒ 403 且**留痕**（0→1 正面断言），且**没走到执行那一跳**。
@@ -700,10 +718,14 @@ async function main(): Promise<void> {
     const probe = makeProbeDevice();
     const rows = redactedDevices([probe.device]);
     eq(rows.length, 1, 'C-2a 一台设备 ⇒ 一行');
-    eq(Object.keys(rows[0]).sort(), ['actions', 'call_name', 'kind'], 'C-2b ★★门外只见**三样**：call_name / kind / actions');
+    // zx_20261029_2 M3：门外设备行增两样（`kind_class` 品类归一、`room` 房间名）——仍**无实例/坐标/授权态**。
+    //   钉**恰五键**（不是"含三键"）：多出任何一列（尤其地址/端口/授权）即红。
+    eq(Object.keys(rows[0]).sort(), ['actions', 'call_name', 'kind', 'kind_class', 'room'], 'C-2b ★★门外只见**五样**：call_name / kind / kind_class / actions / room');
     eq(rows[0].call_name, deviceCallName(probe.device), 'C-2b2 `call_name` 取**同一把尺**（`deviceCallName`：别名优先、回退自述名）');
     eq(rows[0].kind, 'light', 'C-2b3 `kind` 是设备自述');
     eq(rows[0].actions, ['turn_on', 'turn_off'], 'C-2b4 `actions` 是设备自述能力（不自造）');
+    eq(rows[0].kind_class, 'light', 'C-2b5 `kind_class` 由 `deviceKindClassOf` 派生（归一词表：light→light，非另抄一份）');
+    eq(rows[0].room, '', 'C-2b6 ★`room` 只给房间名（未指派即空串）——**不给**地址/端口/授权态');
 
     const raw = JSON.stringify(rows);
     for (const leak of ['192.168.1.50', '1883', 'dev-1', 'mqtt', 'authorized', 'controllable']) {
@@ -734,7 +756,7 @@ async function main(): Promise<void> {
     const capBody = capRes.body as { terminal_id: string; capabilities: string[]; devices: Array<Record<string, unknown>> };
     eq(capBody.terminal_id, pairingId, 'C-3a2 `terminal_id` 由**凭据**派生（不是请求里报的）');
     eq(capBody.capabilities, ['device_control'], 'C-3a3 能力＝**白名单 ∩ 该终端获批**');
-    eq(Object.keys(capBody.devices[0]).sort(), ['actions', 'call_name', 'kind'], 'C-3a4 门外看的设备行是**脱敏**那一份');
+    eq(Object.keys(capBody.devices[0]).sort(), ['actions', 'call_name', 'kind', 'kind_class', 'room'], 'C-3a4 门外看的设备行是**脱敏**那一份（恰五键，与 C-2b 同形）');
 
     const inv = await handleInboundRequest({
       method: 'POST', path: INBOUND_INVOKE_PATH, headers: auth, remoteAddress: '192.168.1.44',
@@ -759,9 +781,10 @@ async function main(): Promise<void> {
     //   批六再增 `team_library` ⇒ 恰六项；zx_20261018_3 批七再增 `audit_export` ⇒ 恰七项；
     //   zx_20261022_3 批八再增 `project_profile_share` ⇒ 恰八项
     //   （逐成员枚举，不放宽成 >=；新增一员即须补人话名与接线）。
+    // zx_20261029_2 M6：`device_discovery` 移往 Pro 闸 ⇒ 八项→七项（逐成员枚举，不放宽成 >=）。
     eq([...TEAM_FEATURES],
-      ['multi_node', 'device_discovery', 'device_control', 'external_terminal', 'audit_view', 'audit_export', 'team_library', 'project_profile_share'],
-      'C-4a ★能力词表**恰八项**（唯一定处 `team-gate.ts`；批二 `audit_view` / 批六 `team_library` / 批七 `audit_export` / zx_20261022_3 批八 `project_profile_share`）');
+      ['multi_node', 'device_control', 'external_terminal', 'audit_view', 'audit_export', 'team_library', 'project_profile_share'],
+      'C-4a ★能力词表**恰七项**（唯一定处 `team-gate.ts`；M6 起发现归 Pro，本表只管控制面）');
     for (const f of TEAM_FEATURES) {
       ok(typeof TEAM_FEATURE_LABEL[f] === 'string' && TEAM_FEATURE_LABEL[f].length > 0,
         `C-4b 人话名非空：${f} ⇒ 「${TEAM_FEATURE_LABEL[f]}」`);

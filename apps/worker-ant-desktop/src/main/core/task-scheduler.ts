@@ -51,6 +51,13 @@ export class TaskScheduler {
   private db: Database.Database;
   private handlers = new Map<string, JobHandler>();
   private pending = new Map<string, { type: string; payload: Record<string, unknown>; jobId?: string }>();
+  /**
+   * zx_20261028_1 M1（图难于其易）：**在途键**——与 `pending` 同域（`pendingKey`）。
+   * 此前 `processPending` 在 `await handler` **之前**就把条目从 `pending` 删掉，拆解那 ~5 秒里
+   * `scanReadyTasks`（10s 一跳、只查 `pending.has`）以为"没在跑"，按软闸再入队一份 ⇒ 一次派发拆两遍。
+   * 键在"取到 handler"那一刻加入、`finally` 里移除；在途期间任何再入队都会被本闸挡下。
+   */
+  private inflight = new Set<string>();
   private running = false;
   /**
    * zx_20260930 M14-3：**调度器活体脉冲**——`processPending` 每秒被 `setInterval` 唤起，
@@ -410,7 +417,7 @@ export class TaskScheduler {
     ).all() as Array<{ id: string; project_id: string; context_json: string | null; pstatus: string; pctx: string | null }>;
     const now = new Date();
     for (const r of rows) {
-      if (this.pending.has(r.id)) continue;
+      if (this.pending.has(r.id) || this.inflight.has(r.id)) continue;
       let ctx: Record<string, unknown> = {};
       try { ctx = JSON.parse(r.context_json || '{}') as Record<string, unknown>; } catch { continue; }
       const decision = shouldAutoResumeOnStepCap(ctx);
@@ -477,7 +484,8 @@ export class TaskScheduler {
           for (const task of ready) {
             if (selectedThisPass.size >= conc.available) break;
             const taskId = task.id as string;
-            if (this.pending.has(taskId)) continue;
+            // zx_20261028_1 M1：「已排队」与「正在跑」同等对待——后者此前不在 `pending` 里，被当成空闲而二次入队。
+            if (this.pending.has(taskId) || this.inflight.has(taskId)) continue;
             // A2 (2026-09-03_3): 祖先链有 paused/failed/archived 时不自动拉起（防"暂停后依赖链又自动执行"）
             if (this.chainStalled(taskId)) continue;
             // zx_20260917 M5-1: 「链上至多一个在跑」——直接父在跑 / 名下有后代在跑或已排作业 / 本批次已选中链上亲属
@@ -601,22 +609,26 @@ export class TaskScheduler {
     if (this.pending.size === 0) return;
     // C6: 按任务优先级排序(高优先级先执行)，单轮取数批见 JOB_BATCH_SIZE（与项目并发上限是两个概念）
     const jobs = Array.from(this.pending.entries());
+    // zx_20261028_1 M1：优先级**一次批量取**（原为比较器里逐条 `SELECT priority … WHERE id = ?`，
+    //   10s 一跳、每条目两次查库——N+1，且比较器每轮被调多次）。查不到的按 0（与旧值同）。
+    const prio = this.priorityByTaskId(jobs.map(([, j]) => (j.payload as { taskId?: string })?.taskId));
     jobs.sort(([, a], [, b]) => {
       const pidA = (a.payload as {taskId?:string})?.taskId;
       const pidB = (b.payload as {taskId?:string})?.taskId;
       if (!pidA || !pidB) return 0;
-      const priA = (this.db.prepare('SELECT priority FROM wa_tasks WHERE id = ?').get(pidA) as {priority:number}|undefined)?.priority ?? 0;
-      const priB = (this.db.prepare('SELECT priority FROM wa_tasks WHERE id = ?').get(pidB) as {priority:number}|undefined)?.priority ?? 0;
-      return priB - priA; // 降序：高优先级先执行
+      return (prio.get(pidB) ?? 0) - (prio.get(pidA) ?? 0); // 降序：高优先级先执行
     });
     const batch = jobs.slice(0, JOB_BATCH_SIZE);
     const promises = batch.map(async ([key, job]) => {
       const handler = this.handlers.get(job.type);
       if (!handler) return;
+      // zx_20261028_1 M1：同键已在跑 ⇒ 本轮不动，条目**留在 `pending`**（下一跳再看），不并发两份。
+      if (this.inflight.has(key)) return;
       // zx_20260929 M5-d: `pending` 的键已归一（见 pendingKey），真实作业行 id 只在 `jobId` 里。
       //   软闸（scanReadyTasks）那条路**不写 wa_jobs**，其条目无 jobId ⇒ 下列三条 UPDATE 一律跳过，
       //   不再假装"有作业行可更新"（此前用 taskId 当 id 去更新，恒 0 行、沉默空转）。
       const jobId = (job as { jobId?: string }).jobId;
+      this.inflight.add(key);
       this.pending.delete(key);
       if (jobId) this.db.prepare("UPDATE wa_jobs SET status = ?, started_at = datetime('now') WHERE id = ?").run('running', jobId);
       try {
@@ -641,9 +653,31 @@ export class TaskScheduler {
           this.db.prepare('UPDATE wa_jobs SET status = ?, error = ? WHERE id = ?').run('failed', String(err), jobId);
         }
         logger.error({ id: jobId, key, type: job.type, retries, backoffMs, error: String(err) }, '作业执行失败');
+      } finally {
+        // 无论成败/重试，键在本次处理结束时归零——重试条目已由 catch 里的 setTimeout 重新入 `pending`。
+        this.inflight.delete(key);
       }
     });
     await Promise.all(promises);
+  }
+
+  /** zx_20261028_1 M1：`pending` 里各条目的优先级一次批量取（`SQLITE_MAX_VARIABLE_NUMBER` 友好，400 一批）。 */
+  private priorityByTaskId(taskIds: Array<string | undefined>): Map<string, number> {
+    const out = new Map<string, number>();
+    const unique = Array.from(new Set(taskIds.filter((id): id is string => !!id)));
+    for (let i = 0; i < unique.length; i += 400) {
+      const chunk = unique.slice(i, i + 400);
+      if (chunk.length === 0) continue;
+      try {
+        const rows = this.db.prepare(
+          `SELECT id, priority FROM wa_tasks WHERE id IN (${chunk.map(() => '?').join(',')})`,
+        ).all(...chunk) as Array<{ id: string; priority: number | null }>;
+        for (const r of rows) out.set(r.id, r.priority ?? 0);
+      } catch (e) {
+        logger.warn({ err: e, count: chunk.length }, '批量取优先级失败，本批按 0 排序');
+      }
+    }
+    return out;
   }
 
   private checkScheduled(): void {

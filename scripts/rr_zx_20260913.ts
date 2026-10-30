@@ -29,6 +29,7 @@ import {
 } from './lib/rr-pins.js';
 // S8① 的产物证据要按**当前词表**核产物，故标记从真源**派生**而非手抄（改取值则断言随之改，不会假绿）
 import { ACCEPTANCE_TYPES } from '../apps/worker-ant-desktop/src/main/core/deliverable-types.js';
+import { depBlockInfo } from '../apps/worker-ant-desktop/src/main/core/dep-graph.js';
 
 let pass = 0; let fail = 0;
 function ok(cond: boolean, label: string, detail?: string): void {
@@ -227,10 +228,26 @@ console.log('\n[S8 整轮不变式：跨进程共享真源 / M1-4 单点记账 /
   const readAsset = (f: string) => fs.readFileSync(path.join(assetsDir, f), 'utf-8');
   const jsAssets = assets.filter((f) => f.endsWith('.js'));
   ok(jsAssets.length > 0, 'renderer 产物存在 js chunk（renderer build 须先于本脚本）', `${jsAssets.length} 个`);
-  // dep-graph 仍以独立共享 chunk 落地（被 TaskDetailPage/TasksPage 两个懒加载页共用）——这一条照旧
-  ok(assets.some((f) => f.startsWith('dep-graph-') && f.endsWith('.js')),
-    'renderer 产物含独立共享 chunk dep-graph-*.js（跨进程同源的机器证据）',
-    assets.filter((f) => f.startsWith('dep-graph-')).join(',') || '(未找到)');
+  // dep-graph 的实现本体确在产物里，且**全 dist 恰一份**、由两个懒加载页共同 import（真正共享）。
+  // ★zx_20261029_3 M4 改锚：旧断言认文件名前缀 `dep-graph-*.js`，而 chunk 名是打包器给共享模块起的名字，
+  //   随 import 图变化——本轮新增 `lib/task-source.ts` 后，两页共用的同一块被命名为 `task-source-*`，
+  //   旧判据把**合法排布变化**报成回归。改锚在由真源**派生**的文案指纹（文件名是排布细节，实现本体是
+  //   模块指纹），并加钉「两页共引该 chunk」——比"恰好叫 dep-graph"更强：既证明代码真在产物里，
+  //   又证明它仍是**共享**而非各页内联一份。
+  const depProbeId = '__dep_probe_missing__';
+  const depMark = depBlockInfo([depProbeId], () => undefined, () => '').text.split(depProbeId).pop() ?? '';
+  ok(depMark.length > 8, 'dep-graph 文案指纹可由真源派生（非手抄字面量）', JSON.stringify(depMark));
+  const depHolders = jsAssets.filter((f) => readAsset(f).includes(depMark));
+  ok(depHolders.length === 1,
+    'renderer 产物含 dep-graph 实现本体且全 dist 恰一份副本（同一份实现，非每页一份拷贝）',
+    `${depHolders.join(',') || '(未找到)'}`);
+  const depChunkRef = depHolders.length === 1 ? `./${depHolders[0]}` : '';
+  const depImporters = depChunkRef ? ['TasksPage', 'TaskDetailPage'].filter((p) => {
+    const pageChunk = jsAssets.find((f) => f.startsWith(`${p}-`) && f.endsWith('.js'));
+    return !!pageChunk && readAsset(pageChunk).includes(depChunkRef);
+  }) : [];
+  eq(depImporters, ['TasksPage', 'TaskDetailPage'],
+    'dep-graph 所在 chunk 被列表页与详情页共同 import（跨页共享真源的机器证据）');
   // deliverable-types：标记**从真源派生**（`["doc","code"]` 去掉方括号）。
   // ★zx_20260929 M7 订正：该字面量**已不再是模块指纹**——成果页的类型下拉
   //   `['daemon','mcp','a2a','ui','doc','code']` 被打包后同样含子串 `"doc","code"`

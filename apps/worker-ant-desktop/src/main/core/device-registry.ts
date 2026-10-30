@@ -17,6 +17,11 @@
  */
 import { randomUUID } from 'node:crypto';
 import { liveStateOf } from './device-diagnostics.js';
+import { kindClassOf } from './device-kind.js';
+// zx_20261030_1 M5「限」：设备登记容量闸——档位取 `resolveLicenseTier`，上限与话术取 `tier-capacity`。
+//   ⚠ 只在**首次插入**分支判；已有行的 UPDATE 路径不受影响（只拦新增，不回收已有）。
+import { resolveLicenseTier } from './license.js';
+import { capacityRefusal, countDevices } from './tier-capacity.js';
 
 /**
  * 读/写设备台账的最小库接口（`NodeSettingDb`/`AnsSettingDb` 同形）——
@@ -56,6 +61,12 @@ export interface AnsDevice {
   room: string;
   /** 设备**自述**的类别（自由串，非枚举——mDNS/SSDP 的自述五花八门，硬套枚举即"预设"）。 */
   kind: string;
+  /**
+   * **派生**类目（zx_20261029_2 M1；庄子·不预设）：由 `kindClassOf` 计算，**不覆盖** `kind`。
+   * 依据只许协议自述与有凭据的 model（见 `core/device-kind.ts`）；认不出 ⇒ `unknown`。
+   * 旧行（列建成之前）在 `rowToDevice` 读时按 `kind` 现算兜底，不把空串当"无品类"。
+   */
+  kind_class: string;
   protocol: DeviceProtocol;
   address: string;
   port: number | null;
@@ -86,6 +97,12 @@ export interface AnsDevice {
 export interface DiscoveredDevice {
   name: string;
   kind: string;
+  /**
+   * 协议入口**已知**的派生类目（zx_20261029_2 M1）：HA 知道 `device_class`、涂鸦知道 category、
+   * 米家知道 model——这些信息落库时不必从 `kind` 反推。缺省 ⇒ 由 `upsertDiscovered` 按
+   * `kindClassOf({kind, protocol, capabilities})` 现算（单一写点，见下）。
+   */
+  kindClass?: string;
   protocol: DeviceProtocol;
   address: string;
   port?: number | null;
@@ -151,16 +168,22 @@ function parseJson<T>(raw: unknown, fallback: T): T {
 
 /** DB 行 → `AnsDevice`（一处投影，读写两侧同形）。 */
 function rowToDevice(row: Record<string, unknown>): AnsDevice {
+  const kind = String(row.kind ?? 'unknown');
+  const protocol = row.protocol as DeviceProtocol;
+  const capabilities = parseJson<string[]>(row.capabilities_json, []);
+  // 旧行（`kind_class` 建成之前）列值为空串 ⇒ 读时按自述现算，不把"没算过"当成"无品类"。
+  const storedClass = String(row.kind_class ?? '').trim();
   return {
     id: String(row.id),
     name: String(row.name ?? ''),
     alias: String(row.alias ?? ''),
     room: String(row.room ?? ''),
-    kind: String(row.kind ?? 'unknown'),
-    protocol: row.protocol as DeviceProtocol,
+    kind,
+    kind_class: storedClass || kindClassOf({ kind, protocol, capabilities }),
+    protocol,
     address: String(row.address ?? ''),
     port: typeof row.port === 'number' ? row.port : null,
-    capabilities: parseJson<string[]>(row.capabilities_json, []),
+    capabilities,
     controllable: Number(row.controllable) === 1,
     authorized: Number(row.authorized) === 1,
     status: row.status_json == null ? null : parseJson<Record<string, unknown>>(row.status_json, {}),
@@ -171,7 +194,7 @@ function rowToDevice(row: Record<string, unknown>): AnsDevice {
   };
 }
 
-const DEVICE_COLUMNS = 'id, name, alias, room, kind, protocol, address, port, capabilities_json, controllable, authorized, status_json, online, first_seen, last_seen';
+const DEVICE_COLUMNS = 'id, name, alias, room, kind, kind_class, protocol, address, port, capabilities_json, controllable, authorized, status_json, online, first_seen, last_seen';
 
 /** 按**去重键**（`protocol + address`）取行——幂等 upsert 的查找面，也是"同一设备"的唯一判据。 */
 export function findDeviceByIdentity(db: DeviceDb, protocol: string, address: string): AnsDevice | null {
@@ -180,34 +203,68 @@ export function findDeviceByIdentity(db: DeviceDb, protocol: string, address: st
 }
 
 /**
+ * 模块级容量拒绝计数（zx_20261030_1 M5）——设备页据此显示「因上限未登记 N 台」。
+ * 只数**本次进程**内被容量闸挡下的首次发现；已有行更新从不计入。进程重启归零（这是运行期观测量，非史实）。
+ */
+let deviceCapacityRefusalCount = 0;
+let lastDeviceCapacityRefusalAt: string | null = null;
+
+/** 设备容量闸的拒绝读数（供 IPC 透出；无拒绝时 `count:0, lastAt:null`）。 */
+export function getDeviceCapacityRefusals(): { count: number; lastAt: string | null } {
+  return { count: deviceCapacityRefusalCount, lastAt: lastDeviceCapacityRefusalAt };
+}
+
+/** 仅供受控回归清场（模块级内存态）。 */
+export function __resetDeviceCapacityRefusalsForTest(): void {
+  deviceCapacityRefusalCount = 0;
+  lastDeviceCapacityRefusalAt = null;
+}
+
+/**
  * 幂等入账：按 `protocol + address` 去重。
  *  - **首次**见到 ⇒ 新增一行（`id` 新生成，`authorized` **恒从 false 起**——发现不等于授权）；
  *  - **再次**见到 ⇒ **刷新**自述字段与 `last_seen`，**绝不**覆盖 `authorized`（用户意志不被发现冲掉）
  *    与 `first_seen`（首见时刻是史实）。
+ *
+ * zx_20261030_1 M5「限」：首次插入前过**容量闸**（上限由 `TIER_LIMITS[tier].maxDevices` 派生）。
+ *   到顶 ⇒ **不 INSERT**、记一次模块级拒绝计数、返回 `null`（调用方跳过这一台）；**已有行一条不删**，
+ *   更新路径（下面 `existing` 分支）完全不受闸影响。`undefined/null` 库（无许可表）⇒ `resolveLicenseTier`
+ *   照常退 `community`，与生产同一把尺。
  */
-export function upsertDiscovered(db: DeviceDb, dev: DiscoveredDevice, now?: string): AnsDevice {
+export function upsertDiscovered(db: DeviceDb, dev: DiscoveredDevice, now?: string): AnsDevice | null {
   const t = now ?? dbNowUtc();
   const caps = JSON.stringify(dev.capabilities ?? []);
   const controllable = dev.controllable ? 1 : 0;
   const roomHint = normalizeRoomName(dev.roomHint ?? '').slice(0, 32);
+  // 派生类目**唯一写点**：协议入口已知就用它（HA device_class / 涂鸦 category / 米家 model），
+  // 否则按自述现算；空串即"没给"，绝不让空串落库冒充品类。
+  const kindClass = String(dev.kindClass ?? '').trim()
+    || kindClassOf({ kind: dev.kind, protocol: dev.protocol, capabilities: dev.capabilities ?? [] });
   const existing = findDeviceByIdentity(db, dev.protocol, dev.address);
   if (existing) {
     // ⚠ 这条 UPDATE 只盖**自述**字段——`alias` 与 `authorized`/`first_seen` 一样**不在其中**：
     //   发现只刷新"设备是什么"，不覆盖"我们叫它什么"与"我们准不准它"（zx_20261014_1 批二）。
     // ⚠ `room` 只在**空串**时采用自述提示（zx_20261018_1 批三）：用户已指派的房间是显式数据，
     //   发现不得覆盖——提示只是提示。
-    db.prepare(`UPDATE wa_devices SET name = ?, kind = ?, port = ?, capabilities_json = ?, controllable = ?,
+    db.prepare(`UPDATE wa_devices SET name = ?, kind = ?, kind_class = ?, port = ?, capabilities_json = ?, controllable = ?,
       room = CASE WHEN TRIM(COALESCE(room, '')) = '' AND ? <> '' THEN ? ELSE room END,
       last_seen = ? WHERE id = ?`)
-      .run(dev.name, dev.kind, dev.port ?? null, caps, controllable, roomHint, roomHint, t, existing.id);
+      .run(dev.name, dev.kind, kindClass, dev.port ?? null, caps, controllable, roomHint, roomHint, t, existing.id);
   } else {
+    // zx_20261030_1 M5：首次插入前过容量闸（到顶 ⇒ 不落库、计入拒绝数；已有行更新不走这里）。
+    const verdict = capacityRefusal(resolveLicenseTier(db), 'maxDevices', countDevices(db));
+    if (!verdict.ok) {
+      deviceCapacityRefusalCount += 1;
+      lastDeviceCapacityRefusalAt = t;
+      return null;
+    }
     // 首见：`alias` 落**空串**（新设备还没有我们的叫法——不从自述名顺手抄一个，那是两件事混作一件）；
     //   `online` 落 **NULL**（刚发现不等于在线——如实"未知"，等可用性事件来改）；
     //   `room` 落自述提示（有则用，无则空串＝未分配——**不**编一个房间）。
-    db.prepare(`INSERT INTO wa_devices (${DEVICE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, ?, ?)`)
-      .run(randomUUID(), dev.name, '', roomHint, dev.kind, dev.protocol, dev.address, dev.port ?? null, caps, controllable, t, t);
+    db.prepare(`INSERT INTO wa_devices (${DEVICE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, ?, ?)`)
+      .run(randomUUID(), dev.name, '', roomHint, dev.kind, kindClass, dev.protocol, dev.address, dev.port ?? null, caps, controllable, t, t);
   }
-  return findDeviceByIdentity(db, dev.protocol, dev.address)!;
+  return findDeviceByIdentity(db, dev.protocol, dev.address);
 }
 
 /** 全部设备台账（最近见到在前）。 */
@@ -363,10 +420,13 @@ export interface DeviceLiveState {
   state: string;
   /** 属性主题的 JSON 对象（无 ⇒ `{}`）。 */
   attributes: Record<string, unknown>;
-  /** 最近一次上行消息的落库时刻（DB 格式 UTC）。 */
+  /** 最近一次采集（上行消息或直查）的落库时刻（DB 格式 UTC）。 */
   at: string;
-  /** 来源主题类别。 */
-  source: 'state' | 'attributes';
+  /**
+   * 来源类别：`state` / `attributes` = MQTT 上行主题（设备自己报的）；
+   * `provider` = zx_20261027_3 M1 云 Provider / miIO **直查**的快照（面板如实标来源，不冒充上行）。
+   */
+  source: 'state' | 'attributes' | 'provider';
   /** 属性主题坏 JSON 的如实原因；成功解析后清除。 */
   attributes_error?: string;
 }

@@ -13,6 +13,11 @@
  *
  * ⚠ 零依赖（不 import 任何 core 模块）：`license.ts` 引它、`task-accounting.ts` 引它，
  *   若它反过来引它们即成 ESM 环。纯常量 + 纯函数是刻意的。
+ *
+ * ⚠ zx_20261030_1 M5「限」：此前档位差异只在「项目 / 席位 / 节点」三个维度，而 0.3.0 用户真正摸得到的
+ *   东西（设备台账、外部终端、A2A 服务、知识卡、团队共享记忆）**一律不限**——专业版与团队版在这些
+ *   维度上毫无差别，容量卖点无物可兑。本轮补五个**容量型**上限，与既有字段同一约定：`0 = 不限`，
+ *   且**只拦新增、不回收已有、不影响运行中任务**（判据在 `core/tier-capacity.ts`，动作面各自接线）。
  */
 
 /** 档位词表（**唯一**定义处；新增档位须穷举读取谓词——`TIER_LIMITS`/`TIER_LABEL` 的键类型取它 ⇒ 漏一档是编译期错）。 */
@@ -32,6 +37,16 @@ export interface TierLimits {
    *   ——由 `nodes:enroll` 依 ANS 台账在注册前拦下（`core/node-quota.ts`）。
    */
   maxNodes: number;
+  /** 设备台账（`wa_devices` 行数）上限；**0 = 不限**。只拦**首次发现插入**，已有行更新不拦。 */
+  maxDevices: number;
+  /** 外部 AI 终端（`status='approved'`）上限；**0 = 不限**。只拦**批准**这一动作。 */
+  maxExternalTerminals: number;
+  /** 同时运行的 A2A 服务数上限；**0 = 不限**。只拦**启动**。 */
+  maxA2AServers: number;
+  /** **单个项目**的知识卡张数上限；**0 = 不限**。到顶不再落新卡，旧卡的既有清理语义不变。 */
+  maxKnowledgeCardsPerProject: number;
+  /** 从团队共享库**导入**并落 `wa_memories(source='team_library')` 的记忆总条数上限；**0 = 不限**。 */
+  maxTeamLibraryMemories: number;
 }
 
 /**
@@ -39,9 +54,18 @@ export interface TierLimits {
  * ⚠ 改这里 = 改**产品口径**，须同步该表（管子·度量衡：一把尺）。
  */
 export const TIER_LIMITS: Record<LicenseTier, TierLimits> = {
-  community: { maxProjectConcurrency: 3, maxProjects: 1, maxMembers: 1, maxNodes: 1 },
-  pro: { maxProjectConcurrency: 8, maxProjects: 0, maxMembers: 1, maxNodes: 1 },
-  team: { maxProjectConcurrency: 16, maxProjects: 0, maxMembers: 20, maxNodes: 20 },
+  community: {
+    maxProjectConcurrency: 3, maxProjects: 1, maxMembers: 1, maxNodes: 1,
+    maxDevices: 5, maxExternalTerminals: 1, maxA2AServers: 1, maxKnowledgeCardsPerProject: 8, maxTeamLibraryMemories: 200,
+  },
+  pro: {
+    maxProjectConcurrency: 8, maxProjects: 0, maxMembers: 1, maxNodes: 1,
+    maxDevices: 30, maxExternalTerminals: 3, maxA2AServers: 3, maxKnowledgeCardsPerProject: 24, maxTeamLibraryMemories: 2000,
+  },
+  team: {
+    maxProjectConcurrency: 16, maxProjects: 0, maxMembers: 20, maxNodes: 20,
+    maxDevices: 200, maxExternalTerminals: 20, maxA2AServers: 10, maxKnowledgeCardsPerProject: 60, maxTeamLibraryMemories: 0,
+  },
 };
 
 /** 人话档位名（界面直接上屏用；键类型取 `LicenseTier` ⇒ 漏一档是编译期错）。 */

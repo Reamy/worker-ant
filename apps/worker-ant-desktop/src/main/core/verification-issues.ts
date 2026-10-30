@@ -63,7 +63,35 @@ const VERDICT_ONLY = new Set([
  * 它们**不能**单独成主语/成题（那是 `VERDICT_ONLY` 管的事）；但作为一句话里的细节出现时，
  * 它明说"这件事还差一步"，正是要立项的那类事——真报告里「实调未完成」就这样被旧口径漏掉过。
  */
-const ACTIONABLE_RE = /未落地|未实现|缺失|未接入|未消费|零调用|无调用方|不一致|不同源|未映射|未配置|未传|丢失|阻断|模拟|硬编码|能力空转|无端点|未完成|未实调|未实测|建议|需|待定|风险/;
+const ACTIONABLE_RE = /未落地|未实现|缺失|未接入|未消费|零调用|无调用方|不一致|不同源|未映射|未配置|未传|丢失|阻断|模拟|硬编码|能力空转|无端点|未完成|未实调|未实测|建议|待定|风险/;
+
+/**
+ * zx_20261029_3 M1（荀子·名定而实辨）：**只能由人做的事**，不该派给智能体。
+ *
+ * 病根：`ACTIONABLE_RE` 里曾有一枚裸 `需`，于是「需 GUI 人工操作」「需运行实例 + MySQL」
+ * 「需重编译部署」全被当成"可修问题"自动立了修复任务——真库三张 `paused` 的
+ * `修复核实发现的未落地问题` 描述逐条都是这种待人事项，派出去后只能空转到目标偏离为止。
+ *
+ * 判据分两半：
+ * - **动作/话术**（`HUMAN_ACTION_RE`）本身即足：人工、GUI、扫码、真机、开发者工具、截图、需登录…
+ * - **资源**（`HUMAN_RESOURCE_RE`）须与「需/无法/不允许/不可用…」**同句**才算：运行实例、外部数据库、
+ *   测试库、沙箱、账号凭据、部署重编译。单说「部署脚本缺失」是**可修**的，故不能只看资源词。
+ *
+ * 刻意不收裸 `登录`（「登录接口未实现」是可修的）、裸 `未`（「账号体系缺失」是可修的）。
+ */
+const HUMAN_ACTION_RE = /人工|手动|扫码|真机|开发者工具|界面点击|截图|需登录|登录操作|需在你们的|需要你/;
+const HUMAN_RESOURCE_RE = /运行实例|数据库实例|MySQL|MariaDB|外部服务|测试库|沙箱|账号|账户|凭据|密钥|重编译|部署/;
+const HUMAN_QUALIFIER_RE = /需|无法|不允许|不可用|无可用|没有/;
+
+/** 这一条是否只能由人做（GUI/真机/外部实例/凭据/部署）。 */
+export function isHumanOnlyIssue(issue: string): boolean {
+  const s = normalizeCell(issue);
+  if (HUMAN_ACTION_RE.test(s)) return true;
+  return HUMAN_RESOURCE_RE.test(s) && HUMAN_QUALIFIER_RE.test(s);
+}
+
+/** 待人事项的展示上限（再多就只报数量，不把收口文案撑爆）。 */
+export const MAX_MANUAL_ITEMS = 10;
 
 /** 证据列/说明列——不能拿来当"要修什么"。 */
 const EVIDENCE_RE = /^(依据|证据|备注|说明|结果|判定|见\s|详见)/;
@@ -135,28 +163,43 @@ function issueFromLine(line: string): string | null {
 export interface VerificationIssueExtraction {
   /** 已归一、去重、截断后的可操作问题（保持原文出现顺序） */
   issues: string[];
-  /** 因上限 20 被截掉的问题数（如实上报"另 N 条未立项"） */
+  /** 只能由人做的事项（已去重、展示上限内）——**不立项**，由调用方登账并告知用户 */
+  manualItems: string[];
+  /** 待人事项超出展示上限的条数 */
+  manualOverflow: number;
+  /** 因上限 20 被截掉的可操作问题数（如实上报"另 N 条未立项"） */
   overflow: number;
 }
 
-/** 从一份或多份报告正文里抽出可立项的问题。 */
+function dedupKey(s: string): string {
+  return s.toLowerCase().replace(/[\s:：，,。；;、（）()【】\[\]「」《》]/g, '');
+}
+
+/** 从一份或多份报告正文里抽出可立项的问题；待人事项单列，不混进 issues。 */
 export function extractVerificationIssues(texts: string[]): VerificationIssueExtraction {
   const seen = new Set<string>();
   const picked: string[] = [];
+  const manual: string[] = [];
   for (const text of texts) {
     for (const line of String(text ?? '').split('\n')) {
       const issue = issueFromLine(line);
       if (!issue) continue;
       const cleaned = issue.replace(/\s+/g, ' ').trim();
       if (cleaned.length < 6) continue;
-      if (!ACTIONABLE_RE.test(cleaned)) continue;
-      const key = cleaned.toLowerCase().replace(/[\s:：，,。；;、（）()【】\[\]「」《》]/g, '');
+      const humanOnly = isHumanOnlyIssue(cleaned);
+      if (!humanOnly && !ACTIONABLE_RE.test(cleaned)) continue;
+      const key = dedupKey(cleaned);
       if (!key || seen.has(key)) continue;
       seen.add(key);
-      picked.push(cleaned);
+      if (humanOnly) manual.push(cleaned); else picked.push(cleaned);
     }
   }
-  return { issues: picked.slice(0, MAX_VERIFICATION_ISSUES), overflow: Math.max(0, picked.length - MAX_VERIFICATION_ISSUES) };
+  return {
+    issues: picked.slice(0, MAX_VERIFICATION_ISSUES),
+    manualItems: manual.slice(0, MAX_MANUAL_ITEMS),
+    manualOverflow: Math.max(0, manual.length - MAX_MANUAL_ITEMS),
+    overflow: Math.max(0, picked.length - MAX_VERIFICATION_ISSUES),
+  };
 }
 
 /** 只用到 prepare().run() 的最小库接口（与 `task-jobs.ts` 同形）。 */

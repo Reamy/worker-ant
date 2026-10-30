@@ -33,6 +33,14 @@
  *   三个**动作**出口（`devices:discover` / `devices:authorize` / `devices:control`）各经**同一判据**
  *   （`core/team-gate.ts`），锁定即如实回 `TEAM_REQUIRED`（不触发现/不写授权/不下发命令）；
  *   `devices:list`（只读台账）**照常**回，另带 `gate` 供面板显示升级提示。
+ *
+ * zx_20261029_2 M6「阶梯」: **发现/渠道接入归 Pro**（`core/pro-gate.ts` 的 `device_discovery`），
+ *   **控制归 Team**（`device_control`）——两档各读各的闸，不并成一句"设备能力"：
+ *   · `devices:discover` / `devices:cloud_sync` / `devices:channels` / `devices:channel_auth` ⇒ Pro 闸，
+ *     锁定如实回 `PRO_REQUIRED`；`cloud_sync` 的闸**先于**任何配置读取/网络调用。
+ *   · `devices:authorize` / `devices:control` / `devices:intent_execute` / `devices:miio_token` 写口 ⇒ Team 闸。
+ *   · `devices:list` 照常回，**另带 `discoveryGate`（Pro）与 `gate`（Team）**——面板分别显示"看不了/动不了"。
+ *   · `devices:intent_preview` 仍**不挂闸**（这是"看"，排好的步骤先给人看）。
  */
 import { ipcMain } from 'electron';
 import type Database from 'better-sqlite3';
@@ -40,6 +48,7 @@ import {
   applyAvailability as applyDeviceAvailability,
   findDeviceByIdentity,
   getDevice,
+  getDeviceCapacityRefusals,
   listDeviceActions,
   listDevices,
   setDeviceAlias,
@@ -48,11 +57,13 @@ import {
   setDeviceLiveState,
   setDeviceRoom,
   taskRefsOf,
+  upsertDiscovered,
   type AnsDevice,
   type DeviceActionRow,
   type DeviceDb,
   type TaskRef,
 } from '../core/device-registry.js';
+import { kindClassOf } from '../core/device-kind.js';
 import {
   composeDiscoveryIo,
   defaultDiscoveryIo,
@@ -63,16 +74,20 @@ import {
 } from '../core/device-discovery.js';
 import { defaultDeviceControl, executeDeviceIntentPlan, lanAddressRefusal, runDeviceControl } from '../core/tools/device.js';
 // zx_20261018_1 批五: 意图演练两跳——规则表/词表/计划账各取各自真源（本文件只接线）。
-import { planHomeComfort } from '../core/home-intent.js';
-import { createIntentPlan, getIntentPlan } from '../core/intent-plans.js';
+// zx_20261029_2 M2：预览与门外/工具走**同一条** `resolveComfortIntent`（规则 → 模型兜底 → 再校验）。
+import { resolveComfortIntent } from '../core/home-intent.js';
+import { runComfortModelPlan, type IntentModelClient } from '../core/intent-model-plan.js';
+import { readBoolSetting } from '../core/settings-bool.js';
+import { createIntentPlan, intentPlanSourceLabel, getIntentPlan } from '../core/intent-plans.js';
 import {
   HOME_COMFORT_INTENT,
   INTENT_CAPABILITY,
   validateIntent,
-  type ComfortFeeling,
 } from '../core/intent-protocol.js';
 // zx_20261017_1 批八: 三方云（涂鸦）Provider——启动时注册，同步/控制时现读配置。
-import { getDeviceProvider, syncProviderDevices } from '../core/device-provider.js';
+import { cloudDeviceState, cloudProviderIdOf, getDeviceProvider, syncProviderDevices } from '../core/device-provider.js';
+// zx_20261027_3 M1b: 设备状态直查（只对无实时订阅的 cloud/miIO 协议）——选路/写回补丁是纯函数。
+import { livePatchFromProviderState, selectStateRefreshTargets } from '../core/device-state-refresh.js';
 import {
   registerTuyaCloudProvider,
   resolveTuyaConfig,
@@ -99,7 +114,10 @@ import { haDiscoveryIo, resolveHaConfig } from '../core/device-homeassistant.js'
 // zx_20261023_5 批三: 渠道目录（向导第一步）与 miIO 渠道（发现/控制/每设备 token）。
 import { authorizeChannel, listOnboardingChannels, resolveChannel } from '../core/device-channel.js';
 import {
+  currentMiioToken,
   mijiaMiioDiscoveryIo,
+  miioDeviceModel,
+  miioDeviceState,
   miioTokenSettingKey,
   normalizeMiioToken,
   setMiioTokenProvider,
@@ -114,8 +132,12 @@ import { probeTuya } from '../core/providers/tuya-cloud.js';
 import { terminalNamesOf, type TerminalDb } from '../core/external-terminals.js';
 import { eventBus } from '../core/event-bus.js';
 import { resolveTeamGate, teamFeatureRefusal, type TeamGate } from '../core/team-gate.js';
+// zx_20261029_2 M6: 发现/渠道接入归 Pro（`device_discovery`）；控制仍归 Team——两档各读各的闸。
+import { resolveProGate, proFeatureRefusal, type ProGate } from '../core/pro-gate.js';
 import { refusalWithContext } from '../core/tier-usage.js';
-import type { LicenseSettingDb } from '../core/license.js';
+import { resolveLicenseTier, type LicenseSettingDb } from '../core/license.js';
+// zx_20261030_1 M5「限」：设备登记容量的**读数**（上限由 `TIER_LIMITS[tier].maxDevices` 派生，0=不限）。
+import { capacityLimit, countDevices, type CapacityDb } from '../core/tier-capacity.js';
 
 /** 首屏一屏读全：台账 + 最近审计 + 发现是否在跑。 */
 export interface DevicesListPayload {
@@ -132,8 +154,17 @@ export interface DevicesListPayload {
    */
   terminalRefs: Record<string, string>;
   discoveryRunning: boolean;
-  /** zx_20261005 M22: Team 档软闸——面板据此显示升级提示并禁用动作按钮。 */
+  /** zx_20261005 M22: Team 档软闸（**控制**）——面板据此禁用授权/控制/意图执行。 */
   gate: TeamGate;
+  /** zx_20261029_2 M6: Pro 档软闸（**发现/渠道接入**）——面板据此禁用"开始发现"与渠道向导。 */
+  discoveryGate: ProGate;
+  /**
+   * zx_20261030_1 M5「限」：设备登记容量（`limit === 0` ⇒ 不限）。
+   * 只拦**新登记**：已有台账行不受影响（面板据此解释"为什么新发现的没进来"）。
+   */
+  capacity?: { used: number; limit: number };
+  /** 本进程内因容量上限被挡下的首次发现数（不是史实；重启归零，`lastAt` 为 UTC 时刻）。 */
+  capacityRefusals?: { count: number; lastAt: string | null };
 }
 
 /**
@@ -149,7 +180,13 @@ export function stopDeviceLiveSubscriptions(): void {
   liveSub = null;
 }
 
-export function initDevicesIpc(db: Database.Database): void {
+/**
+ * 模型兜底的取模型口（zx_20261029_2 M2）——装配层注入；未给 ⇒ 预览只走规则（如实不 pretend）。
+ * 与门外门/任务工具共用 `runComfortModelPlan`，三处同一份模型调用与校验。
+ */
+export type DevicesAnsClientGetter = () => Promise<IntentModelClient>;
+
+export function initDevicesIpc(db: Database.Database, getAnsClient?: DevicesAnsClientGetter): void {
   const ddb = db as unknown as DeviceDb;
   const licDb = db as unknown as LicenseSettingDb;
   const tdb = db as unknown as TerminalDb;
@@ -203,10 +240,18 @@ export function initDevicesIpc(db: Database.Database): void {
   });
 
   // zx_20261023_5 批三: 渠道目录（向导第一步）。**锁定的渠道不出现**——不是灰着，是不列。
+  // zx_20261029_2 M6: 渠道接入归 **Pro**（`device_discovery`）；控制另在动作出口判 Team，不在此圈走。
   ipcMain.handle('devices:channels', async () => {
     try {
       const gate = resolveTeamGate(licDb);
-      return { data: { channels: listOnboardingChannels({ teamUnlocked: gate.unlocked }), gate } };
+      const discoveryGate = resolveProGate(licDb);
+      return {
+        data: {
+          channels: listOnboardingChannels({ proUnlocked: discoveryGate.unlocked, teamUnlocked: gate.unlocked, tierLabel: discoveryGate.tierLabel }),
+          gate,
+          discoveryGate,
+        },
+      };
     } catch (e) {
       return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } };
     }
@@ -218,17 +263,20 @@ export function initDevicesIpc(db: Database.Database): void {
       const r = resolveChannel(String(channelId ?? ''));
       if (!r.ok) return { error: { code: 'NOT_FOUND', message: r.reason } };
       const gate = resolveTeamGate(licDb);
+      const discoveryGate = resolveProGate(licDb);
       const channel = r.channel;
       // "已配置"只问渠道级前置键（每设备凭据是下一步的事，不在此拦）。
       const hasCredentials = channel.configKeys.length > 0
         && channel.configKeys.every((k) => (settingsGet(k) ?? '') !== '');
       const verdict = authorizeChannel(channel, {
+        proUnlocked: discoveryGate.unlocked,
         teamUnlocked: gate.unlocked,
+        tierLabel: discoveryGate.tierLabel,
         hasCredentials,
         // token 渠道的 token 在设备行逐台填——渠道层不拦（不然用户连列表都看不到）。
         hasToken: true,
       });
-      return { data: { channelId: channel.id, verdict, hasCredentials, gate } };
+      return { data: { channelId: channel.id, verdict, hasCredentials, gate, discoveryGate } };
     } catch (e) {
       return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } };
     }
@@ -277,8 +325,82 @@ export function initDevicesIpc(db: Database.Database): void {
         terminalRefs: Object.fromEntries(terminalNamesOf(tdb, actions.filter((a) => a.actor_kind === 'external').map((a) => a.actor_ref))),
         discoveryRunning: isDiscoveryRunning(),
         gate: resolveTeamGate(licDb),
+        discoveryGate: resolveProGate(licDb),
+        // zx_20261030_1 M5「限」：容量读数与"因上限未登记"计数（读不到按 0，不拦只读页）。
+        capacity: {
+          used: countDevices(db as unknown as CapacityDb),
+          limit: capacityLimit(resolveLicenseTier(licDb), 'maxDevices'),
+        },
+        capacityRefusals: getDeviceCapacityRefusals(),
       };
       return { data: payload };
+    } catch (e) {
+      return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } };
+    }
+  });
+
+  // zx_20261027_3 M1b（维特根斯坦·意义即用法）: **状态直查**——只对 `cloud` / `miio`，
+  //   因为它们没有实时订阅（MQTT/HA 走上行订阅，重复查会拿直查结果覆盖设备自报的状态）。
+  //   结果按 `source='provider'` 写回既有 `live`（面板如实标"直查"，不冒充上行）；
+  //   查不到/未配置 token 逐条如实返回，**不写**、不抹旧快照。这是"看"，与 `devices:list` 同一先例，不经 Team 闸。
+  ipcMain.handle('devices:refresh_states', async () => {
+    try {
+      const { targets, skipped } = selectStateRefreshTargets(listDevices(ddb));
+      const refreshed: Array<Record<string, unknown>> = [];
+      for (const dev of targets) {
+        let result: { ok: boolean; state?: Record<string, unknown>; unsupported?: boolean; error?: string };
+        let sourceLabel: string;
+        if (dev.protocol === 'cloud') {
+          sourceLabel = `云 Provider · ${cloudProviderIdOf(dev.address) || '未知'}`;
+          result = await cloudDeviceState(dev);
+        } else {
+          const token = currentMiioToken(dev.address);
+          if (!token) {
+            refreshed.push({
+              deviceId: dev.id, name: dev.name, protocol: dev.protocol, ok: false,
+              error: '未配置 miIO token（先在设备行填入 token）',
+            });
+            continue;
+          }
+          sourceLabel = '米家 miIO';
+          result = await miioDeviceState(dev);
+          // zx_20261029_2 M1: 品类还没认出来的米家设备，状态刷新时顺带查 `miio.info` 补 model——
+          //   只补派生类目，不改 `kind`（设备自述仍是 unknown）；查不到就保持"未识别"。
+          if (dev.kind_class === 'unknown') {
+            const model = await miioDeviceModel(dev);
+            const cls = model ? kindClassOf({ kind: dev.kind, protocol: 'miio', model }) : 'unknown';
+            if (cls !== 'unknown') {
+              upsertDiscovered(ddb, {
+                name: dev.name,
+                kind: dev.kind,
+                kindClass: cls,
+                protocol: dev.protocol,
+                address: dev.address,
+                port: dev.port,
+                capabilities: dev.capabilities,
+                controllable: dev.controllable,
+              });
+            }
+          }
+        }
+        const patch = livePatchFromProviderState(result);
+        if (patch) {
+          const updated = setDeviceLiveState(ddb, dev.id, patch);
+          if (updated) void eventBus.emit('device.status_changed', { deviceId: updated.id, device: updated });
+        }
+        refreshed.push({
+          deviceId: dev.id,
+          name: dev.name,
+          protocol: dev.protocol,
+          ok: result.ok === true,
+          ...(result.unsupported === true ? { unsupported: true } : {}),
+          ...(result.error ? { error: result.error } : {}),
+          state: result.state ?? null,
+          source: sourceLabel,
+          written: patch != null,
+        });
+      }
+      return { data: { refreshed, skipped } };
     } catch (e) {
       return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } };
     }
@@ -395,12 +517,12 @@ export function initDevicesIpc(db: Database.Database): void {
   });
 
   // zx_20261017_1 批八: 从涂鸦云同步设备入台账。
-  //   ⚠ Team 闸（`device_discovery`）**先于**任何配置读取/网络调用；未配置⇒如实拒，不触网。
+  //   ⚠ **Pro** 闸（`device_discovery`，zx_20261029_2 M6 起归专业版）**先于**任何配置读取/网络调用；未配置⇒如实拒，不触网。
   //   ⚠ 入账走 `syncProviderDevices`（既有幂等 upsert）——发现不覆盖 `alias`/`authorized`。
   ipcMain.handle('devices:cloud_sync', async () => {
     try {
-      const refusal = teamFeatureRefusal(licDb, 'device_discovery');
-      if (refusal) return { error: { code: 'TEAM_REQUIRED', message: refusalWithContext(db, refusal, { requiredTier: 'team' }) } };
+      const refusal = proFeatureRefusal(licDb, 'device_discovery');
+      if (refusal) return { error: { code: 'PRO_REQUIRED', message: refusalWithContext(db, refusal, { requiredTier: 'pro' }) } };
       if (!resolveTuyaConfig(settingsGet)) {
         return { error: { code: 'NOT_CONFIGURED', message: '涂鸦云凭据未配置（Access ID / Secret）——请先在「三方云」区填写并保存。' } };
       }
@@ -420,12 +542,12 @@ export function initDevicesIpc(db: Database.Database): void {
     }
   });
 
-  // 起发现：落账后发 `device.discovered`（持久化）——面板据此实时刷新台账。Team 档软闸：锁定即不触发现。
+  // 起发现：落账后发 `device.discovered`（持久化）——面板据此实时刷新台账。**Pro** 档软闸（M6）：锁定即不触发现。
   // zx_20261013_1 批五: 配了 MQTT broker（且开关开）时**并联** MQTT 发现——两路各自自述、共用同一落账面。
   ipcMain.handle('devices:discover', async () => {
     try {
-      const refusal = teamFeatureRefusal(licDb, 'device_discovery');
-      if (refusal) return { error: { code: 'TEAM_REQUIRED', message: refusalWithContext(db, refusal, { requiredTier: 'team' }) } };
+      const refusal = proFeatureRefusal(licDb, 'device_discovery');
+      if (refusal) return { error: { code: 'PRO_REQUIRED', message: refusalWithContext(db, refusal, { requiredTier: 'pro' }) } };
       const cfg = mqttConfig();
       const haCfg = resolveHaConfig(settingsGet);
       const mqttErrors: string[] = [];
@@ -587,21 +709,45 @@ export function initDevicesIpc(db: Database.Database): void {
       if (!v.ok) {
         return { error: { code: 'INVALID_REQUEST', message: (v.body.errors ?? []).join('；') || v.body.error } };
       }
-      const plan = planHomeComfort(listDevices(ddb), String(v.params.room), v.params.feeling as ComfortFeeling);
+      // 与门外/工具同一条解析链：规则 → 规则排不出且开关开 ⇒ 模型 → 再校验。
+      const modelFallback = getAnsClient && readBoolSetting(db, 'device.intent_model_fallback');
+      const plan = await resolveComfortIntent(
+        { intent: HOME_COMFORT_INTENT, params: v.params },
+        {
+          listDevices: () => listDevices(ddb),
+          ...(modelFallback
+            ? { modelPlan: (input) => runComfortModelPlan(input, { getAnsClient: getAnsClient! }) }
+            : {}),
+        },
+      );
       if (!plan.ok) {
-        // 不生成空计划——如实回"这房间里没有能做的"（被略过的设备照实带原因，写进人看的那句话：
-        //   渲染层的 IpcError 只透传 message，旁挂字段到不了界面）。
+        // 不生成空计划——如实回"这房间里没有能做的"（被略过的设备照实带原因）。
+        // zx_20261029_2 M2：失败原因**细分到可行动**——`message` 是给用户看的下一步，
+        //   渲染层的 IpcError 只透传 message，故把原因前缀并进同一句。
         const skipped = plan.skipped ?? [];
         const detail = skipped.length > 0
           ? `已略过：${skipped.map((s) => `${s.call_name}（${s.reason}）`).join('；')}`
-          : '该房间没有相关设备。';
-        return { error: { code: 'NO_CONTROLLABLE_DEVICE', message: `该房间里没有可执行的步骤——${detail}` } };
+          : '';
+        const next = plan.message ?? '该房间里没有可执行的步骤。';
+        const code = plan.reason === 'room_unassigned' ? 'ROOM_UNASSIGNED'
+          : plan.reason === 'no_recognized_kind' ? 'NO_RECOGNIZED_KIND'
+            : plan.reason === 'no_controllable_device' ? 'NO_CONTROLLABLE_DEVICE'
+              : 'INTENT_PLAN_FAILED';
+        return { error: { code, message: detail ? `${next}${detail}` : next } };
       }
       const created = createIntentPlan(db, {
         terminalId: 'panel', capability: INTENT_CAPABILITY,
         params: v.params, steps: plan.steps, skipped: plan.skipped,
+        source: plan.source ?? 'rule',
       });
-      return { data: { planId: created.id, expiresIn: created.expiresIn, steps: plan.steps, skipped: plan.skipped } };
+      return {
+        data: {
+          planId: created.id, expiresIn: created.expiresIn,
+          steps: plan.steps, skipped: plan.skipped,
+          source: plan.source ?? 'rule',
+          sourceLabel: intentPlanSourceLabel(plan.source ?? 'rule'),
+        },
+      };
     } catch (e) {
       return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } };
     }

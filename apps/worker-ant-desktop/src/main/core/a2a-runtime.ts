@@ -7,6 +7,12 @@ import { createLogger } from './logger.js';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
+// zx_20261029_2 M3：A2A 卡与门牌共享**同一份技能词汇**（仅类型，打包期擦除）。
+//   不把节点能力硬塞进交付物卡——这里只是让"一条技能条目"在两处叫同一个名字。
+import type { CapabilitySkill } from './capability-vocabulary.js';
+// zx_20261030_1 M5「限」：并发 A2A 服务数按档位设闸（只拦**启动**；已运行的实例不回收）。
+import { resolveLicenseTier, type LicenseSettingDb } from './license.js';
+import { capacityRefusal } from './tier-capacity.js';
 
 const logger = createLogger('a2a-runtime');
 
@@ -48,8 +54,14 @@ export async function startA2AServer(
   workingDir: string,
   entryFile = 'server.js',
   onExit?: (code: number | null, signal: NodeJS.Signals | null) => void,
+  opts: { db?: LicenseSettingDb } = {},
 ): Promise<{ endpoint: string; agentCardUrl: string; port: number }> {
+  // 同一交付物重启：先停旧的（它不占"新增"额度，见下面的计数时机）。
   if (processes.has(deliverableId)) await stopA2AServer(deliverableId);
+  // zx_20261030_1 M5「限」：spawn **之前**判容量（上限由 `TIER_LIMITS[tier].maxA2AServers` 派生，0=不限）。
+  //   到顶抛带中文说明的 Error（IPC 壳会原样上屏）；已在跑的实例一条不停——只拦"再起一个"。
+  const verdict = capacityRefusal(resolveLicenseTier(opts.db), 'maxA2AServers', processes.size);
+  if (!verdict.ok) throw new Error(`A2A 服务无法启动：${verdict.note}`);
   const port = allocatePort();
   const endpoint = `http://localhost:${port}`;
   const agentCardUrl = `${endpoint}/.well-known/agent.json`;
@@ -151,7 +163,11 @@ export interface AgentCardTemplate {
   description?: string;
   version?: string;
   capabilities?: { streaming?: boolean; pushNotifications?: boolean; stateTransitionHistory?: boolean };
-  skills?: Array<{ id: string; name: string; description?: string; tags?: string[]; inputModes?: string[]; outputModes?: string[] }>;
+  /**
+   * 技能条目与门牌同形（zx_20261029_2 M3）：`id/name/description/tags` 取自 `CapabilitySkill`；
+   * 故 `agentSkillsFromCapabilities(...)` 的结果可**原样**传进来，不必再转一手。
+   */
+  skills?: Array<Pick<CapabilitySkill, 'id' | 'name'> & Partial<Pick<CapabilitySkill, 'description' | 'tags'>> & { inputModes?: string[]; outputModes?: string[] }>;
   defaultInputModes?: string[];
   defaultOutputModes?: string[];
 }

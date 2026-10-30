@@ -466,6 +466,10 @@ export interface ChildCompletionClass {
   failed: number;
   /** 既未 completed 也未 failed（收口前会被前置检查拦下） */
   incomplete: number;
+  /** `incomplete` 的拆分：已归档（放弃）数 */
+  archived: number;
+  /** `incomplete` 的拆分：尚未了结（pending/running/paused…）数 */
+  open: number;
 }
 
 /**
@@ -475,10 +479,11 @@ export interface ChildCompletionClass {
 export function classifyChildCompletion(
   children: Array<{ status?: string | null; context_json?: string | null }>,
 ): ChildCompletionClass {
-  const c: ChildCompletionClass = { total: children.length, done: 0, emptyShell: 0, failed: 0, incomplete: 0 };
+  const c: ChildCompletionClass = { total: children.length, done: 0, emptyShell: 0, failed: 0, incomplete: 0, archived: 0, open: 0 };
   for (const ch of children) {
     if (ch.status === 'failed') { c.failed++; continue; }
-    if (ch.status !== 'completed') { c.incomplete++; continue; }
+    if (ch.status === 'archived') { c.archived++; c.incomplete++; continue; }
+    if (ch.status !== 'completed') { c.open++; c.incomplete++; continue; }
     let shell = false;
     try { shell = (JSON.parse(ch.context_json || '{}') as { auto_completed_without_output?: unknown }).auto_completed_without_output === true; } catch { /* 脏 ctx 不作空壳认定 */ }
     if (shell) c.emptyShell++; else c.done++;
@@ -500,6 +505,11 @@ export function childCompletionCheckLabel(c: ChildCompletionClass): string {
   //   未了结者算进"已完成/已终结"的那个 N 里（旧文案 `已终结 ${total}（…）` 把 pending 也算作
   //   "已终结"，名实不符）。真库标本 `7c39678e`：7 完成 + 8 归档 ⇒ 旧文案谎报「所有15个子任务已完成」。
   if (c.incomplete === 0 && c.emptyShell === 0 && c.failed === 0) return `[PASS] 所有${c.total}个子任务已完成`;
+  // zx_20261028_2 M4：**无一完成**是另一档事实——旧文案把它写成「[PASS] 共 N …」，读的人会以为收口条件已满足。
+  //   （真库标本：模板拆出的子任务全部被归档，父仍以 [PASS] 收口。）
+  if (c.done === 0 && c.incomplete > 0) {
+    return `[WARN] 共 ${c.total} 个子任务，无一完成（归档 ${c.archived} 个、未了结 ${c.open} 个、失败 ${c.failed} 个${c.emptyShell > 0 ? `、未产出 ${c.emptyShell} 个` : ''}）——这批子任务均未交付成果，请逐条核验后再收口`;
+  }
   const notes: string[] = [];
   if (c.emptyShell > 0) notes.push('未产出者为"置完成但无产出证据"的空壳（未交付任何成果），请核验后决定是否补做');
   if (c.failed > 0) notes.push('存在失败子任务，请核验后决定是否补做');
@@ -567,14 +577,33 @@ export function isPlanOrImplTask(text: string | null | undefined): boolean {
  * （真库全库 40 条这种任务，其中 36 条 0 子任务）。若不排除，一个叫「M4 建子任务这条路」的
  * **叶子**任务会被要求"建一个 M4 子任务"——自指，**永远满足不了**。
  */
+/**
+ * zx_20261027_1 M1（维特根斯坦「意义即用法」）：里程碑号的**唯一**词形。
+ *
+ * 此前五处各写各的 `M\d+`，只认整数 ⇒ 方案里的 `M2.5` 被读成 `M2`：
+ * `M2` 与 `M2.5` 同板时，`M2.5` 的子任务被认成 `M2`，`status != 'done'` 的条件又让
+ * 已完成的 `M2` 被重写实施者、`M2.5` 永远 pending。**一个号指了两件事**。
+ *
+ * 小数段是可选的：整数 `M12` 仍完整匹配（不被截成 `M1`），`M2.5` 也不再退化。
+ * 导出**字符串源**而非共享正则对象：`g` 正则带 `lastIndex`，共享即状态串味。
+ */
+export const MILESTONE_NUM_SOURCE = String.raw`M\d+(?:\.\d+)?`;
+export const MILESTONE_TOKEN_SOURCE = String.raw`\b${MILESTONE_NUM_SOURCE}\b`;
+/** 前缀形态（标题/行首）：`M2. 设计` 里的点不算小数段（其后无数字），仍取 `M2`。 */
+export const MILESTONE_PREFIX_SOURCE = String.raw`^(${MILESTONE_NUM_SOURCE})(?!\d)`;
+/** 每处新建实例（`g` 的 `lastIndex` 不外泄）。 */
+export function milestoneTokenRegex(flags = 'g'): RegExp {
+  return new RegExp(MILESTONE_TOKEN_SOURCE, flags);
+}
+
 export function milestoneOwnLabel(title: string | null | undefined): string | null {
-  return String(title ?? '').trim().match(/^(M\d+)\b/)?.[1] ?? null;
+  return String(title ?? '').trim().match(new RegExp(MILESTONE_PREFIX_SOURCE))?.[1] ?? null;
 }
 
 /** 逐段取值再合并（**不要**先把各段 join 起来——相邻段尾 "M1" + 首 "2..." 会拼出一个假的 "M12"）。 */
 export function milestoneRefsIn(...texts: Array<string | null | undefined>): Set<string> {
   const out = new Set<string>();
-  for (const t of texts) for (const m of String(t ?? '').matchAll(/\bM\d+\b/g)) out.add(m[0]);
+  for (const t of texts) for (const m of String(t ?? '').matchAll(milestoneTokenRegex())) out.add(m[0]);
   return out;
 }
 
@@ -600,11 +629,11 @@ export function milestoneTitledRefsIn(text: string | null | undefined): Map<stri
   };
   const lines = String(text ?? '').split('\n');
   for (const line of lines) {
-    const row = /^\s*\|\s*(M\d+)\s+([^|]+?)\s*\|/.exec(line);
+    const row = new RegExp(String.raw`^\s*\|\s*(${MILESTONE_NUM_SOURCE})\s+([^|]+?)\s*\|`).exec(line);
     if (row) put(row[1] as string, (row[2] as string));
   }
   for (const line of lines) {
-    const head = /^\s*#{1,6}\s+(M\d+)\s+([^（(]+)/.exec(line);
+    const head = new RegExp(String.raw`^\s*#{1,6}\s+(${MILESTONE_NUM_SOURCE})\s+([^（(]+)`).exec(line);
     if (head) put(head[1] as string, (head[2] as string));
   }
   return out;
@@ -686,8 +715,7 @@ export function milestoneBoardOwner(ctxJson: Record<string, unknown>): string | 
  * 实现与旧 `/^M(\d+)/` **逐例等价**（`\d+` 贪婪已保证其后非数字），故本收敛不引入行为变更。
  */
 export function milestoneFromTitle(title: string | null | undefined): string | null {
-  const m = /^M(\d+)/.exec(String(title ?? ''));
-  return m ? `M${m[1]}` : null;
+  return String(title ?? '').match(new RegExp(MILESTONE_PREFIX_SOURCE))?.[1] ?? null;
 }
 
 /**
@@ -823,6 +851,43 @@ export function writeMilestoneDone(
 }
 
 /**
+ * zx_20261027_1 M3（道德经·知止不殆，但须是**可纠正的止**）：撤回某任务落地的里程碑。
+ *
+ * 只对 `implemented_by_task_id = 该任务` 且 `status = 'done'` 的行生效——退回 `pending` 并清实施者。
+ * 用在"父复核推翻子任务完成"这一条窄口上：子被改判失败，它名下的 M 不能继续冒充已落地。
+ * 与 `writeMilestoneDone` **只前进不回退**的契约互补：那一侧防重复收口，这一侧是显式撤回。
+ */
+export function revertMilestoneDoneForTask(
+  db: AccountingDb,
+  taskId: string,
+  emit?: (e: MilestoneChangedEvent) => void,
+): string[] {
+  try {
+    const rows = db.prepare(
+      "SELECT plan_task_id, milestone FROM wa_plan_milestones WHERE implemented_by_task_id = ? AND status = 'done'",
+    ).all(taskId) as Array<{ plan_task_id: string; milestone: string }>;
+    if (rows.length === 0) return [];
+    const upd = db.prepare(
+      "UPDATE wa_plan_milestones SET status = 'pending', implemented_by_task_id = NULL, updated_at = datetime('now') WHERE plan_task_id = ? AND milestone = ? AND implemented_by_task_id = ? AND status = 'done'",
+    );
+    const reverted: string[] = [];
+    for (const r of rows) {
+      const up = upd.run(r.plan_task_id, r.milestone, taskId);
+      if ((up?.changes ?? 0) === 0) continue;
+      reverted.push(r.milestone);
+      try {
+        const pl = db.prepare('SELECT project_id FROM wa_plan_milestones WHERE plan_task_id = ? AND milestone = ?')
+          .get(r.plan_task_id, r.milestone) as { project_id?: string } | undefined;
+        if (pl?.project_id) emit?.({ projectId: pl.project_id, planTaskId: r.plan_task_id, milestone: r.milestone, status: 'pending' });
+      } catch { /* emit 失败不阻断 */ }
+    }
+    return reverted;
+  } catch {
+    return [];
+  }
+}
+
+/**
  * M5（管子·度量衡）上限截断后「剩余 M」的补归口——板上**无卡**且**父自述过**的 `M{n}` 归父。
  *
  * `create_task` 广度上限 5 是全系统共用的安全阀（D3 不放宽），而方案板可能有 7 行 ⇒ M5/M6 **根本没有卡**，
@@ -870,12 +935,12 @@ export function backfillBoardRemainderToSelf(
     // ② 父自述的 M 范围（标题 / 描述 / plan 文本）
     const declared = new Set<string>();
     const planText = typeof ctxJson?.plan === 'string' ? (ctxJson.plan as string) : '';
-    for (const m of `${tr.title || ''}\n${tr.description || ''}\n${planText}`.matchAll(/\bM\d+\b/g)) declared.add(m[0]);
+    for (const m of `${tr.title || ''}\n${tr.description || ''}\n${planText}`.matchAll(milestoneTokenRegex())) declared.add(m[0]);
     if (declared.size === 0) return null;
 
     // ③ 已有卡的 M（不代标——含失败/空壳卡）
     const withCard = new Set<string>();
-    for (const c of children) { const mm = /\bM\d+\b/.exec(String(c.title ?? '')); if (mm) withCard.add(mm[0]); }
+    for (const c of children) { const mm = milestoneTokenRegex('').exec(String(c.title ?? '')); if (mm) withCard.add(mm[0]); }
 
     // ④ 落归口：板上未落地 且 父自述 且 无卡
     const rows = db.prepare("SELECT milestone FROM wa_plan_milestones WHERE plan_task_id = ? AND status != 'done'").all(planTaskId) as Array<{ milestone: string }>;

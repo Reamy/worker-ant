@@ -92,11 +92,17 @@ export async function runCloseSection(o: {
   const contentReasons: Array<{ file: string; reasons: string[] }> = [];
   if (gateTargets.length > 0) {
     try {
-      const { validateOutput, canReuseOutputValidation, VALIDATION_CRITERIA_VERSION } = await import('./output-validator.js');
+      const { validateOutputs, canReuseOutputValidation, VALIDATION_CRITERIA_VERSION } = await import('./output-validator.js');
+      // 两条来路（缓存命中 / 本轮实判）落**同一个判据版本**——此处只读一次，两处写点共用（M3-C 钉形状）。
+      const criteriaVersion = VALIDATION_CRITERIA_VERSION;
       const ansClient = await ctx.getAnsClient();
-      const ov: Array<Record<string, unknown>> = [];
+      // zx_20261028_2 M3：命中缓存的照旧逐条复用；**未命中的一次性有界并发问完**（原为逐个 `await`，
+      //   单文件超时即整段串起来等）。`ov` 按目标原序落位，下游 `output_validations` 顺序不变。
+      const ov: Array<Record<string, unknown>> = new Array(gateTargets.length);
       let reused = 0;
-      for (const abs of gateTargets) {
+      const missAt: number[] = [];
+      const missTargets: Array<{ file: string; archetype: string }> = [];
+      gateTargets.forEach((abs, i) => {
         const sig = fileSig(abs);
         // zx_20260911_1 M1: 判型归位——按**产物本身**决定规则（原用任务原型，研究/文档类任务下 .py 被文档规则量）
         const arch = archetypeForFile(abs);
@@ -104,43 +110,47 @@ export async function runCloseSection(o: {
         // zx_20260911_1 M1: 复用还须**原型一致**——历史缓存里 .py 记的是 archetype:'document'，与当前判型不符则
         // 不复用、自动重判并落新结论（否则旧误判会被永久复用，自愈不了）。
         const hit = cachedOutputValidation(ctxJson, abs);
-        let status: string | undefined;
-        let sufficient: boolean | undefined;
-        let confidence: number | undefined;
-        let issues: string[] = [];
-        let missingAspects: string[] = [];
-        let suggestion = '';
         // zx_20260923 M3（G8）：守卫从"签名 + 判型"扩为"签名 + 判型 + **判据版本**"——
         //   判据改了（如 M7 把问句从"任务+文件"改对成"只问文件"）而文件没动时，旧结论**不再被复用**。
         //   判据只此一处（`canReuseOutputValidation`），不在此手抄一遍四条与。
         if (canReuseOutputValidation(hit, arch)) {
-          status = String(hit.entry.status);
-          sufficient = hit.entry.sufficient as boolean | undefined;
-          confidence = hit.entry.confidence as number | undefined;
-          issues = Array.isArray(hit.entry.issues) ? hit.entry.issues as string[] : [];
-          missingAspects = Array.isArray(hit.entry.missingAspects) ? hit.entry.missingAspects as string[] : [];
-          suggestion = String(hit.entry.suggestion ?? '');
+          ov[i] = {
+            file: abs, archetype: arch,
+            status: String(hit.entry.status),
+            sufficient: hit.entry.sufficient as boolean | undefined,
+            confidence: hit.entry.confidence as number | undefined,
+            issues: Array.isArray(hit.entry.issues) ? hit.entry.issues as string[] : [],
+            missingAspects: Array.isArray(hit.entry.missingAspects) ? hit.entry.missingAspects as string[] : [],
+            suggestion: String(hit.entry.suggestion ?? ''),
+            reason: hit.entry.reason as string | undefined,
+            size: sig?.size ?? null, mtimeMs: sig?.mtimeMs ?? null,
+            criteriaVersion,
+          };
           reused += 1;
         } else {
           // zx_20260922_1 M7（F9）：此处原先传 `${title} ${description}`（**任务题面**）当第三参 ⇒
           // 门禁问的是任务、答出来的记在**文件名**头上（`pom.xml` 被判"缺少 git 提交署名"）。
           // 该参数已从 `validateOutput` 整体删除：量文件，就问文件。
-          const v = await validateOutput(ansClient as never, abs, arch) as { status?: string; sufficient?: boolean; confidence?: number; usage?: number; quickCheck?: { issues?: string[] }; llmCheck?: { missingAspects?: string[]; suggestion?: string } };
-          // 省耗账实(1a): 收口内容校验(未命中缓存)为旁路子 LLM——usage 记入执行期账本
-          addSideTokens(ctx, v.usage);
-          status = v.status;
-          sufficient = v.sufficient;
-          confidence = v.confidence;
-          issues = v.quickCheck?.issues ?? [];
-          missingAspects = v.llmCheck?.missingAspects ?? [];
-          suggestion = v.llmCheck?.suggestion ?? '';
+          missAt.push(i);
+          missTargets.push({ file: abs, archetype: arch });
         }
+      });
+      const results = await validateOutputs(ansClient as never, missTargets);
+      results.forEach((r, k) => {
+        // 省耗账实(1a): 收口内容校验(未命中缓存)为旁路子 LLM——usage 记入执行期账本（逐条累加）
+        addSideTokens(ctx, r.usage);
+        const sig = fileSig(r.file);
         // zx_20260911_1 M2: 快检诊断(issues) 一并落库——此前唯一有用的判据被算出来却丢弃，拒收文案成了空话
-        ov.push({ file: abs, archetype: arch, status, sufficient, confidence, issues, missingAspects, suggestion, size: sig?.size ?? null, mtimeMs: sig?.mtimeMs ?? null, criteriaVersion: VALIDATION_CRITERIA_VERSION });
-        if (status === 'insufficient') {
-          contentUnfulfilled.push(abs);
-          contentReasons.push({ file: abs, reasons: issues.length > 0 ? issues : (missingAspects.length > 0 ? missingAspects : [suggestion].filter(Boolean)) });
-        }
+        ov[missAt[k]!] = { file: r.file, archetype: r.archetype, status: r.status, sufficient: r.sufficient, confidence: r.confidence, issues: r.quickCheck?.issues ?? [], missingAspects: r.llmCheck?.missingAspects ?? [], suggestion: r.llmCheck?.suggestion ?? '', reason: r.reason, criteriaVersion, size: sig?.size ?? null, mtimeMs: sig?.mtimeMs ?? null };
+      });
+      for (const e of ov) {
+        if (e.status !== 'insufficient') continue;
+        const abs = String(e.file);
+        const issues = Array.isArray(e.issues) ? e.issues as string[] : [];
+        const missingAspects = Array.isArray(e.missingAspects) ? e.missingAspects as string[] : [];
+        const suggestion = String(e.suggestion ?? '');
+        contentUnfulfilled.push(abs);
+        contentReasons.push({ file: abs, reasons: issues.length > 0 ? issues : (missingAspects.length > 0 ? missingAspects : [suggestion].filter(Boolean)) });
       }
       ctxJson.output_validations = ov;
       if (reused > 0) ctxJson.output_validations_reused = reused;

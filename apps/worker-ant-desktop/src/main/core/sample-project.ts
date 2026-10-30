@@ -18,12 +18,24 @@
  * ⚠ 示例记忆一律 `source='user_correction'`（`user_*` 前缀）——绕开墓碑拦截（`storeText` 的机器写入闸
  *   只拦非 `user_*` 来源）。此处用直插（不经 `storeText`），同样带 `user_*` 来源，语义一致：
  *   "这些是**人工写好的**示例，不是机器重提取"。
+ *
+ * ⚠ zx_20261029_2 M6「堵空档」：示例项目**计入项目配额**——它就是一行真 `wa_projects`，
+ *   "一个项目就是一个项目"，不因带 `is_sample=1` 而豁免。故载入前过 `projectQuotaRefusal`；
+ *   社区档（上限 1）载入示例后用满名额，想建自己的项目须先一键删除示例（`removeSampleProject`）。
+ *   这比"示例不计数"更诚实：否则社区档可长期持有一示例 + 一真项目，而价目表写的是 1 个。
  */
 import type Database from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createDeliverable } from './deliverable-lifecycle.js';
 import { deleteProjectCascade, removeProjectDataDir, resolveProjectOwnerId } from './project-engine.js';
+import { projectQuotaRefusal } from './project-quota.js';
+
+/** 配额不足时抛出（IPC 壳据此回 `PROJECT_QUOTA`，界面拿到的是**判据原文**，不是"操作失败"）。 */
+export class SampleQuotaError extends Error {
+  readonly code = 'PROJECT_QUOTA';
+  constructor(message: string) { super(message); this.name = 'SampleQuotaError'; }
+}
 
 /** 示例项目的**固定 id**（删除只认它 + `is_sample=1`，双闸）。 */
 export const SAMPLE_PROJECT_ID = 'sample-competitor-research';
@@ -73,6 +85,10 @@ const REPORT_BODY = `# 竞品调研报告（示例）
 export function installSampleProject(db: Database.Database, dataDir: string): SampleInstallResult {
   const existing = db.prepare('SELECT id FROM wa_projects WHERE id = ?').get(SAMPLE_PROJECT_ID) as { id: string } | undefined;
   if (existing) return { projectId: SAMPLE_PROJECT_ID, created: false };
+
+  // 先闸后写：与 `project:create`/`project:clone`/IM 建项目**同一判据**（不因"示例"另开一条路）。
+  const refusal = projectQuotaRefusal(db);
+  if (refusal) throw new SampleQuotaError(refusal);
 
   const workingDir = path.join(dataDir, 'projects', SAMPLE_PROJECT_ID);
   try { fs.mkdirSync(workingDir, { recursive: true }); } catch { /* ignore */ }

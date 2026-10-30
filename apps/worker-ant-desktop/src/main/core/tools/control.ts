@@ -33,7 +33,7 @@ import { dependencyRefusal } from '../task-dep-gate.js';
 import { noInteractionAskRefusal } from '../no-interaction.js';
 // zx_20261011_1 M4（双向澄清）: 中继任务（派来的活）的提问器——先问上游（有界等待），答不到才退回 M11 自决。
 import { answerOf, getRequestAsker, requestIdOf } from '../node-clarify.js';
-import { resolveTaskMilestoneLink, writeMilestoneDone, selfCompleteBan, buildChildContext, resolveAncestorSchemeRef, goalDeviationCapReached, MAX_CHILD_BREADTH, MAX_TASK_DEPTH, childBreadthRefusal, collectAncestorIds, collectSubtreeIds } from '../task-accounting.js';
+import { resolveTaskMilestoneLink, writeMilestoneDone, revertMilestoneDoneForTask, selfCompleteBan, buildChildContext, resolveAncestorSchemeRef, goalDeviationCapReached, MAX_CHILD_BREADTH, MAX_TASK_DEPTH, childBreadthRefusal, collectAncestorIds, collectSubtreeIds } from '../task-accounting.js';
 import { truncationNote } from '../shell-exec.js';
 import { makeAnsDecomposeDeps, autoDecomposeForTask, loadDecompositionPatterns, recordInferredDeps } from '../task-decompose.js';
 // zx_20260921 M7（D4 断点③）: 判"前置是否指向自己的祖先"要解析 id 串——用**既有真源**，不在此手抄 split/trim
@@ -276,16 +276,30 @@ export function controlTools(deps: ToolDeps) {
         const ban = selfCompleteBan(taskId, args.targetTaskId, args.status);
         if (ban) return JSON.stringify({ error: ban });
         // 目标不存在此前静默"成功"（UPDATE 命中 0 行也返回 status）——补存在性校验，并取目标任务自己的 project_id
-        const trow = db.prepare('SELECT project_id, status FROM wa_tasks WHERE id = ?').get(args.targetTaskId) as
-          | { project_id: string | null; status: string }
+        const trow = db.prepare('SELECT project_id, status, parent_task_id, quality_score FROM wa_tasks WHERE id = ?').get(args.targetTaskId) as
+          | { project_id: string | null; status: string; parent_task_id: string | null; quality_score: number | null }
           | undefined;
         if (!trow) return JSON.stringify({ error: '任务不存在' });
+        // zx_20261027_1 M3（道德经·知止不殆，但须是**可纠正的止**）：终态守卫原样保留，另开两个**窄口**——
+        //   只给「父任务处置**自己的直接子任务**」，且必须带 `reason`：
+        //     ① failed → archived：失败子任务放弃掉。此前父被 `failedChildren` 闸死，
+        //        agent 手上没有任何工具能处置（真库事故：`SQL 优化` 子任务失败后父任务停在原地等人工）；
+        //     ② completed → failed：复核推翻一个"被判过线"的完成，**仅当质量分 < 60**——
+        //        翻的是证据，不是任意翻案。推翻时把它名下的里程碑一并退回 pending（`revertMilestoneDoneForTask`）。
+        //   祖先/兄弟/跨层一律仍拒；无因不处置（退回原守卫）。
+        const hasReason = !!(args.reason || '').trim();
+        const isDirectChild = trow.parent_task_id === taskId;
+        const closureOfFailedChild =
+          args.status === 'archived' && trow.status === 'failed' && isDirectChild && hasReason;
+        const reopenLowQualityChild =
+          args.status === 'failed' && trow.status === 'completed' && isDirectChild && hasReason &&
+          typeof trow.quality_score === 'number' && trow.quality_score < 60;
         // zx_20261021_2 D3（知止）：**编排工具不得改写终态**。
         //   真库事故：两个"修复核实…"任务被归档后，后续流程（收尾段/暂停写口）又把它们改成 paused/completed；
         //   本工具此前只挡"自己标自己完成"（`selfCompleteBan`），对**已终态的他人任务**照写任意状态。
         //   ⚠ 同值幂等仍放行（`completed→completed`）：`rr_zx_20260915` 的"不硬拦"裁定与
         //     `rr_zx_20261015_2` C-3 正踩这条路，若一并拒掉就是把既有契约当回归。
-        if (isTerminalStatus(trow.status) && trow.status !== args.status) {
+        if (isTerminalStatus(trow.status) && trow.status !== args.status && !closureOfFailedChild && !reopenLowQualityChild) {
           return JSON.stringify({
             error: `目标任务已是终态（${trow.status}），不再改写为 ${args.status}——归档/完成/失败都是了结；确需重开请人工在桌面端处置`,
             taskId: args.targetTaskId,
@@ -308,14 +322,25 @@ export function controlTools(deps: ToolDeps) {
           //   翻账页 + 发 status_changed。此前此处裸 `UPDATE … SET status='archived'`：因不落、账页不翻，
           //   与 `pauseTask` 收口前那条旧病同形（本工具 `reason` 此前只进事件，不进账）。
           archiveTask(db, { taskId: args.targetTaskId, reason: args.reason });
+          if (closureOfFailedChild) {
+            db.prepare("INSERT INTO wa_task_conversations (id, task_id, role, content, token_count, created_at) VALUES (?, ?, 'system', ?, 0, datetime('now'))")
+              .run(crypto.randomUUID(), args.targetTaskId, `[放弃失败子任务] 父任务复核后放弃该失败子任务（原因：${args.reason}）——失败闸随之解除，父任务可继续收口。`);
+          }
         } else if (args.status === 'failed') {
           // zx_20261012_2 批五 M5: `failed` 走**唯一写手** `markTaskFailed`——不再裸 `UPDATE`。
           //   裸写三缺：① 账不翻页（上一次 run 的判卷留在账上 ⇒ 一次失败被读成"质量 90 分"，G12 同病）；
           //   ② 失败 IM 无人发（本事故 9 连败一条通知没有的一支）；③ 与事故里那 5 条规划产物不同路归口。
           //   会话行在此**补**（`markTaskFailed` 只管状态行 + 账 + 通知；会话消息各写点形状不同，仍归调用方）。
           markTaskFailed(db, args.targetTaskId, { reason: args.reason });
-          db.prepare("INSERT INTO wa_task_conversations (id, task_id, role, content, token_count, created_at) VALUES (?, ?, 'system', ?, 0, datetime('now'))")
-            .run(crypto.randomUUID(), args.targetTaskId, `[标记失败] ${args.reason || '由 agent 经 update_task_status 置为失败'}`);
+          if (reopenLowQualityChild) {
+            const reverted = revertMilestoneDoneForTask(db, args.targetTaskId, (e) => { eventBus.emit('project.milestone_changed', e).catch(() => {}); });
+            const msLine = reverted.length > 0 ? `已将其落地的里程碑退回待实施：${reverted.join('、')}` : '其名下无已落地里程碑需退回';
+            db.prepare("INSERT INTO wa_task_conversations (id, task_id, role, content, token_count, created_at) VALUES (?, ?, 'system', ?, 0, datetime('now'))")
+              .run(crypto.randomUUID(), args.targetTaskId, `[复核推翻] 父任务复核后推翻本次「完成」：完成分 ${trow.quality_score} < 60，${msLine}。原因：${args.reason}。⚠ 已提升的成果物不自动撤回，请人工核验。`);
+          } else {
+            db.prepare("INSERT INTO wa_task_conversations (id, task_id, role, content, token_count, created_at) VALUES (?, ?, 'system', ?, 0, datetime('now'))")
+              .run(crypto.randomUUID(), args.targetTaskId, `[标记失败] ${args.reason || '由 agent 经 update_task_status 置为失败'}`);
+          }
         } else if (args.status === 'running') {
           // zx_20261022_2 批一（毛选·实践论）: 此前 `running` 与 `pending` 同走一条**裸 UPDATE**——
           //   状态行写"在跑"，但调度器只扫 `pending`、`wa_jobs` 零行、会话零行，直到应用重启的启动对账

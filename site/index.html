@@ -6,14 +6,14 @@
     <title>工蚁 Worker Ant —— 跑在你机器上、用手机就能指挥的私有 AI 打工队</title>
     <meta
       name="description"
-      content="工蚁是一支跑在你自己机器上的私有 AI 打工队：你用自然语言派活，它在本机改文件、跑命令、提交 git，产出登记成可交付资产；出门在外，发条微信就能查进度、审产物。代码不出你的机器。开源 · AGPL-3.0。"
+      content="工蚁是一支跑在你自己机器上的私有 AI 打工队：你用自然语言派活，它在本机改文件、跑命令、提交 git，产出登记成可交付资产；出门在外，发条微信就能查进度、审产物。执行在你机器上，代码不经过我们的服务器。开源 · AGPL-3.0。"
     />
     <meta name="theme-color" content="#faf8f5" />
     <meta property="og:type" content="website" />
     <meta property="og:title" content="工蚁 Worker Ant —— 私有 AI 打工队" />
     <meta
       property="og:description"
-      content="跑在你机器上、用手机就能指挥的私有 AI 打工队。代码不出你的机器，任务不占你的双手。"
+      content="跑在你机器上、用手机就能指挥的私有 AI 打工队。执行在你机器上，任务不占你的双手。"
     />
     <meta property="og:url" content="https://workerant.cn/" />
     <meta property="og:locale" content="zh_CN" />
@@ -21,7 +21,7 @@
     <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png" />
     <link rel="icon" href="/favicon-16.png" sizes="16x16" type="image/png" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-    <link rel="stylesheet" href="/styles.css?v=0.2.2" />
+    <link rel="stylesheet" href="/styles.css?v=0.3.0" />
   </head>
   <body>
     <header class="nav">
@@ -52,13 +52,13 @@
             你用自然语言派活，它真的在你电脑上改文件、跑命令、提交 git。<br />
             产出登记成可交付资产；你出门在外，发条微信就能查进度、审产物。
           </p>
-          <p class="hero-tag">代码不出你的机器，任务不占你的双手。</p>
+          <p class="hero-tag">执行在你机器上，任务不占你的双手。</p>
           <p class="hero-en">A self-hosted AI agent crew you command from your phone.</p>
 
           <div class="cta-row">
             <a
               class="btn btn-primary"
-              href="https://github.com/Reamy/worker-ant/releases/download/v0.2.2/worker-ant-0.2.2-mac-arm64.dmg"
+              href="https://github.com/Reamy/worker-ant/releases/download/v0.3.0/worker-ant-0.3.0-mac-arm64.dmg"
               rel="noopener"
               >下载 macOS 版</a
             >
@@ -105,9 +105,13 @@
           <h2>不是又一个 AI 助手，是<strong>你的</strong> AI 打工队</h2>
           <div class="cards-3">
             <article class="card">
-              <h3>① 本机私有 —— 你的代码不出门</h3>
+              <h3>① 本机私有 —— 执行在你机器上</h3>
               <p>引擎跑在你自己的机器上，文件读写、命令执行、git 提交<strong>全在本机发生</strong>。</p>
-              <p>代码与数据不经过我们的任何服务器。<strong>你的私有，是结构性的，不是承诺的。</strong></p>
+              <p>
+                代码与数据不经过我们的服务器；模型端点由你选——用本地模型或自建网关，内容完全不出机。<strong
+                  >你的私有，是结构性的，不是承诺的。</strong
+                >
+              </p>
             </article>
             <article class="card">
               <h3>② 手机 IM 指挥 —— 发条微信就能派活</h3>
@@ -145,7 +149,7 @@
             </li>
           </ol>
           <p class="note">
-            如实标注：目前需自行启动 ANS 服务并配置 Key；一键安装向导在开发中——见 <a href="#start">快速开始</a>。
+            如实标注：源码运行需自行启动 ANS 服务并配置模型 Key；安装包自带首启向导——见 <a href="#start">快速开始</a>。
           </p>
         </div>
       </section>
@@ -192,25 +196,26 @@
                 与 Windows 版本暂未提供。
               </p>
               <p class="muted">
-                v0.2.2 修复了退出后残留 ANS 进程、首次启动未进入安装向导两个问题。自动更新尚未启用，已装 v0.2.1
-                的用户请手动下载覆盖安装。
+                v0.3.0 新增局域网设备发现与远程控制（Pro / Team 档）、AI
+                终端接入、项目建时自动生成须知，任务载荷更轻；v0.2.1 / v0.2.2
+                的退出残留与首启向导问题均已包含在本版。自动更新尚未启用，已装旧版的用户请手动下载覆盖安装。
               </p>
               <p>
                 <a
                   class="link"
-                  href="https://github.com/Reamy/worker-ant/releases/download/v0.2.2/worker-ant-0.2.2-mac-arm64.dmg"
+                  href="https://github.com/Reamy/worker-ant/releases/download/v0.3.0/worker-ant-0.3.0-mac-arm64.dmg"
                   rel="noopener"
                   >下载 dmg →</a
                 >
                 &nbsp;·&nbsp;
                 <a
                   class="link"
-                  href="https://github.com/Reamy/worker-ant/releases/download/v0.2.2/worker-ant-0.2.2-mac-arm64.zip"
+                  href="https://github.com/Reamy/worker-ant/releases/download/v0.3.0/worker-ant-0.3.0-mac-arm64.zip"
                   rel="noopener"
                   >下载 zip</a
                 >
                 &nbsp;·&nbsp;
-                <a class="link" href="https://github.com/Reamy/worker-ant/releases/tag/v0.2.2" rel="noopener"
+                <a class="link" href="https://github.com/Reamy/worker-ant/releases/tag/v0.3.0" rel="noopener"
                   >校验值与发布说明</a
                 >
               </p>
@@ -224,7 +229,10 @@
               ><button class="copy" type="button" data-copy aria-label="复制">复制</button><code>pnpm install
 pnpm dev:ans                                 # 终端 1：AI 资源中心（ANS）
 cd apps/worker-ant-desktop &amp;&amp; bash run.sh    # 终端 2：桌面端</code></pre>
-              <p class="muted">⚠️ 当前需自行启动 ANS 并配置模型 Key。<strong>一键安装向导正在开发中。</strong></p>
+              <p class="muted">
+                源码运行需自行启动 ANS 并配置模型 Key。<strong>安装包已带首启向导</strong>（填 Key → 自检连接 →
+                建项目）。
+              </p>
               <p><a class="link" href="https://github.com/Reamy/worker-ant" rel="noopener">打开仓库 →</a></p>
             </div>
           </div>
@@ -253,7 +261,7 @@ cd apps/worker-ant-desktop &amp;&amp; bash run.sh    # 终端 2：桌面端</cod
                 <tr>
                   <td>Manus / OpenHands / Coze</td>
                   <td>云托管，任务能跑</td>
-                  <td><strong>代码 / 数据不出内网</strong>；本机执行</td>
+                  <td><strong>代码不经过我们的服务器</strong>；本机执行；模型端点由你选</td>
                 </tr>
                 <tr>
                   <td>n8n / Dify</td>
@@ -331,12 +339,14 @@ cd apps/worker-ant-desktop &amp;&amp; bash run.sh    # 终端 2：桌面端</cod
           <p class="note">
             主推<strong>年付</strong>；免费版给得起，但<strong>并发 / 项目数有天花板</strong>；<strong>BYO Key</strong
             >——模型账单你直接付给模型厂商，我们不抽成。<br />
+            各档另有容量上限（设备登记 / 外部终端 / 每项目知识卡）：社区 5 / 1 / 8，Pro 30 / 3 / 24，Team 200 / 20 /
+            60——<strong>只拦新增，已有记录不受影响</strong>。<br />
             <strong>授权与安装包都已就绪</strong>：Pro、早鸟终身与 Team 授权包已在
             <a class="link" href="https://mbd.pub/o/author-bW2ZlHFtZg==/work" rel="noopener">面包多店铺</a>
             开售，企业版暂不售卖；macOS 版已完成 Developer ID 签名与 Apple 公证，
-            <a class="link" href="https://github.com/Reamy/worker-ant/releases/tag/v0.2.2" rel="noopener"
+            <a class="link" href="https://github.com/Reamy/worker-ant/releases/tag/v0.3.0" rel="noopener"
               >已在 GitHub Releases 发布</a
-            >。桌面端自带 <strong>14 天 Pro 试用</strong>。
+            >。桌面端自带 <strong>14 天团队版试用</strong>。
           </p>
         </div>
       </section>
@@ -348,7 +358,11 @@ cd apps/worker-ant-desktop &amp;&amp; bash run.sh    # 终端 2：桌面端</cod
           <div class="faq">
             <details>
               <summary>我的代码会被上传吗？</summary>
-              <p>不会。引擎在你本机执行，文件、命令、git 都不经过我们的服务器。你填的模型 Key 也只在你本机使用。</p>
+              <p>
+                引擎在你本机执行，文件、命令、git
+                都不经过我们的服务器。需要说准确的是模型调用：请求直达你自己配置的端点——用云端模型时，上下文会发给那家模型厂商；用本地模型或自建网关，内容才完全不出机。你填的模型
+                Key 只在你本机使用，当前版本没有遥测。
+              </p>
             </details>
             <details>
               <summary>支持哪些模型？</summary>
@@ -365,8 +379,15 @@ cd apps/worker-ant-desktop &amp;&amp; bash run.sh    # 终端 2：桌面端</cod
             <details>
               <summary>开源到什么程度？</summary>
               <p>
-                引擎核心与桌面端开源（AGPL-3.0），本页所列的档位能力都在桌面端可核对；云端协作服务尚未发布，发布时另行说明。详见仓库的
-                <code>OPEN_SOURCE_SCOPE</code>。
+                引擎核心与桌面端开源（AGPL-3.0），本页所列的档位能力都在桌面端可核对；云端协作服务尚未发布，发布时另行说明。开源范围与许可见仓库的
+                <a class="link" href="https://github.com/Reamy/worker-ant/blob/main/LICENSE" rel="noopener">LICENSE</a>
+                与
+                <a
+                  class="link"
+                  href="https://github.com/Reamy/worker-ant/blob/main/COMMERCIAL_LICENSE.md"
+                  rel="noopener"
+                  >COMMERCIAL_LICENSE</a
+                >。
               </p>
             </details>
             <details>
@@ -378,11 +399,11 @@ cd apps/worker-ant-desktop &amp;&amp; bash run.sh    # 终端 2：桌面端</cod
                   开售</strong
                 >；企业版暂不售卖。<strong>安装包已发布</strong>——macOS 版（Apple Silicon）已完成 Developer ID 签名与
                 Apple 公证，可从
-                <a class="link" href="https://github.com/Reamy/worker-ant/releases/tag/v0.2.2" rel="noopener"
+                <a class="link" href="https://github.com/Reamy/worker-ant/releases/tag/v0.3.0" rel="noopener"
                   >GitHub Releases</a
                 >
                 下载 dmg / zip。当前仅支持 macOS 13+ 的 Apple Silicon，Intel Mac 与 Windows 暂未提供。 桌面端自带 14 天
-                Pro 试用，可以先试再买。
+                团队版试用，可以先试再买。
               </p>
             </details>
             <details>
@@ -415,7 +436,7 @@ cd apps/worker-ant-desktop &amp;&amp; bash run.sh    # 终端 2：桌面端</cod
         </div>
       </div>
       <div class="wrap foot-base">
-        <p class="foot-slogan">工蚁系统 · 你的代码不出门，你的任务不睡觉。</p>
+        <p class="foot-slogan">工蚁系统 · 执行在你机器上，任务不睡觉。</p>
         <p class="foot-copy">© <span id="year">2026</span> 工蚁 Worker Ant · 备案与主体信息以正式开放时为准</p>
       </div>
     </footer>

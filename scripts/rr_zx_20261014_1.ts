@@ -61,6 +61,7 @@ const SELF_ROUND = path.basename(__filename).replace(/^rr_/, '').replace(/\.ts$/
 const SCHEMA = `
 CREATE TABLE wa_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT DEFAULT (datetime('now')));
 CREATE TABLE wa_devices (id TEXT PRIMARY KEY, name TEXT DEFAULT '', alias TEXT DEFAULT '', room TEXT DEFAULT '', kind TEXT DEFAULT 'unknown',
+  kind_class TEXT NOT NULL DEFAULT '',
   protocol TEXT NOT NULL, address TEXT NOT NULL, port INTEGER, capabilities_json TEXT DEFAULT '[]',
   controllable INTEGER DEFAULT 0, authorized INTEGER DEFAULT 0, status_json TEXT,
   first_seen TEXT DEFAULT (datetime('now')), last_seen TEXT DEFAULT (datetime('now')), online INTEGER);
@@ -194,13 +195,16 @@ async function main(): Promise<void> {
     //   **刻意不在其中**：它只"看"，不碰设备，与 `devices:list` 同一先例）。
     // zx_20261023_5 批三: 增至六个（新增 `devices:miio_token`——写设备 token 是**动作**、不是本地元数据；
     //   与 `devices:rename` 的"只改别名"不同：token 一旦写入即可控制设备）。
-    const DEVICE_GATED: Array<[string, string]> = [
-      ['devices:discover', 'device_discovery'],
+    // zx_20261029_2 M6「阶梯」：发现/云同步归 Pro，控制归 Team——两组各枚举、各核闸与回码。
+    const DEVICE_TEAM_GATED: Array<[string, string]> = [
       ['devices:authorize', 'device_control'],
       ['devices:control', 'device_control'],
-      ['devices:cloud_sync', 'device_discovery'],
       ['devices:intent_execute', 'device_control'],
       ['devices:miio_token', 'device_control'],
+    ];
+    const DEVICE_PRO_GATED: Array<[string, string]> = [
+      ['devices:discover', 'device_discovery'],
+      ['devices:cloud_sync', 'device_discovery'],
     ];
     const deviceBodyOf = (handler: string): string => {
       const code = CODE(`${A}/src/main/ipc/devices.ipc.ts`);
@@ -209,10 +213,14 @@ async function main(): Promise<void> {
       const next = code.indexOf('ipcMain.handle(', start + 1);
       return next < 0 ? code.slice(start) : code.slice(start, next);
     };
-    ok(DEVICE_GATED.every(([h, f]) => deviceBodyOf(h).includes(`teamFeatureRefusal(licDb, '${f}')`)),
-      'B6d ★反证（回归护栏）：设备动作出口逐 handler 枚举且档位映射正确——改名未偷加也未误删');
-    eq(countOcc(dipc, 'teamFeatureRefusal('), DEVICE_GATED.length,
-      'B6d-b 档位闸总数＝枚举的动作出口数（由枚举派生，不写幻数）——改名口不在其中');
+    ok(DEVICE_TEAM_GATED.every(([h, f]) => deviceBodyOf(h).includes(`teamFeatureRefusal(licDb, '${f}')`)),
+      'B6d ★反证（回归护栏）：设备**控制**出口逐 handler 枚举且映射 Team 闸——改名未偷加也未误删');
+    ok(DEVICE_PRO_GATED.every(([h, f]) => deviceBodyOf(h).includes(`proFeatureRefusal(licDb, '${f}')`)),
+      'B6d-c ★设备**发现**出口逐 handler 枚举且映射 Pro 闸（M6 阶梯）');
+    eq(countOcc(dipc, 'teamFeatureRefusal('), DEVICE_TEAM_GATED.length,
+      'B6d-b Team 闸总数＝枚举的控制出口数（由枚举派生，不写幻数）——改名口不在其中');
+    eq(countOcc(dipc, 'proFeatureRefusal('), DEVICE_PRO_GATED.length,
+      'B6d-d Pro 闸总数＝枚举的发现出口数（由枚举派生）');
 
     // ── B7 渲染层接线：API + 面板入口（接线那一跳）────────────────────────────────
     const ripc = RD(`${A}/renderer/src/lib/ipc.ts`);
@@ -225,7 +233,9 @@ async function main(): Promise<void> {
   // ═══ C｜呼之即应（批三：按名解析 + 工具收名）══════════════════════════════════════
   console.log('\n【C】呼之即应 —— 按名使唤（维特根斯坦·意义即用法 / 罗尔斯·同一把尺）');
   {
-    const db = mkdb();
+    // zx_20261030_1 M5 容量真闸：社区档 5 台封顶会挡住本块第 6/7 台样本（本块主题是"按名解析"，不是容量）
+    //   ⇒ 夹具给试用（Team 档），容量维度不在本块考。断言本身未放宽。
+    const db = mkdb({ trial: true });
     const lamp = seed(db, { name: '客厅灯', address: '192.168.1.30', alias: '小台灯', authorized: true });
     const fan = seed(db, { name: '落地扇', address: '192.168.1.31' });
     seed(db, { name: 'Desk', address: '192.168.1.32', alias: 'DeskLamp' });

@@ -8,8 +8,9 @@ import { executeTask, detectArchetypeDeviation, persistAwaitingInput, taskFailed
 import { goalDeviationCapReached, GOAL_DEVIATION_MAX_RESTARTS, MAX_CHILD_BREADTH, resolveProjectConcurrency, decomposedBefore, warnDepsUnresolved, resolveMachineConcurrencyLimit, countMachineRunning } from '../task-accounting.js';
 // zx_20261002 M5: 启动路「到点即拆」——门+拆+落行+留痕用**一处实现** `autoDecomposeForTask`（与引擎路共用）；
 //   "复杂档"判据取**一处真源** `isComplexOrPlanish`（与执行前那条软建议同问一把尺）。
-import { autoDecomposeForTask, createDeferredSubtasks, loadDecompositionPatterns, makeAnsDecomposeDeps, recordInferredDeps, type OptimalModelClient } from '../task-decompose.js';
+import { autoDecomposeForTask, claimAutoDecompose, releaseAutoDecomposeClaim, createDeferredSubtasks, loadDecompositionPatterns, makeAnsDecomposeDeps, recordInferredDeps, type OptimalModelClient } from '../task-decompose.js';
 import { assessComplexity, isComplexOrPlanish } from '../task-archetype.js';
+import { describeExecutionError } from '../exec-error.js';
 // zx_20260915 P0-3(c): 「有失败子」这一问只在 children-gate.ts 一处回答（含回退开关），五处闸同取
 import { failedChildren, childNames } from '../children-gate.js';
 import { PAUSE_REASON_CHILDREN_INCOMPLETE, PAUSE_REASON_CHILDREN_FAILED, PAUSE_REASON_GOAL_DEVIATION, PAUSE_REASON_ABNORMAL_END, PAUSE_REASON_LABEL } from '../pause-reason.js';
@@ -28,6 +29,8 @@ import { boolSetting, readBoolSetting } from '../settings-bool.js';
 import { buildUnansweredBanner, composeResumeInput } from '../pause-settlement.js';
 import { markEngineDrafted } from '../turn-authorship.js';
 import { bumpResumeLedger } from '../resume-ledger.js';
+// zx_20261030_2 M6: `[工具调用]` 标记行的唯一解析/摘要处——简报、恢复摘要、已读清单同源。
+import { parseToolMarkers, digestToolTurns, formatDigest } from '../tool-digest.js';
 // zx_20260923 M1: 「AI 引擎故障」这一次事故的账（立旗带起始时刻；用户恢复即新事故）
 import { closeSdkIncident } from '../sdk-incident.js';
 import { markTaskFailed, grantDeliverableRetryQuota, isReviewableStatus } from '../task-terminal.js';
@@ -35,6 +38,8 @@ import { markTaskFailed, grantDeliverableRetryQuota, isReviewableStatus } from '
 import { isTerminalTask } from '../task-jobs.js';
 // zx_20261023_5 批一：本地任务到终态 ⇒ 依赖它的后继重新走一次派发决策（与远端回写处同一触发口）。
 import { scheduleDependentDispatch } from '../collab-dispatch.js';
+// zx_20261027_3 M6b: 任务完成 ⇒ 画像随项目知识自动跟随（仅已启用且已有本机画像；永不抛）。
+import { refreshProjectProfileIfEnabled } from '../project-profile.js';
 // zx_20260930 M4-1: 成果取数范围改为共享真源（此处范围=「本任务、排除退休与探针」）。
 import { deliverableScopeSql } from '../deliverable-lifecycle.js';
 // zx_20261011_1 M5（收口真源统一）：IM 通知的"取哪份内容"与 relay 回传**同引一处真源**。
@@ -116,7 +121,8 @@ const GOAL_DEVIATION_CONVERGENCE_NOTE =
  * **失败即如实**：拆不出/调用不通/一行未建 ⇒ 返回 false，本次按**单任务照跑**（这正是改前的全部行为），
  * 绝不空建子任务充数。
  *
- * @returns true = 本次已拆并挂起父任务（调用方**不得**再执行它）
+ * @returns true = 本次已拆并挂起父任务，**或**已有一条派发正持有拆解占位（zx_20261028_1 M2）——
+ *   两种情形调用方**都不得**再执行它
  */
 export async function tryAutoDecomposeAtStart(
   db: Database.Database,
@@ -141,28 +147,37 @@ export async function tryAutoDecomposeAtStart(
     if (depth !== 0) return false;
     // 闸③（免 HTTP）：历史上拆过就别再拆（防"子全完成 ⇒ 父恢复 ⇒ 再拆"的回环）
     if (decomposedBefore(db, opts.taskId)) return false;
+    // zx_20261028_1 M2（毛选·不打无准备之仗）：**闸③与 `$.auto_decomposed` 之间隔着拆解 LLM 的
+    //   ~5 秒 await**——两条派发同时越过闸③就会各拆一遍（真实标本：一条作业行、两套子任务）。
+    //   故在 await 之前先**占位**：抢不到 ⇒ 已有人在拆，调用方同样不得再执行本任务（返回 true），
+    //   且**不写任何状态**（该状态归正在拆的那一条写）。
+    if (!claimAutoDecompose(db, opts.taskId)) return true;
 
-    const r = await autoDecomposeForTask({
-      db, taskId: opts.taskId, projectId: opts.projectId,
-      goal: `${title}\n${description}`.trim(),
-      depth,
-      getDeps: async () => makeAnsDecomposeDeps(await opts.getAnsClient()),
-      patterns: loadDecompositionPatterns(db, opts.projectId),
-      label: '任务启动', noDepWhen: '立即启动',
-    });
-    if (!r) return false;
-    // 标记写法与 IM 路 / 引擎路**逐字同一形状**（三路共有层 `$.auto_decomposed`）。
-    // 位置在 `pauseTask` **之前**：后者会读一次 `context_json` 再合并 `pause_reason` 写回（不抹键），
-    //   故两种顺序结果相同；先写标记是为让"已拆"这一事实在父翻成 paused 的同时就已落盘，
-    //   任何下游读点（GUI 溯源 / 模板提炼 / 本路的重入闸）任一刻读到的都是自洽状态。
-    db.prepare("UPDATE wa_tasks SET context_json = json_set(COALESCE(context_json,'{}'), '$.auto_decomposed', json('true')), updated_at = datetime('now') WHERE id = ?").run(opts.taskId);
-    recordInferredDeps(db, opts.taskId, r.inferredDeps);
-    pauseTask(db, {
-      taskId: opts.taskId,
-      reason: PAUSE_REASON_CHILDREN_INCOMPLETE,
-      note: `已自动拆解为 ${r.created} 个子任务（其中 ${r.noDepCount} 个无前置、可立即动工），本任务暂停待其完成后自动恢复`,
-    });
-    return true;
+    try {
+      const r = await autoDecomposeForTask({
+        db, taskId: opts.taskId, projectId: opts.projectId,
+        goal: `${title}\n${description}`.trim(),
+        depth,
+        getDeps: async () => makeAnsDecomposeDeps(await opts.getAnsClient()),
+        patterns: loadDecompositionPatterns(db, opts.projectId),
+        label: '任务启动', noDepWhen: '立即启动',
+      });
+      if (!r) return false;
+      // 标记写法与 IM 路 / 引擎路**逐字同一形状**（三路共有层 `$.auto_decomposed`）。
+      // 位置在 `pauseTask` **之前**：后者会读一次 `context_json` 再合并 `pause_reason` 写回（不抹键），
+      //   故两种顺序结果相同；先写标记是为让"已拆"这一事实在父翻成 paused 的同时就已落盘，
+      //   任何下游读点（GUI 溯源 / 模板提炼 / 本路的重入闸）任一刻读到的都是自洽状态。
+      db.prepare("UPDATE wa_tasks SET context_json = json_set(COALESCE(context_json,'{}'), '$.auto_decomposed', json('true')), updated_at = datetime('now') WHERE id = ?").run(opts.taskId);
+      recordInferredDeps(db, opts.taskId, r.inferredDeps);
+      pauseTask(db, {
+        taskId: opts.taskId,
+        reason: PAUSE_REASON_CHILDREN_INCOMPLETE,
+        note: `已自动拆解为 ${r.created} 个子任务（其中 ${r.noDepCount} 个无前置、可立即动工），本任务暂停待其完成后自动恢复`,
+      });
+      return true;
+    } finally {
+      releaseAutoDecomposeClaim(db, opts.taskId);
+    }
   } catch (e) {
     // 拆解失败**不阻断执行**：本次按单任务照跑（改前的全部行为）。
     console.log(`[拆解] 启动路自动拆解失败，按单任务执行: ${(e as Error)?.message}`);
@@ -239,7 +254,8 @@ export function recordExecutionFailure(
     memory?: MemoryManager;
   },
 ): { recorded: boolean; status: string | null } {
-  const msg = ((err as Error)?.message || String(err)).slice(0, 200);
+  // zx_20261028_1 M4：与执行器同一句话术（`describeExecutionError`），原文仍以子串在场。
+  const msg = describeExecutionError(err).slice(0, 300);
   let recorded = false;
   let status: string | null = null;
   try {
@@ -378,7 +394,8 @@ export function writeSubagentExperience(
 /**
  * M3-7: 汇总某父任务下每个子的"交付了什么"——每子一行，只读既有真源。
  * 摘要取 `context_json.completion_summary`（finalize_task 写入，`agent-executor.ts:1002`），
- * 缺失时回退该子最近一条 assistant 回合；产出取 `wa_deliverables`；验收取 `context_json.acceptance_check`。
+ * 缺失时先由该子自己的 `[工具调用]` 标记行派生工具摘要，再无则回退最近一条 assistant 回合；
+ * 产出取 `wa_deliverables`；验收取 `context_json.acceptance_check`。
  * **不新增表、不新增字段**（共激的载体就是既有真源）。
  */
 export function buildChildBriefs(db: Database.Database, parentId: string): string[] {
@@ -392,6 +409,16 @@ export function buildChildBriefs(db: Database.Database, parentId: string): strin
     let summary = typeof ctx.completion_summary === 'string' && ctx.completion_summary.trim()
       ? normalizeSnippet(ctx.completion_summary.trim(), 80)
       : '';
+    // 摘要优先级：完成摘要 > 该子自己的工具摘要（读/写/跑）> 最后一条 assistant 行。
+    // 最后一条 assistant 在收口时可能是整轮聚合的噪音，故工具摘要必须排在它前面。
+    if (!summary) {
+      try {
+        const rows = db.prepare(
+          "SELECT content FROM wa_task_conversations WHERE task_id = ? AND role = 'system' AND content LIKE '[工具调用] %' ORDER BY created_at ASC, rowid ASC",
+        ).all(k.id) as Array<{ content: string }>;
+        summary = formatDigest(digestToolTurns(parseToolMarkers(rows)));
+      } catch { /* 标记行读不到则下走会话兜底 */ }
+    }
     if (!summary) {
       try {
         const last = db.prepare(
@@ -862,6 +889,8 @@ export function registerAiTaskHandlers(ctx: JobContext, scheduler: {
       // A1: 自治工作循环——项目自治模式下，完成后自动创建后续 backlog 任务
       if (statusRow?.status === 'completed') {
         try { checkAutonomousChain(taskId, projectId); } catch {}
+        // zx_20261027_3 M6b: 本项目知识/运行面变了 ⇒ 已启用的本机画像自动跟上（不新建、不改启停）。
+        try { refreshProjectProfileIfEnabled(db, projectId); } catch { /* 跟随失败不影响收尾 */ }
       }
     } catch (err) {
       console.error(`[ai-task] 执行失败: ${taskId.slice(0, 8)}`, (err as Error).message);
@@ -995,32 +1024,18 @@ export function registerAiTaskHandlers(ctx: JobContext, scheduler: {
           // 进度摘要：统计之前会话的读/写/命令调用次数 + 已读清单 + 已搜词 + 已有产出物（避免重复探索）
           let progressSummary = '';
           try {
-            const readCount = (db.prepare("SELECT COUNT(*) as c FROM wa_task_conversations WHERE task_id = ? AND role = 'tool' AND content LIKE '%read_file%'").get(taskId) as { c: number }).c;
-            const writeCount = (db.prepare("SELECT COUNT(*) as c FROM wa_task_conversations WHERE task_id = ? AND role = 'tool' AND content LIKE '%write_file%'").get(taskId) as { c: number }).c;
-            const cmdCount = (db.prepare("SELECT COUNT(*) as c FROM wa_task_conversations WHERE task_id = ? AND role = 'tool' AND content LIKE '%execute_command%'").get(taskId) as { c: number }).c;
-            // zx_20260904_4 T4 (2026-09-04): 已读文件/已搜词清单——解析 `[工具调用] read_file/search_content` 行，
-            // 供恢复时"命中即复用、勿整文重读/重复搜索"
-            const readSet: string[] = [];
-            const querySet: string[] = [];
-            try {
-              const toolRows = db.prepare("SELECT content FROM wa_task_conversations WHERE task_id = ? AND role = 'tool' AND content LIKE '[工具调用] %'").all(taskId) as Array<{ content: string }>;
-              for (const row of toolRows) {
-                for (const m of row.content.matchAll(/read_file\(\{"filePath":"([^"]+)"\}/g)) {
-                  const fp = (m[1] || '').split(/[\\/]/).pop() || m[1] || '';
-                  if (fp && !readSet.includes(fp)) readSet.push(fp);
-                }
-                if (row.content.includes('search_content')) {
-                  for (const m of row.content.matchAll(/"(?:query|keyword|q)"\s*:\s*"([^"]{2,80})"/g)) {
-                    if (!querySet.includes(m[1]!)) querySet.push(m[1]!);
-                  }
-                }
-              }
-            } catch { /* 清单解析失败不阻塞 */ }
+            // 已读/已写/已跑一律从 `[工具调用]` 标记行同源派生（`role='system'`）；
+            // `role='tool'` 只是 `[toolName] 结果`，与标记行不相交（此前按 tool 取 ⇒ 清单恒空）。
+            const toolRows = db.prepare(
+              "SELECT content FROM wa_task_conversations WHERE task_id = ? AND role = 'system' AND content LIKE '[工具调用] %' ORDER BY created_at ASC, rowid ASC",
+            ).all(taskId) as Array<{ content: string }>;
+            const digest = digestToolTurns(parseToolMarkers(toolRows));
             const delivs = db.prepare("SELECT name, type, status FROM wa_deliverables WHERE task_id = ?").all(taskId) as Array<{ name: string; type: string; status: string }>;
             const delivSummary = delivs.length > 0 ? delivs.map(d => `${d.name}(${d.type}/${d.status})`).join(', ') : '无';
-            const readList = readSet.length > 0 ? `\n- 已读文件(前12): ${readSet.slice(0, 12).join(', ')}` : '';
-            const searchList = querySet.length > 0 ? `\n- 已搜索(前8): ${querySet.slice(0, 8).join('；')}` : '';
-            progressSummary = `\n## 进度摘要\n- 之前已读 ${readCount} 个文件，写 ${writeCount} 次，执行命令 ${cmdCount} 次${readList}${searchList}\n- 已有产出物: ${delivSummary}\n⚠️ 已读文件/已搜词命中即复用已有理解，不要再整文重读或重复搜索同一目标；确需更新仅读差异。`;
+            const digestLine = formatDigest(digest) || '无工具调用记录';
+            const readList = digest.filesRead.length > 0 ? `\n- 已读文件: ${digest.filesRead.join(', ')}` : '';
+            const searchList = digest.searches.length > 0 ? `\n- 已搜索: ${digest.searches.join('；')}` : '';
+            progressSummary = `\n## 进度摘要\n- 之前${digestLine}${readList}${searchList}\n- 已有产出物: ${delivSummary}\n⚠️ 已读文件/已搜词命中即复用已有理解，不要再整文重读或重复搜索同一目标；确需更新仅读差异。`;
           } catch {}
           return [
             `[系统恢复] 你之前的任务已恢复。以下是任务上下文：`,
@@ -1169,6 +1184,10 @@ export function registerAiTaskHandlers(ctx: JobContext, scheduler: {
       try { checkParentTaskAfterChildDone(db, taskId, { enqueue: d1Enqueue }); } catch {}
       // zx_20261023_5 批一：恢复路完成同样放行依赖它的后继（两条完成出口一把尺）。
       try { scheduleDependentDispatch(db, taskId); } catch { /* 同上 */ }
+      // zx_20261027_3 M6b: 恢复路完成同样让画像跟上（与上方出口一把尺）。
+      if (taskRow?.status === 'completed') {
+        try { refreshProjectProfileIfEnabled(db, taskRow.project_id); } catch { /* 跟随失败不影响收尾 */ }
+      }
     } catch (err) {
       console.error(`[resume-ai-task] 恢复失败: ${taskId.slice(0, 8)}`, (err as Error).message);
       // zx_20260915 P0-3(b): 与 ai-task 路**同一处**落账（实测 02adce34 走的正是本路）——

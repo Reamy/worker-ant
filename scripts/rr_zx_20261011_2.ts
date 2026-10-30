@@ -484,11 +484,12 @@ async function main(): Promise<void> {
     // 静态**次序**：ANS `/answer` 的终态闸须在**幂等分支之后**（已答重投仍 200，不误伤）
     //   且 `question_status !== 'asked'` 判据**之前**（先挡"复活"，再谈"无待答"）。
     const NODES = CODE('apps/ans-server/src/routes/nodes.ts');
-    //   扫面须**限于 `/answer` 处理体内**：`/result` 处理器里也有一句同形的终态守卫
-    //   （`if (row.status === 'done' || row.status === 'error')`），不设起点会把它认成本闸（假绿/假红）。
+    //   扫面须**限于 `/answer` 处理体内**：`/result`/`/progress`/`/cancel` 处理器里也有同形终态守卫，
+    //   不设起点会把它认成本闸（假绿/假红）。
+    //   zx_20261030_1 M3：终态集增 `cancelled`（叫停后真停）——钉点同步上移到三态形（钉的面更大，不放宽）。
     const ansStart = NODES.indexOf("'/requests/:id/answer'");
     const idemIdx = NODES.indexOf("if (row.question_status === 'answered') return", ansStart);
-    const termIdx = NODES.indexOf("if (row.status === 'done' || row.status === 'error')", ansStart);
+    const termIdx = NODES.indexOf("if (row.status === 'done' || row.status === 'error' || row.status === 'cancelled')", ansStart);
     const noQIdx = NODES.indexOf("if (row.question_status !== 'asked')", ansStart);
     ok(ansStart >= 0, 'I-0 `/answer` 路由在场（次序判据的扫描起点，缺则下面三条全无意义）', `ansStart@${ansStart}`);
     ok(idemIdx >= 0 && termIdx > idemIdx && noQIdx > termIdx,

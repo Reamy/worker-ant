@@ -51,7 +51,8 @@ export function startDeviceDiscovery(db: DeviceDb, opts: DiscoveryOpts = {}): vo
     try {
       const isNew = findDeviceByIdentity(db, dev.protocol, dev.address) == null;
       const row = upsertDiscovered(db, dev, opts.now ? opts.now() : undefined);
-      opts.onDiscovered?.(row, { isNew });
+      // zx_20261030_1 M5：容量到顶 ⇒ 首次发现未落库（返回 null）；如实跳过这台，不回调"新发现"。
+      if (row) opts.onDiscovered?.(row, { isNew });
     } catch {
       /* 单条落账失败：如实跳过（不静默吞整轮，也不因此崩掉发现器） */
     }
@@ -116,16 +117,25 @@ function hasControlHint(texts: Array<string | undefined>): boolean {
   return texts.some((t) => typeof t === 'string' && CONTROL_HINT_RE.test(t));
 }
 
-/** 由**自述文本**归一个粗类（认不出即 `unknown`——不硬塞）。 */
+/**
+ * 由**自述文本**归一个粗类（认不出即 `unknown`——不硬塞）。
+ * zx_20261029_2 M1: 补上舒适意图真正用得着的四类（窗帘/空调/风扇/扫地机）——
+ *   此前 mDNS/SSDP 只认 light/switch/sensor 等，窗帘与空调一律落到 `unknown`，意图链走不通。
+ * ⚠ 只读**自述** service type / TXT 键，不读设备名字（庄子·不预设）。
+ */
 export function deriveDeviceKind(text: string): string {
   const t = text.toLowerCase();
   if (/(lock|doorlock|\bdoor\b|garage|\bgate\b|\bsafe\b|alarm|security)/.test(t)) return 'lock';
   if (/(camera|\bcam\b|ipcam)/.test(t)) return 'camera';
+  if (/(curtain|blind|shade|window.?cover|\bcover\b)/.test(t)) return 'curtain';
+  if (/(aircon|air.?condition|climate|hvac)/.test(t)) return 'aircon';
   if (/(light|\blamp\b|bulb|dimmer)/.test(t)) return 'light';
+  if (/(\bfan\b|ventilat)/.test(t)) return 'fan';
   if (/(switch|relay|socket|plug|outlet)/.test(t)) return 'switch';
   if (/(sensor|\btemp\b|humid|thermo|meter|probe)/.test(t)) return 'sensor';
   if (/(speaker|audio|\bmedia\b|music|sound)/.test(t)) return 'speaker';
   if (/(display|\bscreen\b|\btv\b|monitor)/.test(t)) return 'display';
+  if (/(vacuum|robot.?clean|sweeper)/.test(t)) return 'vacuum';
   if (/(printer|scanner)/.test(t)) return 'printer';
   return 'unknown';
 }

@@ -32,6 +32,10 @@ import { scheduleDependentDispatch } from './collab-dispatch.js';
 import { buildTaskOutcome } from './task-outcome.js';
 import { enqueueJob } from './job-enqueuer.js';
 import { markTaskFailed, type TaskTerminalDb } from './task-terminal.js';
+// zx_20261030_1 M3：远端被叫停 ⇒ 本地子任务**归档**（唯一写入口；既非完成也非失败）。
+import { archiveTask } from './task-archive.js';
+// zx_20261030_1 M4：远端 done 的回执**自洽核对**（三选一；不符即不记完成）。
+import { receiptNote, verifyRemoteReceipt } from './node-receipt.js';
 
 const logger = createLogger('node-remote-driver');
 
@@ -66,6 +70,8 @@ export interface DriveRemoteResult {
   completed: number;
   /** 远端 `error` ⇒ 本地置 `failed` 的条数。 */
   failed: number;
+  /** zx_20261030_1 M3：远端 `cancelled` ⇒ 本地子任务**归档**的条数（叫停不是失败）。 */
+  cancelled: number;
   /** 超时撤归属退回 `pending` 的条数。 */
   reclaimed: number;
   /** 读回失败（网络/凭据）——本拍**不动**该任务，下拍再试的条数。 */
@@ -126,6 +132,18 @@ function appendSystemNote(db: Database.Database, taskId: string, content: string
   } catch { /* 会话记录缺失不该改收口结局 */ }
 }
 
+/**
+ * zx_20261030_1 M4：本机事件台账里「这单」是否有痕（回执核对的一项）——**任务或本次派发**二者之一。
+ *   派发事件（`node.request_dispatched`，聚合 id＝requestId）是外派子任务在台账上的第一道痕；
+ *   任务事件（`task.*`，聚合 id＝taskId）在本地执行展开后才会有。二者取或，才不把"外派件还没跑"误判为无痕。
+ *   查不到表/查询失败 ⇒ `false`——**不把"读不成"当成"有痕"**（诚实方向与在线判据同）。
+ */
+function hasTaskEvent(db: Database.Database, taskId: string, requestId: string): boolean {
+  try {
+    return db.prepare('SELECT 1 AS ok FROM wa_event_log WHERE aggregate_id IN (?, ?) LIMIT 1').get(taskId, requestId) != null;
+  } catch { return false; }
+}
+
 /** 从远端 `result` 摘一句**人话摘要**（供父任务逐子简报与面板下钻；取不出则如实说明）。 */
 function summarizeResult(status: string, result: Record<string, unknown> | null): string {
   if (!result) return `远端 ${status}（无回传摘要）`;
@@ -156,6 +174,7 @@ function isTimedOut(assignedAt: string, nowMs: number, timeoutMs: number): boole
  *   - `done` ⇒ CAS 置 `completed`（命中才落账）→ 写回传摘要进 context → system 会话留痕 →
  *     emit `task.completed`（满足 invariant #1：completed 必有事件）→ 既有 `checkParentTaskAfterChildDone` 恢复父。
  *   - `error`（且非"等作答"）⇒ CAS 置 `failed`（如实）→ emit `task.failed` → 父按既有 children-gate 处置（不静默恢复）。
+ *   - `cancelled`（M3，远端被叫停）⇒ CAS 置 `archived`（`archiveTask` 唯一写入口）→ 放行父（既非完成也非失败）。
  *   - `error` ∧ `question_status='asked'`（B 端在问）⇒ **非终态**，不动（等作答；与 `refreshDispatchResult` 同判据）。
  *   - `pending`/`assigned`/`awaiting_answer` ⇒ 非终态，不动。
  *   - **超时**（`now - assignedAt > 上限` ∧ 仍非终态）⇒ `clearRemoteAssigned` 退回 `pending` + 留痕（知止：不无限等一个可能已死的对端）。
@@ -163,7 +182,7 @@ function isTimedOut(assignedAt: string, nowMs: number, timeoutMs: number): boole
  * 读回失败（`errors`）⇒ 本拍**不动**（下拍再试；超时兜底仍会把它收回）。
  */
 export async function driveRemoteSubtasks(db: Database.Database, deps: DriveRemoteDeps = {}): Promise<DriveRemoteResult> {
-  const out: DriveRemoteResult = { checked: 0, completed: 0, failed: 0, reclaimed: 0, errors: 0 };
+  const out: DriveRemoteResult = { checked: 0, completed: 0, failed: 0, cancelled: 0, reclaimed: 0, errors: 0 };
   const nowMs = () => (deps.now ? deps.now() : Date.now());
   const timeoutMs = deps.timeoutMs ?? REMOTE_ASSIGN_TIMEOUT_MS;
 
@@ -201,6 +220,34 @@ export async function driveRemoteSubtasks(db: Database.Database, deps: DriveRemo
     const req = read.request;
 
     if (req.status === 'done') {
+      // zx_20261030_1 M4「认」：先核回执再改状态——回执不符（任务号不对/终态非法）**不记完成**，
+      //   如实按失败收口；符合但缺项 ⇒ 完成并标明"自报/核对通过"到哪一档（不越界说"本机验收"）。
+      const checkedAt = new Date(nowMs()).toISOString();
+      const receipt = verifyRemoteReceipt({
+        localTaskId: taskId,
+        result: req.result,
+        hasLocalEvent: hasTaskEvent(db, taskId, assign.requestId),
+        checkedAt,
+      });
+      const resultWithReceipt = { ...(req.result ?? {}), receipt };
+      if (receipt.verdict === 'failed') {
+        const reason = receiptNote(receipt);
+        const failed = markTaskFailed(db as unknown as TaskTerminalDb, taskId, { expectStatus: 'pending', reason });
+        if (!failed.changed) continue; // 已被别的路处理（幂等）
+        out.failed++;
+        patchContext(db, taskId, {
+          [REMOTE_RESULT_KEY]: resultWithReceipt,
+          [REMOTE_SUMMARY_KEY]: reason,
+          [REMOTE_RESULT_AT_KEY]: checkedAt,
+        });
+        appendSystemNote(db, taskId, `[协同·回执不符] 子任务由他机（${assign.nodeId.slice(0, 8)}）回传 done，但${reason}。本机如实置 failed（不把不符的回执记成完成）。`);
+        try {
+          await emit('task.failed', { taskId, task_id: taskId, projectId: row.project_id, error: reason, phase: 'remote' });
+        } catch { /* 事件失败不该改收口结局 */ }
+        try { checkParentTaskAfterChildDone(db, taskId, { enqueue }); } catch { /* 同下 */ }
+        logger.warn({ taskId, requestId: req.id, nodeId: assign.nodeId, missing: receipt.missing }, '远端 done 回执不符 ⇒ 本地如实 failed');
+        continue;
+      }
       const cas = db
         .prepare("UPDATE wa_tasks SET status = 'completed', updated_at = datetime('now') WHERE id = ? AND status = 'pending'")
         .run(taskId) as { changes?: number };
@@ -209,19 +256,35 @@ export async function driveRemoteSubtasks(db: Database.Database, deps: DriveRemo
       const summary = summarizeResult('done', req.result);
       // 先写 context（含 `completion_summary` ⇒ 父任务逐子简报取得到），再恢复父。
       patchContext(db, taskId, {
-        [REMOTE_RESULT_KEY]: req.result,
+        [REMOTE_RESULT_KEY]: resultWithReceipt,
         [REMOTE_SUMMARY_KEY]: summary,
-        [REMOTE_RESULT_AT_KEY]: new Date(nowMs()).toISOString(),
+        [REMOTE_RESULT_AT_KEY]: checkedAt,
       });
-      appendSystemNote(db, taskId, `[协同·远端完成] 子任务已由他机（${assign.nodeId.slice(0, 8)}）执行并回传 done。**远端自报完成，本机未复核**（如实边界）。回传摘要：${summary}`);
+      appendSystemNote(db, taskId, `[协同·远端完成] 子任务已由他机（${assign.nodeId.slice(0, 8)}）执行并回传 done。${receiptNote(receipt)}（只核回执自洽，未重跑其产出）。回传摘要：${summary}`);
       try {
-        await emit('task.completed', { taskId, task_id: taskId, projectId: row.project_id, ...buildTaskOutcome(db, taskId, 0), remote_result: req.result ?? undefined });
+        await emit('task.completed', { taskId, task_id: taskId, projectId: row.project_id, ...buildTaskOutcome(db, taskId, 0), remote_result: resultWithReceipt });
       } catch { /* 事件失败不该改收口结局 */ }
       try { checkParentTaskAfterChildDone(db, taskId, { enqueue }); } catch { /* 放行父失败不阻断本子收口 */ }
       // zx_20261023_5 批一：上游在本机到站 ⇒ 依赖它的后继**重新走一次派发决策**（有依赖也照样能跨机）。
       //   与本地完成处共用同一个触发口；开关未开时一次库查询后即返回，不发网络请求。
       scheduleDependentDispatch(db, taskId);
       logger.info({ taskId, requestId: req.id, nodeId: assign.nodeId }, '远端 done ⇒ 本地子任务已置 completed 并放行父任务');
+      continue;
+    }
+
+    // zx_20261030_1 M3「止」：远端已**真停**（派活方叫停）⇒ 本地子任务归档（唯一写入口）。
+    //   不用 `failed`：叫停不是失败（不该进复盘/告警）；不用 `completed`：没办成不能说办成。
+    //   `archiveTask` 自带 `task.status_changed` 事件与 CAS（`expectStatus:'pending'` ⇒ 幂等）。
+    if (req.status === 'cancelled') {
+      const summary = summarizeResult('cancelled', req.result);
+      const archived = archiveTask(db as unknown as TaskTerminalDb, { taskId, reason: `remote_cancelled: ${summary}`, expectStatus: 'pending' });
+      if (!archived.changed) continue; // 已被别的路处理（幂等）
+      out.cancelled++;
+      patchContext(db, taskId, { [REMOTE_RESULT_KEY]: req.result, [REMOTE_RESULT_AT_KEY]: new Date(nowMs()).toISOString() });
+      appendSystemNote(db, taskId, `[协同·远端已停] 子任务由他机（${assign.nodeId.slice(0, 8)}）执行时被叫停，远端已真停并回传 cancelled；本地子任务如实归档（既非完成，也非失败）。`);
+      // 归档是"了结"，放行父任务（children-gate 不把 archived 当失败子）。
+      try { checkParentTaskAfterChildDone(db, taskId, { enqueue }); } catch { /* 放行父失败不阻断本子收口 */ }
+      logger.info({ taskId, requestId: req.id, nodeId: assign.nodeId }, '远端 cancelled ⇒ 本地子任务已归档');
       continue;
     }
 

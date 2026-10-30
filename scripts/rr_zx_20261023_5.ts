@@ -174,7 +174,7 @@ import { CLOUD_ENTITLEMENT_PATH, pullCloudEntitlement } from '../apps/worker-ant
 import { LICENSE_SETTING_KEYS, resolveLicenseState, resolveLicenseTier } from '../apps/worker-ant-desktop/src/main/core/license.js';
 import { teamUnlocked } from '../apps/worker-ant-desktop/src/main/core/team-gate.js';
 import { PRICING } from '../apps/worker-ant-desktop/src/main/core/pricing.js';
-import { BENEFIT_COVERAGE } from '../apps/worker-ant-desktop/src/main/core/tier-catalog.js';
+import { BENEFIT_COVERAGE, tierCatalog } from '../apps/worker-ant-desktop/src/main/core/tier-catalog.js';
 import { issueEntitlement, resolveEntitlement } from '../apps/ans-server/src/routes/entitlements.js';
 import { entitlementTierRank, isEntitlementTier, type AnsEntitlement } from '@worker-ant/shared-types';
 
@@ -889,8 +889,12 @@ async function main(): Promise<void> {
       'B-9b 计数取真返回值（不是"调了就算"）');
 
     const execSrc = STRIPPED(`${A}/src/main/core/agent-executor.ts`);
-    ok(/recordPitfallCandidate\(db, taskRow\.project_id, \{ taskTitle: taskRow\.title, failedItems \}\)/.test(execSrc),
-      'B-9c 验收失败块真调候选卡写口（同一 taskRow 真源）');
+    // zx_20261030_2 M4 按符号重定向（不放宽）：由「调用形状」升为「摘要单源 + 调用形状」同钉——
+    //   同一 `failedItems` 既进记忆正文又进候选卡，且它只由 `summarizeAcceptanceFailures(payload.failed)` 产出。
+    ok(/const failedItems = summarizeAcceptanceFailures\(payload\.failed\)/.test(execSrc)
+      && /const content = `任务「\$\{taskRow\.title\}」验收未达：\$\{failedItems\}`/.test(execSrc)
+      && /recordPitfallCandidate\(db, taskRow\.project_id, \{ taskTitle: taskRow\.title, failedItems \}\)/.test(execSrc),
+      'B-9c 验收失败块：摘要单源（summarizeAcceptanceFailures）同喂记忆与候选卡写口');
     ok(/cards: cardRows/.test(execSrc) && /memoryCardText && !memTextAfterTrim\.includes\(memoryCardText\)/.test(execSrc),
       'B-9d 注入账：裁剪后回读记忆块，卡段被丢 ⇒ 零行');
     ok(/memoryCardText = built\.cardText/.test(execSrc) && /memoryCardInjections = built\.cardInjections/.test(execSrc),
@@ -924,17 +928,22 @@ async function main(): Promise<void> {
     const miss = resolveChannel('no-such-channel');
     ok(!miss.ok && miss.reason.includes('no-such-channel'), 'C-1g 未注册渠道如实拒且带名', miss.ok ? '' : miss.reason);
 
-    eq(listOnboardingChannels({ teamUnlocked: true }).map((c) => c.id), ids, 'C-1h 解锁档五条全列');
-    eq(listOnboardingChannels({ teamUnlocked: false }), [], 'C-1i 锁定档一条不列（不是灰着）');
+    // zx_20261029_2 M6「阶梯」：渠道接入归 Pro（`device_discovery`）——**两只标本**：
+    //   ① Pro 开、Team 锁 ⇒ 渠道仍可列（"能看"不等"能动"）；② Pro 锁 ⇒ 一条不列。
+    eq(listOnboardingChannels({ proUnlocked: true, teamUnlocked: true }).map((c) => c.id), ids, 'C-1h 双档解锁五条全列');
+    eq(listOnboardingChannels({ proUnlocked: false, teamUnlocked: true }), [],
+      'C-1i Pro 锁 ⇒ 一条不列（团队档不代行设备发现）');
+    eq(listOnboardingChannels({ proUnlocked: true, teamUnlocked: false }).map((c) => c.id), ids,
+      'C-1i2 Pro 开、Team 锁 ⇒ 五条仍列（发现归专业版，控制另闸）');
 
     const free: DeviceChannel = {
       id: 'tmp-free', label: '免费演示渠道', kind: 'lan', requires: 'none',
-      protocols: [], teamFeatures: [], summary: '演示', settingsKeys: [], credentialKeys: [],
+      protocols: [], requiredFeatures: [], summary: '演示', settingsKeys: [], credentialKeys: [],
       configKeys: [], capabilities: { discover: true, control: false, state: false },
     };
     registerChannel(free);
     eq(getChannel('tmp-free')?.id, 'tmp-free', 'C-1j 注册即生效（厂商可扩展，不必改注册表文件）');
-    eq(listOnboardingChannels({ teamUnlocked: false }).map((c) => c.id), ['tmp-free'],
+    eq(listOnboardingChannels({ proUnlocked: false, teamUnlocked: false }).map((c) => c.id), ['tmp-free'],
       'C-1k 免费渠道锁定档仍出现（反证：过滤的是档位不是"内置清单"）');
     unregisterChannel('tmp-free');
     eq(getChannel('tmp-free'), null, 'C-1l 注销后取不到（下次启动内置渠道自动恢复）');
@@ -947,17 +956,22 @@ async function main(): Promise<void> {
     const lan = getChannel('lan')!;
     const mqtt = getChannel('mqtt')!;
     const miio = getChannel('mijia-miio')!;
-    eq(authorizeChannel(lan, { teamUnlocked: true }), { ok: true }, 'C-2a 无前置渠道直接放行');
-    const noCred = authorizeChannel(mqtt, { teamUnlocked: true });
+    const open = { proUnlocked: true, teamUnlocked: true };
+    eq(authorizeChannel(lan, open), { ok: true }, 'C-2a 无前置渠道直接放行');
+    const noCred = authorizeChannel(mqtt, open);
     ok(!noCred.ok && noCred.reason.includes('凭据'), 'C-2b 缺凭据 ⇒ 点名"凭据"', noCred.ok ? '' : noCred.reason);
-    eq(authorizeChannel(mqtt, { teamUnlocked: true, hasCredentials: true }), { ok: true },
+    eq(authorizeChannel(mqtt, { ...open, hasCredentials: true }), { ok: true },
       'C-2c 凭据齐 ⇒ 放行（同一渠道的另一只标本）');
-    const noToken = authorizeChannel(miio, { teamUnlocked: true });
+    const noToken = authorizeChannel(miio, open);
     ok(!noToken.ok && noToken.reason.includes('token'), 'C-2d 缺 token ⇒ 点名 token', noToken.ok ? '' : noToken.reason);
-    eq(authorizeChannel(miio, { teamUnlocked: true, hasToken: true }), { ok: true }, 'C-2e token 在 ⇒ 放行');
-    const locked = authorizeChannel(mqtt, { teamUnlocked: false, hasCredentials: true });
-    ok(!locked.ok && locked.reason.includes('团队版'),
-      'C-2f 档位最先判：凭据齐也拒，且说清是"团队版"（不是"配置错误"）', locked.ok ? '' : locked.reason);
+    eq(authorizeChannel(miio, { ...open, hasToken: true }), { ok: true }, 'C-2e token 在 ⇒ 放行');
+    // zx_20261029_2 M6：档位最先判，且**说清缺的是哪一档**（渠道接入归专业版）。
+    const locked = authorizeChannel(mqtt, { proUnlocked: false, teamUnlocked: false, hasCredentials: true });
+    ok(!locked.ok && locked.reason.includes('专业版'),
+      'C-2f 档位最先判：凭据齐也拒，且说清是"专业版"（不是"配置错误"）', locked.ok ? '' : locked.reason);
+    // 阶梯的另一侧：Pro 开、Team 锁 ⇒ 接入放行（控制不在这道闸里）。
+    eq(authorizeChannel(mqtt, { proUnlocked: true, teamUnlocked: false, hasCredentials: true }), { ok: true },
+      'C-2g Pro 开、Team 锁 ⇒ 渠道预检仍放行（接入≠控制）');
   }
 
   // ═══ C-3 miIO 包编解码 ════════════════════════════════════════════════════
@@ -1711,18 +1725,22 @@ async function main(): Promise<void> {
 
     const tdb = mkdb();
     set(tdb, LICENSE_SETTING_KEYS.trialStartedAt, now.toISOString());
-    eq(resolveLicenseTier(tdb, opts), 'pro', 'E-5h 试用基线为 Pro');
-    writeCloudEntitlementCache(tdb, mkCloud('pro'));
+    // zx_20261027_3 M3「试得真」：试用授予档由 tier-catalog 同一对纯函数派生（现为团队版），判据不写死档名。
+    const trialTier = tierCatalog().trial.grantsTier;
+    eq(resolveLicenseTier(tdb, opts), trialTier, `E-5h 试用基线为授予档（${trialTier}，派生自 tier-catalog）`);
+    writeCloudEntitlementCache(tdb, mkCloud(trialTier));
     const sameTier = resolveLicenseState(tdb, opts);
-    eq(sameTier.tier, 'pro', 'E-5i 云端同为 Pro ⇒ 档位不变');
+    eq(sameTier.tier, trialTier, 'E-5i 云端同为授予档 ⇒ 档位不变');
     ok(!sameTier.detail.includes('云端权益已提升至'), 'E-5j ★不虚假宣称"已提升"（同档不算抬高）');
-    writeCloudEntitlementCache(tdb, mkCloud('team'));
+    // 授予档已是最高档 ⇒ 「云端更高」标本不存在；改钉反方向（云端更低只升不降），两侧仍齐。
+    const lowerTier = ENTITLEMENT_TIER_ORDER[Math.max(0, ENTITLEMENT_TIER_ORDER.indexOf(trialTier) - 1)]!;
+    writeCloudEntitlementCache(tdb, mkCloud(lowerTier));
     const raised = resolveLicenseState(tdb, opts);
-    eq(raised.tier, 'team', 'E-5k 云端 Team 抬升试用期');
-    ok(teamUnlocked(raised), 'E-5l Team 闸随之放行');
+    eq(raised.tier, trialTier, 'E-5k ★反证：云端不高于授予档 ⇒ 档位不降（只升不降）');
+    ok(teamUnlocked(raised), 'E-5l Team 闸仍随授予档放行');
 
     writeCloudEntitlementCache(tdb, mkCloud('team', '2026-10-01T00:00:00.000Z'));
-    eq(resolveLicenseTier(tdb, opts), 'pro', 'E-5m 云端权益过期 ⇒ 回落本地（不续命）');
+    eq(resolveLicenseTier(tdb, opts), trialTier, 'E-5m 云端权益过期 ⇒ 回落本地（不续命）');
 
     const junk = mkdb();
     set(junk, CLOUD_ENTITLEMENT_SETTING_KEY, '{"entitlement":{"tier":"team"},"fetchedAt":"x"}');

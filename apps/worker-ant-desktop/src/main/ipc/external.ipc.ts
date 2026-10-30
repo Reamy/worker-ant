@@ -37,24 +37,22 @@ import {
   rejectTerminal,
   reissueTerminalCredential,
   revokeTerminal,
+  terminalReasonToError as reasonToError,
   type PendingTerminalPublic,
   type TerminalDb,
   type TerminalPublic,
 } from '../core/external-terminals.js';
 import {
   LAN_SILENCE_MS,
-  isLanTerminalSilenced,
-  isTerminalBrowseRunning,
+  createTerminalBrowseLifecycle,
   listLanPending,
-  pruneLanSilences,
   silenceLanTerminal,
-  startTerminalBrowse,
-  terminalBrowseError,
   takeLanPending,
-  type LanIdentity,
   type LanPendingTerminal,
   type SilenceDb,
   type TerminalBrowseIo,
+  type TerminalBrowseLifecycle,
+  type TerminalBrowseStatusPayload,
 } from '../core/lan-terminals.js';
 import { pushImOwnerNotice } from '../core/im/im-notify.js';
 import {
@@ -100,6 +98,12 @@ export interface ExternalListPayload {
 }
 
 /**
+ * zx_20261029_2 M4：常驻发现的**实况**（只读）——形状的真源在 `core/lan-terminals.ts`；
+ * 此处 re-export 只为渲染层沿既有 `external.ipc.js` 取类型的惯例（不手抄第二份形状）。
+ */
+export type { TerminalBrowseLifecycle, TerminalBrowseStatusPayload } from '../core/lan-terminals.js';
+
+/**
  * zx_20261023_5 批四：**局域网待接入**列表（只读）。
  * `running`（浏览真在跑）与 `error`（起不来的因）分开如实说——列表空时用户要能分清
  * 「没人广播」与「本机看不见」。
@@ -134,34 +138,25 @@ export interface InboundControl {
 /** 审批/吊销的统一回包：成功回 `data.ok=true`（重签再带一句人话）；失败按码回 `error`（供面板如实提示）。 */
 type MutateResult = { data: { ok: true; message?: string } } | { error: { code: string; message: string } };
 
-function reasonToError(reason: string): { code: string; message: string } {
-  if (reason === 'not_found') return { code: 'NOT_FOUND', message: '该申请/终端不存在' };
-  if (reason === 'already_delivered') return { code: 'INVALID_STATE', message: '该终端的凭据已送达（终端手上有能用的钥匙）——若要换一把，请先吊销再重新配对' };
-  if (reason.startsWith('not_pending')) return { code: 'INVALID_STATE', message: `该申请已不是待批状态（${reason.split(':')[1] ?? ''}）` };
-  if (reason.startsWith('not_approved')) return { code: 'INVALID_STATE', message: `该终端不是已授权状态（${reason.split(':')[1] ?? ''}）` };
-  return { code: 'INTERNAL', message: reason };
-}
+// 拒因 → 错误形状的唯一实现在 `core/external-terminals.ts`（纯函数，受控回归可直跑）。
 
-export function initExternalIpc(db: Database.Database, control: InboundControl, browse?: { io?: TerminalBrowseIo }): void {
+export function initExternalIpc(
+  db: Database.Database,
+  control: InboundControl,
+  browse?: { io?: TerminalBrowseIo; isDoorRunning?: () => boolean },
+): TerminalBrowseLifecycle {
   const tdb = db as unknown as TerminalDb;
   const cdb = db as unknown as ExternalCallDb;
   const licDb = db as unknown as LicenseSettingDb;
   const sdb = db as unknown as SilenceDb;
-  let lanBrowseStarted = false;
 
-  /** 浏览只在**首次要看**时起（用户从不打开面板就不占 mDNS）；锁定档不起。 */
-  const ensureLanBrowse = (): boolean => {
-    if (teamFeatureRefusal(licDb, 'external_terminal')) return false;
-    if (lanBrowseStarted || isTerminalBrowseRunning()) return true;
-    lanBrowseStarted = true;
-    try { pruneLanSilences(sdb); } catch { /* 清过期静默失败不拦浏览 */ }
-    startTerminalBrowse({
-      ...(browse?.io ? { io: browse.io } : {}),
-      isSilenced: (t: LanIdentity) => isLanTerminalSilenced(sdb, t),
-      onDiscovered: (item) => emitLanTerminalSeen({ id: item.id, name: item.name, address: item.address }),
-    });
-    return true;
-  };
+  // zx_20261029_2 M4：**常驻发现**由装配层随入站门起停（`main/index.ts` 的 `applyInboundDoor`）；
+  //   IPC 只读状态 + 局域网接入/忽略两动作，**不再**由 `lanList` 惰性拉起。
+  const browseLifecycle = createTerminalBrowseLifecycle(db, {
+    ...(browse?.io ? { io: browse.io } : {}),
+    ...(browse?.isDoorRunning ? { isDoorRunning: browse.isDoorRunning } : {}),
+    onDiscovered: (item) => emitLanTerminalSeen({ id: item.id, name: item.name, address: item.address }),
+  });
 
   ipcMain.handle('external:listPending', async () => {
     try {
@@ -274,28 +269,34 @@ export function initExternalIpc(db: Database.Database, control: InboundControl, 
   // ── zx_20261023_5 批四：**局域网发现**（Team）────────────────────────────────
   // 发现 ≠ 授权：列表只来自内存且 30 秒即散；点「接入」才走配对（核对码 → 批准 → 钥匙只回一次）。
 
+  // zx_20261029_2 M4：常驻发现的**只读实况**——运行中 / 未运行的原因（门未开、Team 未解锁、起不来）。
+  //   ⚠ 它**不**起停浏览（起停随入站门，见 `applyInboundDoor`）；面板打开与否都不影响发现。
+  ipcMain.handle('external:lanStatus', async () => {
+    try {
+      return { data: browseLifecycle.status() } satisfies { data: TerminalBrowseStatusPayload };
+    } catch (e) {
+      return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } };
+    }
+  });
+
   ipcMain.handle('external:lanList', async () => {
     try {
-      if (teamFeatureRefusal(licDb, 'external_terminal')) {
-        const payload: LanPendingPayload = {
-          items: [], running: false, error: null, locked: true,
-          detail: '局域网终端发现需 Team 档（本机当前档位未解锁）。',
-        };
-        return { data: payload } satisfies { data: LanPendingPayload };
-      }
-      ensureLanBrowse();
-      const items = listLanPending();
-      const err = terminalBrowseError();
+      const s = browseLifecycle.status();
+      const items = s.locked ? [] : listLanPending();
       const payload: LanPendingPayload = {
         items,
-        running: isTerminalBrowseRunning(),
-        error: err,
-        locked: false,
-        detail: err
-          ? `本机 mDNS 浏览不可用：${err}`
-          : items.length
-            ? `局域网内看到 ${items.length} 台终端（30 秒无广播即消失）`
-            : '正在监听局域网…（广播中的 AI 终端会出现在这里，30 秒无广播即消失）',
+        running: s.running,
+        error: s.error,
+        locked: s.locked,
+        detail: s.locked
+          ? s.detail
+          : s.error
+            ? `本机 mDNS 浏览不可用：${s.error}`
+            : items.length
+              ? `局域网内看到 ${items.length} 台终端（30 秒无广播即消失）`
+              : s.running
+                ? '正在监听局域网…（广播中的 AI 终端会出现在这里，30 秒无广播即消失）'
+                : s.detail,
       };
       return { data: payload } satisfies { data: LanPendingPayload };
     } catch (e) {
@@ -355,4 +356,7 @@ export function initExternalIpc(db: Database.Database, control: InboundControl, 
       return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } };
     }
   });
+
+  // 交给装配层：入站门开/关的**同一条路**上 `start()/stop()`（见 `main/index.ts`）。
+  return browseLifecycle;
 }

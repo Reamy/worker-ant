@@ -253,6 +253,14 @@ export function initDatabase(dbPath?: string): Database.Database {
       question_json TEXT,
       answer_json TEXT,
       question_status TEXT,
+      -- zx_20261027_3 M1：择机快照（层组/净收益/余力/槽位/人话理由）——面板与日志可答「为什么派给它」。
+      selection_json TEXT,
+      -- zx_20261030_1 M2：执行方进度快照 {step,total,note,at}——派活方据此显示「第 3/8 步」。
+      --   可空：对端旧版本不上报 ⇒ NULL（界面说"对方未上报进度"，不退化成 0%）。
+      progress_json TEXT,
+      -- zx_20261030_1 M3：派活方叫停标志（1 = 已请求停止）。执行方在检查点读到即真停并回传 cancelled；
+      --   pending 件由 ANS 直接置 cancelled（无需执行方参与）。
+      cancel_requested INTEGER DEFAULT 0,
       created_at TEXT DEFAULT (datetime('now')),
       claimed_at TEXT,
       done_at TEXT
@@ -430,6 +438,27 @@ export function initDatabase(dbPath?: string): Database.Database {
   // zx_20261011 M1：请求方身份（`GET /requests/:id` 读回鉴权用）。可空——旧行/非节点终端为 NULL。
   try {
     db.exec(`ALTER TABLE ans_node_requests ADD COLUMN requester_node_id TEXT`);
+  } catch {
+    /* ok */
+  }
+
+  // zx_20261027_3 M1：择机快照列（旧库补列，`try{ALTER}catch{}` 范式）。
+  try {
+    db.exec(`ALTER TABLE ans_node_requests ADD COLUMN selection_json TEXT`);
+  } catch {
+    /* ok */
+  }
+
+  // zx_20261030_1 M2：执行方进度快照列（旧库补列，`try{ALTER}catch{}` 范式）。
+  try {
+    db.exec(`ALTER TABLE ans_node_requests ADD COLUMN progress_json TEXT`);
+  } catch {
+    /* ok */
+  }
+
+  // zx_20261030_1 M3：叫停标志列（旧库补列，`try{ALTER}catch{}` 范式）。
+  try {
+    db.exec(`ALTER TABLE ans_node_requests ADD COLUMN cancel_requested INTEGER DEFAULT 0`);
   } catch {
     /* ok */
   }

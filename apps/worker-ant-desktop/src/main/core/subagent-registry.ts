@@ -35,9 +35,11 @@ export const SUBAGENT_TYPES: Record<string, SubagentType> = {
   builder: {
     name: 'builder',
     description: '构建Agent：代码编写、测试、产出物注册',
-    allowTools: ['read_file', 'write_file', 'execute_command', 'git_clone', 'get_current_time', 'create_deliverable', 'register_deliverable', 'finalize_task'],
+    // zx_20261030_2 M2（「器」）：`edit_file` 必须与 `write_file` 并列——父任务给子的指令常明令
+    //   「对既有文件用 edit_file」，白名单没有它等于把子代理的手绑住（真标本 792d6adb）。
+    allowTools: ['read_file', 'write_file', 'edit_file', 'execute_command', 'git_clone', 'get_current_time', 'create_deliverable', 'register_deliverable', 'finalize_task'],
     denyTools: ['spawn_subagent', 'enter_plan_mode', 'exit_plan_mode', 'create_task', 'escalate_to_human'],
-    systemPrompt: '你是代码构建Agent。编写代码、运行测试、注册产出物。完成后调用finalize_task。',
+    systemPrompt: '你是代码构建Agent。编写代码、运行测试、注册产出物。改既有文件用 edit_file，新建文件用 write_file。完成后调用finalize_task。',
     maxSteps: 12,
     timeout: 300_000,
   },

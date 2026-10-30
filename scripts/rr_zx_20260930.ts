@@ -2799,10 +2799,15 @@ function groupGb(): void {
     'G-b-9 ★三跳齐全且按序：**放宽**长期层池（`longTermK`）→ 按 Tulving 二分各排各的（强度由管理器传值）→ 轮转交织取 topK');
 
   // M7-e 工作记忆
-  ok(mgrSrc.includes('if (hit) { hit.n = (hit.n ?? 1) + 1; hit.ts = ts; }')
+  // zx_20261027_1 M5：复述分支中间按"只升不降"补了出处升级（evidence 行插在原一条语句之间），
+  //   故锚点按语义拆成三段并**加强**——同内容复述仍 n+1/刷新 ts，且无出处的复述不得把已核验降级。
+  ok(mgrSrc.includes('if (hit) {')
+    && mgrSrc.includes('hit.n = (hit.n ?? 1) + 1;')
+    && mgrSrc.includes('hit.ts = ts;')
+    && mgrSrc.includes('if (evidence?.verified) hit.verified = true;')
     && mgrSrc.includes('const keep = new Set(ranked.slice(0, WM_POOL_CAP).map((r) => r.item));')
     && mgrSrc.includes('ctx.working_memory = wm.filter((w) => keep.has(w));'),
-    'G-b-10 ★池满时按**值**淘汰（`ranked.slice(0, WM_POOL_CAP)`）；同内容再记一次是**一次更强的复述**（`n` 加一、`ts` 刷新），不是占两格');
+    'G-b-10 ★池满时按**值**淘汰（`ranked.slice(0, WM_POOL_CAP)`）；同内容再记一次是**一次更强的复述**（`n` 加一、`ts` 刷新、出处只升不降），不是占两格');
   eq(mgrSrc.includes('while (wm.length > 7) wm.shift();'), false,
     'G-b-11 ★FIFO 语句**已不在源码里**——注意锚点带分号：旧写法在本文件的**注释里**作为被引用的旧实现仍可见'
     + '（那正是"改完实现须回头改注释"留的痕），故判据必须钉**代码形状**而非子串在场');
@@ -3717,11 +3722,14 @@ function groupKa(): void {
     + '模型**连表达这个意图的工具都拿不到**——那不是"少省一点 token"，是结构性落空');
 
   // ② 档内集是**派生**的：类目过滤在册工具，逐件落到位（不是"表里字面写了类目"就算数）
+  // zx_20261030_2 M3 新增 `await_subagents`（等待子代理到站会置 paused ⇒ 非只读）：旧形「恰十件」是幻数，
+  //   改为**逐成员枚举**（新入库的 resource 件必须在此点名，否则本判据红——幻数计数换不来这层强度）。
   const resTools = toolRegistry.listNames().filter((n) => toolRegistry.getMeta(n)!.category === 'resource');
-  eq(resTools.length, 10, 'K-a-2 前置：`resource` 类恰十件（方案 §2-M10 的清单同尺）', resTools.join(','));
+  eq([...resTools].sort(), ['await_subagents', 'call_mcp_tool', 'find_best_model', 'find_mcp_service', 'list_skills', 'read_web', 'recruit_swarm', 'search_web', 'skill', 'spawn_debate', 'spawn_subagent'],
+    'K-a-2 前置：`resource` 类逐成员枚举（方案 §2-M10 的清单同尺，新增件须点名）', resTools.join(','));
   for (const c of ['document', 'conversation'] as TaskArchetype[]) {
     const got = new Set(availableToolNames(c));
-    eq(resTools.filter((n) => !got.has(n)), [], `K-a-3 \`${c}\` 档的派生集**逐件**含 resource 十件`);
+    eq(resTools.filter((n) => !got.has(n)), [], `K-a-3 \`${c}\` 档的派生集**逐件**含 resource 全部件`);
   }
 
   // ③ **该不命中**：放开 resource ≠ 放开一切

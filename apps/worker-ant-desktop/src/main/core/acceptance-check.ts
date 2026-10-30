@@ -122,6 +122,32 @@ export function buildAcceptanceCheckPayload(
 }
 
 /**
+ * zx_20261030_2 M4（墨经·「举，拟实也」/ 维特根斯坦·意义即用法）: **验收未达的摘要**，
+ * 判据与理由**同价**——不把「因为什么没过」丢在账本里。
+ *
+ * 病根（§1.6 D5）：`payload.failed[]` 早已带 `{criterion, reason}`，但记忆与 pitfall 卡都只取
+ * `criterion` 拼一串判据名 ⇒ 下一棒只看到"哪几条没过"，看不到"为何没过"，于是只能重犯同一错。
+ *
+ * 格式固定（**一处真源**，两个写口共用同一个字符串）：`判据（原因）`，多条以 `；` 连接；
+ * 最多 `max` 条，其余以 `另 N 条` 收口；criterion/reason 为空分别记 `未命名`/`（未说明）`——
+ * 与 `buildAcceptanceCheckPayload` 的既有默认一致。
+ */
+export function summarizeAcceptanceFailures(
+  failed: ReadonlyArray<{ criterion?: string; reason?: string }>,
+  max = 3,
+): string {
+  const items = failed.map((f) => {
+    const criterion = String(f.criterion ?? '').trim() || '未命名';
+    const reason = String(f.reason ?? '').trim() || '未说明';
+    return `${criterion}（${reason}）`;
+  });
+  if (items.length === 0) return '';
+  const shown = items.slice(0, Math.max(0, max));
+  const rest = items.length - shown.length;
+  return rest > 0 ? `${shown.join('；')}；另 ${rest} 条` : shown.join('；');
+}
+
+/**
  * 未核验载荷。`criteria_total: 0` 是刻意的——面板不得显示一个假的 "0/0 已达成"，
  * 而要显示"未核验 + 原因"；下游也只认 `verified` 而非计数。
  */

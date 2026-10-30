@@ -65,6 +65,12 @@ export const PRICING: Record<LicenseTier, TierPricing> = {
     //   每一句都在 `tier-catalog.ts` 的 `BENEFIT_COVERAGE` 里指回一项能力，新增无闸卖点会弄红 rr。
     benefits: [
       '不限项目',
+      // zx_20261029_2 M6「阶梯」：设备**发现与只读台账**归专业版（`device_discovery` 真闸：
+      //   discover/cloud_sync/渠道接入）；**控制**是团队版那句——两档不并成一句"设备能力"。
+      '设备发现（只读台账）',
+      // zx_20261030_1 M5「限」：容量维度也有真闸（`device-registry.ts` 只拦**新登记**）。
+      //   数值由 `TIER_LIMITS` 派生——改一处价目表跟着变（不抄死数）。
+      `设备登记（最多 ${TIER_LIMITS.pro.maxDevices} 台）`,
       // zx_20261022_3 批七：两端都兑现——导出/导入各有一跳真闸（`knowledge_export`/`knowledge_import`）；
       //   预览与执行期注入仍对社区档常开（括号里如实写明）。
       '项目知识包（预览注入常开 + JSONL 导出/导入）',
@@ -77,6 +83,10 @@ export const PRICING: Record<LicenseTier, TierPricing> = {
       // zx_20261023_5 批五：`knowledge_cards` 早已有真闸（批二），但价目表没写这句——**卖点若无人兑现是虚名，
       //   兑现了却不写也是白干**。措辞如实：确定性蒸馏的一小把卡，不是训练出的小模型。
       '项目知识卡（开工前注入最用得上的几张蒸馏卡）',
+      // zx_20261030_1 M5「限」：每项目知识卡张数由档位设闸（`knowledge-cards.ts` 蒸馏落卡），数值派生自 `TIER_LIMITS`。
+      `每项目知识卡（最多 ${TIER_LIMITS.pro.maxKnowledgeCardsPerProject} 张）`,
+      // zx_20261029_2 M6：只卖「安装」这一跳（`plugin_install` 真闸在 `ansCall`）；浏览市场不限档位。
+      '市场插件安装（浏览不限）',
       '优先支持',
     ],
   },
@@ -88,18 +98,23 @@ export const PRICING: Record<LicenseTier, TierPricing> = {
     priceYearlyCny: 5990,
     priceNote: '团队授权包',
     tagline: '团队授权包：最多 20 台协同节点，设备与审计一处管',
-    // 七项与 `team-gate.ts` 的 `TEAM_FEATURES`（八项，其中设备发现/控制合成一行）逐项对齐；
+    // 七项与 `team-gate.ts` 的 `TEAM_FEATURES` 逐项对齐（`device_discovery` 已移往 Pro，见上一档）；
     //   「AI 终端意图接入」＝`external_terminal`：默认只授意图能力，原始控制须显式勾选；
     //   「审计导出（CSV）」＝`audit_export`（zx_20261018_3 批七）：`audit:export` 第一跳过闸；
     //   「项目画像共享」＝`project_profile_share`（zx_20261022_3 批八）：只闸分享/导入，本机生成常开。
     benefits: [
       '多机协同（自动外派）',
-      '设备发现与控制',
+      // zx_20261029_2 M6: 只卖「控制」——发现/只读台账已在专业版那句里兑现，不重复圈一次。
+      '设备控制（含意图执行）',
+      // zx_20261030_1 M5「限」：团队档设备登记上限更高（数值派生自 `TIER_LIMITS`）。
+      `设备登记（最多 ${TIER_LIMITS.team.maxDevices} 台）`,
       'AI 终端意图接入',
       '审计视图',
       '审计导出（CSV）',
       '团队共享库（模板 / 记忆 / 成果 / 领域包 / 项目画像）',
       '项目画像共享（跨节点带项目画像）',
+      // zx_20261030_1 M5「限」：团队档每项目知识卡上限更高（数值派生自 `TIER_LIMITS`，不另抄）。
+      `每项目知识卡（最多 ${TIER_LIMITS.team.maxKnowledgeCardsPerProject} 张）`,
     ],
   },
 };
@@ -144,6 +159,25 @@ export function capabilityLine(tier: LicenseTier): string {
   const proj = l.maxProjects === 0 ? '不限项目' : `${l.maxProjects} 个项目`;
   const nodes = l.maxNodes === 0 ? '不限节点' : `协同节点 ${l.maxNodes} 台`;
   return `并发 ${l.maxProjectConcurrency} · ${proj} · ${nodes}`;
+}
+
+/**
+ * 容量行——同样**由 `TIER_LIMITS` 派生**（zx_20261030_1 M5「限」）。
+ * 五项容量维度（设备登记 / 外部终端 / A2A 服务 / 每项目知识卡 / 团队共享记忆）在价目表上
+ * 此前没有任何落点：用户看不到"这一档能挂多少东西"，升级差异也就无物可兑。
+ * `0 = 不限`（与 `TIER_LIMITS` 同义），不写成 "0 台"。
+ */
+export function capacityLine(tier: LicenseTier): string {
+  const l = TIER_LIMITS[tier];
+  const seg = (name: string, v: number, unit: string): string =>
+    `${name} ${v === 0 ? '不限' : `${v} ${unit}`}`;
+  return [
+    seg('设备登记', l.maxDevices, '台'),
+    seg('外部终端', l.maxExternalTerminals, '台'),
+    seg('A2A 服务', l.maxA2AServers, '个'),
+    seg('每项目知识卡', l.maxKnowledgeCardsPerProject, '张'),
+    seg('团队共享记忆', l.maxTeamLibraryMemories, '条'),
+  ].join(' · ');
 }
 
 /** 上屏用：各档定价行（按 `LICENSE_TIERS` 序，附派生能力行）。 */

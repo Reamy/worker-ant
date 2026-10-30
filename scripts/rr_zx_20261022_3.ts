@@ -198,6 +198,7 @@ const ADMIN_IPC = `${A}/src/main/ipc/admin.ipc.ts`;
 const SETTINGS_PAGE = `${A}/renderer/src/pages/SettingsPage.tsx`;
 const SETUP_PAGE = `${A}/renderer/src/pages/SetupPage.tsx`;
 const EXTERNAL_IPC = `${A}/src/main/ipc/external.ipc.ts`;
+const EXTERNAL_TERMINALS_CORE = `${A}/src/main/core/external-terminals.ts`;
 
 /* ── 夹具：逐列照抄 database.ts 中 collectNodeEnv 触达的表（不缺列、不放宽）── */
 const SCHEMA = `
@@ -1026,7 +1027,12 @@ function groupE(): void {
     const ipc = strip(EXTERNAL_IPC);
     ok(/ipcMain\.handle\('external:reissue'/.test(ipc), 'E-6a main 注册了 external:reissue 出口');
     ok(/reissueTerminalCredential\(tdb,/.test(ipc), 'E-6b 走同一个 core 编排（无第二份状态机）');
-    ok(/already_delivered/.test(ipc), 'E-6c already_delivered 有专门人话（不是 INTERNAL 兜底）');
+    // 拒因→人话的**唯一一处**在 core（zx_20261030_1 M8 起）：main 出口只转调、不自带第二份映射——
+    // 两处各写一遍正是 `capacity:` 机器前缀漏上屏的来路。
+    const terminalsCore = strip(EXTERNAL_TERMINALS_CORE);
+    ok(/already_delivered/.test(terminalsCore), 'E-6c already_delivered 有专门人话（不是 INTERNAL 兜底）');
+    ok(/terminalReasonToError/.test(ipc) && !/function reasonToError/.test(ipc),
+      'E-6c2 main 出口转调 core 的唯一映射（不自带第二份）');
     ok(/emitExternalStatusChanged\('external:reissue'/.test(ipc), 'E-6d 重签后广播刷新（面板不等轮询）');
     const rIpc = strip(RENDERER_IPC);
     ok(/reissue: \(terminalId: string\) => ipcCall<\{ ok: true; message\?: string \}>\('external:reissue'/.test(rIpc),
@@ -2038,15 +2044,29 @@ function groupI(): void {
     ...Object.values(PRO_FEATURE_LABEL),
     ...Object.values(TEAM_FEATURE_LABEL),
   ]);
-  const quotaShapes = LICENSE_TIERS.flatMap((t) => {
-    const l = TIER_LIMITS[t];
-    return [
-      l.maxProjects === 0 ? '不限项目' : `${l.maxProjects} 个项目`,
-      `并发 ${l.maxProjectConcurrency}`,
-      // zx_20261023_1「称」: 升级差异的档位上限改列**协同节点**（席位降为本机账号口径，不再作卖点）。
-      l.maxNodes === 0 ? '不限协同节点' : `${l.maxNodes} 台协同节点`,
-    ];
-  });
+  // zx_20261030_1 M4（改旧断言＝钉更强的真源）: 上限口径已扩到**九维**（M5 增设备/外部终端/A2A/知识卡/
+  //   团队共享记忆）——期望文案仍逐维由 `TIER_LIMITS` 派生（不写死数值，也不写死"只有四维"）。
+  const quotaOf = (l: (typeof TIER_LIMITS)[keyof typeof TIER_LIMITS]): string[] => [
+    l.maxProjects === 0 ? '不限项目' : `${l.maxProjects} 个项目`,
+    `并发 ${l.maxProjectConcurrency}`,
+    // zx_20261023_1「称」: 升级差异的档位上限改列**协同节点**（席位降为本机账号口径，不再作卖点）。
+    l.maxNodes === 0 ? '不限协同节点' : `${l.maxNodes} 台协同节点`,
+    // zx_20261027_3 M3「试得真」: 本机账号同样是档位实差 ⇒ 升级面板逐档列。
+    l.maxMembers === 0 ? '不限本机账号' : `本机账号 ${l.maxMembers}`,
+    // zx_20261030_1 M5「限」: 五个容量维度（0 = 不限，不写成 "0 台"）。
+    l.maxDevices === 0 ? '不限设备登记' : `设备登记 ${l.maxDevices} 台`,
+    l.maxExternalTerminals === 0 ? '不限外部终端' : `外部终端 ${l.maxExternalTerminals} 台`,
+    l.maxA2AServers === 0 ? '不限 A2A 服务' : `A2A 服务 ${l.maxA2AServers} 个`,
+    l.maxKnowledgeCardsPerProject === 0 ? '不限每项目知识卡' : `每项目知识卡 ${l.maxKnowledgeCardsPerProject} 张`,
+    l.maxTeamLibraryMemories === 0 ? '不限团队共享记忆' : `团队共享记忆 ${l.maxTeamLibraryMemories} 条`,
+  ];
+  const quotaShapes = LICENSE_TIERS.flatMap((t) => quotaOf(TIER_LIMITS[t]));
+  /** 两档之间**确实变化**的上限（与上述同一套形状逐维对齐）。 */
+  const diffQuotas = (a: (typeof TIER_LIMITS)[keyof typeof TIER_LIMITS], b: (typeof TIER_LIMITS)[keyof typeof TIER_LIMITS]): string[] => {
+    const A = quotaOf(a);
+    const B = quotaOf(b);
+    return B.filter((text, i) => text !== A[i]);
+  };
 
   // I-1 用量计数与库同源：0→1 正面值；上限取 TIER_LIMITS，不另立计数。
   {
@@ -2074,19 +2094,30 @@ function groupI(): void {
       'I-1g 用量写法：`0 = 不限`，不把不限档写成 0/0');
   }
 
-  // I-2 档位上限随许可态走：试用视同 Pro，能力行取 catalog 本档对照行。
+  // I-2 档位上限随许可态走：试用**授予档**由 tier-catalog 同一对纯函数派生（zx_20261027_3 M3「试得真」：试用即团队），
+  //   能力行取 catalog 本档对照行。
   {
     const db = mkUsageDb();
     db.prepare('INSERT INTO wa_settings (key, value) VALUES (?, ?)')
       .run(LICENSE_SETTING_KEYS.trialStartedAt, '2026-10-20T02:00:00.000Z');
+    const trialTier = tierCatalog().trial.grantsTier;
+    const trialLimits = TIER_LIMITS[trialTier];
     const c = tierUsageCounts(db as never, { ...opts, cpus: 4 });
-    eq([c.tier, c.kind], ['pro', 'trial'], 'I-2a 试用期视同 Pro（档位与上限同一次解析）');
-    eq([c.projects.limit, c.concurrency.perProjectMax, c.seats.limit], [0, 8, 1],
-      'I-2b 试用时上限随 Pro（项目 0=不限；并发 8）');
+    eq([c.tier, c.kind], [trialTier, 'trial'],
+      'I-2a 试用档由 tier-catalog 派生（试用即团队——与两道软闸同一次解析）');
+    eq([c.projects.limit, c.concurrency.perProjectMax, c.seats.limit],
+      [trialLimits.maxProjects, trialLimits.maxProjectConcurrency, trialLimits.maxMembers],
+      'I-2b 试用上限随授予档（项目/并发/本机账号全取 TIER_LIMITS，不写死数值）');
     ok(c.features.some((f) => f.key === 'image_vision' && f.included),
       'I-2c 能力行逐项取 tier-catalog 本档 included（不另写卖点）');
-    ok(c.features.some((f) => f.key === 'multi_node' && !f.included && f.upgradeLabel === TIER_LABEL.team),
-      'I-2d 未含能力如实带"哪一档才含"（upgradeLabel 来自同一份对照表）');
+    ok(c.features.every((f) => f.included && f.upgradeLabel === null),
+      'I-2d 授予档已含全部能力 ⇒ 无「升级到某档」提示（对照表同一份）');
+    // 反面标本：只用"全都包含"的样本 ⇒ included 判据过宽也全票通过。社区档取另一侧。
+    const community = tierUsageCounts(mkUsageDb() as never, { ...opts, cpus: 4 });
+    const unlockRow = tierCatalog().tiers.find((r) =>
+      r.capabilities.some((x) => x.key === 'multi_node' && x.included))!;
+    ok(community.features.some((f) => f.key === 'multi_node' && !f.included && f.upgradeLabel === unlockRow.label),
+      'I-2e ★反面标本：社区档 `multi_node` 未含，且 upgradeLabel = 最早含它的档（由同一对照表反查，不写死档名）');
   }
 
   // I-3 升级差异只由"已注册能力 + TIER_LIMITS 派生上限"构成。
@@ -2094,8 +2125,8 @@ function groupI(): void {
     const up = upgradeDifferences('community');
     eq([up.toTier, up.toLabel], ['pro', TIER_LABEL.pro],
       'I-3a 缺省目标＝下一档（由 LICENSE_TIERS 派生）');
-    eq(up.quotas, ['不限项目', '并发 8'],
-      'I-3b 上限差异只列确实变化项（项目/并发；协同节点不变不列）');
+    eq(up.quotas, diffQuotas(TIER_LIMITS.community, TIER_LIMITS.pro),
+      'I-3b 上限差异只列确实变化项（九维逐枚举；不变维不列）');
     const proIncluded = tierCatalog().tiers.find((r) => r.tier === 'pro')!.capabilities
       .filter((c) => c.included).map((c) => c.label);
     const teamIncluded = tierCatalog().tiers.find((r) => r.tier === 'team')!.capabilities
@@ -2104,8 +2135,11 @@ function groupI(): void {
       'I-3c ★能力差异 = 目标档新增的已注册能力（不多不少）');
 
     const up2 = upgradeDifferences('pro');
-    eq(up2.quotas, ['并发 16', '20 台协同节点'],
-      'I-3d 逐档派生：Pro→Team 只涨并发与协同节点（项目本就 0=不限；席位不作升级卖点）');
+    // 四维逐枚举、期望文案由 TIER_LIMITS 派生（zx_20261027_3 M3：本机账号也是档位实差，须列）。
+    const proL = TIER_LIMITS.pro;
+    const teamL = TIER_LIMITS.team;
+    eq(up2.quotas, diffQuotas(proL, teamL),
+      'I-3d 逐档派生：Pro→Team 只列**确实变化**的上限（九维逐枚举）');
     eq(up2.capabilities, teamIncluded.filter((l) => !proIncluded.includes(l)),
       'I-3e Pro→Team 只列 Team 新增那几项（Pro 已有的不重复卖）');
 

@@ -20,6 +20,19 @@ export interface IntentPlanDb {
 
 export type IntentPlanStatus = 'planned' | 'executing' | 'executed' | 'failed';
 
+/** 计划由谁排出（zx_20261029_2 M2）——`rule`＝确定性规则表，`model`＝规则排不出时的模型补充。 */
+export type IntentPlanSource = 'rule' | 'model';
+
+/** 人话来源（面板与门内回执共用；表外按规则处理，不冒充模型）。 */
+export const INTENT_PLAN_SOURCE_LABEL: Record<IntentPlanSource, string> = {
+  rule: '规则解析',
+  model: '模型辅助解析',
+};
+
+export function intentPlanSourceLabel(value: string): string {
+  return value === 'model' ? INTENT_PLAN_SOURCE_LABEL.model : INTENT_PLAN_SOURCE_LABEL.rule;
+}
+
 export interface IntentPlanRow {
   id: string;
   terminal_id: string;
@@ -27,6 +40,7 @@ export interface IntentPlanRow {
   params_json: string;
   plan_json: string;
   status: string;
+  source: string;
   created_at: string;
   expires_at: string;
   executed_at: string | null;
@@ -57,6 +71,7 @@ export interface CreatedIntentPlan {
   id: string;
   expiresAt: string;
   expiresIn: number;
+  source: IntentPlanSource;
 }
 
 /** 落一条计划（`status='planned'`）。**只写库，不碰设备**。 */
@@ -68,6 +83,8 @@ export function createIntentPlan(
     params: Record<string, unknown>;
     steps: IntentStep[];
     skipped: IntentSkip[];
+    /** 未传 ⇒ `rule`（老调用点语义不变；模型路径显式传 `model`）。 */
+    source?: IntentPlanSource;
     now?: Date;
     ttlSec?: number;
   },
@@ -75,21 +92,23 @@ export function createIntentPlan(
   const id = randomUUID();
   const now = input.now ?? new Date();
   const ttlSec = input.ttlSec ?? INTENT_PLAN_TTL_SEC;
+  const source = input.source ?? 'rule';
   const createdAt = dbNowUtc(now);
   const expiresAt = dbNowUtc(new Date(now.getTime() + ttlSec * 1000));
   db.prepare(
-    `INSERT INTO wa_intent_plans (id, terminal_id, capability, params_json, plan_json, status, created_at, expires_at, result_json)
-     VALUES (?, ?, ?, ?, ?, 'planned', ?, ?, '{}')`,
+    `INSERT INTO wa_intent_plans (id, terminal_id, capability, params_json, plan_json, status, source, created_at, expires_at, result_json)
+     VALUES (?, ?, ?, ?, ?, 'planned', ?, ?, ?, '{}')`,
   ).run(
     id,
     input.terminalId,
     input.capability,
     JSON.stringify(input.params),
     JSON.stringify({ steps: input.steps, skipped: input.skipped }),
+    source,
     createdAt,
     expiresAt,
   );
-  return { id, expiresAt, expiresIn: ttlSec };
+  return { id, expiresAt, expiresIn: ttlSec, source };
 }
 
 export function getIntentPlan(db: IntentPlanDb, id: string): IntentPlanRow | null {

@@ -36,6 +36,7 @@ import type { CoreMessage } from 'ai';
 import { isComplexOrPlanish, type AdaptiveStrategy, type ComplexityLevel, type TaskArchetype } from './task-archetype.js';
 import { readBoolSetting } from './settings-bool.js';
 import { createLogger } from './logger.js';
+import { buildSelfRulesBlock, readSelfEvolveRules } from './self-evolve.js';
 // zx_20260930 M5: 失败模式的**类型名**与写侧同引一处（原为写在本文件 SQL 里的裸字面量）。
 //   读写分家时两侧各写一个近义串（拼法不同）都"没错"，查询恒空而无人报错——故名字只定义一次。
 //   本文件内**不留**该名字的任何副本（连注释里都不写），免得日后有人照着抄成一个串。
@@ -44,6 +45,8 @@ import { buildToolConstraintBrief } from './tool-guards.js';
 import { generateTensionContext, generateContradictionContext, getTensions } from './tension-engine.js';
 import { generateFactSnapshot } from './world-snapshot.js';
 import { getToolUsageHint } from './feedback-engine.js';
+// zx_20261029_1「知」: 项目须知是"模型读工作目录一次生成的代码仓快照"，与术语/画像不同源。
+import { loadProjectBrief, renderProjectBrief } from './project-brief.js';
 import { truncateHistoryTail, contentChars } from './context-compaction.js';
 import {
   buildBudgetContextBlock, classifyTaskGuidance, truncateCtx,
@@ -64,7 +67,11 @@ export const CONTEXT_BLOCK_ORDER = [
   'tool_brief',
   'user_prefs',
   'project_stable',
+  // zx_20261029_1「知」：须知随项目而稳（同仓不同任务逐字节相同），故留在稳定前缀内、紧随项目上下文。
+  'project_brief',
   'sandbox',
+  // zx_20261027_3 M4「批了就用」：人工批准的自我优化规则——与项目/任务无关，属稳定前缀。
+  'self_rules',
   // —— 稳定前缀结束 ——
   'autonomy',
   'tension',
@@ -82,7 +89,7 @@ export type ContextBlock = (typeof CONTEXT_BLOCK_ORDER)[number];
 
 /** 稳定前缀的块名（须是 `CONTEXT_BLOCK_ORDER` 的**严格前缀**；rr 逐项核对）。 */
 export const STABLE_PREFIX_BLOCKS = [
-  'system_prompt', 'tool_brief', 'user_prefs', 'project_stable', 'sandbox',
+  'system_prompt', 'tool_brief', 'user_prefs', 'project_stable', 'project_brief', 'sandbox', 'self_rules',
 ] as const satisfies readonly ContextBlock[];
 const LAST_STABLE_BLOCK: ContextBlock = STABLE_PREFIX_BLOCKS[STABLE_PREFIX_BLOCKS.length - 1];
 
@@ -211,6 +218,16 @@ export async function buildTaskContext(o: {
   const projectStable = projectCtx.slice(taskLine.length + 1);
   add('project_stable', truncateCtx(`<project-context>${projectStable}</project-context>`, CTX_PROJECT_MAX_CHARS, '项目上下文'));
 
+  // zx_20261029_1「知」：项目须知（模型读仓一次生成）。**按内容判**——`brief` 来自 `brief_json`，
+  //   重跑失败保留上一份成功须知；从未成功过 ⇒ 不出块（不让空壳占位）。渲染侧自带上限，只整行取舍。
+  try {
+    const stored = loadProjectBrief(db, projectId);
+    if (stored?.brief) {
+      const rendered = renderProjectBrief(stored.brief, stored.updatedAt);
+      if (rendered) add('project_brief', `<project-brief>\n${rendered}\n</project-brief>`);
+    }
+  } catch { /* 须知注入失败不影响执行 */ }
+
   // 沙箱模式感知（sandbox.getSandboxPrompt）
   try {
     const sandboxMode = (project?.sandbox_mode as string) || 'workspace';
@@ -218,6 +235,15 @@ export async function buildTaskContext(o: {
     const sandboxPrompt = getSandboxPrompt(sandboxMode as 'strict' | 'workspace' | 'off');
     if (sandboxPrompt) add('sandbox', sandboxPrompt);
   } catch {}
+
+  // zx_20261027_3 M4「批了就用」：人工批准的自我优化规则真进 system。
+  //   超预算**整条丢弃**（`buildSelfRulesBlock` 只整条取舍，绝不截半条），并如实记一行日志。
+  try {
+    const rules = readSelfEvolveRules(db);
+    const block = buildSelfRulesBlock(rules);
+    if (block.text) add('self_rules', block.text);
+    if (block.dropped > 0) logger.warn(`自我优化规则超出上下文预算，本次丢弃 ${block.dropped} 条（未截半条）`);
+  } catch { /* 规则注入失败不影响执行 */ }
 
   // A1.3: 自治模式感知（autonomous_mode + backlog 链）
   try {

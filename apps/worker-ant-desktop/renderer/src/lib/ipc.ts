@@ -38,6 +38,7 @@ import type { LicenseState } from '../../../src/main/core/license.js';
 import type { SeatUsage } from '../../../src/main/core/seat-quota.js';
 // zx_20261005 M22（Team 档软闸）: 面板据 `gate` 显示升级提示/禁用动作。仅类型引用 main 真源，打包期擦除。
 import type { TeamGate } from '../../../src/main/core/team-gate.js';
+import type { ProGate } from '../../../src/main/core/pro-gate.js';
 // zx_20261005 M11: 定价形状同引 main 侧真源（`core/pricing.ts`），不手抄镜像。
 import type { PricingPayload } from '../../../src/main/core/pricing.js';
 // zx_20261018_2 批五: 档位对照形状同引 main 侧真源（`core/tier-catalog.ts`），不手抄镜像。
@@ -45,7 +46,9 @@ import type { TierCatalogPayload } from '../../../src/main/core/tier-catalog.js'
 // zx_20261022_3 批九: 档位用量形状同引 main 真源（`core/tier-usage.ts`），不手抄镜像。
 import type { TierUsagePayload } from '../../../src/main/core/tier-usage.js';
 // zx_20261023_5 批五: 云端权益上屏形状同引 main IPC 真源（仅类型，打包期擦除——该文件运行期 import electron）。
-import type { CloudEntitlementPayload } from '../../../src/main/ipc/license.ipc.js';
+import type { CloudEntitlementPayload, ProFeatureGatePayload } from '../../../src/main/ipc/license.ipc.js';
+// zx_20261029_2 M6: 单项 Pro 能力的键（词表只在 main 落一处；渲染层只传键名，不手抄档位判断）。
+import type { ProFeature } from '../../../src/main/core/pro-gate.js';
 // zx_20261017_1 批七: 知识包预览/导出的返回形状同引 main 真源（仅类型，打包期擦除）。
 import type { KnowledgeInjectionStats, ProjectKnowledgePreview } from '../../../src/main/core/project-knowledge.js';
 import type { KnowledgeExportResult } from '../../../src/main/core/knowledge-export.js';
@@ -57,14 +60,18 @@ import type {
 } from '../../../src/main/core/knowledge-import.js';
 // zx_20261022_3 批八: 画像视图形状同引 main IPC 真源（仅类型，打包期擦除）。
 import type { KnowledgeProfileView } from '../../../src/main/ipc/knowledge.ipc.js';
+// zx_20261027_3 M6a: 知识卡成效形状同引 main core 真源（仅类型，打包期擦除）。
+import type { KnowledgeCardUsage } from '../../../src/main/core/knowledge-cards.js';
 // zx_20261021_3 批五: 领域包的资产/注入成效形状同引 main 真源（仅类型，打包期擦除）。
 import type { DomainPackListRow, DomainPackPayload, DomainPackStats } from '../../../src/main/core/domain-pack.js';
+// zx_20261030_1 M6「荐」: 相似项目条目与 main 侧同形（IPC 只传纯数据）。
+import type { SimilarProject } from '../../../src/main/core/project-similarity.js';
 // zx_20261014_4 批三: 「门」（外部 AI 终端接入）的返回形状取 main 侧真源——仅类型引用，打包期擦除。
 //   ⚠ 只 **type** 引 `core/external-*` 与 `ipc/external.ipc`（后者运行期 import electron ⇒ 只能类型引）。
 //   能力词表**不在渲染层手抄**（第二落点会漂）：随 `external:list` 的载荷由 main 送来。
 import type { PendingTerminalPublic, TerminalPublic } from '../../../src/main/core/external-terminals.js';
 import type { ExternalCallRow } from '../../../src/main/core/external-calls.js';
-import type { ExternalListPayload, InboundStatusPayload, LanPendingPayload } from '../../../src/main/ipc/external.ipc.js';
+import type { ExternalListPayload, InboundStatusPayload, LanPendingPayload, TerminalBrowseStatusPayload } from '../../../src/main/ipc/external.ipc.js';
 // zx_20261017_1 批二: 审计行的形状取 main 侧词表真源（仅类型，打包期擦除）。
 import type { AuditEventRow, AuditSource } from '../../../src/main/core/audit-labels.js';
 // zx_20261017_1 批六: 团队共享库的条目形状与候选形状取共享真源/main core（仅类型，打包期擦除）。
@@ -121,6 +128,31 @@ export const auth = {
 };
 
 // ===== Project =====
+/** zx_20261029_1「知」: 项目须知（IPC 边界只传纯数据，字段名与 main 侧 `ProjectBrief` 一致）。 */
+export interface ProjectBriefCommand { name: string; cmd: string }
+export interface ProjectBriefLayout { path: string; purpose: string }
+export interface ProjectBriefData {
+  summary: string;
+  stack: string[];
+  commands: ProjectBriefCommand[];
+  entry_points: string[];
+  layout: ProjectBriefLayout[];
+  conventions: string[];
+  gotchas: string[];
+}
+export interface ProjectBriefRecord {
+  projectId: string;
+  status: 'pending' | 'running' | 'ready' | 'failed';
+  brief: ProjectBriefData | null;
+  sourceHash: string;
+  error: string;
+  model: string;
+  tokensIn: number;
+  tokensOut: number;
+  trigger: string;
+  updatedAt: string;
+}
+
 export const projects = {
   list: () => ipcCall<Array<Record<string, unknown>>>('project:list'),
 
@@ -151,6 +183,13 @@ export const projects = {
 
   clone: (id: string, name?: string) =>
     ipcCall<Record<string, unknown>>('project:clone', { id, name }),
+
+  /** zx_20261029_1「知」: 读项目须知（含"仓库是否已变化"的真值，渲染层不自算指纹）。 */
+  brief: (id: string) =>
+    ipcCall<{ brief: ProjectBriefRecord | null; stale: boolean | null; workingDir: string }>('project:brief', { id }),
+
+  /** 手动重跑须知（入队即返，后台作业执行；结果轮询 `brief`）。 */
+  initBrief: (id: string) => ipcCall<{ accepted: boolean }>('project:initBrief', { id }),
 
   memories: (id: string, type?: string) =>
     ipcCall<{ list: Array<Record<string, unknown>>; counts: Array<Record<string, unknown>> }>('project:memories', { id, type }),
@@ -203,6 +242,9 @@ export const knowledge = {
   // zx_20261018_1 批七 R-66: 注入成效（真实注入行 → 归来结局），面板据此显示“注入 N 次 / 成功 M / 失败 K”。
   stats: (projectId: string) =>
     ipcCall<KnowledgeInjectionStats>('knowledge:stats', { projectId }),
+  // zx_20261027_3 M6a: 知识卡 + 每张卡的结局账（注入 N / 成 M / 败 K）。
+  cards: (projectId: string) =>
+    ipcCall<KnowledgeCardUsage[]>('knowledge:cards', { projectId }),
   // zx_20261022_3 批七: 导入（挂 Pro 闸；拒因以 `FEATURE_REQUIRED` 原样上屏，解析错以解析码上屏）。
   import: (projectId: string, filePath: string, mode: KnowledgeImportMode) =>
     ipcCall<KnowledgeImportResult>('knowledge:import', { projectId, filePath, mode }),
@@ -216,7 +258,23 @@ export const knowledge = {
     ipcCall<KnowledgeProfileView>('knowledge:profileGenerate', { projectId }),
   profileEnabled: (projectId: string, enabled: boolean) =>
     ipcCall<KnowledgeProfileView>('knowledge:profileEnabled', { projectId, enabled }),
+  // zx_20261030_1 M6「荐」: 增量水位——未吸收事件数（只读）/ 手动吸收（水位成功才前移）/ 相似项目（只展示）。
+  unabsorbed: (projectId: string) =>
+    ipcCall<{ count: number; lastEventId: number; lastRunAt: string; lastEventAt: string }>('knowledge:unabsorbed', { projectId }),
+  absorbNow: (projectId: string) =>
+    ipcCall<KnowledgeAbsorbReceipt>('knowledge:absorb-now', { projectId }),
+  similarProjects: (projectId: string) =>
+    ipcCall<{ projects: SimilarProject[] }>('knowledge:similar-projects', { projectId }),
 };
+
+/** 手动吸收回执（与 main 侧 `knowledge:absorb-now` 返回同形；数如实上屏）。 */
+export interface KnowledgeAbsorbReceipt {
+  absorbedEvents: number;
+  sections: number;
+  cards: number;
+  candidatePackId: string | null;
+  remaining: number;
+}
 
 // ===== Domain pack（zx_20261021_3 批五）=====
 // 生成/启用挂 Pro 闸（拒因原样以 `FEATURE_REQUIRED` 上屏）；撤销不挂闸；导入≠启用。
@@ -231,6 +289,11 @@ export const packs = {
   unapply: (projectId: string, packId: string) =>
     ipcCall<{ removed: boolean }>('packs:unapply', { projectId, packId }),
   stats: (projectId: string) => ipcCall<DomainPackStats>('packs:stats', { projectId }),
+  // zx_20261030_1 M6「荐」: 系统建议的候选包（未启用、可拒绝）与「忽略」。
+  suggested: (projectId: string) =>
+    ipcCall<{ packs: DomainPackListRow[] }>('packs:suggested', { projectId }),
+  dismiss: (packId: string) =>
+    ipcCall<{ dismissed: boolean }>('packs:dismiss', { packId }),
 };
 
 // ===== Task =====
@@ -290,7 +353,8 @@ export const tasks = {
 
   inject: (id: string, text: string) => ipcCall<{ id: string; status: string; injected?: boolean }>('task:inject', { id, text }),
 
-  delete: (id: string) => ipcCall<{ id: string; deleted: boolean }>('task:delete', { id }),
+  // zx_20261027_2: 删除返回的是整棵子树（含根），`deletedIds` 为实际删净的任务 id。
+  delete: (id: string) => ipcCall<{ id: string; deleted: boolean; deletedIds?: string[] }>('task:delete', { id }),
 
   update: (id: string, body: { title?: string; description?: string; priority?: number; acceptance_criteria?: string; depends_on?: string }) =>
     ipcCall<Record<string, unknown>>('task:update', { id, ...body }),
@@ -465,7 +529,9 @@ export const templates = {
   test: (title: string, description?: string) =>
     ipcCall<{
       matched: { id: string; name: string; category: string; priority: number; success_rate: number | null; hitKeywords: string[]; method?: string; similarity?: number | null; field?: 'title' | 'description' | ''; subtaskCount: number } | null;
-      skip: 'explicit_subtasks' | 'planning_intent' | null;
+      skip: 'explicit_subtasks' | 'planning_intent' | 'repair_intent' | null;
+      /** 语义兜底门槛（主进程 `TEMPLATE_SEMANTIC_MIN_SIMILARITY` 的投影——界面文案不得手抄数字） */
+      semanticMinSimilarity: number;
     }>('template:test', { title, description }),
 };
 
@@ -537,6 +603,13 @@ export interface AnsPage<T> { rows: T[]; total: number; limit: number | null; of
 // 形状取自共享真源 `packages/shared-types/src/nodes.ts`（`AnsNode`/`NodePatch`），不在此手抄镜像。
 /** `nodes:list`：群蚁一屏。`error` 非空 = 读不到 ANS，界面如实说原因而非报空。`gate` 见 M22 软闸。 */
 export interface NodesListPayload { nodes: AnsNode[]; localNodeId: string; gate: TeamGate; error?: string; /** zx_20261011_3: 读台账失败的 HTTP 状态码（传输层失败为 0）——与 main 侧 `NodesListPayload` 同形。 */ errorStatus?: number; }
+/**
+ * zx_20261030_1 M4「认」: 集群一屏（本机 + 对端汇总）。形状取 main 纯函数真源
+ *   （`core/node-cluster.ts`，零 IO ⇒ 渲染层可运行期引它的判据/词表，不手抄镜像）。
+ */
+export type { ClusterNode, ClusterTotals, ClusterView } from '../../../src/main/core/node-cluster.js';
+import type { ClusterView } from '../../../src/main/core/node-cluster.js';
+export interface NodesClusterPayload extends ClusterView { gate: TeamGate; }
 /** `nodes:card`：本机台账行（M6「自知者明」）。`node=null` 且无 `error` = 本机尚未注册。 */
 export interface NodeCardPayload { localNodeId: string; node: AnsNode | null; gate: TeamGate; error?: string; }
 /** `nodes:requests`：AI 终端调用记录（M13）。纯本地读（`wa_event_log` 聚合），不触网。 */
@@ -560,12 +633,16 @@ export interface NodeDispatchesPayload { records: NodeDispatchRecord[]; }
 export interface OrchestrateModePayload { mode: string; modes: string[]; }
 /**
  * zx_20261017_1 批三: `nodes:auto-dispatch`：**建单即派**开关 + 最近一次自动外派（审计账投影）。
- *   `enabled` 缺省关（main 只认显式 `'1'`）；`last` 为 `null` 即还没有过自动外派（不是"派失败"）。
+ * zx_20261029_2 M7：开关变**三态策略**——`policy.source='default'` 即"Team 已解锁且已入网，替你默认开"，
+ *   此时只在满负荷时溢出；`'explicit'` 是用户自己设的。`policy.reason` 是给界面直接上屏的一句话。
+ *   `last` 为 `null` 即还没有过自动外派（不是"派失败"）。
  */
 export interface LastAutoDispatchPayload { at: string; nodeId: string; requestId: string; category: string; }
+export interface AutoDispatchPolicyPayload { source: 'explicit' | 'default'; reason: string; }
 export interface AutoDispatchPayload {
   enabled: boolean;
-  /** 一次性引导是否已问过（zx_20261018_1 批一）——`false` 且 Team 已入网时，面板弹一次确认。 */
+  policy: AutoDispatchPolicyPayload;
+  /** 一次性告知是否已说过（zx_20261018_1 批一；M7 起语义为"告知"而非"询问"）。 */
   prompted: boolean;
   last: LastAutoDispatchPayload | null;
 }
@@ -610,6 +687,8 @@ import type { DispatchBoardPayload, DispatchReasonView } from '../../../src/main
 
 export const nodes = {
   list: () => ipcCall<NodesListPayload>('nodes:list'),
+  /** zx_20261030_1 M4: 集群一屏（在线/运行中/排队/满载 + 逐节点详情）。 */
+  cluster: () => ipcCall<NodesClusterPayload>('nodes:cluster'),
   /** 协同面板三分组：可派 / 等待依赖 / 上游已死（与真派同一把尺）。 */
   dispatchBoard: () => ipcCall<DispatchBoardPayload>('nodes:dispatch-board'),
   update: (nodeId: string, patch: NodePatch) => ipcCall<AnsNode>('nodes:update', { nodeId, patch }),
@@ -629,13 +708,16 @@ export const nodes = {
   dispatchResult: (id: string) => ipcCall<DispatchReadResult>('nodes:dispatch-result', { id }),
   // zx_20261011_1 M4（双向澄清）: 作答被派方的一问（**写口**，过 Team 软闸）。
   answerQuestion: (id: string, answer: string) => ipcCall<DispatchReadResult>('nodes:answer-question', { id, answer }),
+  // zx_20261030_1 M3「止」: 派活方叫停一单（**写口**，过 Team 软闸）。
+  //   回来的 `request.status` 是真实处置：`cancelled`=已停；仍在跑=`已请求，待对端在检查点真停`。
+  cancelDispatch: (id: string) => ipcCall<DispatchReadResult>('nodes:request-cancel', { id }),
   // zx_20261011_4 M4: 编排模式读/写（本机设置 `node.orchestrate_mode`；读口随带词表，写口非法值如实拒）。
   orchestrateMode: () => ipcCall<OrchestrateModePayload>('nodes:orchestrate-mode'),
   setOrchestrateMode: (mode: string) => ipcCall<{ mode: string }>('nodes:set-orchestrate-mode', { mode }),
-  // zx_20261017_1 批三: 建单即派读/写（本机设置 `node.auto_dispatch_on_create`，**缺省关**）。
+  // zx_20261017_1 批三: 建单即派读/写（本机设置 `node.auto_dispatch_on_create`；M7 起三态：显式/缺省）。
   autoDispatch: () => ipcCall<AutoDispatchPayload>('nodes:auto-dispatch'),
   setAutoDispatch: (enabled: boolean) => ipcCall<{ enabled: boolean }>('nodes:set-auto-dispatch', { enabled }),
-  /** 首次入网后的**一次性引导**回答（Team 已解锁才可达；拒绝也算回答，不再打扰）。 */
+  /** 首次满足条件时的**一次性告知**应答（`true`=知道了保持开启、`false`=一键关闭；Team 已解锁才可达）。 */
   confirmAutoDispatch: (accept: boolean) => ipcCall<{ enabled: boolean; prompted: boolean }>('nodes:confirm-auto-dispatch', { accept }),
 };
 
@@ -674,11 +756,16 @@ export const external = {
   lanRequest: (lanId: string) => ipcCall<{ pairingId: string; pairCode: string }>('external:lanRequest', { lanId }),
   /** 「忽略」：24 小时静默（不落终端台账——拒绝的是"出现"，不是"进门申请"）。 */
   lanIgnore: (lanId: string) => ipcCall<{ ok: true; silencedForMs: number }>('external:lanIgnore', { lanId }),
+  /**
+   * zx_20261029_2 M4：常驻发现的实况（只读）——不再由本页首调 `lanList` 兼任"开关"。
+   * `running` 真在跑；未跑的原因分开如实说（`locked` / `door_open=false` / `error`）。
+   */
+  lanStatus: () => ipcCall<TerminalBrowseStatusPayload>('external:lanStatus'),
 };
 
 // ===== Devices（设备面板，zx_20261004 M9/M10）=====
 // 形状取自 main 侧零依赖语义模块 `device-registry.ts`（`AnsDevice`/`DeviceActionRow`/`DeviceControlOutcome`）。
-/** `devices:list`：台账 + 最近审计 + 发现是否在跑 + Team 档软闸（M22，面板据此禁用动作）。 */
+/** `devices:list`：台账 + 最近审计 + 发现是否在跑 + 两档软闸（M22 Team 控制 / M6 Pro 发现）。 */
 export interface DevicesListPayload {
   devices: AnsDevice[];
   actions: DeviceActionRow[];
@@ -687,7 +774,14 @@ export interface DevicesListPayload {
   /** zx_20261016_2 批三: `actor_ref` ⇒ 终端名（外部终端路来的留痕；**读时现查**，查无不进表）。 */
   terminalRefs: Record<string, string>;
   discoveryRunning: boolean;
+  /** Team 闸（控制）：授权/控制/意图执行。 */
   gate: TeamGate;
+  /** zx_20261029_2 M6: Pro 闸（发现/渠道接入）。 */
+  discoveryGate: ProGate;
+  /** zx_20261030_1 M5「限」：设备登记容量（`limit === 0` ⇒ 不限）；只拦新登记。 */
+  capacity?: { used: number; limit: number };
+  /** 本进程内因容量上限被挡下的首次发现数（非史实，重启归零）。 */
+  capacityRefusals?: { count: number; lastAt: string | null };
 }
 /**
  * zx_20261017_1 批八: 三方云（涂鸦）配置态。
@@ -710,12 +804,18 @@ export interface IntentPreviewPayload {
   expiresIn: number;
   steps: IntentStep[];
   skipped: IntentSkip[];
+  /** zx_20261029_2 M2: 计划由谁排出（`rule` 规则表 / `model` 模型兜底）。 */
+  source?: 'rule' | 'model';
+  /** 与 `source` 同源的人话标签（`规则解析` / `模型辅助解析`）。 */
+  sourceLabel?: string;
 }
 
 /** zx_20261023_5 批三：渠道目录回包（**锁定的渠道不在 `channels` 里**——列表即权限）。 */
 export interface DeviceChannelsPayload {
   channels: DeviceChannel[];
   gate: TeamGate;
+  /** zx_20261029_2 M6: 渠道接入归 Pro——向导据此显示"需要专业版"而不是"团队版"。 */
+  discoveryGate: ProGate;
 }
 /** zx_20261023_5 批三：渠道预检回包（`verdict.ok:false` 的 `reason` 直接上屏）。 */
 export interface DeviceChannelAuthPayload {
@@ -723,12 +823,31 @@ export interface DeviceChannelAuthPayload {
   verdict: ChannelAuthorize;
   hasCredentials: boolean;
   gate: TeamGate;
+  discoveryGate: ProGate;
 }
 /** zx_20261023_5 批三：miIO token 状态——**只有"有没有/是否密文"**，token 永不回渲染层。 */
 export interface MiioTokenState {
   hasValue: boolean;
   encrypted: boolean;
   cipherAvailable: boolean;
+}
+/**
+ * zx_20261027_3 M1b：状态直查回包——只覆盖 `cloud`/`miio`（MQTT/HA 有实时订阅，不重复轮询）。
+ * `ok:false` 逐条带 `error`；`written:false` 表示**没有写回**（旧快照保持原样，不冒充此刻）。
+ */
+export interface DeviceStateRefreshPayload {
+  refreshed: Array<{
+    deviceId: string;
+    name: string;
+    protocol: string;
+    ok: boolean;
+    unsupported?: boolean;
+    error?: string;
+    state: Record<string, unknown> | null;
+    source: string;
+    written?: boolean;
+  }>;
+  skipped: Array<{ id: string; name: string; protocol: string; reason: string }>;
 }
 /** 意图执行的逐步结果（`ok`=全成；任一步失败如实列在 `steps` 里，不回滚）。 */
 export interface IntentExecutePayload {
@@ -743,6 +862,8 @@ export const devices = {
   discover: () => ipcCall<{ discoveryRunning: boolean; mqttEnabled?: boolean; haEnabled?: boolean; mqttErrors?: string[] }>('devices:discover'),
   stop: () => ipcCall<{ discoveryRunning: boolean }>('devices:stop'),
   authorize: (deviceId: string, authorized: boolean) => ipcCall<AnsDevice>('devices:authorize', { deviceId, authorized }),
+  // zx_20261027_3 M1b: 状态直查（只 cloud/miIO；页面可见时 30s 一次 + 手动刷新同一入口）。
+  refreshStates: () => ipcCall<DeviceStateRefreshPayload>('devices:refresh_states'),
   // zx_20261014_1 批二: 改名——写 `wa_devices.alias`（"我叫它什么"）；空串=清除别名（回到自述名）。
   rename: (deviceId: string, alias: string) => ipcCall<AnsDevice>('devices:rename', { deviceId, alias }),
   // zx_20261018_1 批三: 指派房间——写 `wa_devices.room`（显式数据）；空串=清除（回到未分配）。
@@ -791,6 +912,8 @@ export const license = {
   cloud: () => ipcCall<CloudEntitlementPayload>('license:cloud'),
   /** 手动重拉一次（main 侧 5 秒有界、失败 fail-open）；`reason` 为本次如实原因。 */
   cloudRefresh: () => ipcCall<CloudEntitlementPayload & { reason: string | null }>('license:cloud_refresh'),
+  /** zx_20261029_2 M6: 单项 Pro 能力只读裁定（面板先禁用，不让用户点了才看报错）。 */
+  proFeature: (feature: ProFeature) => ipcCall<ProFeatureGatePayload>('license:pro_feature', feature),
   /** 应用版本（唯一真源 `app.getVersion()`）。 */
   appVersion: () => ipcCall<string>('app:version'),
 };

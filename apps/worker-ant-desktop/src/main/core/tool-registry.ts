@@ -93,9 +93,10 @@ export class ExploreQuotaLedger {
 }
 
 /**
- * 63 个工具的元数据表（zx_20260914 M2-5b 订正：原写 `47`，已漂移 9 个；M3-1 新增 `list_skills` → 56+1；
+ * 64 个工具的元数据表（zx_20260914 M2-5b 订正：原写 `47`，已漂移 9 个；M3-1 新增 `list_skills` → 56+1；
  * zx_20260921 M5 新增 `view_image` / `read_document` → 57+2；zx_20261004 M8 新增
- * `list_devices` / `device_status` / `device_control` → 59+3；zx_20261018_1 批五新增 `device_intent` → 62+1）。
+ * `list_devices` / `device_status` / `device_control` → 59+3；zx_20261018_1 批五新增 `device_intent` → 62+1；
+ * zx_20261030_2 M3 新增 `await_subagents` → 63+1）。
  *
  * `list_skills` 须在册：`toolRegistry.listReadOnlyNames()` 供 Step1 只读工具集派生（agent-executor），
  * 缺登即被剔出只读步——而「开跑第一步先看看有哪些技能」正是只读步最需要的场景。
@@ -228,6 +229,8 @@ export const TOOL_METAS: ToolMeta[] = [
   { name: 'list_skills', category: 'resource', isReadOnly: true, permissionLevel: 'normal', description: '列出可用技能（含来源分类）' },
   { name: 'skill', category: 'resource', isReadOnly: false, permissionLevel: 'normal', description: '执行技能' },
   { name: 'spawn_subagent', category: 'resource', isReadOnly: false, permissionLevel: 'normal', description: '派生子代理' },
+  // zx_20261030_2 M3：等待子代理到站（会置任务 paused ⇒ 非只读）。
+  { name: 'await_subagents', category: 'resource', isReadOnly: false, permissionLevel: 'normal', description: '等待子代理到站（子全完成后自动恢复）' },
   { name: 'spawn_debate', category: 'resource', isReadOnly: false, permissionLevel: 'normal', description: '发起辩论' },
   { name: 'recruit_swarm', category: 'resource', isReadOnly: false, permissionLevel: 'normal', description: '招募协作组' },
 

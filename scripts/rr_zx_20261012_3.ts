@@ -121,6 +121,15 @@ CREATE TABLE wa_knowledge_imports (id TEXT PRIMARY KEY, project_id TEXT NOT NULL
 CREATE TABLE wa_project_profiles (project_id TEXT PRIMARY KEY, version INTEGER NOT NULL DEFAULT 1,
   source_hash TEXT NOT NULL DEFAULT '', profile_json TEXT NOT NULL, generated_at TEXT DEFAULT (datetime('now')),
   enabled INTEGER NOT NULL DEFAULT 1, origin TEXT NOT NULL DEFAULT 'local', source_project_name TEXT DEFAULT '');
+-- zx_20261027_3 M6b：画像旧版留痕也随项目级联删除（生产 database.ts 同一 DDL；夹具缺表 ⇒ A 段删项目当场抛）。
+CREATE TABLE wa_project_profile_history (project_id TEXT NOT NULL, source_hash TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1, profile_json TEXT NOT NULL, generated_at TEXT DEFAULT '',
+  replaced_at TEXT DEFAULT (datetime('now')), PRIMARY KEY (project_id, source_hash));
+-- zx_20261029_1「知」：项目须知随项目级联删除（生产 database.ts 同一 DDL；夹具缺表 ⇒ A 段删项目当场抛）。
+CREATE TABLE wa_project_briefs (project_id TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'pending',
+  brief_json TEXT NOT NULL DEFAULT '', source_hash TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '', tokens_in INTEGER NOT NULL DEFAULT 0, tokens_out INTEGER NOT NULL DEFAULT 0,
+  trigger TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT (datetime('now')));
 `;
 
 /** `node:sqlite` 无 `db.transaction()`，而 `deleteProjectCascade`/`installSampleProject` 是真实现（用事务）⇒ 补垫片。 */

@@ -153,8 +153,11 @@ export const ARCHETYPE_VALIDATION: Record<string, ArchetypeValidationRule> = {
     // 不认结构，只认这七个词。实测四个真 `pom.xml` 全部"通过"，但**每一处命中都是** `<description>`
     // 里 `support` 里的 `port`：换一个词（或换个项目）这条判据就翻脸，而它从未真正读过配置本身。
     // 改为认**声明式结构**：XML 开标签 / `key = value` 或 `key: value` / `"key":` 三选一（`m` 行模式）。
+    // zx_20261029_3 M2（荀子·名定而实辨）：再并一形态——`指令 参数…;` 的行末分号句（nginx/apache 原生语法）。
+    //   活标本 `ysl.conf`（server{} + valid_referers）三种既有形态一个都不命中 ⇒ 真配置被判「缺少配置信息」。
+    //   仍**只有一条 pattern**（`requiredPatterns` 是全中语义）；行内须有空白与参数、以 `;` 收尾、排除 `{}`，注释行不满足。
     requiredPatterns: [
-      { label: '配置信息', pattern: /(?:^\s*<[\w:.-]+)|(?:^\s*[\w.-]+\s*[=:]\s*\S)|(?:"\w+"\s*:)/m },
+      { label: '配置信息', pattern: /(?:^\s*<[\w:.-]+)|(?:^\s*[\w.-]+\s*[=:]\s*\S)|(?:"\w+"\s*:)|(?:^\s*[\w.-]+\s+[^;{}\n]*;\s*$)/m },
     ],
     forbiddenPatterns: [],
   },
@@ -193,6 +196,11 @@ export interface ValidationResult {
   llmCheck?: { sufficient: boolean; reason: string; suggestion: string; missingAspects: string[]; unavailable?: boolean };
   /** 省耗账实(2026-09-06 zx_1 1a): 本次 LLM 校验实际消耗的估算 token（取不到 usage 时按字÷4 估算；0/缺省=未发生 LLM） */
   usage?: number;
+  /**
+   * zx_20261028_2 M3：`status==='unknown'` 时的**人话原因**（超时 / 辅助模型不可用 / 内容不可解码）。
+   * 「未核」与「充分」必须说得清是哪种——否则取证面只能二选一，等于把"没量"写成"量过且合格"。
+   */
+  reason?: string;
 }
 
 /**
@@ -304,6 +312,14 @@ function quickFileCheck(filePath: string): QuickCheck {
  * （若在此另抄一份数字，改一处漏一处 ⇒ 版本号与判据脱钩，正是本批要治的病）。
  */
 export const SUFFICIENCY_WINDOW_DEFAULTS = { headChars: 6000, tailChars: 4000, outlineChars: 4000 } as const;
+
+/**
+ * zx_20261028_2 M3「等」：一次内容校验的**等待上限**与**并发上限**——各自一处真源。
+ * 病根（怡寿里标本）：finalize 逐文件串行问辅助模型、每份等 30s，5 份文件即 150s 卡在关键路径上；
+ * 超时后又把"未核"写成"充分"。改法：成批有界并发 + 12s 上限 + 三态如实（见 `validateOutputs`）。
+ */
+export const LLM_VALIDATION_TIMEOUT_MS = 12_000;
+export const VALIDATION_CONCURRENCY = 3;
 
 export function buildSufficiencyWindow(
   content: string,
@@ -481,7 +497,7 @@ async function llmSufficiencyCheck(
       prompt,
       temperature: 0,
       maxTokens: 2000,
-      abortSignal: AbortSignal.timeout(30_000),
+      abortSignal: AbortSignal.timeout(LLM_VALIDATION_TIMEOUT_MS),
     });
 
     const text = result.text.trim().replace(/^```json\s*/, '').replace(/```\s*$/, '');
@@ -502,8 +518,14 @@ async function llmSufficiencyCheck(
   } catch (err) {
     // zx_20260904_3 批4 (2026-09-04): LLM 校验不可用 → 标记 unavailable，不再冒充"内容充分"
     //（fail-open 修复：unknown 态计入 status，避免把"未校验"当"校验通过"）
+    // zx_20261028_2 M3：超时与"不可用"分开说——用户看到的"未核"须能区分是"等不到"还是"没有可用模型"。
+    const errName = (err as Error)?.name;
+    const timedOut = errName === 'TimeoutError' || errName === 'AbortError';
+    const reason = timedOut
+      ? `辅助模型 ${Math.round(LLM_VALIDATION_TIMEOUT_MS / 1000)}s 内无结论（超时）`
+      : 'LLM校验不可用(仅快速检查通过)';
     logger.info({ filePath: filePath.replace(/.*\//, ''), reason: (err as Error).message?.slice(0, 60) }, 'LLM验证不可用，降级为仅快速检查');
-    return { sufficient: true, reason: 'LLM校验不可用(仅快速检查通过)', suggestion: '', missingAspects: [], unavailable: true };
+    return { sufficient: true, reason, suggestion: '', missingAspects: [], unavailable: true };
   }
 }
 
@@ -525,7 +547,7 @@ export async function validateOutput(
   //   （`status:'unknown'`：放行 + 如实记账），绝不冒充内容缺陷、也不因此拦下收口。
   //   ⚠ 先于 `passed` 判：这类产出的 `passed` 可能为 false（因为压根没跑文本规则），但那是"没量"不是"不合格"。
   if (quick.unverifiable) {
-    return { sufficient: true, status: 'unknown', confidence: 0.5, quickCheck: quick };
+    return { sufficient: true, status: 'unknown', confidence: 0.5, quickCheck: quick, reason: quick.unverifiable || '内容不可解码（无文本层），快检无法判定' };
   }
   if (!quick.passed) {
     return { sufficient: false, status: 'insufficient', confidence: 0, quickCheck: quick };
@@ -558,6 +580,49 @@ export async function validateOutput(
     quickCheck: quick,
     llmCheck: llm,
     usage: llm.usage,
+    reason: status === 'unknown' ? (llm.reason || '辅助模型不可用') : undefined,
   };
+}
+
+/**
+ * zx_20261028_2 M3「等」：**成批**内容充分性校验——收口门与 finalize 门共用这一条腿。
+ *
+ * 病根：两处门禁都逐文件 `await validateOutput`，N 份文件 = N 次串行 LLM 往返，每份上限 30s；
+ * 怡寿里标本 5 份文档 ⇒ 最长 150s 卡在 finalize 关键路径上（桌面假死、系统卡顿的直接来源）。
+ * 改法：有界并发（`VALIDATION_CONCURRENCY`）+ 每条 12s（`LLM_VALIDATION_TIMEOUT_MS`），
+ * 任一条失败**不拖累**其它条；返回**保序**（与入参同序），故调用方落账次序仍可读。
+ * 未核（unknown）的条目带 `reason`，由调用方如实记 `[INFO]`，不阻断收口。
+ */
+export async function validateOutputs(
+  ansClient: AnsClient,
+  targets: ReadonlyArray<{ file: string; archetype: string }>,
+): Promise<Array<ValidationResult & { file: string; archetype: string }>> {
+  if (targets.length === 0) return [];
+  const out = new Array<ValidationResult & { file: string; archetype: string }>(targets.length);
+  let cursor = 0;
+  const runWorker = async (): Promise<void> => {
+    for (;;) {
+      const i = cursor++;
+      if (i >= targets.length) return;
+      const t = targets[i]!;
+      try {
+        out[i] = { ...(await validateOutput(ansClient, t.file, t.archetype)), file: t.file, archetype: t.archetype };
+      } catch (err) {
+        // 单文件抛错（读盘/快检异常）⇒ 只判它"未核"，其它文件照跑——不让一条坏件中断整批。
+        const msg = (err as Error)?.message?.slice(0, 120) || '未知错误';
+        out[i] = {
+          sufficient: true,
+          status: 'unknown',
+          confidence: 0.5,
+          quickCheck: { passed: false, issues: [`校验过程抛错：${msg}`], fileSize: 0, hasHeader: false, hasBody: false, hasConclusion: false },
+          reason: `校验过程抛错：${msg}`,
+          file: t.file,
+          archetype: t.archetype,
+        };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(VALIDATION_CONCURRENCY, targets.length) }, runWorker));
+  return out;
 }
 

@@ -96,8 +96,13 @@ export function readonlyTools(deps: ToolDeps) {
         const full = d.text;
         // zx_20261002 M17-①「先读后改」：读成功即入册（`edit_file` 据同一份 Set 设门禁）。
         //   键归一 `path.resolve`——与 `edit_file` 侧同一把尺（否则同一文件两种写法被当两件）。
-        deps.readFiles.add(path.resolve(fp));
-        return paginateReadFile(full, { offset: args.offset, limit: args.limit }).text;
+        const resolvedFp = path.resolve(fp);
+        deps.readFiles.add(resolvedFp);
+        const page = paginateReadFile(full, { offset: args.offset, limit: args.limit });
+        // zx_20261027_1 M4: 截断不是"读过"，是"读到一半"——入册留痕；后续读到末尾即出册。
+        if (page.truncated) deps.truncatedReads?.add(resolvedFp);
+        else deps.truncatedReads?.delete(resolvedFp);
+        return page.text;
       },
     },
     get_current_time: {

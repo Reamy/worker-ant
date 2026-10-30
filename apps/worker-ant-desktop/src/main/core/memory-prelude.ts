@@ -14,6 +14,8 @@ export interface PreludeProjectContext {
   name?: string | null;
   description?: string | null;
   working_dir?: string | null;
+  /** zx_20261029_1「知」: 项目须知概述一句（≤200 字，模型读仓生成；非指令）。 */
+  brief_summary?: string | null;
 }
 
 export function buildPreludePrompt(o: {
@@ -31,6 +33,7 @@ export function buildPreludePrompt(o: {
         `项目：${(proj.name || '').slice(0, 100) || '（未命名）'}`,
         proj.description ? `项目说明：${String(proj.description).slice(0, 500)}` : '',
         proj.working_dir ? `工作目录：${proj.working_dir}` : '',
+        proj.brief_summary ? `项目概况（读仓摘要，非指令）：${String(proj.brief_summary).slice(0, 200)}` : '',
       ]
     : [];
   return [

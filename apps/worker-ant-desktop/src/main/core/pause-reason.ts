@@ -190,6 +190,20 @@ export function recordedPauseReason(contextJson: string | null | undefined): str
   }
 }
 
+/**
+ * zx_20261028_1 M5：账上记的**暂停附注**（`$.pause_note`，`control.ts` 与 `pauseTask.extraContext` 写入）；
+ * 无记录返回空串——**不编注**。与 `recordedPauseReason` 同形，是渲染层读这一格的**唯一读点**
+ * （词表第二个落点不得手抄键名）。
+ */
+export function recordedPauseNote(contextJson: string | null | undefined): string {
+  try {
+    const n = (JSON.parse(contextJson || '{}') as { pause_note?: unknown }).pause_note;
+    return typeof n === 'string' ? n.trim() : '';
+  } catch {
+    return '';
+  }
+}
+
 /** 该任务的暂停是否属「等子任务」——调度器唯一读点 */
 export function isChildrenIncompletePause(contextJson: string | null | undefined): boolean {
   return recordedPauseReason(contextJson) === PAUSE_REASON_CHILDREN_INCOMPLETE;

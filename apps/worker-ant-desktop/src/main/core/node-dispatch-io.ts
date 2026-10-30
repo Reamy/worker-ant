@@ -70,5 +70,14 @@ export function makeAnsDispatchIo(db: Database.Database): DispatchIo {
       if (!r.ok) { const note = ansFailureNote(r); noteOnce('answer', note); throw new Error(note); }
       return readData(r, 'answer');
     },
+
+    // zx_20261030_1 M3: 派活方叫停——`POST /requests/:id/cancel`，ANS 侧按**请求方身份**鉴权（同 answer）。
+    //   处置按该单此刻的真实状态由 ANS 定（pending ⇒ 立即 cancelled；在跑 ⇒ 只置叫停标志）；
+    //   本机只如实转达它回来的那个状态，不假设"点了就停"。
+    async cancel(id: string): Promise<AnsNodeRequest> {
+      const r = await ansSignedRequest(resolveAnsCreds(credsDb), `/api/v1/nodes/requests/${encodeURIComponent(id)}/cancel`, { method: 'POST' });
+      if (!r.ok) { const note = ansFailureNote(r); noteOnce('cancel', note); throw new Error(note); }
+      return readData(r, 'cancel');
+    },
   };
 }

@@ -64,11 +64,12 @@ import { proFeatureRefusal } from './pro-gate.js';
 // zx_20261018_2 批一：`view_image` 的视觉子调用（盘上图 → 视觉模型 → 文字观察）。
 //   住独立模块（零 electron 静态依赖、生成走动态 import）⇒ rr 注入桩可直跑真实现。
 import { makeImageDescriber } from './image-describe.js';
-import { decideAcceptanceOutcome, recordAcceptanceOutcome, recordProposedCheck, proposeAcceptanceCriteria, criteriaSourceOf, toAcceptanceSummary, acceptanceVerdictOf, capScoreByAcceptanceVerdict, UNVERIFIED_REASON_LABEL, type AcceptanceOutcome, type AcceptanceCheckPayload, type AcceptanceSummary, type AcceptanceVerdict, type ProposedCriteria } from './acceptance-check.js';
+import { decideAcceptanceOutcome, recordAcceptanceOutcome, recordProposedCheck, proposeAcceptanceCriteria, criteriaSourceOf, toAcceptanceSummary, acceptanceVerdictOf, capScoreByAcceptanceVerdict, summarizeAcceptanceFailures, UNVERIFIED_REASON_LABEL, type AcceptanceOutcome, type AcceptanceCheckPayload, type AcceptanceSummary, type AcceptanceVerdict, type ProposedCriteria } from './acceptance-check.js';
 import { formatOptions, formatAwaitingInputMessage } from './im/options.js';
 import type { MemoryManager, MemoryEntry } from './memory-manager.js';
 import { buildMemoryContext, memoryConfTag, dropMemorySections } from './memory-context.js';
 import { createLogger } from './logger.js';
+import { describeExecutionError } from './exec-error.js';
 // zx_20261018_1 批七「账」：七源分账 / 上下文预算 / `execution_metrics` 唯一写口。
 import { ledgerFromChars, withSourceChars, type TokenLedger, type TokenChars } from './token-ledger.js';
 import { applyContextBudget } from './context-budget.js';
@@ -91,7 +92,8 @@ import { shellTools } from './tools/shell.js';
 import { memoryTools } from './tools/memory.js';
 import { resourceTools } from './tools/resource.js';
 import { deviceTools } from './tools/device.js';
-import { classifyArchetype, classifyArchetypeKeyword, classifyByFamilyResemblance, FAMILY_REPRESENTATIVES, getAdaptiveStrategy, ARCHETYPE_BUDGETS, applyPriorityTilt, determineExecutionMode, applyExecutionMode, assessComplexity, narrowToolFace, buildToolFaceBrief, buildUnavailableNotice, applyArchetypeFloor, type TaskArchetype } from './task-archetype.js';
+import { classifyArchetypeDetailed, classifyArchetypeKeyword, classifyByFamilyResemblance, FAMILY_REPRESENTATIVES, getAdaptiveStrategy, ARCHETYPE_BUDGETS, applyPriorityTilt, determineExecutionMode, applyExecutionMode, assessComplexity, narrowToolFace, applySubagentToolScope, buildToolFaceBrief, buildUnavailableNotice, applyArchetypeFloor, type TaskArchetype, type ArchetypeDecision } from './task-archetype.js';
+import { getSubagentType } from './subagent-registry.js';
 import { getLearnedStrategy, naturalStrategySelection, adjustProjectStrategy, recordStrategyOutcome, getToolUsageHint, getProjectThresholds, type ExecutionMetrics } from './feedback-engine.js';
 import { auditWorldConsistency, generateFactSnapshot, listFilesWrittenSince } from './world-snapshot.js';
 import { resolveMaxSteps, stepsCapReached, buildStepCapNote, budgetCapReached, grantStepBudgetOnCapHit, stepCapContinuationOf, buildStepContinuationNote } from './step-budget.js';
@@ -220,12 +222,32 @@ export function archetypeForFile(filePath: string): 'document' | 'code' | 'confi
  *   新增档位时这里静默读不出，回落路径悄悄生效而无人知（正是"契约散两处"的病根）。
  */
 export function pinnedArchetype(contextJson: unknown): TaskArchetype | null {
+  return resolvePinnedArchetype(contextJson)?.archetype ?? null;
+}
+
+/**
+ * zx_20261030_2 M1（「名」）：**用户手动指定 > 节点侧指定 > 自动判定**，逐级回落。
+ *
+ * 病根（真标本 `4c1ae2e1`）：任务被判成 `conversation` 后，用户既看不见「为什么」，
+ * 也没有任何入口改——只能改库。本函数把「覆盖」收成一处真源，并对**非法值一律当没写**
+ * （不抛、不猜），保证一条坏账不会把任务带进一个不存在的档位。
+ */
+export function resolvePinnedArchetype(
+  contextJson: unknown,
+): { archetype: TaskArchetype; source: 'node' | 'manual'; reason: string } | null {
   if (typeof contextJson !== 'string' || contextJson.length === 0) return null;
   try {
     const ctx: unknown = JSON.parse(contextJson);
     if (!ctx || typeof ctx !== 'object' || Array.isArray(ctx)) return null;
-    const v = (ctx as Record<string, unknown>).node_archetype;
-    return typeof v === 'string' && Object.prototype.hasOwnProperty.call(ARCHETYPE_BUDGETS, v) ? (v as TaskArchetype) : null;
+    const pick = (key: string): TaskArchetype | null => {
+      const v = (ctx as Record<string, unknown>)[key];
+      return typeof v === 'string' && Object.prototype.hasOwnProperty.call(ARCHETYPE_BUDGETS, v) ? (v as TaskArchetype) : null;
+    };
+    const manual = pick('archetype_override');
+    if (manual) return { archetype: manual, source: 'manual', reason: '用户手动指定' };
+    const node = pick('node_archetype');
+    if (node) return { archetype: node, source: 'node', reason: '节点按请求类目指定' };
+    return null;
   } catch { return null; }
 }
 
@@ -938,9 +960,11 @@ export function buildTools(ctx: AgentContext, taskId: string, projectId: string,
   //   自建的。**每次 `buildTools` 新建一份**（一次任务执行 = 一份）；`read_file`/`write_file` 入册，
   //   `edit_file` 据此设门禁。见 `tools/deps.ts` 的字段注。
   const readFiles = new Set<string>();
+  // zx_20261027_1 M4: "只读到部分"与"读过"分开记——前者是收口时必须如实交代的事实。
+  const truncatedReads = new Set<string>();
   const deps: ToolDeps = {
-    ctx, db, taskId, projectId, workingDir, readFiles,
-    pauseForDecision, approvePathWrite, ensureSkillsLoaded,
+    ctx, db, taskId, projectId, workingDir, readFiles, truncatedReads,
+    pauseForDecision, pauseTask, approvePathWrite, ensureSkillsLoaded,
     ensureDocDeliverable, checkAcceptanceCriteria, mergePlanModeContext, syncQualityColumn,
     registerFilesWrittenByCommand, interruptTask, logger, archetypeForFile,
     formatInsufficiencyReasons, ARTIFACT_WRITE_TOOLS, realOutputEvidence, fileSig,
@@ -1160,22 +1184,28 @@ export async function executeTask(
   try {
     // 0. 任务类型识别（6种原型）+ 三层策略选择（道法自然）
     // zx_20261004 M12: 中转请求声明类目 ⇒ 以此锁住原型（否则"类目级限定工具面"名实不符，见 `pinnedArchetype` 头注释）。
-    //   **声明即意志**：pinned 非空时，语义修正与成功率校准**都不再推翻它**——否则声明会在求值点被悄悄改掉，
-    //   与"没声明"无异。无声明 ⇒ `pinned === null`，下面三处逐字回落原路径，既存任务零回归。
-    const pinned = pinnedArchetype(task.context_json);
-    let rawArchetype = pinned ?? classifyArchetype(`${title} ${description}`);
+    //   **声明即意志**：pinnedDec 非空时，语义修正与成功率校准**都不再推翻它**——否则声明会在求值点被悄悄改掉，
+    //   与"没声明"无异。无声明 ⇒ `pinnedDec === null`，下面逐字回落原路径，既存任务零回归。
+    const pinnedDec = resolvePinnedArchetype(task.context_json);
+    let decision: ArchetypeDecision = pinnedDec ?? classifyArchetypeDetailed(`${title} ${description}`);
+    let rawArchetype = decision.archetype;
     // B1 (2026-08-31): 关键词命中不覆盖，未命中才语义识别（embedding 相似度 > 阈值），失败回退词袋
-    if (!pinned && ctx.memory && !classifyArchetypeKeyword(`${title} ${description}`)) {
+    if (!pinnedDec && ctx.memory && !classifyArchetypeKeyword(`${title} ${description}`)) {
       try {
         const semantic = await ctx.memory.classifyArchetypeByEmbedding(`${title} ${description}`, FAMILY_REPRESENTATIVES);
         if (semantic && semantic.score > 0.4) {
           rawArchetype = semantic.archetype as TaskArchetype;
+          decision = { archetype: rawArchetype, source: 'semantic', reason: `语义识别（相似度 ${semantic.score.toFixed(3)}）` };
           logger.info({ archetype: rawArchetype, score: semantic.score.toFixed(3) }, '任务类型(语义修正)');
         }
       } catch { /* 语义识别失败回退词袋 */ }
     }
     // Phase C: 分类模糊时用历史成功率校准（家族相似→实践论）
-    const archetype = pinned ?? calibrateArchetype(db, projectId, `${title} ${description}`, rawArchetype);
+    const calibrated = calibrateArchetype(db, projectId, `${title} ${description}`, rawArchetype);
+    const archetype = pinnedDec?.archetype ?? calibrated;
+    if (!pinnedDec && calibrated !== rawArchetype) {
+      decision = { archetype: calibrated, source: 'calibrated', reason: '按历史成功率校准' };
+    }
     const hardcodedStrategy = getAdaptiveStrategy(archetype);
 
     // 三层优先级：自然涌现(历史表现) > 已学习策略 > 硬编码默认
@@ -1449,6 +1479,9 @@ export async function executeTask(
       const taskCtx = JSON.parse((db.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get(taskId) as { context_json: string })?.context_json || '{}');
       taskCtx.archetype = archetype;
       taskCtx.archetype_label = adaptiveStrategy.label;
+      // zx_20261030_2 M1（「名」）：来源与理由一并落账——GUI 要能回答「凭什么判成这个」，用户才能质疑与纠正。
+      taskCtx.archetype_source = decision.source;
+      taskCtx.archetype_reason = decision.reason;
       taskCtx.budget_max_tokens = maxTokens;
       // zx_20260910_5 M1: 费用上限同步落 ctx（与 token 侧 budget_max_tokens 对称），供 GUI 费用水位读数
       // zx_20260910_6 M1: 未设时写 0（与"无上限"同义）；另落 cost_budget_src（'task'/'project'/'none'），
@@ -1461,9 +1494,21 @@ export async function executeTask(
     // 子Agent类型配置（从 context_json 读取 maxSteps/systemPrompt，由 spawn_subagent 写入）
     const subagentCtxJson = (() => { try { return JSON.parse((db.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get(taskId) as { context_json: string })?.context_json || '{}'); } catch { return {}; } })();
     const subagentMaxSteps = (subagentCtxJson.maxSteps as number) || undefined;
-    const subagentSystemPrompt = subagentCtxJson.systemPrompt as string | undefined;
-    const subagentAllowTools = subagentCtxJson.allowTools as string[] | undefined;
-    const subagentDenyTools = subagentCtxJson.denyTools as string[] | undefined;
+    // zx_20261030_2 M2（「器随其用」）：systemPrompt/allow/deny **运行期读注册表**——
+    //   白名单修好后，既有子代理任务的下一次运行立刻生效，不必等重建任务。
+    //   `maxSteps` 仍用派遣时快照：步数是账，不在中途变；注册表查不到该类型时整体回落快照。
+    let subagentSystemPrompt = subagentCtxJson.systemPrompt as string | undefined;
+    let subagentAllowTools = subagentCtxJson.allowTools as string[] | undefined;
+    let subagentDenyTools = subagentCtxJson.denyTools as string[] | undefined;
+    const subagentTypeName = typeof subagentCtxJson.subagentType === 'string' ? subagentCtxJson.subagentType : '';
+    if (subagentTypeName) {
+      const liveCfg = getSubagentType(subagentTypeName);
+      if (liveCfg) {
+        subagentSystemPrompt = liveCfg.systemPrompt;
+        subagentAllowTools = liveCfg.allowTools;
+        subagentDenyTools = liveCfg.denyTools;
+      }
+    }
 
     // zx_20260921 M8（重构·只动形不动义）: 上下文装配段（系统提示骨架 / 各类感知注入 / 预算说明书 /
     //   项目上下文 / 历史摘要与尾部回放）已整段搬至 `core/exec-context.ts`；此处只剩接线。
@@ -1632,8 +1677,11 @@ export async function executeTask(
     //   放这里而非水位 try 块内，是因为它同时要被"水位计量"和"装配点删除"两处用。
     // zx_20261023_2 批一: 子代理的显式 allow-list 参与收窄——否则形态表先删掉 `execute_command`，
     //   后面的白名单无物可留（`restored` 即被这一步救回来的工具名）。
-    const toolFace = narrowToolFace(archetype, tools as unknown as Record<string, unknown>,
+    const baseFace = narrowToolFace(archetype, tools as unknown as Record<string, unknown>,
       subagentAllowTools ? { allowTools: subagentAllowTools } : undefined);
+    // zx_20261030_2 M2（「器」）：allow/deny 在这里一次算定（纯函数），删 key 与说明书共用同一结果。
+    const scope = applySubagentToolScope(baseFace, { allowTools: subagentAllowTools, denyTools: subagentDenyTools });
+    const toolFace = { ...baseFace, kept: scope.kept, removed: scope.removed };
     const toolsCharsAfter = JSON.stringify(Object.fromEntries(toolFace.kept.map((k) => [k, (tools as unknown as Record<string, unknown>)[k]]))).length;
 
     // ═══ zx_20261018_1 批七「账」（道德经·知止 / 管子·度量衡）：七源分账 + 最小 token 的裁法 ═══
@@ -1947,8 +1995,17 @@ export async function executeTask(
       // zx_20261023_2 「诚」——验证者能编译 / 判卷看得见中段 / 暂停即未达成 / 槽位不饿死规划。**只改这一处**。
       // zx_20261023_3 「令」——令下即止（起跑/每步同一判据·句柄前置）/ 越界即拒（变更类工具调用时状态闸）/ 名实（跨任务消息不复活）。**只改这一处**。
       // zx_20261023_5 「序」——依赖感知跨机编排：关键路径优先 / 依赖三态准入 / 上游摘要随行 / 上游到站重决策 / 作业来源。**只改这一处**。
+      // zx_20261027_2 「净」——归档可删（弃了就允许清走）/ 删除清整棵子树（未结束成员则整棵拒绝并点名）。**只改这一处**。
+      // zx_20261027_3 「合」——人机各得其位（余力派单/一单一跑/试用即团队/规则入提示词/门牌与任务请求/卡结局与画像跟随/改动面选套件）。**只改这一处**。
+      // zx_20261028_2 「轻」——快照出仓（ctx 只留引用）/ 列表不搬上下文 / 校验并行有界且未核不冒充 / 模板拆解加闸。**只改这一处**。
+      // zx_20261029_1 「知」——项目先自知：读仓一次生成须知 / 稳定前缀注入 / 失败不抹旧 / 预读带一句概述。**只改这一处**。
+      // zx_20261029_2 「通」——发现→品类归一→意图→安全闸→真控制→留痕一条链 / 卡片同一套能力词汇 / Pro 看·Team 控·插件按档。**只改这一处**。
+      // zx_20261029_3 「辨」——可修/待人分判 / 配置按自身语法判 / 后台进程登记与带走 / 列表四账 / 多段逐段校验。**只改这一处**。
+      // zx_20261030_1 「协」——择其能（可靠性排序）/ 尽其用（进度上屏·容量真闸）/ 止其可止（真停·回执核对·集群视图·知识增量与卖点兑现）。**只改这一处**。
+      // zx_20261030_2 「器」——名正（形态判定补词与来源落账·手动覆盖）/ 器利（子代理工具面说做同源·edit_file）/ 止有时（await_subagents）/ 验收理由入账 / 收口去重 / 简报与审计同源。**只改这一处**。
       const prefixFp = fingerprintMessages(messages, stablePrefixEnd);
-      const feats ={ requirementCard: true, contextWatermark: true, historySummaryOnly: true, readListOnResume: true, goalRestartCap: true, build: 'zx_20261023_5',
+      const feats ={ requirementCard: true, contextWatermark: true, historySummaryOnly: true, readListOnResume: true, goalRestartCap: true, build: 'zx_20261030_2',
+        archetype_source: decision.source,
         ctx_prefix_hash: prefixFp.hash, ctx_prefix_chars: prefixFp.chars, ctx_prefix_end: prefixFp.end };
       // zx_20260916_1 M5 (#6): 读**恢复账总数**（用户介入 + 系统自动），不再单读 `resume_count`——
       //   该键自本轮起只记用户介入，单读它会把"系统反复重启"的重任务漏判成轻任务。真源见 `core/resume-ledger.ts`。
@@ -1975,19 +2032,11 @@ export async function executeTask(
     //   的"循环中禁用"是**不同场景**：循环里删会让 AI SDK 抛 unavailable tool 硬错误，故那里用桩；
     //   而档外调用有**专门的如实告知支**（见下方 catch 内的 NoSuchToolError）。
     for (const k of toolFace.removed) delete toolMap[k];
-    logger.info({ taskId: taskId.slice(0, 8), toolFace: archetype, kept: toolFace.kept.length, removed: toolFace.removed.length, restored: toolFace.restored, toolsCharsAfter }, '工具面按形态收窄已应用');
+    logger.info({ taskId: taskId.slice(0, 8), toolFace: archetype, kept: toolFace.kept.length, removed: toolFace.removed.length,
+      removedByAllow: scope.removedByAllow.length, removedByDeny: scope.removedByDeny.length, restored: toolFace.restored, toolsCharsAfter }, '工具面按形态收窄已应用');
     // 如实告知（正向·开工即知）: 本档可用哪些工具。本档零收窄时只说一句"未收窄"（无"档外"可告知）。
+    //   ⚠ zx_20261030_2 M2：这句话**必须**在 allow/deny 两刀之后生成——它描述的是模型**手上真正拿到的那把**。
     messages.push({ role: 'system', content: buildToolFaceBrief(archetype, adaptiveStrategy.label, toolFace.kept, toolFace.removed.length) });
-
-    // 2.3 每作用域工具限制：子代理 allowTools/denyTools 白名单/黑名单（deny 优先，可见即权限）
-    if (subagentAllowTools || subagentDenyTools) {
-      for (const key of Object.keys(toolMap)) {
-        if (subagentDenyTools?.includes(key) || (subagentAllowTools && !subagentAllowTools.includes(key))) {
-          delete toolMap[key];
-        }
-      }
-      logger.info({ taskId: taskId.slice(0, 8), allowed: subagentAllowTools?.length ?? 0, denied: subagentDenyTools?.length ?? 0, remaining: Object.keys(toolMap).length }, '子代理工具限制已应用');
-    }
 
     // zx_20261023_3 批二（令下即止 / 越界即拒）：给变更类工具的 `execute` 包一层**调用时**状态闸。
     //   装配时只包壳、不读库；壳里每次调用当场读库 ⇒ 同一 run 内前一步被暂停，后一步即进不来。
@@ -2049,6 +2098,8 @@ export async function executeTask(
     const sizeMultiplier = projectFileCount >= 200 ? 1.5 : projectFileCount >= 50 ? 1.25 : 1.0;
     const maxSteps = resolveMaxSteps(baseMaxSteps, sizeMultiplier, estSteps, stepBudgetBonus);
     let finalContent = '';
+    // zx_20261030_2 M5：逐步行已写入的正文（收口行只写增量，杜绝同一段话说两遍）。
+    let textWritten = '';
     let stepCount = 0;
     let totalTokensUsed = 0;
     // zx_20260910_5 M1: 费用累计（CNY），本次执行局部变量，跨 resume 从 cost_used 恢复（与 token 侧同一口径）
@@ -2267,6 +2318,8 @@ export async function executeTask(
         get controller() { return controller; },
         get lastStepTs() { return lastStepTs; },
         set lastStepTs(v) { lastStepTs = v; },
+        get textWritten() { return textWritten; },
+        set textWritten(v) { textWritten = v; },
       };
 
       // zx_20261023_3 批一：**起跑前最后一次复核**——认领至此隔了整个 prelude（含 await 的选型/记忆检索），
@@ -2705,10 +2758,22 @@ export async function executeTask(
       delete ctxJson.step_cap_hit;
       try { db.prepare('UPDATE wa_tasks SET context_json = ? WHERE id = ?').run(JSON.stringify(ctxJson), taskId); } catch { /* 清账失败不阻断收口 */ }
     }
-    if (finalContent) {
+    // zx_20261030_2 M5（「同一段话只说一遍」）：收口只写**增量**——逐步行已落库的正文不再重复落一行。
+    //   撞顶注记在上一步拼进 `finalContent`，故它天然只进增量；模型改写早先内容时退整段写一次并如实入账。
+    const closeDelta = closeTextDelta(textWritten, finalContent);
+    if (closeDelta.rewritten) {
+      const rf = (ctxJson.run_features && typeof ctxJson.run_features === 'object')
+        ? ctxJson.run_features as Record<string, unknown>
+        : undefined;
+      if (rf) {
+        rf.final_text_rewritten = true;
+        try { db.prepare('UPDATE wa_tasks SET context_json = ? WHERE id = ?').run(JSON.stringify(ctxJson), taskId); } catch { /* 落账失败不阻断收口 */ }
+      }
+    }
+    if (closeDelta.delta) {
       db.prepare(
         "INSERT INTO wa_task_conversations (id, task_id, role, content, token_count, created_at) VALUES (?, ?, 'assistant', ?, 0, datetime('now'))"
-      ).run(crypto.randomUUID(), taskId, finalContent.slice(0, 50_000));
+      ).run(crypto.randomUUID(), taskId, closeDelta.delta.slice(0, 50_000));
     }
 
     // 无产出物且无对话 → 任务实际未达成目标，标记为 failed（而非误导性的 completed）
@@ -2805,7 +2870,8 @@ export async function executeTask(
       sideAtFirstPersist, goalDefined, ctxJson,
     });
   } catch (err) {
-    const errorMsg = (err as Error).message;
+    // zx_20261028_1 M4：失败文案说人话（`fetch failed` ⇒ "先去启动 ANS"）；原文仍以子串在场。
+    const errorMsg = describeExecutionError(err);
     console.error(`[Agent] 任务失败: ${title.slice(0, 50)}`, errorMsg);
     db.prepare(
       "INSERT INTO wa_task_conversations (id, task_id, role, content, token_count, created_at) VALUES (?, ?, 'system', ?, 0, datetime('now'))"
@@ -2883,6 +2949,37 @@ export function truncateGoalDeviationReason(rawReason: string): string {
   return rawReason.length > GOAL_DEVIATION_REASON_LIMIT
     ? `${rawReason.slice(0, GOAL_DEVIATION_REASON_LIMIT)}…（理由已截断，共 ${rawReason.length} 字）`
     : rawReason;
+}
+
+/**
+ * zx_20261030_2 M5（道德经·「少则得」/ 维特根斯坦·意义即用法）: **收口正文只写增量**。
+ *
+ * 病根（§1.6 D7）：逐步行已在执行时把每步正文落库（`exec-step.ts`），收口又写一遍
+ * `result.text`。AI SDK v4 多步语义（`node_modules/ai/dist/index.js`：`text2 = … ? text2 + stepText : stepText`）
+ * 表明 `result.text` 是**末步**正文 ⇒ 收口行与最后一条逐步行**逐字相同**，同一段话在会话里出现两遍。
+ *
+ * 判据（`written` = 本次经逐步行写入的全部正文拼接，`final` = 收口正文）：
+ *  · `final` 是 `written` 的**前缀**或**尾段**（`written.startsWith(final)` / `written.endsWith(final)`）
+ *    ⇒ 增量空，不写收口行（最典型的 D7 场景：`result.text` 就是末步正文）；
+ *  · `final` 整体以 `written` 开头 ⇒ 只写余下那段（多步拼接的常规增量）；
+ *  · `final` 以 `written` 的某**尾段**开头（如撞顶注记接在末步正文后）⇒ 只写尾段之后那段；
+ *  · 其余（模型改写了早先内容）⇒ 退回整段写一次，并 `rewritten:true` **如实入账**。
+ * 尾段比对按字符倒序单趟扫描（O(n)），不做 O(n²) 的逐长度切片。
+ */
+export function closeTextDelta(written: string, final: string): { delta: string; rewritten: boolean } {
+  if (!final) return { delta: '', rewritten: false };
+  if (!written) return { delta: final, rewritten: false };
+  if (final.startsWith(written)) return { delta: final.slice(written.length), rewritten: false };
+  if (written.startsWith(final) || written.endsWith(final)) return { delta: '', rewritten: false };
+  // 最长 k：written 的尾段 k 字 === final 的前 k 字。
+  const maxK = Math.min(written.length, final.length);
+  let k = 0;
+  while (k < maxK && written[written.length - 1 - k] === final[k]) k++;
+  return k === final.length
+    ? { delta: '', rewritten: false }
+    : k > 0
+      ? { delta: final.slice(k), rewritten: false }
+      : { delta: final, rewritten: true };
 }
 
 export async function checkAcceptanceCriteria(
@@ -2975,7 +3072,9 @@ export async function checkAcceptanceCriteria(
       if (ctx.memory) {
         const taskRow = db.prepare('SELECT project_id, title FROM wa_tasks WHERE id = ?').get(taskId) as { project_id: string; title: string } | undefined;
         if (taskRow) {
-          const failedItems = payload.failed.map(f => f.criterion).join('、');
+          // zx_20261030_2 M4（判据与理由同价）：摘要**一处真源**——同一字符串同时喂记忆与 pitfall 卡，
+          //   不再各自只拼判据名（旧形 `map(f => f.criterion).join('、')` 让下一棒看不到「为何没过」）。
+          const failedItems = summarizeAcceptanceFailures(payload.failed);
           const content = `任务「${taskRow.title}」验收未达：${failedItems}`;
           // zx_20260929 M4（维特根斯坦·同一个降权三处是三个意思 / 管子·度量衡）：**同源替换优先**。
           //   本条的读者只有一处——`memory-context.ts` 的 `retrieveByType('acceptance_failure', …, 3)`，

@@ -10,7 +10,7 @@
  *   批二：R-7 Team 词表逐项枚举（含 audit_view）/ R-8 三账合并恰 3 行且来源可辨 /
  *         R-9 新账正面断言 0→1 且字段逐项核对 / R-10 锁定不查库（毒库反证）+ 解锁两侧标本 /
  *         R-11 投影不复制明细（读不写、detail 来自原行）/ R-12 wa_audit_trail 仍零写入。
- *   批三：R-13 开关缺省关（只认 '1'）/ R-14 九道闸逐项独立理由 + 次序 /
+ *   批三：R-13 开关三态（zx_20261029_2 M7）/ R-14 逐项独立理由 + 次序（含 M7 余力闸）/
  *         R-15 成功路径：require_target 提交 + 三键齐落 + 审计投影 /
  *         R-16 预查无果（六种对端标本）⇒ 不触网不写键 /
  *         R-17 失败面三态：提交失败 / 重放幂等（同一建单只派一次）/ 回执不全，一律不写键 /
@@ -43,6 +43,8 @@ import {
 import {
   TEAM_FEATURES, TEAM_FEATURE_LABEL, teamFeatureRefusal,
 } from '../apps/worker-ant-desktop/src/main/core/team-gate.js';
+// zx_20261029_2 M6：云同步/发现改读 Pro 闸（`device_discovery` 已移出 Team）。
+import { proFeatureRefusal } from '../apps/worker-ant-desktop/src/main/core/pro-gate.js';
 import {
   listAuditEvents, listAuditEventsGated, recordAudit, recordNodeUpdate, type AuditDb,
 } from '../apps/worker-ant-desktop/src/main/core/audit-log.js';
@@ -60,7 +62,7 @@ import {
 import type { TaskArchetype } from '../apps/worker-ant-desktop/src/main/core/task-archetype.js';
 import {
   AUTO_DISPATCH_SETTING_KEY, CREATE_DISPATCH_REASON_LABEL, buildDispatchPrompt,
-  decideCreateDispatch, dispatchCreatedTask, isAutoDispatchOn, lastAutoDispatch,
+  decideAutoDispatchPolicy, decideCreateDispatch, dispatchCreatedTask, isAutoDispatchOn, lastAutoDispatch,
   peersSupportingCategory, projectHasWorkingDir, taskHasDependencies,
   type CreateDispatchFacts,
 } from '../apps/worker-ant-desktop/src/main/core/collab-dispatch.js';
@@ -170,6 +172,7 @@ function makeDeviceDb(): DatabaseSync {
   db.exec(`
     CREATE TABLE wa_devices (
       id TEXT PRIMARY KEY, name TEXT DEFAULT '', alias TEXT DEFAULT '', room TEXT DEFAULT '', kind TEXT DEFAULT 'unknown',
+      kind_class TEXT NOT NULL DEFAULT '',
       protocol TEXT NOT NULL, address TEXT NOT NULL, port INTEGER,
       capabilities_json TEXT DEFAULT '[]', controllable INTEGER DEFAULT 0,
       authorized INTEGER DEFAULT 0, status_json TEXT,
@@ -370,10 +373,10 @@ async function main(): Promise<void> {
   // ═══ R-7 Team 词表（批二）═══════════════════════════════════════════════════
   console.log('\n【R-7】Team 能力词表逐项枚举（含 audit_view）');
   {
-    // zx_20261022_3 批八：`project_profile_share` 入册（7→8；逐成员枚举仍不放宽）。
+    // zx_20261029_2 M6：`device_discovery` 移出（归 Pro）⇒ 逐成员枚举 8→7。
     eq([...TEAM_FEATURES],
-      ['multi_node', 'device_discovery', 'device_control', 'external_terminal', 'audit_view', 'audit_export', 'team_library', 'project_profile_share'],
-      'R-7a ★能力词表逐成员枚举（唯一定义处；批六 `team_library`、zx_20261018_3 批七 `audit_export`、zx_20261022_3 批八 `project_profile_share` 已入册，共 8 项）');
+      ['multi_node', 'device_control', 'external_terminal', 'audit_view', 'audit_export', 'team_library', 'project_profile_share'],
+      'R-7a ★能力词表逐成员枚举（唯一定义处；M6 起发现归 Pro，本表只管控制面）');
     for (const f of TEAM_FEATURES) {
       ok(typeof TEAM_FEATURE_LABEL[f] === 'string' && TEAM_FEATURE_LABEL[f].length > 0,
         `R-7b 人话名非空：${f} ⇒ 「${TEAM_FEATURE_LABEL[f]}」`);
@@ -500,22 +503,41 @@ async function main(): Promise<void> {
     db.close();
   }
 
-  // ═══ R-13 建单即派开关（批三）══════════════════════════════════════════════
-  console.log("\n【R-13】建单即派开关：**缺省关**，只认显式 `'1'`");
+  // ═══ R-13 建单即派开关（批三；zx_20261029_2 M7 起为三态）════════════════════
+  console.log("\n【R-13】建单即派开关：三态——显式 `'1'`/`'0'`，未配置跟 Team+入网");
   {
     const db = makeDb();
     eq([AUTO_DISPATCH_SETTING_KEY, isAutoDispatchOn(db)], ['node.auto_dispatch_on_create', false],
-      'R-13a ★未配置 ⇒ 关（键名一处真源 + 缺省关）');
+      'R-13a ★未配置且无团队许可/未入网 ⇒ 关（键名一处真源 + 缺省支）');
     const put = db.prepare('INSERT OR REPLACE INTO wa_settings (key, value) VALUES (?, ?)');
+    // `''` 视同未配置（历史写入口可能落空串）；本库无许可/入网 ⇒ 缺省支仍关。
     for (const [raw, expect] of [['0', false], ['true', false], ['on', false], ['', false], ['1', true]] as const) {
       put.run(AUTO_DISPATCH_SETTING_KEY, raw);
       eq(isAutoDispatchOn(db), expect, `R-13b 值「${raw}」⇒ ${expect ? '开' : '关'}（不放过近似真值）`);
     }
     db.close();
+
+    // zx_20261029_2 M7：缺省三态的纯判据逐支枚举——未配置时**跟 Team 许可 + 入网**，而不是一律关。
+    const def = decideAutoDispatchPolicy({ raw: null, teamUnlocked: true, enrolled: true });
+    eq([def.enabled, def.source], [true, 'default'],
+      'R-13c ★未配置 + Team 已解锁 + 已入网 ⇒ **开**（缺省支）');
+    ok(def.reason.length > 0, 'R-13d 缺省开的理由有非空人话（界面直接上屏）');
+    eq(decideAutoDispatchPolicy({ raw: null, teamUnlocked: false, enrolled: true }).enabled, false,
+      'R-13e ★未配置 + 社区/Pro ⇒ 关（没有多机能力，永不默认开）');
+    eq(decideAutoDispatchPolicy({ raw: null, teamUnlocked: true, enrolled: false }).enabled, false,
+      'R-13f ★未配置 + 未入网 ⇒ 关（没有协同对象）');
+    const off = decideAutoDispatchPolicy({ raw: '0', teamUnlocked: true, enrolled: true });
+    eq([off.enabled, off.source], [false, 'explicit'],
+      'R-13g ★显式关压过缺省开（用户设过的就是用户的）');
+    eq(decideAutoDispatchPolicy({ raw: '1', teamUnlocked: false, enrolled: false }).enabled, true,
+      'R-13h 显式开的读取不看许可（实际外派仍由 team-locked 闸拦）');
+    const junk = decideAutoDispatchPolicy({ raw: ' true ', teamUnlocked: true, enrolled: true });
+    eq([junk.enabled, junk.source], [false, 'explicit'],
+      'R-13i 近似真值（含首尾空白）一律当关——写坏的值不该悄悄改变行为');
   }
 
   // ═══ R-14 准入判据逐项拒绝（批三）══════════════════════════════════════════
-  console.log('\n【R-14】准入：九道闸逐项、各自独立理由（不合并成一个布尔）');
+  console.log('\n【R-14】准入：逐项独立理由（不合并成一个布尔）');
   {
     const allowed = decideCreateDispatch(eligibleFacts());
     eq([allowed.eligible, allowed.reason, allowed.category], [true, 'eligible', 'code'],
@@ -540,10 +562,20 @@ async function main(): Promise<void> {
     eq(decideCreateDispatch(eligibleFacts({ settingOn: false, hasParent: true, category: null })).reason,
       'setting-off', 'R-14c ★判定次序固定：首个不满足者即理由（用户看到的是最上游那道闸）');
 
+    // zx_20261029_2 M7：「缺省开」只在满负荷时溢出——本机有余力就先留在本机；显式开启是用户的选择，不受此限。
+    eq(decideCreateDispatch(eligibleFacts({ autoDispatchSource: 'default', localHasFreeSlot: true })).reason,
+      'local-capacity', 'R-14f ★缺省开 + 本机有余力 ⇒ local-capacity（本机跑得动就先在本机跑）');
+    eq(decideCreateDispatch(eligibleFacts({ autoDispatchSource: 'default', localHasFreeSlot: false })).reason,
+      'eligible', 'R-14g 缺省开 + 本机已满负荷 ⇒ 放行（溢出）');
+    eq(decideCreateDispatch(eligibleFacts({ autoDispatchSource: 'explicit', localHasFreeSlot: true })).reason,
+      'eligible', 'R-14h 显式开 + 本机有余力 ⇒ 仍放行（用户自己的选择，不被余力闸拦）');
+    eq(decideCreateDispatch(eligibleFacts({ localHasFreeSlot: true })).reason,
+      'eligible', 'R-14i 旧调用方不给来由 ⇒ 不因新判据改变行为');
+
     // zx_20261023_5 批一：依赖准入由"一刀切 has-dependencies"细分三态，词表新增两员（逐成员枚举，旧项不删）。
     const reasons = ['eligible', 'setting-off', 'team-locked', 'not-enrolled', 'has-parent',
       'has-dependencies', 'dependencies-waiting', 'dependencies-dead',
-      'has-attachments', 'has-working-dir', 'decomposed', 'no-category'];
+      'has-attachments', 'has-working-dir', 'decomposed', 'local-capacity', 'no-category'];
     eq(Object.keys(CREATE_DISPATCH_REASON_LABEL).sort(), [...reasons].sort(),
       'R-14d 理由词表逐成员枚举（机器码与上屏文案成对，漏一项是编译期错）');
     for (const r of reasons) {
@@ -1619,10 +1651,11 @@ async function main(): Promise<void> {
       const provider = createTuyaProvider(config, { http, now });
       const list = await provider.listDevices();
       eq(list.length, 2, 'R-43h 列表成功 ⇒ 逐台映射');
-      eq(list[0], { id: 'dev1', name: '客厅灯', kind: 'dj', capabilities: ['switch_led', 'bright_value'], controllable: true },
+      eq(list[0], { id: 'dev1', name: '客厅灯', kind: 'dj', kindClass: 'light', capabilities: ['switch_led', 'bright_value'], controllable: true },
         'R-43i 能力取设备自述数据点（不谎称可控）');
-      eq(list[1], { id: 'dev2', name: 'dev2', kind: 'unknown', capabilities: [], controllable: false },
+      eq(list[1], { id: 'dev2', name: 'dev2', kind: 'unknown', kindClass: 'unknown', capabilities: [], controllable: false },
         'R-43j 无自述名/类别/数据点 ⇒ 如实回退（不猜）');
+      eq(list[0].kindClass, 'light', 'R-43i2 ★品类类目由厂商自述 category 派生（dj ⇒ light，不按设备名猜）');
     }
   }
 
@@ -1754,21 +1787,24 @@ async function main(): Promise<void> {
       'R-46h 三个通道在册');
   }
 
-  console.log('\n【R-47】Team 闸：锁定 ⇒ TEAM_REQUIRED，先于拉取与入账');
+  // zx_20261029_2 M6「阶梯」：云同步/发现归 **Pro**（`device_discovery`）——闸仍先于拉取与入账，只是回码换 `PRO_REQUIRED`。
+  console.log('\n【R-47】Pro 闸（发现）：锁定 ⇒ PRO_REQUIRED，先于拉取与入账');
   {
-    ok(teamFeatureRefusal(settingsDb(false), 'device_discovery') != null, 'R-47a 未解锁 ⇒ 有如实拒因');
-    eq(teamFeatureRefusal(settingsDb(true), 'device_discovery'), null, 'R-47b 试用期 ⇒ 放行（与 Team 闸同一判据）');
+    // ★时钟须注入：试用期是相对 now 判的（`TRIAL_DAYS=14`），夹具把起点钉在 `NOW`；
+    //   本条原先真跑墙钟 ⇒ 14 天一到自己引爆（判据不得依赖真实墙钟）。
+    ok(proFeatureRefusal(settingsDb(false), 'device_discovery', { now: NOW }) != null, 'R-47a 未解锁 ⇒ 有如实拒因');
+    eq(proFeatureRefusal(settingsDb(true), 'device_discovery', { now: NOW }), null, 'R-47b 试用期 ⇒ 放行（与 Pro 闸同一判据）');
     const ipcSrc = STRIPPED(`${A}/src/main/ipc/devices.ipc.ts`);
     const at = ipcSrc.indexOf("'devices:cloud_sync'");
     const end = ipcSrc.indexOf('ipcMain.handle(', at + 10);
     const body = at >= 0 ? ipcSrc.slice(at, end > at ? end : undefined) : '';
-    const gateAt = body.indexOf("teamFeatureRefusal(licDb, 'device_discovery')");
+    const gateAt = body.indexOf("proFeatureRefusal(licDb, 'device_discovery')");
     const reqAt = body.indexOf('resolveTuyaConfig(');
     const syncAt = body.indexOf('syncProviderDevices(');
     ok(gateAt >= 0 && reqAt > gateAt && syncAt > reqAt,
       'R-47c ★次序：闸 → 读配置 → 拉取（次序即判据）', `gate=${gateAt} cfg=${reqAt} sync=${syncAt}`);
-    ok(/if\s*\(refusal\)\s*return\s*\{[^}]*TEAM_REQUIRED/s.test(body),
-      'R-47d 锁定即早退 TEAM_REQUIRED（不拉取、不入账）');
+    ok(/if\s*\(refusal\)\s*return\s*\{[^}]*PRO_REQUIRED/s.test(body),
+      'R-47d 锁定即早退 PRO_REQUIRED（不拉取、不入账）');
   }
 
   console.log('\n【W】批八接线：协议枚举 / 注册表 / 三通道 / 渲染面 / 密钥不回显');
@@ -1821,7 +1857,8 @@ async function main(): Promise<void> {
 
     ok(/devicesApi\.cloudStatus\(\)/.test(devPage) && /devicesApi\.tuyaConfig\(/.test(devPage) && /devicesApi\.cloudSync\(\)/.test(devPage),
       'W-76 设备页真调三个出口（不是只摆 UI）');
-    ok(/<CloudConfigBlock locked=\{locked\} \/>/.test(devPage), 'W-77 三方云区块真挂载');
+    ok(/<CloudConfigBlock locked=\{discoveryLocked\} \/>/.test(devPage),
+      'W-77 ★三方云区块真挂载，锁随 `discoveryLocked`（M6 起云同步归专业版，与设备发现同闸）');
     ok(/type="password"[\s\S]{0,220}Secret 已配置（留空不修改）/.test(devPage),
       'W-78 ★Secret 输入框只回显"已配置"提示（不把存储值填进输入框）');
     ok(/官方区域端点/.test(devPage), 'W-79 界面如实写明"只发官方区域端点"');

@@ -28,8 +28,19 @@ import {
   type AnsNodeRequest,
   type NodeAnswer,
   type NodeQuestion,
+  type NodeRequestProgress,
   type NodeRequestStatus,
 } from '@worker-ant/shared-types';
+import {
+  describeNode,
+  explainSelection,
+  rankDispatchCandidates,
+  reliabilityOf,
+  RELIABILITY_WINDOW,
+  type NodeReliability,
+  type RequestOutcomeRow,
+  type SelectionSnapshot,
+} from './node-ranking.js';
 
 interface NodeRow {
   id: string;
@@ -102,6 +113,21 @@ function jsonAnswer(s: string | null): NodeAnswer | null {
   return o && typeof o.answer === 'string' ? { answer: o.answer } : null;
 }
 
+/**
+ * `progress_json` → `NodeRequestProgress`（**收窄**）：`step` 必须是非负整数，`at` 必须是非空串；
+ * 缺任一即整条丢弃（`null`）——半截进度比没有进度更容易被读成结论。
+ */
+function jsonProgress(s: string | null | undefined): NodeRequestProgress | null {
+  if (s == null) return null;
+  const o = jsonObject(s);
+  if (!o) return null;
+  const { step, total, note, at } = o;
+  if (typeof step !== 'number' || !Number.isInteger(step) || step < 0) return null;
+  if (typeof at !== 'string' || at.length === 0) return null;
+  const totalOk = typeof total === 'number' && Number.isInteger(total) && total >= 0 ? total : null;
+  return { step, total: totalOk, note: typeof note === 'string' ? note : '', at };
+}
+
 /** `ans_node_requests` 行形状（M12）。 */
 interface NodeRequestRow {
   id: string;
@@ -115,6 +141,11 @@ interface NodeRequestRow {
   question_json: string | null;
   answer_json: string | null;
   question_status: string | null;
+  selection_json: string | null;
+  /** zx_20261030_1 M2：进度快照（旧库补列后为空；对端未上报亦为空）。 */
+  progress_json: string | null;
+  /** zx_20261030_1 M3：叫停标志（1 = 派活方已请求停止；旧库补列后为 0）。 */
+  cancel_requested: number | null;
   created_at: string;
   claimed_at: string | null;
   done_at: string | null;
@@ -135,6 +166,9 @@ function toNodeRequest(row: NodeRequestRow): AnsNodeRequest {
     question: jsonQuestion(row.question_json),
     answer: jsonAnswer(row.answer_json),
     question_status: isNodeQuestionStatus(row.question_status) ? row.question_status : null,
+    selection: row.selection_json == null ? null : jsonObject(row.selection_json),
+    progress: jsonProgress(row.progress_json),
+    cancel_requested: row.cancel_requested === 1,
     created_at: row.created_at,
     claimed_at: row.claimed_at,
     done_at: row.done_at,
@@ -183,25 +217,74 @@ function callerKeyPrefix(request: Request): string {
 }
 
 /**
- * 选目标**唯一处**（M12；zx_20261011 M2 纳入负载）：在 `DISPATCHABLE_WHERE` 之外，排序改为
- * **净收益 = `weight × 机器余力`**（`status_json.capacity_free_ratio`，C1 采来）——
- *   `ORDER BY (weight * COALESCE(json_extract(status_json,'$.capacity_free_ratio'), 1.0)) DESC, weight DESC, last_seen_at DESC`
- * 取义（罗尔斯·无知之幕）：**不因自报权重高就让一台此刻忙翻的机器永远优先**；也不看机器名、不看过往。
- * ⚠ **余力未知 ⇒ 取 1.0（neutral）**：读不到负载**不惩罚**它（"没这个数"≠"它很忙"）。`json_extract`
- *   在缺字段/非对象时回 NULL ⇒ COALESCE 命中。
+ * zx_20261030_1 M1（毛选·没有调查，没有发言权）: **历史可靠性取自既有请求行**——
+ *   `ans_node_requests` 已有 `status/claimed_at/done_at`，不新增上报字段、不拍脑袋。
+ *   一次查询按目标节点分组（节点上限 20，不做 N+1），每组只留最近 `RELIABILITY_WINDOW` 条。
+ *   取消不计失败（M3 起会出现 `cancelled` 终态）；表/列缺失时如实回空表（不崩、不编）。
+ */
+function reliabilityByNode(db: Database.Database, nodeIds: readonly string[]): Map<string, NodeReliability> {
+  const out = new Map<string, NodeReliability>();
+  if (nodeIds.length === 0) return out;
+  const ph = nodeIds.map(() => '?').join(', ');
+  let rows: Array<{ target_node_id: string; status: string; claimed_at: string | null; done_at: string | null }>;
+  try {
+    rows = db
+      .prepare(
+        `SELECT target_node_id, status, claimed_at, done_at
+           FROM ans_node_requests
+          WHERE target_node_id IN (${ph})
+            AND status IN ('done', 'error', 'cancelled')
+          ORDER BY COALESCE(done_at, created_at) DESC`,
+      )
+      .all(...nodeIds) as typeof rows;
+  } catch {
+    return out;
+  }
+  const grouped = new Map<string, RequestOutcomeRow[]>();
+  for (const row of rows) {
+    const list = grouped.get(row.target_node_id) ?? [];
+    if (list.length < RELIABILITY_WINDOW) {
+      list.push({ status: row.status, claimed_at: row.claimed_at, done_at: row.done_at });
+    }
+    grouped.set(row.target_node_id, list);
+  }
+  for (const [nodeId, list] of grouped) out.set(nodeId, reliabilityOf(list));
+  return out;
+}
+
+/**
+ * 选目标**唯一处**（M12；zx_20261011 M2 纳入负载；zx_20261027_3 M1 改三层排序）。
+ * `DISPATCHABLE_WHERE` 只负责**过滤**；排序交给纯函数 `node-ranking.ts`——
+ * 原因：旧 SQL 把「余力未知」`COALESCE(..., 1.0)` 当成**满血空闲**，一台没上报容量的机器
+ * 会与真正空闲的机器同分，甚至凭高权重压过一台已知 70% 空闲的机器。
+ * 现在固定三层：已知有余力（`weight × ratio`）→ 未知（按 weight）→ 已知满负荷。
+ * 节点上限 20，全量取回后 JS 排序的成本可忽略。
  * 无合适 ⇒ `null`（调用方置 `pending`）。
  */
-function selectTargetNode(db: Database.Database, category: string): NodeRow | null {
+function selectTargetNode(
+  db: Database.Database,
+  category: string,
+): { row: NodeRow; selection: SelectionSnapshot } | null {
   const offlineMod = `-${NODE_OFFLINE_SEC} seconds`;
-  const row = db
-    .prepare(
-      `SELECT * FROM ans_nodes
-     WHERE ${DISPATCHABLE_WHERE}
-     ORDER BY (weight * COALESCE(json_extract(status_json, '$.capacity_free_ratio'), 1.0)) DESC, weight DESC, last_seen_at DESC
-     LIMIT 1`,
-    )
-    .get(offlineMod, category) as NodeRow | undefined;
-  return row ?? null;
+  const rows = db.prepare(`SELECT * FROM ans_nodes WHERE ${DISPATCHABLE_WHERE}`).all(offlineMod, category) as NodeRow[];
+  if (rows.length === 0) return null;
+  const reliability = reliabilityByNode(
+    db,
+    rows.map((r) => r.node_id),
+  );
+  const ranked = rankDispatchCandidates(
+    rows.map((row) => ({
+      node_id: row.node_id,
+      weight: row.weight,
+      status_json: row.status_json,
+      last_seen_at: row.last_seen_at,
+      reliability: reliability.get(row.node_id) ?? null,
+      row,
+    })),
+  );
+  const best = ranked[0];
+  if (!best) return null;
+  return { row: best.item.row, selection: explainSelection(best) };
 }
 
 /**
@@ -492,7 +575,7 @@ export function nodesRoutes(db: Database.Database) {
             }
           }
           // 手动指定目标：以 `nodeQualifies`（与自动选**同源**）校验——不合格**如实拒绝**，不静默改派。
-          let target: NodeRow | null;
+          let target: { row: NodeRow; selection: SelectionSnapshot } | null;
           if (body.target_node_id !== undefined) {
             const wanted = String(body.target_node_id);
             if (!nodeQualifies(db, wanted, body.category)) {
@@ -502,7 +585,16 @@ export function nodesRoutes(db: Database.Database) {
                 400,
               );
             }
-            target = db.prepare('SELECT * FROM ans_nodes WHERE node_id = ?').get(wanted) as NodeRow;
+            const manualRow = db.prepare('SELECT * FROM ans_nodes WHERE node_id = ?').get(wanted) as NodeRow;
+            // 手动目标也留一份快照（同一 explain 口径），理由前缀标明「手动指定」，
+            // 免得事后读 `selection_json` 误以为是自动择机的结果。
+            const snapshot = describeNode({
+              node_id: manualRow.node_id,
+              weight: manualRow.weight,
+              status_json: manualRow.status_json,
+              last_seen_at: manualRow.last_seen_at,
+            });
+            target = { row: manualRow, selection: { ...snapshot, reason: `手动指定：${snapshot.reason}` } };
           } else {
             target = selectTargetNode(db, body.category);
           }
@@ -517,16 +609,18 @@ export function nodesRoutes(db: Database.Database) {
           }
           const id = randomUUID();
           db.prepare(
-            `INSERT INTO ans_node_requests (id, category, payload_json, requester_key_prefix, requester_node_id, target_node_id, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO ans_node_requests
+               (id, category, payload_json, requester_key_prefix, requester_node_id, target_node_id, status, selection_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
           ).run(
             id,
             body.category,
             JSON.stringify(body.payload ?? {}),
             callerKeyPrefix(request),
             requesterNodeId,
-            target?.node_id ?? null,
+            target?.row.node_id ?? null,
             target ? 'assigned' : 'pending',
+            target ? JSON.stringify(target.selection) : null,
           );
           const row = db.prepare('SELECT * FROM ans_node_requests WHERE id = ?').get(id) as NodeRequestRow;
           set.status = 201;
@@ -603,7 +697,7 @@ export function nodesRoutes(db: Database.Database) {
           //   病根：网络重试/心跳重投会让同一件回传两次，旧实现每次都 `UPDATE … done_at = now()` ⇒
           //   ①结果被**迟到的第二笔覆写**（`error` 后一记 `done` 就翻案）；②`done_at` 被刷新（耗时统计失真）。
           //   ⚠ 双校验（403）**先跑**——非目标节点的重复投递仍是 403，幂等守卫只对**已通过双校验**者生效。
-          if (row.status === 'done' || row.status === 'error') {
+          if (row.status === 'done' || row.status === 'error' || row.status === 'cancelled') {
             return { data: toNodeRequest(row) }; // 原样回既有结果；不 UPDATE（首次终态即定，重复不产生第二条）
           }
           const result = body.result === undefined ? null : JSON.stringify(body.result);
@@ -616,11 +710,92 @@ export function nodesRoutes(db: Database.Database) {
         {
           body: t.Object({
             node_id: t.String(),
-            status: t.Union([t.Literal('done'), t.Literal('error')]),
+            // zx_20261030_1 M3：执行方收到叫停后回传 `cancelled`（既非完成也非失败）。
+            status: t.Union([t.Literal('done'), t.Literal('error'), t.Literal('cancelled')]),
             result: t.Optional(t.Any()),
           }),
         },
       )
+      // zx_20261030_1 M2「见」: **进度上报**（B 端＝被派方，跑一步报一步）。
+      //   双校验与回传端**同形**（`target_node_id === node_id` ∧ 资源组含 `node:<node_id>`）——
+      //   进度也是"这件活的执行方才知道的事"，非目标节点不得代报。
+      //   ⚠ **终态不因迟到进度翻案**：已 `done`/`error` 的件收到进度 ⇒ 原样回既有行（200，不 4xx）——
+      //     对端收尾瞬间的在途上报不该被读成错误；但也**不覆盖**已有进度（收口之后没有"进行中"可言）。
+      //   ⚠ 只存快照，不做节流：节流是上报方（runner）的责任（每 ≤2s 一次）；此处若再丢，就分不清
+      //     "对端没报"与"被服务端吞了"。
+      .post(
+        '/requests/:id/progress',
+        ({ params: { id }, body, request }) => {
+          const row = db.prepare('SELECT * FROM ans_node_requests WHERE id = ?').get(id) as NodeRequestRow | undefined;
+          if (!row) throw notFound('Node request', id);
+          const groups = getResourceGroupsFromApiKey(db, request);
+          if (row.target_node_id !== body.node_id || !groups.includes(`node:${body.node_id}`)) {
+            throw new AppError(ErrorCode.FORBIDDEN, `Node ${body.node_id} is not the target of request ${id}`, 403);
+          }
+          if (row.status === 'done' || row.status === 'error' || row.status === 'cancelled')
+            return { data: toNodeRequest(row) };
+          if (!Number.isInteger(body.step) || body.step < 0) {
+            throw new AppError(ErrorCode.INVALID_REQUEST, `Invalid progress step: ${body.step}`, 400);
+          }
+          if (body.total !== undefined && body.total !== null && (!Number.isInteger(body.total) || body.total < 0)) {
+            throw new AppError(ErrorCode.INVALID_REQUEST, `Invalid progress total: ${body.total}`, 400);
+          }
+          const at = (db.prepare("SELECT datetime('now') AS at").get() as { at: string }).at;
+          const progress = {
+            step: body.step,
+            total: typeof body.total === 'number' ? body.total : null,
+            note: typeof body.note === 'string' ? body.note.trim().slice(0, 200) : '',
+            at,
+          };
+          db.prepare('UPDATE ans_node_requests SET progress_json = ? WHERE id = ?').run(JSON.stringify(progress), id);
+          return {
+            data: toNodeRequest(db.prepare('SELECT * FROM ans_node_requests WHERE id = ?').get(id) as NodeRequestRow),
+          };
+        },
+        {
+          body: t.Object({
+            node_id: t.String(),
+            step: t.Number(),
+            total: t.Optional(t.Union([t.Number(), t.Null()])),
+            note: t.Optional(t.String()),
+          }),
+        },
+      )
+      // zx_20261030_1 M3「止」: **请求停止**（A 端＝派活方叫停）。
+      //   鉴权与**作答端同源**（`node:<requester_node_id>` ∨ 无节点身份时的 key 前缀兜底）——
+      //   停是自己的决定，只有请求方谈得上；目标节点也**不能**替派活方叫停别人的单。
+      //   两档处置（按 row 此刻的真实状态，不猜）：
+      //     ① 已终态（done/error/cancelled）⇒ 200 原样回既有（幂等；不翻案）；
+      //     ② `pending`（尚无执行方在跑）⇒ **直接置 `cancelled`**（没有执行体需要通知，立即收口）；
+      //     ③ `assigned`/`awaiting_answer`（执行方在跑）⇒ 只置 `cancel_requested=1`、**状态不动**：
+      //        真停由执行方在检查点完成并回传 `cancelled`。旧版本执行方不读该位 ⇒ 会跑完，
+      //        此时 `status` 仍是它回传的真实结局（done/error）——界面据此如实说话，不假设"点了就停"。
+      .post('/requests/:id/cancel', ({ params: { id }, request }) => {
+        const row = db.prepare('SELECT * FROM ans_node_requests WHERE id = ?').get(id) as NodeRequestRow | undefined;
+        if (!row) throw notFound('Node request', id);
+        const groups = getResourceGroupsFromApiKey(db, request);
+        const byNode = row.requester_node_id != null && groups.includes(`node:${row.requester_node_id}`);
+        const byPrefix =
+          row.requester_node_id == null &&
+          row.requester_key_prefix !== '' &&
+          callerKeyPrefix(request) === row.requester_key_prefix;
+        if (!byNode && !byPrefix) {
+          throw new AppError(ErrorCode.FORBIDDEN, `Key is not the requester of request ${id}`, 403);
+        }
+        if (row.status === 'done' || row.status === 'error' || row.status === 'cancelled') {
+          return { data: toNodeRequest(row) };
+        }
+        if (row.status === 'pending') {
+          db.prepare(
+            "UPDATE ans_node_requests SET status = 'cancelled', cancel_requested = 1, done_at = datetime('now') WHERE id = ?",
+          ).run(id);
+        } else {
+          db.prepare('UPDATE ans_node_requests SET cancel_requested = 1 WHERE id = ?').run(id);
+        }
+        return {
+          data: toNodeRequest(db.prepare('SELECT * FROM ans_node_requests WHERE id = ?').get(id) as NodeRequestRow),
+        };
+      })
       // ==================== M4 双向澄清（B 端提问 / A 端作答，两跳） ====================
       // 新跳① 提问（B 端＝被派的中继执行体）：**双校验同形**（与回传端一致）——`target_node_id === node_id`
       //   且调用方 key 的资源组含 `node:<node_id>`。前置 `status='assigned'`（已认领、跑在手上才谈得上提问）；
@@ -686,7 +861,7 @@ export function nodesRoutes(db: Database.Database) {
           //   此前仍可被作答：本路由把它置回 `status='assigned'` ⇒ worker 重拉 ⇒ **把一件已完成的活重跑一遍**。
           //   次序即判据：**已答**的重投仍在上一步幂等 200（答案确已落地，不该因收口而报错）；
           //   只有**未答**的终态件才落到这里被挡（那正是"复活"路径）。`/question` 已要求 `assigned`，无需同步加闸。
-          if (row.status === 'done' || row.status === 'error') {
+          if (row.status === 'done' || row.status === 'error' || row.status === 'cancelled') {
             throw new AppError(
               ErrorCode.INVALID_REQUEST,
               `Request ${id} is already terminal ('${row.status}') — its question can no longer be answered`,

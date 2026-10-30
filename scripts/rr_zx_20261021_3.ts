@@ -46,7 +46,7 @@ import {
   type TeamItem,
 } from '../packages/shared-types/src/team.js';
 import { importItem, listLocalItems, shareItem } from '../apps/worker-ant-desktop/src/main/core/team-library.js';
-import { buildAgentCard } from '../apps/worker-ant-desktop/src/main/core/inbound-gate.js';
+import { AGENT_CARD_FIELDS, buildAgentCard } from '../apps/worker-ant-desktop/src/main/core/inbound-gate.js';
 import { EXTERNAL_CAPABILITIES } from '../apps/worker-ant-desktop/src/main/core/external-calls.js';
 import { INTENTS } from '../apps/worker-ant-desktop/src/main/core/intent-protocol.js';
 
@@ -491,12 +491,11 @@ async function main(): Promise<void> {
   }
 
   // ═══ G｜能力卡：类目公开、清单遮蔽 ═══════════════════════════════════════════
-  console.log('\n【G】门牌六键；类目/意图由真源派生，实例清单零出现');
+  console.log('\n【G】门牌字段单源；类目/意图由真源派生，实例清单零出现');
   {
     const card = buildAgentCard('阳台的工蚁', '0.1.0');
-    eq(Object.keys(card).sort(),
-      ['agent_version', 'intents', 'name', 'offered_capabilities', 'pairing', 'protocol'],
-      'G-1 ★顶层恰六键（无第七样）');
+    eq(Object.keys(card).sort(), [...AGENT_CARD_FIELDS].sort(),
+      'G-1 ★顶层字段＝`AGENT_CARD_FIELDS` 单源（逐成员；无第七样、不少一员）');
     eq(card.offered_capabilities.map((c) => c.key), [...EXTERNAL_CAPABILITIES],
       'G-2 ★能力类目 ⊆ 且＝`EXTERNAL_CAPABILITIES`（派生，不手抄）');
     ok(card.offered_capabilities.every((c) => c.requires_approval === true),

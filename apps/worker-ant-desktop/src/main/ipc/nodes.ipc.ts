@@ -21,7 +21,7 @@ import { NODE_SETTING_KEYS, ensureNodeIdentity, readNodeSetting, writeNodeSettin
 import { eventBus } from '../core/event-bus.js';
 import { listNodeCallRecords, type NodeCallRecord } from '../core/node-call-log.js';
 // zx_20261011 M3/M4: 出站（本机派出去）——派发 core（`node-dispatcher.ts`）+ 出站台账（`node-dispatch-log.ts`）。
-import { dispatchNodeRequest, refreshDispatchResult, answerQuestion } from '../core/node-dispatcher.js';
+import { dispatchNodeRequest, refreshDispatchResult, answerQuestion, cancelNodeRequest } from '../core/node-dispatcher.js';
 import { listNodeDispatchRecords, type NodeDispatchRecord } from '../core/node-dispatch-log.js';
 import { isNodeRole, type AnsNode, type NodePatch } from '@worker-ant/shared-types';
 // zx_20261005 M22（Team 档软闸）: 协同面板的读/写口各经**同一判据**（`core/team-gate.ts`）——
@@ -42,7 +42,7 @@ import { fetchNodes, type NodeLedger } from '../core/node-list.js';
 //   **同在 main 一处真源**（`core/node-orchestrate.ts`）；渲染层只按返回的 `modes` 摆选项，不手抄枚举。
 import { ORCHESTRATE_MODES, isOrchestrateMode, readOrchestrateMode } from '../core/node-orchestrate.js';
 // zx_20261017_1 批三: 建单即派的读/写口——开关真源与审计投影同出 `core/collab-dispatch.ts`（一处真源）。
-import { applyAutoDispatchOnboarding, dispatchBoard, isAutoDispatchOn, isAutoDispatchPrompted, lastAutoDispatch } from '../core/collab-dispatch.js';
+import { applyAutoDispatchOnboarding, autoDispatchPolicy, dispatchBoard, isAutoDispatchPrompted, lastAutoDispatch } from '../core/collab-dispatch.js';
 // zx_20261017_1 批四: 改档留痕——写点收 `core/audit-log.ts`（一处），此处只转调。
 import { recordNodeUpdate, type AuditDb } from '../core/audit-log.js';
 
@@ -75,6 +75,9 @@ function enrollReasonNote(reason: string): string {
 // zx_20261011_4 M3: 台账取数已移 core（`core/node-list.ts`）——编排器要读**同一份**（N3 预查），
 //   两处各写一份 fetch 即"同一件事两处各记各的"。此处只转调，不再自持一份。
 //   （`fetchNodes` 的失败支仍带 `errorStatus: r.status`，见其实现——与本文件 `NodesListPayload` 声明同形。）
+// zx_20261030_1 M4「认」: 集群一屏的合成是**纯函数**（`core/node-cluster.ts`），此处只取数 + 过 Team 闸。
+import { buildClusterView, readLocalClusterCounts } from '../core/node-cluster.js';
+
 export function initNodesIpc(db: Database.Database): void {
   const settingDb = db as unknown as NodeSettingDb;
   const licDb = db as unknown as LicenseSettingDb;
@@ -87,6 +90,44 @@ export function initNodesIpc(db: Database.Database): void {
       // 锁定 ⇒ 不触 ANS（无本机注册，台账徒劳），回空 + gate 交面板显示升级提示。
       if (!gate.unlocked) return { data: { nodes: [], localNodeId, gate } };
       return { data: { ...(await fetchNodes(db, localNodeId)), gate } };
+    } catch (e) {
+      return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } };
+    }
+  });
+
+  // zx_20261030_1 M4「认」: 集群一屏（本机 + 对端汇总）。与 `nodes:list` **同闸同源**：
+  //   锁定即不触 ANS（回空视图 + gate 交面板显示升级提示）；台账读失败如实把 `error` 带进视图，
+  //   面板照样能看到本机行（本机计数是本地实时读的，不依赖 ANS）。
+  ipcMain.handle('nodes:cluster', async () => {
+    try {
+      const gate = resolveTeamGate(licDb);
+      const identity = ensureNodeIdentity(settingDb);
+      const roleRaw = readNodeSetting(settingDb, NODE_SETTING_KEYS.role);
+      const localRole = isNodeRole(roleRaw) ? roleRaw : 'worker';
+      const local = readLocalClusterCounts(db);
+      const localTier = resolveLicenseTier(licDb);
+      if (!gate.unlocked) {
+        return {
+          data: {
+            ...buildClusterView({ nodes: [], localNodeId: identity.id, localName: identity.name, localRole, local, dispatches: [], localTier, nowMs: Date.now() }),
+            gate,
+          },
+        };
+      }
+      const ledger = await fetchNodes(db, identity.id);
+      const dispatches = listNodeDispatchRecords(db as unknown as Parameters<typeof listNodeDispatchRecords>[0], 200);
+      const view = buildClusterView({
+        nodes: ledger.nodes,
+        localNodeId: identity.id,
+        localName: identity.name,
+        localRole,
+        local,
+        dispatches,
+        localTier,
+        nowMs: Date.now(),
+        ...(ledger.error ? { error: ledger.error } : {}),
+      });
+      return { data: { ...view, gate } };
     } catch (e) {
       return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } };
     }
@@ -280,12 +321,22 @@ export function initNodesIpc(db: Database.Database): void {
     }
   });
 
-  // zx_20261017_1 批三: 建单即派**读口**——开关状态（缺省关）+ 最近一次自动外派（审计账 `requireTarget=1` 投影）。
+  // zx_20261017_1 批三: 建单即派**读口**——开关状态 + 最近一次自动外派（审计账 `requireTarget=1` 投影）。
   //   纯本地读，不触 ANS、不设 Team 闸（同 `nodes:orchestrate-mode`：读本机设置不该要许可）。
+  // zx_20261029_2 M7：开关从「一个布尔」变为**三态策略**——连同 `source`/`reason` 一并回，
+  //   界面才能说清"为什么开/关"（缺省替用户开、还是用户自己设的、还是档位/入网未满足）。
   ipcMain.handle('nodes:auto-dispatch', () => {
     try {
-      // `prompted`：一次性引导是否已问过（GUI 据此决定首次入网后弹不弹；与写口同一读源）。
-      return { data: { enabled: isAutoDispatchOn(settingDb), prompted: isAutoDispatchPrompted(settingDb), last: lastAutoDispatch(db) } };
+      const policy = autoDispatchPolicy(db as unknown as NodeSettingDb & LicenseSettingDb);
+      // `prompted`：一次性告知是否已说过（GUI 据此决定首次满足条件时说不说；与写口同一读源）。
+      return {
+        data: {
+          enabled: policy.enabled,
+          policy: { source: policy.source, reason: policy.reason },
+          prompted: isAutoDispatchPrompted(settingDb),
+          last: lastAutoDispatch(db),
+        },
+      };
     } catch (e) {
       return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } };
     }
@@ -316,9 +367,11 @@ export function initNodesIpc(db: Database.Database): void {
     }
   });
 
-  // zx_20261018_1 批一: 首次入网的**一次性引导**落点（应/不应）——Team 闸在 core 一处判（`applyAutoDispatchOnboarding`）。
-  //   ⚠ 与 `nodes:set-auto-dispatch` **不是**同一件事：后者是用户在设置里随时改开关；本口是"首次引导的那一次回答"，
-  //     附带"已问过"标记（拒绝也算回答，不再打扰）。
+  // zx_20261018_1 批一: 首次入网的**一次性告知**落点——Team 闸在 core 一处判（`applyAutoDispatchOnboarding`）。
+  //   zx_20261029_2 M7：语义从「询问要不要开」改为「已经替你开了，告诉你一声」——
+  //   `accept=true` 只记"已告知"（不写 `'1'`，否则缺省开被钉成显式开、解除满负荷闸）；
+  //   `accept=false` 一键关闭（写 `'0'`）。
+  //   ⚠ 与 `nodes:set-auto-dispatch` **不是**同一件事：后者是用户在设置里随时改开关；本口是"首次告知的那一次应答"。
   ipcMain.handle('nodes:confirm-auto-dispatch', (_event, { accept }: { accept?: unknown }) => {
     try {
       if (typeof accept !== 'boolean') return { error: { code: 'INVALID', message: '参数 accept 须为布尔值' } };
@@ -387,6 +440,20 @@ export function initNodesIpc(db: Database.Database): void {
       const refusal = teamFeatureRefusal(licDb, 'multi_node');
       if (refusal) return { error: { code: 'TEAM_REQUIRED', message: refusalWithContext(db, refusal, { requiredTier: 'team' }) } };
       const r = await answerQuestion(db, { id, answer });
+      return { data: r };
+    } catch (e) {
+      return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } };
+    }
+  });
+
+  // zx_20261030_1 M3「止」: 派活方**叫停**一单（**写口**，过 Team 软闸——同 `nodes:dispatch`/`nodes:answer-question`）。
+  //   回来的 `request.status` 即 ANS 的**真实处置**（`pending` ⇒ 已置 `cancelled`；在跑 ⇒ 只置了叫停标志），
+  //   core 只在该单已终态时顺手落收口事件；"已请求但未停"由面板按 status 如实说，不谎称已停。
+  ipcMain.handle('nodes:request-cancel', async (_event, { id }: { id: string }) => {
+    try {
+      const refusal = teamFeatureRefusal(licDb, 'multi_node');
+      if (refusal) return { error: { code: 'TEAM_REQUIRED', message: refusalWithContext(db, refusal, { requiredTier: 'team' }) } };
+      const r = await cancelNodeRequest(db, id);
       return { data: r };
     } catch (e) {
       return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } };

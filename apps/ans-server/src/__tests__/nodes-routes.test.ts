@@ -873,13 +873,46 @@ describe('M11/M12 能力卡曝光 + 中转队列', () => {
     expect((await r.json()).data.target_node_id).toBe('n-idle-heavy');
   });
 
-  it('M12-⑫ zx_20261011 M2：余力**未知** ⇒ 取 neutral 1.0（不因"没这个数"受罚）', async () => {
-    // 一台权重 2、无余力字段（status 不含 capacity_free_ratio ⇒ json_extract 回 NULL ⇒ COALESCE 1.0 ⇒ 分 2.0）；
-    // 一台权重 1、余力 0.95（分 0.95）。前者分高 ⇒ 被选，证明"未知"未被当成 0（否则 2*0=0 会被后者压过）。
-    await enrollNode('n-unknown', card('n-unknown', ['text']), { weight: 2 }, { os: 't' });
-    await enrollNode('n-known', card('n-known', ['text']), { weight: 1 }, { os: 't', capacity_free_ratio: 0.95 });
+  it('M12-⑫ zx_20261027_3 M1：已知余力**优先于**未知（未知不再冒充满血 1.0）', async () => {
+    // 旧策 `COALESCE(json_extract(...), 1.0)` 把"没这个数"当满血：权重 9 的未知机（分 9）会压过
+    // 权重 1、真余力 0.1 的机器（分 0.1）。新三层排序里 known-free 恒在 unknown 之前 ⇒ 该选后者。
+    // 两只标本都"低权重"，差额全由**层级**决定，不吃权重巧合。
+    await enrollNode('n-unknown', card('n-unknown', ['text']), { weight: 9 }, { os: 't' });
+    await enrollNode('n-known', card('n-known', ['text']), { weight: 1 }, { os: 't', capacity_free_ratio: 0.1 });
     const r = await submit('text', { prompt: 'z' });
-    expect((await r.json()).data.target_node_id).toBe('n-unknown');
+    const data = (await r.json()).data;
+    expect(data.target_node_id).toBe('n-known');
+    // 择机快照随行（M1 落库契约）：组别/余力/人话理由都在。
+    expect(data.selection?.group).toBe('free');
+    expect(data.selection?.ratio).toBeCloseTo(0.1);
+    expect(String(data.selection?.reason)).toContain('已知余力 10%');
+  });
+
+  it('M12-⑫b zx_20261027_3 M1：**全未知**仍按权重派（未知不被排除、不因"读不到负载"受罚）', async () => {
+    await enrollNode('n-u-heavy', card('n-u-heavy', ['text']), { weight: 7 }, { os: 't' });
+    await enrollNode('n-u-light', card('n-u-light', ['text']), { weight: 2 }, { os: 't' });
+    const r = await submit('text', { prompt: 'z' });
+    const data = (await r.json()).data;
+    expect(data.target_node_id).toBe('n-u-heavy');
+    expect(data.selection?.group).toBe('unknown');
+    expect(String(data.selection?.reason)).toContain('余力未知（不惩罚）');
+  });
+
+  it('M12-⑫c zx_20261027_3 M1：已知满负荷（ratio=0）恒排在有/未知余力之后', async () => {
+    // 满负荷机权重再高（100）也不该抢走派单：先让位给已知有闲的，再让位给未知的。
+    await enrollNode('n-full', card('n-full', ['text']), { weight: 100 }, { os: 't', capacity_free_ratio: 0 });
+    await enrollNode('n-unknown2', card('n-unknown2', ['text']), { weight: 1 }, { os: 't' });
+    const r1 = await submit('text', { prompt: 'a' });
+    expect((await r1.json()).data.target_node_id).toBe('n-unknown2');
+
+    // 非法 ratio（1.7）按未知处理——脏值不是事实，不能当满血也不能当满负荷。
+    db.prepare(`UPDATE ans_nodes SET status_json = ? WHERE node_id = 'n-full'`).run(
+      JSON.stringify({ os: 't', capacity_free_ratio: 1.7 }),
+    );
+    const r2 = await submit('text', { prompt: 'b' });
+    const data2 = (await r2.json()).data;
+    expect(data2.target_node_id).toBe('n-full'); // 权重 100 vs 1，双方都归 unknown ⇒ 高权重胜
+    expect(data2.selection?.group).toBe('unknown');
   });
 
   it('M12-⑬ zx_20261011 M2：手动指定目标——合格则**直派**（即便非分值最高）；不合格 400 如实', async () => {

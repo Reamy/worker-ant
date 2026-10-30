@@ -226,6 +226,11 @@ export function verifyLicense(licenseText: string, opts: VerifyOpts = {}): Verif
   if (payload.v !== 1 || !isLicenseTier(payload.tier) || !Array.isArray(payload.devices)) {
     return { ok: false, status: 'bad_payload', detail: '许可载荷字段不合规（版本/档位/设备列表）' };
   }
+  // zx_20261029_2 M6「堵空档」：**运行时**拒永久 Team 许可——与 `scripts/issue-license.ts` 的签发闸
+  //   同一把尺（签发面已拦，这里兜住"绕过工具签出/历史遗留件"，免得只在签发面成立）。
+  if (payload.tier === 'team' && !payload.expiresAt) {
+    return { ok: false, status: 'bad_payload', detail: '团队授权包必须有到期日（按包月/年销售，到期续签）——不接受永久团队许可' };
+  }
   const deviceCap = licenseDeviceCap(payload.tier);
   if (payload.devices.length > deviceCap) {
     return { ok: false, status: 'too_many_devices', detail: `许可绑定了 ${payload.devices.length} 台设备，超出 ${TIER_LABEL[payload.tier]}上限 ${deviceCap} 台` };
@@ -343,9 +348,12 @@ function resolveLocalLicenseState(
       const elapsedMs = Math.max(0, now.getTime() - started.getTime());
       const daysLeft = TRIAL_DAYS - Math.floor(elapsedMs / 86_400_000);
       if (daysLeft > 0) {
+        // zx_20261027_3 M3「试得真」：试用给的就是**团队版能力**（与 `tier-catalog` 的
+        //   `trialGrantsTier()` 及价目表 `trial.grantsTier='team'` 同源）。此前实现落 `pro`，
+        //   宣称与实得两说——本轮让实现追上宣称，不新增档位、不改 `LICENSE_TIERS`。
         return {
-          tier: 'pro', kind: 'trial', tierLabel: TIER_LABEL.pro,
-          detail: `试用中：还剩 ${daysLeft} 天（专业版能力）`,
+          tier: 'team', kind: 'trial', tierLabel: TIER_LABEL.team,
+          detail: `试用中：还剩 ${daysLeft} 天（团队版能力）`,
           expiresAt: null, devices: [], subject: null, trialDaysLeft: daysLeft, fingerprint,
         };
       }

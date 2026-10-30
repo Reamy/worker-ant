@@ -19,6 +19,17 @@
  *   ——「救回」不等于「找回」，如是不假装能补发原来那把（毛选·没有调查没有发言权）。
  */
 import { createHash, randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
+// zx_20261029_2 M4：配对通知里说清"这台终端获准后能做什么"——**人话词表只取能力白名单那一份**
+//   （`EXTERNAL_CAPABILITY_LABEL`），不在此手抄列表；`external-calls` 不反向引本模块（无环）。
+import {
+  DEFAULT_TERMINAL_CAPABILITIES,
+  EXTERNAL_CAPABILITY_LABEL,
+  isExternalCapability,
+  type ExternalCapability,
+} from './external-calls.js';
+// zx_20261030_1 M5「限」：批准前的**有效终端**容量闸（只拦新增；已批准的不回收）。
+import { resolveLicenseTier } from './license.js';
+import { capacityRefusal, countApprovedTerminals } from './tier-capacity.js';
 
 /** 只用到的库接口——使本模块可脱 better-sqlite3，在受控回归里跑真逻辑（同 `settings-bool.ts` 范式）。 */
 export interface TerminalDb {
@@ -292,6 +303,10 @@ export function approveTerminal(
   const row = db.prepare('SELECT * FROM wa_external_terminals WHERE id = ?').get(pairingId) as TerminalRow | undefined;
   if (!row) return { ok: false, reason: 'not_found' };
   if (row.status !== 'pending') return { ok: false, reason: `not_pending:${row.status}` };
+  // zx_20261030_1 M5「限」：批准＝一台**有效**终端新增。到上限即如实拒（`capacity:` 前缀，调用方原样上屏）；
+  //   已批准的终端一条不动——`not_pending:*` 的既有判定先于本闸，不把"重复批"误报成容量问题。
+  const verdict = capacityRefusal(resolveLicenseTier(db), 'maxExternalTerminals', countApprovedTerminals(db));
+  if (!verdict.ok) return { ok: false, reason: `capacity:${verdict.note}` };
   const key = newTerminalKey();
   const secret = randomBytes(32).toString('hex');
   const caps = (Array.isArray(capabilities) ? capabilities : []).filter((c): c is string => typeof c === 'string');
@@ -303,6 +318,23 @@ export function approveTerminal(
   ).run(key.slice(0, 8), hashTerminalSecret(secret), JSON.stringify(caps), dbNowUtc(now), expiresAt, pairingId);
   pendingDelivery.set(pairingId, { key, secret });
   return { ok: true };
+}
+
+/**
+ * 拒因 → IPC 错误形状（**唯一一处**；`external.ipc.ts` 原样转调）。
+ *
+ * zx_20261030_1 M8：`capacity:` 是 core 侧的**分因前缀**（给代码分流、给断言钉形状），不是给人看的——
+ *   上屏前在此剥掉，用户只看到「社区版外部终端已达上限（已用 4/1）。…」；
+ *   此前它经 IPC 兜底分支原样漏进提示条，用户看到的第一句是 `capacity:`。
+ * 住在 core（纯函数、不引 electron）⇒ 受控回归可直跑真实现。
+ */
+export function terminalReasonToError(reason: string): { code: string; message: string } {
+  if (reason === 'not_found') return { code: 'NOT_FOUND', message: '该申请/终端不存在' };
+  if (reason === 'already_delivered') return { code: 'INVALID_STATE', message: '该终端的凭据已送达（终端手上有能用的钥匙）——若要换一把，请先吊销再重新配对' };
+  if (reason.startsWith('capacity:')) return { code: 'CAPACITY_REACHED', message: reason.slice('capacity:'.length) };
+  if (reason.startsWith('not_pending')) return { code: 'INVALID_STATE', message: `该申请已不是待批状态（${reason.split(':')[1] ?? ''}）` };
+  if (reason.startsWith('not_approved')) return { code: 'INVALID_STATE', message: `该终端不是已授权状态（${reason.split(':')[1] ?? ''}）` };
+  return { code: 'INTERNAL', message: reason };
 }
 
 /** 拒绝一台终端（只对 `pending` 行有效）。 */
@@ -455,10 +487,26 @@ export function createPairingPort(db: TerminalDb): PairingPort {
  * 这句回话要能被 `parsePairReply` 认出来，就得**照抄**这里的形状（维特根斯坦·意义即用法：
  * 意义即用法——文案若与解析器各说各话，用户照做即失败，那是本仓「说明书与机器各说各话」的老病）。
  */
-export function buildPairNotice(o: { name: string; pairCode: string; source?: TerminalSource }): string {
+export function buildPairNotice(o: {
+  name: string;
+  pairCode: string;
+  source?: TerminalSource;
+  /**
+   * 这台终端**获准后会拿到**的能力类目。配对申请本身只报名字（`POST {name}`），
+   * 故缺省＝IM 批准实际授予的那一组（`DEFAULT_TERMINAL_CAPABILITIES`）——文案与实际闸**同源**，
+   * 不写"它能做什么"的猜测。
+   */
+  capabilities?: readonly string[];
+}): string {
   // zx_20261023_5 批四：`lan` 来源如实写在通知里——"是工蚁在局域网先看见它"与"它自己敲门"是两种情形。
   const origin = o.source === 'lan' ? '（来自局域网发现）' : '';
-  return `🤖 有终端请求接入工蚁：「${o.name}」${origin}（核对码 ${o.pairCode}）。回复「同意接入 ${o.pairCode}」允许，回复「拒绝接入 ${o.pairCode}」拒绝。`;
+  // zx_20261029_2 M4：能力类目从**白名单的标签表**派生（不手抄一份），空/表外值一律不计。
+  const caps: ExternalCapability[] = (o.capabilities ?? DEFAULT_TERMINAL_CAPABILITIES)
+    .filter(isExternalCapability);
+  const capText = caps.length
+    ? `获准后将授予能力：${caps.map((c) => EXTERNAL_CAPABILITY_LABEL[c]).join('、')}。`
+    : '获准后不授予任何能力（仅配对）。';
+  return `🤖 有终端请求接入工蚁：「${o.name}」${origin}（核对码 ${o.pairCode}）。${capText}批准后可在「协同面板」页撤销。回复「同意接入 ${o.pairCode}」允许，回复「拒绝接入 ${o.pairCode}」拒绝。`;
 }
 
 /** 用户 IM 回复解析结果的形状（`code:null` = 没带核对码，靠"当前只有一条待批"来定；见 `resolvePairTarget`）。 */

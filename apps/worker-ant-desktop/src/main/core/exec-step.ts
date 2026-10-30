@@ -173,6 +173,9 @@ export interface StepScope {
   get controller(): AbortController;
   get lastStepTs(): number;
   set lastStepTs(v: number);
+  /** zx_20261030_2 M5：本次已逐步写入的全部正文（收口算增量的唯一依据）。 */
+  get textWritten(): string;
+  set textWritten(v: string);
 }
 
 /**
@@ -241,9 +244,13 @@ export function createStepHandler(d: StepScope) {
       } catch { /* ANS 记账失败不阻塞执行 */ }
     }
     if (event.text) {
+      // zx_20261030_2 M5（「一段话只说一遍」）：只累计**真正写入**的字符（与落库同一截断口径），
+      //   供收口处算增量——收口行不再把已写过的正文再写一遍。
+      const writtenText = event.text.slice(0, 50_000);
       d.db.prepare(
         "INSERT INTO wa_task_conversations (id, task_id, role, content, token_count, created_at) VALUES (?, ?, 'assistant', ?, ?, datetime('now'))"
-      ).run(crypto.randomUUID(), d.taskId, event.text.slice(0, 50_000), hasToolsNow ? 0 : stepTokens); // 归一到一行：纯文本步记 assistant，工具步记工具行
+      ).run(crypto.randomUUID(), d.taskId, writtenText, hasToolsNow ? 0 : stepTokens); // 归一到一行：纯文本步记 assistant，工具步记工具行
+      d.textWritten += writtenText;
     }
     // 工具调用日志（诊断用：记录每步调用哪些工具）
     const toolCalls = (event as { toolCalls?: Array<{ toolName: string; args?: unknown }> }).toolCalls || [];

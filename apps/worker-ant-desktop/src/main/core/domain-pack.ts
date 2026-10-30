@@ -63,12 +63,18 @@ export interface DomainPackPayload {
   omitted_sections: DomainPackSection[];
 }
 
+/** 包来路（zx_20261030_1 M6）：用户主动生成/导入，或系统按项目知识建议的候选。 */
+export type DomainPackOrigin = 'user' | 'auto_candidate';
+
 export interface DomainPackRow {
   id: string;
   name: string;
   description: string;
   source_project_id: string | null;
   source_project_name: string;
+  origin: DomainPackOrigin;
+  /** 非空 = 用户已忽略该候选（只对 `auto_candidate` 有语义）。 */
+  dismissed_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -213,21 +219,48 @@ export function deriveDomainPack(
   };
 }
 
-/** 落一份包资产（**不启用**）。返回包 id。`sourceProjectId` 为空串 ⇒ 存 NULL（导入包）。 */
-export function insertDomainPack(db: WriteDb, pack: DomainPackPayload): string {
+/**
+ * 落一份包资产（**不启用**）。返回包 id。`sourceProjectId` 为空串 ⇒ 存 NULL（导入包）。
+ * `origin` 缺省 `user`；系统建议的候选必须显式传 `auto_candidate`（承 §2.6：候选**永不自动启用**）。
+ */
+export function insertDomainPack(
+  db: PackDb,
+  pack: DomainPackPayload,
+  origin: DomainPackOrigin = 'user',
+): string {
   const id = newPackId();
-  db.prepare(
-    `INSERT INTO wa_domain_packs (id, name, description, pack_json, source_project_id, source_project_name, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
-  ).run(
+  const args = [
     id,
     clip(pack.name, DOMAIN_PACK_NAME_MAX),
     clip(pack.description, DOMAIN_PACK_DESC_MAX),
     JSON.stringify(pack),
     pack.source.project_id ? pack.source.project_id : null,
     pack.source.project_name || '',
-  );
+  ] as const;
+  if (hasOriginColumn(db)) {
+    db.prepare(
+      `INSERT INTO wa_domain_packs (id, name, description, pack_json, source_project_id, source_project_name, origin, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+    ).run(...args, origin);
+  } else {
+    // M6 之前的老表（旧夹具/未迁移库）没有 origin 列：按 `user` 落库。
+    //   候选建议只在有该列时成立（见 `ensureAutoCandidateDomainPack`）——宁可没有建议，不改老表形状。
+    db.prepare(
+      `INSERT INTO wa_domain_packs (id, name, description, pack_json, source_project_id, source_project_name, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+    ).run(...args);
+  }
   return id;
+}
+
+/** 该库的 `wa_domain_packs` 是否已有 M6 的 `origin` 列（老库/旧夹具没有）。 */
+function hasOriginColumn(db: PackDb): boolean {
+  try {
+    const cols = db.prepare('PRAGMA table_info(wa_domain_packs)').all() as Array<{ name?: unknown }>;
+    return cols.some((c) => String(c?.name ?? '') === 'origin');
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -246,10 +279,105 @@ export function createDomainPack(
   return { ok: true, id, pack: derived.pack };
 }
 
+/**
+ * 系统建议的候选包（zx_20261030_1 M6）：**只生成/更新，不启用**。
+ *
+ * 去重键 = **来源项目**：同一项目只留一份候选（不再每次吸收都多一份包）。
+ * 用户已「忽略」（`dismissed_at` 非空）⇒ 永远不再重复建议，也**不复活**已忽略行。
+ *
+ * ⚠ 本函数**不挂 Pro 闸**：它只产出"建议"，真正启用仍走 `applyDomainPack` 的 Pro 闸——
+ *   社区档看到建议也装不上，与"闸只挡搬运"同一把尺。
+ */
+export function ensureAutoCandidateDomainPack(
+  db: PackDb,
+  projectId: string,
+): { id: string; created: boolean } | null {
+  const pid = projectId || '';
+  if (!pid) return null;
+  const derived = deriveDomainPack(db, pid);
+  if (!derived.ok) return null;
+  const existing = db.prepare(
+    `SELECT id, dismissed_at FROM wa_domain_packs
+      WHERE source_project_id = ? AND origin = 'auto_candidate'
+      ORDER BY created_at, id LIMIT 1`,
+  ).get(pid) as { id?: string; dismissed_at?: string | null } | undefined;
+  if (existing?.id) {
+    // 忽略过就尊重忽略：不刷新、不复活（"拒绝"是用户的表态，不是可以重提的缺口）。
+    if (existing.dismissed_at) return null;
+    db.prepare(
+      `UPDATE wa_domain_packs
+          SET name = ?, description = ?, pack_json = ?, updated_at = datetime('now')
+        WHERE id = ?`,
+    ).run(
+      clip(derived.pack.name, DOMAIN_PACK_NAME_MAX),
+      clip(derived.pack.description, DOMAIN_PACK_DESC_MAX),
+      JSON.stringify(derived.pack),
+      existing.id,
+    );
+    return { id: existing.id, created: false };
+  }
+  const id = insertDomainPack(db, derived.pack, 'auto_candidate');
+  return { id, created: true };
+}
+
+/**
+ * 给某项目看的候选包：未忽略、未启用、**不是从本项目派生**的 `auto_candidate` 资产。
+ * 只展示，不注入；用户点「启用」才走 `applyDomainPack`（Pro 闸）。
+ */
+export function listSuggestedDomainPacks(
+  db: ReadDb,
+  projectId: string,
+  limit: number = 5,
+): DomainPackListRow[] {
+  const pid = projectId || '';
+  if (!pid) return [];
+  const lim = Math.max(1, Math.floor(Number(limit) || 5));
+  const rows = db.prepare(
+    `SELECT p.id AS id, p.name AS name, p.description AS description,
+            p.source_project_id AS source_project_id, p.source_project_name AS source_project_name,
+            p.origin AS origin, p.dismissed_at AS dismissed_at,
+            p.created_at AS created_at, p.updated_at AS updated_at, p.pack_json AS pack_json
+       FROM wa_domain_packs p
+       LEFT JOIN wa_project_domain_packs m ON m.pack_id = p.id AND m.project_id = ?
+      WHERE p.origin = 'auto_candidate'
+        AND p.dismissed_at IS NULL
+        AND m.pack_id IS NULL
+        AND (p.source_project_id IS NULL OR p.source_project_id <> ?)
+      ORDER BY p.updated_at DESC, p.id
+      LIMIT ?`,
+  ).all(pid, pid, lim) as Array<DomainPackRow & { pack_json: string }>;
+  return rows.map((r) => {
+    const pack = parseDomainPackJson(r.pack_json);
+    return {
+      id: r.id,
+      name: r.name,
+      description: r.description,
+      source_project_id: r.source_project_id,
+      source_project_name: r.source_project_name,
+      origin: r.origin === 'auto_candidate' ? 'auto_candidate' : 'user',
+      dismissed_at: r.dismissed_at ?? null,
+      created_at: r.created_at,
+      updated_at: r.updated_at,
+      applied: false,
+      section_count: pack?.sections.length ?? 0,
+      chars: pack ? pack.sections.reduce((n, s) => n + s.content.length, 0) : 0,
+    };
+  });
+}
+
+/** 忽略一条候选（只对 `auto_candidate` 生效；幂等）。返回是否真改了一行。 */
+export function dismissAutoCandidateDomainPack(db: WriteDb, packId: string): boolean {
+  const r = db.prepare(
+    `UPDATE wa_domain_packs SET dismissed_at = datetime('now'), updated_at = datetime('now')
+      WHERE id = ? AND origin = 'auto_candidate' AND dismissed_at IS NULL`,
+  ).run(packId || '');
+  return r.changes > 0;
+}
+
 /** 列出包资产（可按项目标出是否已应用）。 */
 export function listDomainPacks(db: ReadDb, projectId?: string): DomainPackListRow[] {
   const rows = db.prepare(
-    'SELECT id, name, description, source_project_id, source_project_name, created_at, updated_at, pack_json FROM wa_domain_packs ORDER BY updated_at DESC, id',
+    'SELECT id, name, description, source_project_id, source_project_name, origin, dismissed_at, created_at, updated_at, pack_json FROM wa_domain_packs ORDER BY updated_at DESC, id',
   ).all() as Array<DomainPackRow & { pack_json: string }>;
   const applied = new Set<string>();
   if (projectId) {
@@ -264,6 +392,8 @@ export function listDomainPacks(db: ReadDb, projectId?: string): DomainPackListR
       description: r.description,
       source_project_id: r.source_project_id,
       source_project_name: r.source_project_name,
+      origin: r.origin === 'auto_candidate' ? 'auto_candidate' : 'user',
+      dismissed_at: r.dismissed_at ?? null,
       created_at: r.created_at,
       updated_at: r.updated_at,
       applied: applied.has(r.id),

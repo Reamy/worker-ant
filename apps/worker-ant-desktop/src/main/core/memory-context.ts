@@ -232,7 +232,9 @@ export function buildMemoryContext(memory: MemoryManager, projectId: string, tas
   let cardTokens = 0;
   try {
     const cards: KnowledgeCard[] = typeof memory.listKnowledgeCards === 'function' ? memory.listKnowledgeCards(projectId) : [];
-    const picked = selectKnowledgeCardsForInject(cards, currentArchetype, taskText, CARD_INJECT_MAX_TOKENS);
+    // M6a: 本项目卡的**结局账**随行——样本 ≥3 的卡按「成/败」微调先后（仍确定性，不调模型）。
+    const cardStats = typeof memory.knowledgeCardStats === 'function' ? memory.knowledgeCardStats(projectId) : undefined;
+    const picked = selectKnowledgeCardsForInject(cards, currentArchetype, taskText, CARD_INJECT_MAX_TOKENS, cardStats);
     if (picked.length > 0) {
       const lines = picked.map((c) => `- 【${KNOWLEDGE_CARD_KIND_LABEL[c.kind]}】${c.text}`);
       cardText = '## 项目知识卡\n' + lines.join('\n');

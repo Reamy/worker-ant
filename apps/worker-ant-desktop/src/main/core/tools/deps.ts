@@ -30,6 +30,15 @@ export interface ToolDeps {
    */
   readFiles: Set<string>;
 
+  /**
+   * zx_20261027_1 M4（道德经·知不知，上）：本任务内**只读到部分内容**的文件集（键同为 `path.resolve`）。
+   *
+   * 与 `readFiles` 的区别是"读没读"与"读全没读全"——`read_file` 分页/超限截断时入册，之后读到末尾即出册。
+   * 用途只有一个：收口时把"本次有文件只读了一部分"如实说出来（尤其核验类任务，"没看到"不等于"没有"）。
+   * 可选字段：受控回归的既有夹具不建这份集，读侧用 `?.` 兼容。
+   */
+  truncatedReads?: Set<string>;
+
   // ---- 原 buildTools 体内的前置闭包（仍定义在 agent-executor.ts，此处只传引用）----
   // zx_20260930 M3-c: `isModuleFilePath` **已从此处移除**——它的真源挪到零依赖的
   // `core/deliverable-types.ts`，工具体与 IPC 两处**直接引用同一个函数**，
@@ -40,6 +49,11 @@ export interface ToolDeps {
     options: string[] | null,
     context: Record<string, unknown>,
   ) => string;
+  /**
+   * zx_20261030_2 M3（「止」）：`await_subagents` 的**置停**入口。工具层不直接 import 暂停模块——
+   * 保持既有的工具/暂停边界，也让受控回归能注入假实现、直接观察调用形状（因由、无 note）。
+   */
+  pauseTask: typeof import('../pause-task.js').pauseTask;
   approvePathWrite: (resolvedPath: string) => Promise<{ allowed: boolean; reason?: string; response?: string }>;
   ensureSkillsLoaded: () => Promise<void>;
 

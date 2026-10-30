@@ -51,6 +51,8 @@ import {
   type IntentResolveOutcome,
 } from '../apps/worker-ant-desktop/src/main/core/external-calls.js';
 import {
+  AGENT_CARD_FIELDS,
+  INBOUND_AGENT_CARD_PATH,
   handleInboundRequest,
   INBOUND_CAPABILITIES_PATH,
   INBOUND_INTENT_EXECUTE_PATH,
@@ -87,6 +89,7 @@ import {
   isAutoDispatchPrompted,
   shouldPromptAutoDispatch,
 } from '../apps/worker-ant-desktop/src/main/core/collab-dispatch.js';
+import { NODE_SETTING_KEYS } from '../apps/worker-ant-desktop/src/main/core/node-identity.js';
 import { relayTaskTitle, relayTaskFields } from '../apps/worker-ant-desktop/src/main/core/node-request-runner.js';
 import { TaskManager } from '../apps/worker-ant-desktop/src/main/core/project-engine.js';
 import {
@@ -277,7 +280,8 @@ function makeDoorDb(trial = true): DatabaseSync {
     created_at TEXT DEFAULT (datetime('now')),
     expires_at TEXT NOT NULL,
     executed_at TEXT,
-    result_json TEXT NOT NULL DEFAULT '{}'
+    result_json TEXT NOT NULL DEFAULT '{}',
+    source TEXT NOT NULL DEFAULT 'rule'
   )`);
   d.exec(`CREATE INDEX idx_wa_intent_plans_status ON wa_intent_plans(status, expires_at)`);
   d.exec(`CREATE INDEX idx_wa_intent_plans_terminal ON wa_intent_plans(terminal_id, created_at DESC)`);
@@ -298,6 +302,21 @@ function makeDoorDb(trial = true): DatabaseSync {
     d.prepare('INSERT INTO wa_settings (key, value) VALUES (?, ?)')
       .run(LICENSE_SETTING_KEYS.trialStartedAt, new Date().toISOString());
   }
+  return d;
+}
+
+/**
+ * zx_20261029_2 M7 夹具：**已入网**的门内库——三条件照生产 `nodeEnrollmentReason`
+ * （`node.id` + `node.resource_group = node:<id>` + 非占位 `ans_api_key`）。
+ * 缺省三态的「缺省开」支就靠它；未入网/社区两支仍用 `makeDoorDb`。
+ */
+function enrolledDoorDb(trial = true): DatabaseSync {
+  const d = makeDoorDb(trial);
+  const put = d.prepare('INSERT OR REPLACE INTO wa_settings (key, value) VALUES (?, ?)');
+  const id = 'node-self-1';
+  put.run(NODE_SETTING_KEYS.id, id);
+  put.run(NODE_SETTING_KEYS.resourceGroup, `node:${id}`);
+  put.run(NODE_SETTING_KEYS.ansApiKey, 'ak_live_0123456789abcdef'); //gitleaks:allow 合成夹具样本，非凭据
   return d;
 }
 
@@ -422,6 +441,7 @@ function makeRoomDb(): DeviceDb {
     alias TEXT DEFAULT '',
     room TEXT DEFAULT '',
     kind TEXT DEFAULT 'unknown',
+    kind_class TEXT NOT NULL DEFAULT '',
     protocol TEXT NOT NULL,
     address TEXT NOT NULL,
     port INTEGER,
@@ -435,6 +455,19 @@ function makeRoomDb(): DeviceDb {
   )`);
   d.exec(`CREATE UNIQUE INDEX idx_wa_devices_ident ON wa_devices(protocol, address)`);
   return d;
+}
+
+/**
+ * zx_20261030_1 M5 后：`upsertDiscovered` 首次插入前过容量闸（社区 5 台）。
+ *   房间/订阅等**非容量主题**的夹具若样本 >5 台，须显式给足容量——否则第 6 台起被闸拒、
+ *   断言拿到的 `null` 会伪装成"房间匹配坏了"。给试用（团队档 30 台），与生产首次启动同态。
+ *   容量本身的行为由 M5 专项套件验，不靠此夹具旁证。
+ */
+function grantTrialCapacity(d: DeviceDb): void {
+  const raw = d as unknown as DatabaseSync;
+  raw.exec(`CREATE TABLE IF NOT EXISTS wa_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT DEFAULT (datetime('now')))`);
+  raw.prepare('INSERT OR REPLACE INTO wa_settings (key, value) VALUES (?, ?)')
+    .run(LICENSE_SETTING_KEYS.trialStartedAt, new Date().toISOString());
 }
 
 /** 批三的发现标本：只带自述字段（与真实发现器交上来的一致）。 */
@@ -631,7 +664,8 @@ function makeComfortDb(opts: { trial?: boolean } = {}): DatabaseSync {
     created_at TEXT DEFAULT (datetime('now')),
     expires_at TEXT NOT NULL,
     executed_at TEXT,
-    result_json TEXT NOT NULL DEFAULT '{}'
+    result_json TEXT NOT NULL DEFAULT '{}',
+    source TEXT NOT NULL DEFAULT 'rule'
   )`);
   d.exec(`CREATE INDEX idx_wa_intent_plans_status ON wa_intent_plans(status, expires_at)`);
   d.exec(`CREATE TABLE wa_device_actions (
@@ -798,10 +832,12 @@ async function main(): Promise<void> {
   }
   {
     // 人话名/说明两侧齐备（GUI 卡片直接上屏）。
-    eq(EXTERNAL_CAPABILITIES, ['device_control', 'intent_control'],
-      'R-1h 授予词表**恰两项**（原始动作 + 意图）');
-    eq(INVOKE_CAPABILITIES, ['device_control'],
-      'R-1i `/invoke` 可直调面**恰一项**（意图控制不入直调面）');
+    // zx_20261027_3 M5b：词表增 `task_request`——判据**重定向到边界本身**（直调 ⊆ 授予、意图不可直调），
+    //   不再钉"恰两项/恰一项"的固定长度。
+    ok(['device_control', 'intent_control', 'task_request'].every((c) => (EXTERNAL_CAPABILITIES as readonly string[]).includes(c)),
+      'R-1h ★授予词表三类俱在（原始动作 / 意图 / 任务请求）');
+    eq(INVOKE_CAPABILITIES.filter((c) => !(EXTERNAL_CAPABILITIES as readonly string[]).includes(c)), [],
+      'R-1i ★★`/invoke` 直调面 ⊆ 授予面（不留"能调不能授"的野路）');
     ok(isInvocableCapability('intent_control') === false,
       'R-1j ★意图控制**不可**经 `/invoke` 直调');
     for (const c of EXTERNAL_CAPABILITIES) {
@@ -1014,39 +1050,43 @@ async function main(): Promise<void> {
     d.close();
   }
 
-  // ═══ R-9｜建单即派的一次性引导（Team 专属；三只标本）══════════════════════════════
-  console.log('\n【R-9】Team 入网后的一次性引导');
+  // ═══ R-9｜建单即派的一次性**告知**（zx_20261029_2 M7：询问 → 告知）════════════════
+  console.log('\n【R-9】Team 入网后的一次性告知（缺省开 → 告诉你一声 + 一键关闭）');
   {
-    const base = { teamUnlocked: true, enrolled: true, enabled: false, prompted: false };
-    eq(shouldPromptAutoDispatch(base), true, 'R-9a ★标本①（Team + 已入网 + 未开 + 未问）⇒ 弹');
-    eq(shouldPromptAutoDispatch({ ...base, teamUnlocked: false }), false, 'R-9b ★标本②（社区/Pro）⇒ **永不**弹');
-    eq(shouldPromptAutoDispatch({ ...base, enabled: true }), false, 'R-9c 已开启 ⇒ 不打扰');
-    eq(shouldPromptAutoDispatch({ ...base, prompted: true }), false, 'R-9d 问过 ⇒ 不再问');
+    // zx_20261029_2 M7：语义变了——原口径「还没开 ⇒ 问要不要开」，新口径「已替你开 ⇒ 告知」。
+    const base = { teamUnlocked: true, enrolled: true, enabled: true, source: 'default' as const, prompted: false };
+    eq(shouldPromptAutoDispatch(base), true, 'R-9a ★标本①（Team + 已入网 + 缺省已开 + 未告知）⇒ 说一声');
+    eq(shouldPromptAutoDispatch({ ...base, teamUnlocked: false }), false, 'R-9b ★标本②（社区/Pro）⇒ **永不**出现');
+    eq(shouldPromptAutoDispatch({ ...base, enabled: false }), false, 'R-9c 没开 ⇒ 没有"已开启"可告知（不弹）');
+    eq(shouldPromptAutoDispatch({ ...base, source: 'explicit' }), false, 'R-9c2 ★用户自己设过的 ⇒ 不打扰（不是"替你开的"）');
+    eq(shouldPromptAutoDispatch({ ...base, prompted: true }), false, 'R-9d 告知过 ⇒ 不再说');
 
-    // 行为①：Team 里点"开启" ⇒ 开关真写 '1' + 记已问过（0→1 正面断言）。
-    const team = makeDoorDb(true);
-    eq(isAutoDispatchOn(team as never), false, 'R-9e 基线：开关关（0）');
-    eq(isAutoDispatchPrompted(team as never), false, 'R-9f 基线：未问过（0）');
+    // 行为①：缺省开时点「知道了」⇒ 保持开着、只记"已告知"——**不写开关**（写 '1' 会把缺省开钉成显式开、解除满负荷闸）。
+    const team = enrolledDoorDb(true);
+    eq(isAutoDispatchOn(team as never), true, 'R-9e ★基线：Team + 已入网 + 未配置 ⇒ **缺省开**');
+    eq(isAutoDispatchPrompted(team as never), false, 'R-9f 基线：未告知（0）');
     const r1 = applyAutoDispatchOnboarding(team as never, true);
-    eq(r1.ok, true, 'R-9g Team 点开启 ⇒ 成功');
-    eq(isAutoDispatchOn(team as never), true, 'R-9h ★0→1：开关＝开');
-    eq(isAutoDispatchPrompted(team as never), true, 'R-9i ★0→1：已问过');
-    eq(team.prepare('SELECT value FROM wa_settings WHERE key = ?').get(AUTO_DISPATCH_SETTING_KEY), { value: '1' },
-      'R-9j 落库值确为 `\'1\'`');
+    eq(r1.ok, true, 'R-9g 点「知道了」⇒ 成功');
+    eq(isAutoDispatchOn(team as never), true, 'R-9h 开关仍开（缺省开着）');
+    eq(isAutoDispatchPrompted(team as never), true, 'R-9i ★0→1：已告知');
+    eq(team.prepare('SELECT value FROM wa_settings WHERE key = ?').get(AUTO_DISPATCH_SETTING_KEY), undefined,
+      'R-9j ★落库**无**开关键——缺省开不被钉成显式开（保住「满负荷才溢出」）');
     eq(team.prepare('SELECT value FROM wa_settings WHERE key = ?').get(AUTO_DISPATCH_PROMPTED_KEY), { value: 'true' },
-      'R-9k 引导标记确为 `\'true\'`');
+      'R-9k 告知标记确为 `\'true\'`');
     eq(shouldPromptAutoDispatch({
-      teamUnlocked: true, enrolled: true,
+      teamUnlocked: true, enrolled: true, source: 'default',
       enabled: isAutoDispatchOn(team as never), prompted: isAutoDispatchPrompted(team as never),
-    }), false, 'R-9l 点过之后不再弹');
+    }), false, 'R-9l 告知过之后不再说');
     team.close();
 
-    // 行为②：Team 里点"暂不开启" ⇒ 开关保持关 + 记已问过（拒绝也是一次回答）。
-    const team2 = makeDoorDb(true);
+    // 行为②：点「一键关闭」⇒ 显式关（写 '0'）+ 记已告知（一次回答，不再打扰）。
+    const team2 = enrolledDoorDb(true);
     const r2 = applyAutoDispatchOnboarding(team2 as never, false);
-    eq(r2.ok, true, 'R-9m Team 点暂不 ⇒ 成功');
-    eq(isAutoDispatchOn(team2 as never), false, 'R-9n ★用户关掉就保持关');
-    eq(isAutoDispatchPrompted(team2 as never), true, 'R-9o 但仍记已问过（不再打扰）');
+    eq(r2.ok, true, 'R-9m 一键关闭 ⇒ 成功');
+    eq(isAutoDispatchOn(team2 as never), false, 'R-9n ★关掉就保持关（显式关压过缺省支）');
+    eq(team2.prepare('SELECT value FROM wa_settings WHERE key = ?').get(AUTO_DISPATCH_SETTING_KEY), { value: '0' },
+      'R-9n2 落库值确为 `\'0\'`（显式关）');
+    eq(isAutoDispatchPrompted(team2 as never), true, 'R-9o 但仍记已告知（不再打扰）');
     team2.close();
 
     // 行为③：社区档 ⇒ 如实拒（`team-locked`），一个字节都不写。
@@ -1055,20 +1095,25 @@ async function main(): Promise<void> {
     eq(r3.ok, false, 'R-9p ★社区档 ⇒ 拒');
     eq(r3.reason, 'team-locked', 'R-9q 拒因＝`team-locked`');
     eq(isAutoDispatchOn(community as never), false, 'R-9r 反证：开关仍关');
-    eq(isAutoDispatchPrompted(community as never), false, 'R-9s 反证：引导标记未写（不假装问过）');
+    eq(isAutoDispatchPrompted(community as never), false, 'R-9s 反证：告知标记未写（不假装说过）');
     community.close();
   }
   {
-    // 接线：IPC 读写口与 renderer 引导卡在册。
+    // 接线：IPC 读写口与 renderer 告知卡在册。
     const ipc = CODE(`${A}/src/main/ipc/nodes.ipc.ts`);
     ok(/nodes:confirm-auto-dispatch/.test(ipc), 'R-9t IPC 写口 `nodes:confirm-auto-dispatch` 在册');
     ok(/applyAutoDispatchOnboarding/.test(ipc), 'R-9u 写口走一处真源 `applyAutoDispatchOnboarding`');
-    ok(/prompted:\s*isAutoDispatchPrompted\(settingDb\)/.test(ipc), 'R-9v 读口回 `prompted`（GUI 据此决定弹不弹）');
+    ok(/prompted:\s*isAutoDispatchPrompted\(settingDb\)/.test(ipc), 'R-9v 读口回 `prompted`（GUI 据此决定说不说）');
+    ok(/policy:\s*\{\s*source:\s*policy\.source,\s*reason:\s*policy\.reason\s*\}/.test(ipc),
+      'R-9v2 ★读口回**策略与理由**（三态不再只回一个布尔）');
     const page = CODE(`${A}/renderer/src/pages/PeersPage.tsx`);
-    ok(/confirmAutoDispatch/.test(page), 'R-9w renderer 引导卡调 `confirmAutoDispatch`');
+    ok(/confirmAutoDispatch/.test(page), 'R-9w renderer 告知卡调 `confirmAutoDispatch`');
+    ok(/仅在本机满负荷时溢出到其他节点/.test(page), 'R-9w2 告知卡写明「满负荷才溢出」（说清默认行为）');
     const lib = CODE(`${A}/renderer/src/lib/ipc.ts`);
     ok(/confirmAutoDispatch/.test(lib) && /nodes:confirm-auto-dispatch/.test(lib),
       'R-9x IPC 客户端封装 `confirmAutoDispatch`（主/渲染同一通道名）');
+    ok(/export interface AutoDispatchPolicyPayload \{ source: 'explicit' \| 'default'; reason: string; \}/.test(lib),
+      'R-9x2 渲染层类型含 `policy:{source,reason}`（与 main 同形）');
   }
 
   // ═══ R-10｜零能力 = 零门内之物（反证：不写计划、不写设备动作）════════════════════
@@ -1105,10 +1150,9 @@ async function main(): Promise<void> {
   }
 
   // ═══ R-11｜配对前的门牌：只报"我会什么"，不报"我屋里有什么"（罗尔斯·无知之幕）══════
-  //   zx_20261021_3 批四把门牌从四键扩为六键（增类目级能力/意图目录）——**重定向到更强的形状**：
-  //   键集逐成员枚举 + 类目由真源派生 + 实例清单字段零出现（此前"不含 intent 字样"已不成立：
-  //   意图目录本就是协议词汇；真正的边界是**实例**不出去）。
-  console.log('\n【R-11】门牌 `GET /.well-known/agent.json` 六键、类目公开、清单遮蔽');
+  //   zx_20261021_3 批四把门牌从四键扩为六键；zx_20261027_3 M5a 再扩为标准门牌形状——
+  //   判据**重定向到单源** `AGENT_CARD_FIELDS`（逐成员、不放宽），实例清单字段仍零出现。
+  console.log('\n【R-11】门牌 `GET /.well-known/agent.json` 字段单源、类目公开、清单遮蔽');
   {
     const res = await handleInboundRequest(
       { method: 'GET', path: INBOUND_WELL_KNOWN_PATH, headers: {}, remoteAddress: '192.168.1.44' },
@@ -1116,9 +1160,14 @@ async function main(): Promise<void> {
     );
     eq(res.status, 200, 'R-11a 免凭据取门牌 ⇒ 200');
     const body = res.body as Record<string, unknown>;
-    eq(Object.keys(body).sort(),
-      ['agent_version', 'intents', 'name', 'offered_capabilities', 'pairing', 'protocol'],
-      'R-11b ★门牌**恰六键**（第七样仍然不许）');
+    eq(Object.keys(body).sort(), [...AGENT_CARD_FIELDS].sort(),
+      'R-11b ★门牌字段＝`AGENT_CARD_FIELDS` 单源（逐成员；第七样仍然不许）');
+    const alias = await handleInboundRequest(
+      { method: 'GET', path: INBOUND_AGENT_CARD_PATH, headers: {}, remoteAddress: '192.168.1.44' },
+      { nodeName: () => '阳台的工蚁', agentVersion: '0.1.0' },
+    );
+    eq([alias.status, alias.body], [200, body],
+      'R-11b2 两个 well-known 路径回**同一份**门牌（同一组装函数，不是第二套）');
     eq((body.offered_capabilities as Array<{ key: string }>).map((c) => c.key), [...EXTERNAL_CAPABILITIES],
       'R-11c ★能力类目＝`EXTERNAL_CAPABILITIES`（派生，不手抄）');
     eq((body.intents as Array<{ id: string }>).map((i) => i.id), publicIntents().map((i) => i.id),
@@ -1370,8 +1419,9 @@ async function main(): Promise<void> {
     eq(body.intents, publicIntents(), 'R-19b ★意图清单＝`publicIntents()`（词表一处真源）');
     ok(JSON.stringify(body.intents).includes(HOME_COMFORT_INTENT), 'R-19c 列出 `home.comfort`');
     eq(body.rooms, ['主卧', '客厅'], 'R-19d ★房间名去重、去空、排序');
-    eq(body.devices?.[0] && Object.keys(body.devices[0]).sort(), ['actions', 'call_name', 'kind'],
-      'R-19e ★设备只见 name/kind/actions（`redactedDevices` 唯一出口）');
+    // zx_20261029_2 M3：门外设备行增 `kind_class`（品类归一）与 `room`（房间名）——恰五键，仍无实例/坐标/授权态。
+    eq(body.devices?.[0] && Object.keys(body.devices[0]).sort(), ['actions', 'call_name', 'kind', 'kind_class', 'room'],
+      'R-19e ★设备只见 name/kind/kind_class/room/actions（`redactedDevices` 唯一出口）');
     const text = JSON.stringify(body);
     for (const leak of ['192.168.1.50', '"address"', '"port"', '"protocol"', '"authorized"', '"controllable"', '"status"']) {
       ok(!text.includes(leak), `R-19f ★反证：能力面不含 \`${leak}\``);
@@ -1447,9 +1497,15 @@ async function main(): Promise<void> {
       .run('old-1', '旧灯', 'mqtt', 'old#1');
     const cols = (d.prepare('PRAGMA table_info(wa_devices)').all() as Array<{ name?: string }>).map((c) => c.name);
     ok(!cols.includes('room'), 'R-21c 迁移前旧库**没有** room 列（0 起点）');
+    // 生产迁移数组一次跑完全部 wa_devices 加列；夹具照此把 room 与 kind_class 同批补齐（zx_20261029_2 M1）。
+    const alterKind = dbSrc.match(/"ALTER TABLE wa_devices ADD COLUMN kind_class ([^"]+)"/)?.[1]?.trim();
+    eq(alterKind, "TEXT NOT NULL DEFAULT ''", 'R-21b2 ★迁移数组含 kind_class 列（与 DDL 同缺省）');
     d.exec(`ALTER TABLE wa_devices ADD COLUMN room ${alter}`);
+    d.exec(`ALTER TABLE wa_devices ADD COLUMN kind_class ${alterKind}`);
     eq(getDevice(d as unknown as DeviceDb, 'old-1')?.room, '',
       'R-21d ★旧行迁移后 room＝空串（未分配，不编造房间）');
+    eq(getDevice(d as unknown as DeviceDb, 'old-1')?.kind_class, 'unknown',
+      'R-21e ★旧行迁移后 kind_class 空串由读路径兜底派生（不把空串带进判定）');
     d.close();
   }
 
@@ -1498,6 +1554,8 @@ async function main(): Promise<void> {
   console.log('\n【R-24】房间匹配＝精确相等（不是子串/模糊）');
   {
     const db = makeRoomDb();
+    // 本块 7 台样本 > 社区容量 5 ⇒ 给足容量（否则第 6/7 台被 M5 闸拒，Room 逻辑被冤枉）。
+    grantTrialCapacity(db);
     const mk = (name: string, address: string, room: string, now: string) =>
       upsertDiscovered(db, discovered({ name, address, roomHint: room }), now);
     mk('客厅灯', 'b#a1', '客厅', '2026-10-18 00:00:01');
@@ -2049,9 +2107,18 @@ async function main(): Promise<void> {
     eq(t.calls.length, 0, 'R-44h 传动 0 次');
     const ipc = CODE(`${A}/src/main/ipc/devices.ipc.ts`);
     const previewSlice = ipc.slice(ipc.indexOf("'devices:intent_preview'"), ipc.indexOf("'devices:intent_execute'"));
-    ok(previewSlice.includes('planHomeComfort(') && !previewSlice.includes('runDeviceControl('),
-      'R-44i ★预览走 `planHomeComfort`（解析），不直接调控制编排');
-    ok(previewSlice.includes("code: 'NO_CONTROLLABLE_DEVICE'"), 'R-44j ★面板预览对"没有可做的"如实回专用错误码');
+    // zx_20261029_2 M2：预览改走**门外门内共用**的解析链 `resolveComfortIntent`（规则→模型→再校验），
+    //   判据钉更强：必须经共享链、且仍不得直接调控制编排（"解析"与"执行"的那道界还在）。
+    ok(previewSlice.includes('resolveComfortIntent(') && !previewSlice.includes('runDeviceControl('),
+      'R-44i ★预览走 `resolveComfortIntent` 共享解析链，不直接调控制编排');
+    // 失败原因**整套**映射到专用错误码（不是只认其中一个字符串）。
+    ok(
+      previewSlice.includes("'ROOM_UNASSIGNED'") &&
+      previewSlice.includes("'NO_RECOGNIZED_KIND'") &&
+      previewSlice.includes("'NO_CONTROLLABLE_DEVICE'") &&
+      previewSlice.includes('plan.message'),
+      'R-44j ★面板预览把三种失败原因各回专用错误码，并带上给用户的下一步',
+    );
   }
 
   // ═══ R-45｜执行仍过 K-6：预览后取消授权 ⇒ denied 动作行 0→1 ═══════════════════════════
@@ -2130,7 +2197,9 @@ async function main(): Promise<void> {
     const licensedDb = (tier: 'pro' | 'team'): DatabaseSync => {
       const d = makeComfortDb({ trial: false });
       const payload: LicensePayload = {
-        v: 1, tier, subject: 'rr@local', issuedAt: '2026-10-01T00:00:00.000Z', expiresAt: null, devices: [],
+        // zx_20261029_2 M6：Team 件须带到期（`verifyLicense` 已拒永久 Team）；固定远期，不随墙钟漂。
+        v: 1, tier, subject: 'rr@local', issuedAt: '2026-10-01T00:00:00.000Z',
+        expiresAt: tier === 'team' ? '2099-01-01T00:00:00.000Z' : null, devices: [],
       };
       d.prepare('INSERT INTO wa_settings (key, value) VALUES (?, ?)').run(LICENSE_SETTING_KEYS.key, encodeLicense(payload, privatePem));
       return d;
@@ -2687,7 +2756,9 @@ async function main(): Promise<void> {
     const publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
     const privateKeyPem = privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
     const licenseFor = (tier: 'pro' | 'team'): string => encodeLicense({
-      v: 1, tier, subject: 'rr', issuedAt: '2026-10-01T00:00:00.000Z', expiresAt: null, devices: [],
+      // zx_20261029_2 M6：Team 件须带到期（`verifyLicense` 已拒永久 Team）；固定远期，不随墙钟漂。
+      v: 1, tier, subject: 'rr', issuedAt: '2026-10-01T00:00:00.000Z',
+      expiresAt: tier === 'team' ? '2099-01-01T00:00:00.000Z' : null, devices: [],
     }, privateKeyPem);
     for (const tier of ['pro', 'team'] as const) {
       const db = makeExportDb();
@@ -2737,8 +2808,21 @@ async function main(): Promise<void> {
     //   zx_20261022_3 批七：`core/knowledge-import.ts` 成为导出之外的第二跳动作层（导入动作挂闸）。
     //   zx_20261023_5 批二：`core/knowledge-cards.ts` 是动作层（蒸馏/落候选卡两跳过闸）；
     //     `core/memory-manager.ts` 是**读口**（列表按当前档位拒绝注入，不删卡）。
-    eq(importers, ['core/agent-executor.ts', 'core/domain-pack.ts', 'core/knowledge-cards.ts', 'core/knowledge-export.ts', 'core/knowledge-import.ts', 'core/memory-manager.ts', 'core/tier-catalog.ts', 'core/tools/media.ts'],
-      'R-68d ★★引 pro-gate 的动作层/读模型逐成员枚举（导出编排 + 导入编排 + 领域包 + 知识卡蒸馏 + 知识卡读口 + view_image + long_video 装配 + 档位对照；IPC 壳与别处不另写档位判断）');
+    //   zx_20261029_2 M6「阶梯」：设备发现归 Pro ⇒ 新增两处读口——
+    //     `core/device-channel.ts`（渠道级档位判据）与 `ipc/devices.ipc.ts`（发现/云同步/渠道目录三出口）。
+    //   同轮另有两处新增，各有名的理由，不是"顺手引一下"：
+    //     `ipc-handlers.ts`——插件安装闸落在桌面→ANS 的唯一出口 `ansCall`（一处 choke point，
+    //       而非在每个插件 handler 各判一次）；`ipc/license.ipc.ts`——`license:pro_feature` 单项查询出口，
+    //       让界面查"这一项我能不能用"时读同一判据，不自己判档。
+    eq(importers, ['core/agent-executor.ts', 'core/device-channel.ts', 'core/domain-pack.ts', 'core/knowledge-cards.ts', 'core/knowledge-export.ts', 'core/knowledge-import.ts', 'core/memory-manager.ts', 'core/tier-catalog.ts', 'core/tools/media.ts', 'ipc-handlers.ts', 'ipc/devices.ipc.ts', 'ipc/license.ipc.ts'],
+      'R-68d ★★引 pro-gate 的动作层/读模型逐成员枚举（导出编排 + 导入编排 + 领域包 + 知识卡蒸馏 + 知识卡读口 + view_image + long_video 装配 + 档位对照 + 设备发现两处 + 插件安装唯一出口 + 单项查询出口；IPC 壳不逐 handler 另写档位判断）');
+    // 新增两处各钉形状（上一条枚举只证明"引了"，这条证明"引在哪、怎么用"）。
+    const handlersSrc68 = CODE(`${A}/src/main/ipc-handlers.ts`);
+    ok(/PLUGIN_INSTALL_PATH/.test(handlersSrc68) && /proFeatureRefusal\([^)]*'plugin_install'/.test(handlersSrc68),
+      'R-68g ★插件安装闸只在 `ansCall` 单一出口（按路径形状拦安装一跳，不逐 handler 复写）');
+    const licenseIpcSrc68 = CODE(`${A}/src/main/ipc/license.ipc.ts`);
+    ok(/'license:pro_feature'/.test(licenseIpcSrc68) && /resolveProGate/.test(licenseIpcSrc68),
+      'R-68h ★单项能力查询出口 `license:pro_feature` 读同一判据（界面不自己判档）');
     const catalogSrc = CODE(`${A}/src/main/core/tier-catalog.ts`);
     ok(/import \{[^}]*proUnlocked[^}]*\} from '\.\/pro-gate\.js'/.test(catalogSrc)
       && !/proFeatureRefusal|resolveProGate/.test(catalogSrc),
@@ -2770,10 +2854,10 @@ async function main(): Promise<void> {
   {
     // zx_20261018_3 批七：新增 `audit_export`（审计导出）⇒ 词表 6→7；逐成员枚举仍不放宽，
     //   新成员须同时在 `TEAM_FEATURE_LABEL` 补人话名并穷举接线（`audit:export` 第一跳）。
-    // zx_20261022_3 批八：新增 `project_profile_share`（画像共享，只闸搬运）⇒ 7→8；同尺不放宽。
+    // zx_20261029_2 M6：`device_discovery` 移出（归 Pro）⇒ 8→7；逐成员枚举仍不放宽。
     eq([...TEAM_FEATURES],
-      ['multi_node', 'device_discovery', 'device_control', 'external_terminal', 'audit_view', 'audit_export', 'team_library', 'project_profile_share'],
-      'R-70a ★TEAM_FEATURES 逐项枚举（批七 `audit_export`、zx_20261022_3 批八 `project_profile_share` 入册后共 8 项，不顺手加枚举）');
+      ['multi_node', 'device_control', 'external_terminal', 'audit_view', 'audit_export', 'team_library', 'project_profile_share'],
+      'R-70a ★TEAM_FEATURES 逐项枚举（M6 起发现归 Pro，本表只管控制面；不顺手加枚举）');
     const label = TEAM_FEATURE_LABEL.external_terminal;
     ok(label.startsWith('外部终端接入') && label.includes('意图接入') && label.includes('显式勾选'),
       'R-70b ★人话名写明边界（意图接入默认授 / 原始控制须显式勾选）', label);

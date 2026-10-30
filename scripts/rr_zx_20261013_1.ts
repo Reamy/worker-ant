@@ -99,6 +99,7 @@ CREATE TABLE wa_task_conversations (id TEXT PRIMARY KEY, task_id TEXT REFERENCES
 -- 批五：设备台账 + 控制审计（外键/唯一键照搬生产 database.ts——去重键 protocol+address 是"同一设备"的唯一判据）
 CREATE TABLE wa_devices (id TEXT PRIMARY KEY, name TEXT DEFAULT '', alias TEXT DEFAULT '', room TEXT DEFAULT '',
   kind TEXT DEFAULT 'unknown',
+  kind_class TEXT NOT NULL DEFAULT '',
   protocol TEXT NOT NULL, address TEXT NOT NULL, port INTEGER, capabilities_json TEXT DEFAULT '[]',
   controllable INTEGER DEFAULT 0, authorized INTEGER DEFAULT 0, status_json TEXT,
   first_seen TEXT DEFAULT (datetime('now')), last_seen TEXT DEFAULT (datetime('now')), online INTEGER);

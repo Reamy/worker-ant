@@ -33,10 +33,13 @@ import { remoteTaskView } from '../core/node-orchestrate.js';
 // zx_20261017_1 批三（孙子·知彼知己 / 王阳明·知行合一）: **建单即派**——建单成功且确属可外派时，当场交给他机。
 //   判据/预查/提交/记三键全在 `core/collab-dispatch.ts` 一处；本文件只**组准入事实**并接一跳。
 //   失败永不阻断建单（`dispatchCreatedTask` 永不抛），结局如实附在回执 `dispatch` 键上。
-import { dispatchCreatedTask, dispatchReasonForTask, isAutoDispatchOn, projectHasWorkingDir, taskHasDependencies } from '../core/collab-dispatch.js';
+import { autoDispatchPolicy, dispatchCreatedTask, dispatchReasonForTask, localHasFreeSlot, projectHasWorkingDir, taskHasDependencies } from '../core/collab-dispatch.js';
 import { isNodeEnrolled } from '../core/node-heartbeat.js';
 // zx_20261022_2 批二: 「近 N 天」类统计须对两种时刻写法用同一把尺（ISO 行此前恒被排除）。
 import { utcSql } from '../core/sql-time.js';
+// zx_20261029_1「知」：项目创建后按目录是否非空自动排队生成「项目须知」；作业与落库在 core 一处。
+import { decideAutoInit, isBriefStale, loadProjectBrief } from '../core/project-brief.js';
+import { enqueueJob } from '../core/job-enqueuer.js';
 import type { NodeSettingDb } from '../core/node-identity.js';
 import { teamFeatureRefusal } from '../core/team-gate.js';
 import type { LicenseSettingDb } from '../core/license.js';
@@ -53,7 +56,7 @@ import { importLocalAttachments } from '../services/task-attachments.js';
 import { appendTaskAttachments } from '../services/pending-media.js';
 import { analyzeBlockers, detectMilestones, projectQualityStats } from '../core/project-analytics.js';
 import { getTensions, updateTension, TENSION_CONFIGS } from '../core/tension-engine.js';
-import { decideTemplateMatch, matchTemplateSemantic, getTemplateEmbeddings, loadTemplatePool, invalidateTemplateEmbedding, describeAutoTemplateGates } from '../core/task-templates.js';
+import { decideTemplateMatch, matchTemplateSemantic, getTemplateEmbeddings, loadTemplatePool, invalidateTemplateEmbedding, describeAutoTemplateGates, TEMPLATE_SEMANTIC_MIN_SIMILARITY } from '../core/task-templates.js';
 // zx_20261002 M11（康德·概念无直观则空）: 项目调用记账——同批次另两处真调用（MCP 在 tools/resource.ts）共用一处真源。
 import { recordServiceCall, describeServiceCalls } from '../core/service-call-ledger.js';
 // zx_20261003 M4（柏拉图·洞穴喻）: 项目"运行面"聚合——守护/作业两个环节补进知识全景（只读）。
@@ -71,7 +74,8 @@ import { refusalWithContext, PROJECT_QUOTA_UNLOCK_TIER } from '../core/tier-usag
 import { createLogger } from '../core/logger.js';
 import { boolSetting } from '../core/settings-bool.js';
 // zx_20260930 M8: 随项目/任务删除的级联落墓碑（缘由词表与写入语句形状同出该模块）。
-import { MEM_DELETE_REASONS, tombstoneMemoriesBy, MEM_LIVE_SQL } from '../core/memory-lifecycle.js';
+import { MEM_LIVE_SQL } from '../core/memory-lifecycle.js';
+import { deleteTaskSubtree } from '../core/task-delete.js';
 import { resolveAnsCreds, ansSignedRequest, ansFailureNote, type AnsRequestResult } from '../core/ans-signed-request.js';
 import crypto from 'node:crypto';
 import path from 'node:path';
@@ -216,7 +220,38 @@ export function initProjectIpc(db: Database.Database, dataDir: string, memoryGet
         if (backlog && backlog.length > 0) ctx.backlog = backlog;
         db.prepare('UPDATE wa_projects SET context_json = ? WHERE id = ?').run(JSON.stringify(ctx), pid);
       } catch {}
-      return { data: result };
+      // zx_20261029_1「知」：目录非空则排队读仓生成须知。**不等待模型**——作业化后创建即时返回；
+      //   目录为空/不存在则如实回 skipped 原因（存量项目不自动补跑，由详情页按钮触发）。
+      const auto = decideAutoInit(typeof result.working_dir === 'string' ? result.working_dir : '');
+      if (auto.run) enqueueJob(db, 'project-init-brief', { projectId: pid, trigger: 'create' });
+      return { data: { ...result, initBrief: auto.run ? { state: 'queued' } : { state: 'skipped', reason: auto.reason } } };
+    } catch (err) {
+      return { error: { code: 'INTERNAL', message: (err as Error).message } };
+    }
+  });
+
+  // zx_20261029_1「知」：项目须知的读写口。
+  //   读：返回最近一份（可能 null=尚未初始化）+ 是否过期（仓指纹变了）；写：只入队，不在 IPC 里等模型。
+  ipcMain.handle('project:brief', async (_event, { id }: { id: string }) => {
+    try {
+      const proj = projects.getById(id);
+      if (!proj) return { error: { code: 'NOT_FOUND', message: '项目不存在' } };
+      const stored = loadProjectBrief(db, id);
+      const workingDir = String(proj.working_dir ?? '');
+      const stale = stored?.sourceHash ? await isBriefStale(workingDir, stored.sourceHash) : null;
+      return { data: { brief: stored, stale, workingDir } };
+    } catch (err) {
+      return { error: { code: 'INTERNAL', message: (err as Error).message } };
+    }
+  });
+
+  ipcMain.handle('project:initBrief', async (_event, { id }: { id: string }) => {
+    try {
+      const proj = projects.getById(id);
+      if (!proj) return { error: { code: 'NOT_FOUND', message: '项目不存在' } };
+      // 手动重跑允许对空目录发起——作业会如实记失败原因；不在 UI 层假装成功。
+      enqueueJob(db, 'project-init-brief', { projectId: id, trigger: 'manual' });
+      return { data: { accepted: true } };
     } catch (err) {
       return { error: { code: 'INTERNAL', message: (err as Error).message } };
     }
@@ -344,9 +379,29 @@ export function initProjectIpc(db: Database.Database, dataDir: string, memoryGet
       //   分页后它决定**哪 100 条进第一页**：新任务优先级为 0 ⇒ 在 151 条的项目里排到第 132 位，
       //   刚建完就"看不见"（用户实机照出）。改成最新在前——与列表默认排序（时间降序）同一把尺；
       //   `priority` 只在同一秒内作次序键，不再决定分页成员资格。
-      const rows = db.prepare(`SELECT t.*,
+      // zx_20261028_2 M2「瘦」：列表**不再搬 `context_json`/`workflow_config`**——真库单项目 ctx 动辄
+      //   数百 KB（世界快照曾占 91%），一次 100 行的列表把整串文本递过 IPC 再让渲染层逐行 JSON.parse，
+      //   只为了取七八个标量。改为显式白名单 + `context_digest`（列表实际读到的键，JSON 文本）。
+      //   详情页本来就走 `task:get`（整行），故不再新增"取上下文"端点。
+      const rows = db.prepare(`SELECT t.id, t.project_id, t.title, t.description, t.status, t.priority,
+        t.depends_on, t.parent_task_id, t.source, t.acceptance_criteria, t.created_at, t.updated_at,
+        t.aggregate_version, t.quality_score,
         json_extract(t.context_json, '$.acceptance_check.criteria_total') AS acc_total,
-        json_extract(t.context_json, '$.acceptance_check.passed_total') AS acc_passed
+        json_extract(t.context_json, '$.acceptance_check.passed_total') AS acc_passed,
+        json_object(
+          'dynamic_priority', json_extract(t.context_json, '$.dynamic_priority'),
+          'completion_quality', json_extract(t.context_json, '$.completion_quality'),
+          'tokens_used', json_extract(t.context_json, '$.tokens_used'),
+          'budget_max_tokens', json_extract(t.context_json, '$.budget_max_tokens'),
+          'strategy_source', json_extract(t.context_json, '$.strategy_source'),
+          'bottleneck_score', json_extract(t.context_json, '$.bottleneck_score'),
+          'reason', json_extract(t.context_json, '$.reason'),
+          'awaiting_input', json_extract(t.context_json, '$.awaiting_input'),
+          'pending_approval', json_extract(t.context_json, '$.pending_approval'),
+          'pause_reason', json_extract(t.context_json, '$.pause_reason'),
+          'verification_fix', json_extract(t.context_json, '$.verification_fix'),
+          'verification_fix_of', json_extract(t.context_json, '$.verification_fix_of')
+        ) AS context_digest
         FROM wa_tasks t WHERE t.project_id = ? ORDER BY t.created_at DESC, t.priority DESC, t.rowid DESC${page.sql}`).all(projectId, ...page.params) as Array<Record<string, unknown>>;
       // zx_20260913 M2-1(管子·度量衡·同一把尺): 计数改**子树口径**——此前只数本任务 ⇒ 列表说"0 项"、
       // 详情说"N 项"(同一事实两个说法)。一次 GROUP BY 取本项目各任务计数(**同尺套 docNotProbe**，
@@ -635,11 +690,16 @@ export function initProjectIpc(db: Database.Database, dataDir: string, memoryGet
       //   重放不再派一次）。准入事实逐项从真实行/设置读取；`dispatchCreatedTask` 永不抛、失败不写三键
       //   ⇒ 建单这件主动作不受任何影响。放在重取任务行**之前**：成功写入的三键随之出现在回执里。
       const createdRow = db.prepare('SELECT depends_on FROM wa_tasks WHERE id = ?').get(id) as { depends_on?: unknown } | undefined;
+      // zx_20261029_2 M7：开关与来由取自**同一处** `autoDispatchPolicy`（三态：显式/缺省），
+      //   余力取自与心跳/Peers 同一真源；缺省开时只在满负荷才溢出，显式开不受此限。
+      const autoPolicy = autoDispatchPolicy(db as unknown as NodeSettingDb & LicenseSettingDb);
       const dispatchOutcome = await dispatchCreatedTask(
         db,
         { id, title: String(title ?? ''), description, acceptanceCriteria: acceptance_criteria },
         {
-          settingOn: isAutoDispatchOn(db as unknown as NodeSettingDb),
+          settingOn: autoPolicy.enabled,
+          autoDispatchSource: autoPolicy.source,
+          localHasFreeSlot: localHasFreeSlot(db),
           teamUnlocked: teamFeatureRefusal(db as unknown as LicenseSettingDb, 'multi_node') === null,
           enrolled: isNodeEnrolled(db as unknown as NodeSettingDb),
           hasParent: Boolean(parent_task_id),
@@ -1086,27 +1146,18 @@ export function initProjectIpc(db: Database.Database, dataDir: string, memoryGet
   });
 
   // 删除任务（清空对话/产出物/记忆/作业关联）
+  // zx_20261027_2 M2: 删除的是**子树**——根 + 全部后代。任一成员非终态则整棵不删、如实点名阻断者，
+  //   防"删了父留下孤儿"与"删了还在跑的子任务"。清账细节见 `core/task-delete.ts`。
   ipcMain.handle('task:delete', async (_event, { id }: { id: string }) => {
     try {
-      const task = db.prepare('SELECT id FROM wa_tasks WHERE id = ?').get(id) as { id: string } | undefined;
-      if (!task) return { error: { code: 'NOT_FOUND', message: '任务不存在' } };
-      // 2026-09-07 fix: 任务删除同样漏清 wa_deliverable_versions(→wa_deliverables) FK 子表，带版本产出物会触发 FOREIGN KEY constraint failed
-      const delTask = db.transaction(() => {
-        const dIds = (db.prepare('SELECT id FROM wa_deliverables WHERE task_id = ?').all(id) as Array<{ id: string }>).map((r) => r.id);
-        db.prepare('DELETE FROM wa_task_conversations WHERE task_id = ?').run(id);
-        if (dIds.length > 0) {
-          db.prepare(`DELETE FROM wa_deliverable_versions WHERE deliverable_id IN (${dIds.map(() => '?').join(',')})`).run(...dIds);
-        }
-        db.prepare('DELETE FROM wa_deliverables WHERE task_id = ?').run(id);
-        // zx_20260930 M8: 随任务删除**落墓碑**（原为物理删）。
-        //   ⚠ 顺序：必须在 `DELETE FROM wa_tasks` 之前——`tombstoneMemoriesBy` 要先按 task_id 取到行。
-        tombstoneMemoriesBy(db, 'task_id', id, MEM_DELETE_REASONS.taskCascade);
-        db.prepare('DELETE FROM wa_notifications WHERE task_id = ?').run(id); // 2026-09-04_2: 删除任务同步清通知（防死链白页）
-        db.prepare("DELETE FROM wa_jobs WHERE payload LIKE '%' || ? || '%'").run(id);
-        db.prepare('DELETE FROM wa_tasks WHERE id = ?').run(id);
-      });
-      delTask();
-      return { data: { id, deleted: true } };
+      const result = db.transaction(() => deleteTaskSubtree(db, id))();
+      if (!result.ok) {
+        if (result.reason === 'not-found') return { error: { code: 'NOT_FOUND', message: '任务不存在' } };
+        const named = result.blockers.slice(0, 5).map((b) => `「${b.title}」(${b.status})`).join('、');
+        const more = result.blockers.length > 5 ? ` 等 ${result.blockers.length} 个` : '';
+        return { error: { code: 'INVALID_STATUS', message: `以下任务尚未结束，无法删除：${named}${more}。请先中止或归档它们。` } };
+      }
+      return { data: { id, deleted: true, deletedIds: result.deletedIds } };
     } catch (err) {
       return { error: { code: 'INTERNAL', message: (err as Error).message } };
     }
@@ -1330,7 +1381,7 @@ export function initProjectIpc(db: Database.Database, dataDir: string, memoryGet
               console.log(`[a2a:${delivName}] exited code=${code} signal=${signal}`);
               setDeliverableStatus(db, id, 'stopped', 'a2a:exit');
               emitDeliverableRuntimeChanged(id, 'stopped', 'a2a:exit');
-            });
+            }, { db });
             db.prepare("UPDATE wa_deliverables SET registry_id = ? WHERE id = ?").run(a2a.endpoint, id);
             setDeliverableStatus(db, id, 'running', 'deliverable:start');
             emitDeliverableRuntimeChanged(id, 'running', 'deliverable:start');
@@ -2053,6 +2104,8 @@ export function initProjectIpc(db: Database.Database, dataDir: string, memoryGet
         matched: tpl ? { id: tpl.id, name: tpl.name, category: tpl.category, priority: tpl.priority ?? 0, success_rate: tpl.success_rate ?? null, hitKeywords, method, similarity, field, subtaskCount: tpl.subtasks.length } : null,
         // skip 非空 = 真创建时**不会**拆（"会命中谁"仍一并返回，好让界面说清"为什么不拆"）
         skip: decision.skip,
+        // zx_20261028_2 M4：语义兜底门槛由主进程**带来**，界面不再手抄一个会漂的数字
+        semanticMinSimilarity: TEMPLATE_SEMANTIC_MIN_SIMILARITY,
       } };
     } catch (err) { return { error: { code: 'INTERNAL', message: (err as Error).message } }; }
   });

@@ -48,6 +48,9 @@ import {
   type LicensePayload, type LicenseSettingDb,
 } from '../apps/worker-ant-desktop/src/main/core/license.js';
 import { countProjects, projectQuotaRefusal } from '../apps/worker-ant-desktop/src/main/core/project-quota.js';
+// zx_20261027_3 M3「试得真」：试用给哪一档由 **价目表**（`tier-catalog` 的 `trial.grantsTier`）宣称，
+//   本脚本按该真源派生期望，不写死 'pro'/'team'（承「改旧断言＝钉更强的新真源」）。
+import { tierCatalog } from '../apps/worker-ant-desktop/src/main/core/tier-catalog.js';
 
 // ── 批次门（排期序）────────────────────────────────────────────────────────
 const ORDER = ['M5', 'M6', 'M7', 'M8', 'M9'] as const;
@@ -249,12 +252,21 @@ async function main(): Promise<void> {
       'M6-17a ★档位化设备上限：community/pro = 3（K-5），team = `TIER_LIMITS.team.maxNodes`（不另抄 20）',
     );
     const team20 = Array.from({ length: 20 }, (_, i) => `0000-0000-0000-${String(i).padStart(4, '0')}`);
-    const vTeam20 = verifyLicense(sign(payload({ tier: 'team', devices: team20 })), { publicKeyPem: TEST_PUBLIC_PEM, now: NOW, fingerprint: team20[0]! });
+    // zx_20261029_2 M6：Team 许可**必须有到期日**（运行时同闸）——夹具照生产签发形状补到期，
+    //   不再用 `expiresAt:null` 的"永久团队件"当有效标本（那恰恰是本轮要堵的空档）。
+    const TEAM_EXP = '2099-01-01T00:00:00.000Z';
+    const vTeam20 = verifyLicense(sign(payload({ tier: 'team', devices: team20, expiresAt: TEAM_EXP })), { publicKeyPem: TEST_PUBLIC_PEM, now: NOW, fingerprint: team20[0]! });
     ok(vTeam20.ok && vTeam20.status === 'valid',
       'M6-17b ★团队授权包：一张许可绑 **20** 台通过（个人档同形状会被 M6-17 拒）', vTeam20.detail);
-    const vTeam21 = verifyLicense(sign(payload({ tier: 'team', devices: [...team20, '0000-0000-0000-9999'] })), { publicKeyPem: TEST_PUBLIC_PEM, now: NOW, fingerprint: team20[0]! });
+    const vTeam21 = verifyLicense(sign(payload({ tier: 'team', devices: [...team20, '0000-0000-0000-9999'], expiresAt: TEAM_EXP })), { publicKeyPem: TEST_PUBLIC_PEM, now: NOW, fingerprint: team20[0]! });
     ok(!vTeam21.ok && vTeam21.status === 'too_many_devices',
       'M6-17c ★团队包上限两侧标本：**21** 台 ⇒ `too_many_devices`（上限不是"没有上限"）', vTeam21.detail);
+    // zx_20261029_2 M6「堵空档」：永久 Team 件两侧标本——Team 拒、Pro 仍可永久（不误伤个人档）。
+    const vTeamForever = verifyLicense(sign(payload({ tier: 'team', devices: [], expiresAt: null })), { publicKeyPem: TEST_PUBLIC_PEM, now: NOW, fingerprint: FP });
+    ok(!vTeamForever.ok && vTeamForever.status === 'bad_payload' && vTeamForever.detail.includes('到期日'),
+      'M6-17d ★★永久 Team 许可 ⇒ `bad_payload`（运行时与签发工具同一把尺，不只拦签发面）', vTeamForever.detail);
+    ok(verifyLicense(sign(payload({ tier: 'pro', expiresAt: null })), { publicKeyPem: TEST_PUBLIC_PEM, now: NOW, fingerprint: FP }).ok,
+      'M6-17e 另一侧标本：Pro 永久许可**照常有效**（闸只针对团队授权包，不误伤个人档）');
 
     eq(
       [
@@ -293,13 +305,19 @@ async function main(): Promise<void> {
       'M6-21 无许可无试用 ⇒ `none` + community（**缺许可即社区版**，不是"什么都开"）');
     const trialDay1 = licDb({ [LICENSE_SETTING_KEYS.trialStartedAt]: new Date(NOW.getTime() - 86_400_000).toISOString() });
     const stTrial = resolveLicenseState(trialDay1, { now: NOW, fingerprint: FP });
-    eq([stTrial.kind, stTrial.tier, stTrial.trialDaysLeft], ['trial', 'pro', TRIAL_DAYS - 1],
-      'M6-22 试用第 1 天 ⇒ `trial` + **pro 能力** + 剩余天数 = TRIAL_DAYS-1（首启锚点 + 倒计时同一处算）');
+    // zx_20261027_3 M3：试用档位**以价目表宣称的授予档为真源**（`trial.grantsTier`），
+    //   并核 `tierLabel`/`detail` 说的是同一件事——宣称与实得两处一把尺。
+    const trialGrants = tierCatalog().trial.grantsTier;
+    eq([stTrial.kind, stTrial.tier, stTrial.trialDaysLeft], ['trial', trialGrants, TRIAL_DAYS - 1],
+      'M6-22 试用第 1 天 ⇒ `trial` + **价目表宣称的授予档**（`tier-catalog.trial.grantsTier`）+ 剩余天数 = TRIAL_DAYS-1（首启锚点 + 倒计时同一处算）');
+    ok(stTrial.tierLabel === TIER_LABEL[stTrial.tier] && stTrial.detail.includes(TIER_LABEL[stTrial.tier]),
+      'M6-22b 试用态 `tierLabel` 与被授予档一致，`detail` 同说这一档（宣称与实得不两说）', stTrial.detail);
     const trialEnd = licDb({ [LICENSE_SETTING_KEYS.trialStartedAt]: new Date(NOW.getTime() - TRIAL_DAYS * 86_400_000).toISOString() });
     const stEnd = resolveLicenseState(trialEnd, { now: NOW, fingerprint: FP });
     eq([stEnd.kind, stEnd.tier], ['trial_expired', 'community'],
       'M6-23 恰满 TRIAL_DAYS 天 ⇒ `trial_expired` + 回落 community（边界：第 14 天当天即失效，不多给）');
-    const stLic = resolveLicenseState(licDb({ [LICENSE_SETTING_KEYS.key]: sign(payload({ tier: 'team', devices: [] })) }), { now: NOW, fingerprint: FP, publicKeyPem: TEST_PUBLIC_PEM });
+    // zx_20261029_2 M6：Team 件带到期（生产形状）；永久 Team 已由 M6-17d 判拒。
+    const stLic = resolveLicenseState(licDb({ [LICENSE_SETTING_KEYS.key]: sign(payload({ tier: 'team', devices: [], expiresAt: '2099-01-01T00:00:00.000Z' })) }), { now: NOW, fingerprint: FP, publicKeyPem: TEST_PUBLIC_PEM });
     eq([stLic.kind, stLic.tier], ['licensed', 'team'],
       'M6-24 有效许可 ⇒ `licensed` 且档位取自**许可载荷**（不是查表猜的）');
     // ★ 名实相符：「有 key 但校验不过」**不回落试用**。
@@ -345,7 +363,7 @@ async function main(): Promise<void> {
       'M7-4 拒因**如实**：含档位名与上限数（由 `TIER_LIMITS`/`TIER_LABEL` 真源派生，不抄字面量）', refusal ?? '');
     const proDb = licDb({ [LICENSE_SETTING_KEYS.trialStartedAt]: new Date(NOW.getTime() - 3_600_000).toISOString() }, ['p1', 'p2', 'p3', 'p4']);
     eq(projectQuotaRefusal(proDb, { now: NOW, fingerprint: FP }), null,
-      'M7-5 ★★另一侧：**试用中（＝专业版）**已有 4 个项目仍放行（`maxProjects: 0` 不限——档位真的在放宽）');
+      `M7-5 ★★另一侧：**试用中（＝${TIER_LABEL[tierCatalog().trial.grantsTier]}）**已有 4 个项目仍放行（\`maxProjects: 0\` 不限——档位真的在放宽）`);
     eq(projectQuotaRefusal(null), null, 'M7-6 无库 ⇒ 不拦（fail-open 方向与 K-3 一致，不是"打不开"）');
 
     // ── 接线（静态判据读原文，G-5） ──

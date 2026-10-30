@@ -494,11 +494,17 @@ async function main(): Promise<void> {
     // ⚠ zx_20260929 M9：run 收口门随收尾段落到 `core/exec-close.ts` ⇒ 执行体侧取并集（减工具段）。
     //   两处仍**分别**取面、各判"恰一处"——整份换成含工具段的 `engineSrc()` 会把 finalize 门那处
     //   同时计进两侧，"各一处"退化成"合计 ≥1"，是放宽。
-    ok(countOcc(execSideCode, 'criteriaVersion: VALIDATION_CRITERIA_VERSION') === 1
+    // zx_20261028_2 M3 **就地改钉（非放宽）**：收口门改批量面后，结论有两条来路（缓存命中 / 本轮实判）
+    //   却必须落**同一判据版本** ⇒ 真源只读一次到局部 `criteriaVersion`，两处写点共用。
+    //   断言随之从"字面量恰 1 处"升级为"真源读取恰 1 处 + 局部写点 ≥2 处都取自它"
+    //   （字面量各写一遍反而更弱：两处可各抄一份不同值而照样过）。
+    ok(countOcc(execSideCode, 'const criteriaVersion = VALIDATION_CRITERIA_VERSION') === 1
+      && countOcc(execSideCode, 'criteriaVersion,') >= 2
       && countOcc(controlCode, 'criteriaVersion: VALIDATION_CRITERIA_VERSION') === 1,
-      'M3-C **两个写点同源**：run 收口（执行体侧）与 finalize 门（`control-finalize.ts`，M8 就地改钉）各一处，'
+      'M3-C **两个写点同源**：run 收口（执行体侧）两条来路（缓存命中/实判）共用同一判据版本，finalize 门一处，'
       + '都取同一个 `VALIDATION_CRITERIA_VERSION`（写点手抄版本值 ⇒ 与判据脱钩，version 形同虚设）',
-      `执行体侧 ${countOcc(execSideCode, 'criteriaVersion: VALIDATION_CRITERIA_VERSION')} 处 · `
+      `执行体侧 真源读取 ${countOcc(execSideCode, 'const criteriaVersion = VALIDATION_CRITERIA_VERSION')} 处 · `
+      + `写点 ${countOcc(execSideCode, 'criteriaVersion,')} 处 · `
       + `control ${countOcc(controlCode, 'criteriaVersion: VALIDATION_CRITERIA_VERSION')} 处（扫描面 ${execSideLines}+${controlCode.split('\n').length} 行）`);
     ok(countOcc(execSideCode, 'canReuseOutputValidation(hit, arch)') === 1
       && countOcc(execSideCode, 'hit.entry.archetype === arch') === 0,

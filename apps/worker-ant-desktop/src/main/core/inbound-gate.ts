@@ -12,12 +12,17 @@
  *   ② **门外先认街坊**——绑全网卡以达局域网，但**每请求**校验对端地址属私网（`isPrivateAddress`）；
  *      非私网一律 **403**（双保险：绑 lan ＋ 逐请求围栏）。
  *   ③ **类目公开、清单遮蔽**（罗尔斯·无知之幕；zx_20261021_3 批四收窄了"只说三句"）——
- *      `/.well-known/agent.json` **免凭据**，只含六键：`name` / `protocol` / `agent_version` /
- *      `offered_capabilities` / `intents` / `pairing.endpoint`。
+ *      `/.well-known/agent.json` **免凭据**，只含**元信息**：`name` / `description` / `protocol` /
+ *      `version` / `agent_version` / `url` / `defaultInputModes` / `defaultOutputModes` /
+ *      `capabilities` / `skills` / `offered_capabilities` / `intents` / `pairing.endpoint`
+ *      （真源 `AGENT_CARD_FIELDS`，zx_20261027_3 M5 起为通用终端可解析的标准门牌形状）。
  *      **公开**的是"能做什么类"（能力类目 + 意图目录，二者皆取自既有真源 `EXTERNAL_CAPABILITIES`
- *      与 `INTENTS`）；**遮蔽**的是"对谁做"——设备清单、设备 id/名字、地址端口、房间实例值、
+ *      与 `INTENTS`）；**遮蔽**的是"对谁做"——设备清单、设备 id/名字、房间实例值、
  *      `node_id`、授权态，一律不出现。分界理由：不公开类目，别的终端无从判断"值不值得配对"；
  *      公开实例清单，则是把屋里的布置摊给街上的人看。
+ *      `url` 只报**本机在局域网上的入口**（首个非内网回环 IPv4 + 入站端口），取不到即 `null`——
+ *      不编地址。⚠ 门牌**只做发现**：不宣称完整 A2A JSON-RPC 兼容，真正的调用仍走配对后的
+ *      `/api/v1/*`。
  *   ④ **起不来如实记因**——`listen` 失败即把状态复位并记因，**不假装在跑**（照 ANS 代起 M2 纪律）。
  *
  * ⚠ **零 electron 依赖**（只用 `node:http`）：路由处置抽为**纯函数** `handleInboundRequest`，
@@ -27,16 +32,27 @@
  *   这是"被找到"），**刻意不合并**。
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { networkInterfaces, type NetworkInterfaceInfo } from 'node:os';
 import type { PairingPort } from './external-terminals.js';
 // 批四：能力**类目**自述的唯一组装处（门牌与 rr 同引，不在门里另拼一份）。
 import { offeredCapabilities } from './external-calls.js';
 import type { ExternalCapabilityPort } from './external-calls.js';
 import { publicIntents, type PublicIntentDescriptor } from './intent-protocol.js';
+// zx_20261029_2 M3：门牌的技能条目与设备类目取自**能力词汇唯一来源**（与节点卡、A2A 卡同一份）。
+import {
+  agentSkillsFromCapabilities,
+  deviceCategoryInventory,
+  type CapabilitySkill,
+  type DeviceCategorySummary,
+} from './capability-vocabulary.js';
+import type { KindClassDeviceLike } from './device-kind.js';
 
 /** 入站端口**单源**（避开 27183/5173/19950-19999/3100）。可用 `WA_INBOUND_PORT` 逃生口（照 ANS `ANS_SERVER_PORT` 先例）。 */
 export const INBOUND_DEFAULT_PORT = 27184;
 /** 对外露面的**唯一**免凭据端点（"门牌"）。 */
 export const INBOUND_WELL_KNOWN_PATH = '/.well-known/agent.json';
+/** zx_20261027_3 M5a：通用终端约定的门牌别名——**同一份组装结果**，不是第二套门牌。 */
+export const INBOUND_AGENT_CARD_PATH = '/.well-known/agent-card.json';
 /** 对外协议标识（外部终端据此判"这是哪一族的东西"）。 */
 export const INBOUND_PROTOCOL = 'worker-ant/1';
 /** 配对入口（批二落地）——`POST {name}` ⇒ 建 `pending` 行，回 `{pairing_id, pair_code}`。 */
@@ -93,29 +109,106 @@ export function isPrivateAddress(ip: string | undefined | null): boolean {
   return false;
 }
 
+/** 门牌技能条目（通用终端按 `id` 认能力；由能力类目派生，不手抄）。 */
+export type AgentCardSkill = CapabilitySkill;
+
+/**
+ * 门牌字段**单源**（顺序即 `buildAgentCard` 的键序）。
+ * ⚠ 字段集合**精确**——多一个键就是把门内之物提前摆到街上；泄漏判据按这份清单做全等。
+ */
+export const AGENT_CARD_FIELDS = [
+  'name',
+  'description',
+  'protocol',
+  'version',
+  'agent_version',
+  'url',
+  'defaultInputModes',
+  'defaultOutputModes',
+  'capabilities',
+  'skills',
+  'offered_capabilities',
+  'intents',
+  // zx_20261029_2 M3：屋里有哪几类设备（**类目+数量**，无实例/无房间/无地址）。
+  'device_categories',
+  'pairing',
+] as const;
+
 /**
  * 门牌（罗尔斯·无知之幕：**类目公开、清单遮蔽**）。
- * ⚠ 六键**精确**——多一个键就是把门内之物提前摆到街上；泄漏判据按这六键做全等。
+ * ⚠ 键集合**精确**（见 `AGENT_CARD_FIELDS`）——这里只有"是谁、是什么、能做什么类、怎么配对"，
+ *   没有设备清单/地址端口/房间实例值/`node_id`/授权态。
  */
 export interface AgentCard {
   name: string;
+  /** 这是什么（一句话；不涉及本机屋内布置）。 */
+  description: string;
   protocol: string;
+  /** 协议版本（通用终端按此解析；与 `agent_version` 同值，前者是标准字段名）。 */
+  version: string;
   agent_version: string;
+  /** 本机在局域网上的入口；取不到即 `null`（不编地址）。 */
+  url: string | null;
+  defaultInputModes: string[];
+  defaultOutputModes: string[];
+  /** 协议能力自述（本门牌只做发现：不推流、不推送）。 */
+  capabilities: { streaming: false; pushNotifications: false };
+  /** 技能条目——由 `offeredCapabilities()` 派生（id/name/description/tags）。 */
+  skills: AgentCardSkill[];
   /** 能力类目（取自 `EXTERNAL_CAPABILITIES`；`requires_approval` 恒 true）。 */
   offered_capabilities: Array<{ key: string; label: string; requires_approval: true }>;
   /** 意图目录（id / label / 参数**名**；`values` 只含固定枚举，不含任何房间/设备实例）。 */
   intents: PublicIntentDescriptor[];
+  /** 设备**类目**清单（类目+数量；`unknown` 不列——列了等于承诺一个做不到的类目）。 */
+  device_categories: DeviceCategorySummary[];
   pairing: { endpoint: string };
 }
 
-export function buildAgentCard(nodeName: string, agentVersion: string): AgentCard {
+/**
+ * 本机入口 URL——首个**非回环** IPv4（优先私网地址）+ 入站端口；一个都没有 ⇒ `null`。
+ * `ifaces` 可注入 ⇒ rr 给固定网卡标本，判定不依赖跑测机器的真实网络。
+ */
+export function resolveAdvertisedUrl(
+  port: number,
+  ifaces: NodeJS.Dict<NetworkInterfaceInfo[]> = networkInterfaces(),
+): string | null {
+  const candidates: string[] = [];
+  for (const list of Object.values(ifaces)) {
+    for (const info of list ?? []) {
+      if (info.family !== 'IPv4' || info.internal) continue;
+      candidates.push(info.address);
+    }
+  }
+  if (candidates.length === 0) return null;
+  // 局域网配对优先私网地址；没有私网才退回任意非回环 IPv4（仍是本机真实地址，不编）。
+  const lan = candidates.find((ip) => isPrivateAddress(ip)) ?? candidates[0]!;
+  return `http://${lan}:${port}`;
+}
+
+export function buildAgentCard(
+  nodeName: string,
+  agentVersion: string,
+  url: string | null = null,
+  /** 台账设备（只读品类；缺省空表 ⇒ 门牌自述"屋里有 0 类设备"，不假装）。 */
+  devices: readonly KindClassDeviceLike[] = [],
+): AgentCard {
+  const offered = offeredCapabilities();
   return {
     name: nodeName,
+    description: '工蚁本机智能体（Worker Ant）：局域网内配对后，按本机用户批准的能力提供受控调用。',
     protocol: INBOUND_PROTOCOL,
+    version: agentVersion,
     agent_version: agentVersion,
-    // 两项皆**派生**自既有真源（不在此手抄类目名/意图名）——新增一类能力或意图，门牌自动跟上。
-    offered_capabilities: offeredCapabilities(),
+    url,
+    // 门目前只收 JSON 请求、只回 JSON 回包——如实标注，不虚报推流/推送。
+    defaultInputModes: ['application/json'],
+    defaultOutputModes: ['application/json'],
+    capabilities: { streaming: false, pushNotifications: false },
+    // 技能 = 能力类目的通用终端视图（含 `requires_approval` 自述——配对前不可用）。
+    skills: agentSkillsFromCapabilities(offered),
+    offered_capabilities: offered,
     intents: publicIntents(),
+    device_categories: deviceCategoryInventory(devices),
     pairing: { endpoint: INBOUND_PAIR_ENDPOINT },
   };
 }
@@ -151,6 +244,16 @@ export interface InboundDeps {
    * 该两路 404（认证过但门内无端点）——保持"缺什么就如实说没有，不假装"的一贯做法。
    */
   capability?: ExternalCapabilityPort;
+  /**
+   * M5a：门牌上如实报的本机入口（`resolveAdvertisedUrl` 的结果）；`undefined`/`null` ⇒ 门牌 `url: null`。
+   * 由 `startInboundGate` 按**实际监听端口**算好传入——纯处置函数不碰网卡枚举。
+   */
+  cardUrl?: string | null;
+  /**
+   * zx_20261029_2 M3：门牌上的设备**类目**来源（品类由 `device-kind` 归一，只报类目与数量）。
+   * 缺省 ⇒ 空表（门牌如实说"没有设备类目"），不在门里自查库。
+   */
+  listDevices?: () => readonly KindClassDeviceLike[];
 }
 
 /** 从 `Authorization: Bearer <key>.<secret>` 拆出凭据（形状不符 ⇒ null）。 */
@@ -176,9 +279,12 @@ export function handleInboundRequest(req: InboundRequestLike, deps: InboundDeps)
   if (!isPrivateAddress(req.remoteAddress)) return { status: 403, body: { error: 'forbidden' } };
   const method = (req.method || 'GET').toUpperCase();
   const path = req.path || '/';
-  // ② 门牌：免凭据，只回三块。
-  if (method === 'GET' && path === INBOUND_WELL_KNOWN_PATH) {
-    return { status: 200, body: buildAgentCard(deps.nodeName(), deps.agentVersion) };
+  // ② 门牌：免凭据。两个 well-known 路径回**同一份**组装结果（同一组装函数，不是第二套门牌）。
+  if (method === 'GET' && (path === INBOUND_WELL_KNOWN_PATH || path === INBOUND_AGENT_CARD_PATH)) {
+    return {
+      status: 200,
+      body: buildAgentCard(deps.nodeName(), deps.agentVersion, deps.cardUrl ?? null, deps.listDevices?.() ?? []),
+    };
   }
   const port = deps.pairing;
   if (!port) return { status: 404, body: { error: 'not_found' } };
@@ -301,6 +407,13 @@ export interface StartInboundOpts {
   pairing?: PairingPort;
   /** 批三：能力面端口（`createExternalCapabilityPort(db, …)`）。省略 ⇒ 认证过也 404（门内无端点）。 */
   capability?: ExternalCapabilityPort;
+  /**
+   * M5a：门牌 `url`。缺省（`undefined`）⇒ 按**实际端口**由 `resolveAdvertisedUrl` 现算；
+   * 显式 `null` ⇒ 如实留空（rr 用它剥离真实网卡，判据不受跑测机器网络影响）。
+   */
+  cardUrl?: string | null;
+  /** zx_20261029_2 M3：门牌设备**类目**的来源（只读品类；缺省 ⇒ 空表，不在门里自查库）。 */
+  listDevices?: () => readonly KindClassDeviceLike[];
   /** 注入 server 工厂（rr 传假 server ⇒ 不真开网卡）。缺省 `node:http`。 */
   serverFactory?: InboundServerFactory;
   /** mDNS 广播工厂；`null` = 不广播（rr）。缺省真广播。 */
@@ -329,7 +442,15 @@ export function startInboundGate(opts: StartInboundOpts): { started: boolean; po
   if (activeServer) return { started: true, port: activePort, reason: 'already-running' };
   const port = opts.port ?? resolveInboundPort(opts.env ?? process.env);
   const factory = opts.serverFactory ?? defaultServerFactory;
-  const deps: InboundDeps = { nodeName: opts.nodeName, agentVersion: opts.agentVersion, pairing: opts.pairing, capability: opts.capability };
+  const cardUrl = opts.cardUrl !== undefined ? opts.cardUrl : resolveAdvertisedUrl(port);
+  const deps: InboundDeps = {
+    nodeName: opts.nodeName,
+    agentVersion: opts.agentVersion,
+    pairing: opts.pairing,
+    capability: opts.capability,
+    cardUrl,
+    listDevices: opts.listDevices,
+  };
   const server = factory((req, res) => { void serveInbound(req, res, deps); });
   server.on('error', (e) => {
     lastError = e?.message || String(e);

@@ -20,6 +20,11 @@ import { MEM_LIVE_SQL } from '../memory-lifecycle.js';
 // zx_20261014_4 批四: 项目域知识册（**零 LLM** 派生）——与 panorama 并跑，注入侧由它取代 panorama（见 memory-context §K）。
 import { deriveProjectKnowledge, upsertProjectKnowledge } from '../project-knowledge.js';
 import { distillKnowledgeCards } from '../knowledge-cards.js';
+// zx_20261030_1 M6「荐」: 派生改由**水位驱动**的增量吸收（只处理有未吸收事件的项目），
+//   重跑成本从 O(全史) 降到 O(增量)；水位只在前移处推进（`knowledge-watermark.ts` 一处真源）。
+import { ABSORB_MAX_PROJECTS_PER_RUN, absorbProjectIncrement, projectsWithUnabsorbedEvents } from '../knowledge-watermark.js';
+// zx_20261029_1「知」：项目须知生成作业（LLM 只在 `project-brief-job.ts` 一处）。
+import { runProjectBriefInit } from '../project-brief-job.js';
 
 interface JobDeps {
   db: Database.Database;
@@ -359,23 +364,44 @@ export function registerAllJobs(deps: JobDeps): void {
       // Phase A (zx_20261014_4 批四): 项目域知识册（**零 LLM** 派生——四类真源直接成册）。
       //   与上面的 panorama **并跑**（后者保留、界面仍可见）；差别在**消费**：panorama 的注入段已移除，
       //   由本册取代（§批五）——"为学日益，为道日损"：不靠 LLM 每轮重写，只从既有事实**派生**。
-      //   ⚠ 与 panorama 不同，本支**无门槛、无 LLM、无失败面**（除库读写外不可能失败）⇒ 不必"候选不足 return null"。
+      //
+      // zx_20261030_1 M6「荐」（大野耐一·现地现物 / 艾宾浩斯·遗忘曲线）: 改为**水位驱动的增量吸收**。
+      //   病根：旧实现只迭代「最近 7 天活跃」项目且每次全量重算——停两周再回来的项目知识书是旧的，
+      //   且没有任何东西告诉用户它旧了。现在按 `wa_event_log.id > 水位` 的**未吸收事件数降序**取前 N 个
+      //   （含久未活跃项目），每轮有界，避免长尾拖慢一小时一次的巩固作业。
+      //   ⚠ 单项目失败只跳过本单位、水位不推进（下轮重试）；不因一个坏项目中断其余巩固 Phase。
       let totalKnowledge = 0;
       let totalCards = 0;
-      for (const { project_id } of recentProjects) {
+      let totalCandidates = 0;
+      let knowledgeProjects = 0;
+      const backlog = projectsWithUnabsorbedEvents(db, ABSORB_MAX_PROJECTS_PER_RUN);
+      for (const { projectId: project_id, unabsorbed } of backlog) {
         try {
-          totalKnowledge += upsertProjectKnowledge(db, project_id, deriveProjectKnowledge(db, project_id));
-          // zx_20261023_5 批二「省」: 蒸馏卡随册同轮重算（社区档在函数内的 Pro 闸处直接返零，不写库）。
-          totalCards += distillKnowledgeCards(db, project_id).cards;
+          // 派生/落册**真函数**由本层注入（水位模块只管"何时、推进到哪"）；
+          //   知识卡在吸收之后按本项目口径计数（Pro 闸在 `distillKnowledgeCards` 内，社区档返 0）。
+          const r = absorbProjectIncrement(db, project_id, {
+            derivation: {
+              derive: (d, pid) => deriveProjectKnowledge(d as never, pid),
+              upsert: (d, pid, entries) => upsertProjectKnowledge(d as never, pid, entries),
+            },
+          });
+          totalKnowledge += r.sections;
+          knowledgeProjects++;
+          try {
+            totalCards += distillKnowledgeCards(db, project_id).cards;
+          } catch (err) {
+            logger.warn({ projectId: project_id.slice(0, 8), errMsg: (err as Error).message }, 'consolidate: 知识卡蒸馏失败（知识册已吸收，水位已前移）');
+          }
+          if (r.candidateError) {
+            logger.warn({ projectId: project_id.slice(0, 8), errMsg: r.candidateError }, 'consolidate: 候选领域包建议失败（知识册已吸收）');
+          }
+          logger.debug({ projectId: project_id.slice(0, 8), unabsorbed, absorbed: r.absorbedEvents, sections: r.sections }, 'consolidate: 项目知识增量吸收');
         } catch (err) {
-          logger.warn({ projectId: project_id.slice(0, 8), errMsg: (err as Error).message }, 'consolidate: 域知识册派生失败');
+          logger.warn({ projectId: project_id.slice(0, 8), unabsorbed, errMsg: (err as Error).message }, 'consolidate: 项目知识增量吸收失败（水位不推进，下轮重试）');
         }
       }
-      if (totalKnowledge > 0) {
-        logger.info({ sections: totalKnowledge }, '项目域知识册派生完成');
-      }
-      if (totalCards > 0) {
-        logger.info({ cards: totalCards }, '项目知识卡蒸馏完成');
+      if (knowledgeProjects > 0) {
+        logger.info({ projects: knowledgeProjects, sections: totalKnowledge, cards: totalCards, candidates: totalCandidates }, '项目知识增量吸收完成');
       }
 
       // Phase A (2026-08-27): 记忆缘起条件（空性·缘起性空——高价值记忆提取适用条件+稳定性分级）
@@ -544,4 +570,14 @@ export function registerAllJobs(deps: JobDeps): void {
   // 调度：每天执行一次（启动后延迟10分钟首跑）
   setTimeout(() => { scheduler.enqueue('consolidate-templates', {}).catch(() => {}); }, 600_000);
   setInterval(() => { scheduler.enqueue('consolidate-templates', {}).catch(() => {}); }, 86_400_000);
+
+  // ===== project-init-brief: 项目创建/手动重跑时读仓生成「项目须知」 =====
+  //   zx_20261029_1「知」：不在创建 IPC 里等模型——作业化后创建即时返回，失败可重试且如实落账。
+  //   单飞锁在 `runProjectBriefInit` 内；这里只负责把作业载荷接上。
+  scheduler.register('project-init-brief', async (payload) => {
+    const projectId = typeof payload.projectId === 'string' ? payload.projectId : '';
+    const trigger = typeof payload.trigger === 'string' ? payload.trigger : 'manual';
+    if (!projectId) return;
+    await runProjectBriefInit({ db, ansClient, projectId, trigger });
+  });
 }

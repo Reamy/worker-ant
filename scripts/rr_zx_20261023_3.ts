@@ -145,7 +145,11 @@ async function main(): Promise<void> {
   // ═══ C｜工具闸 ════════════════════════════════════════════════════════════════
   console.log('\n【C】越界即拒：变更类工具调用时看状态');
   {
-    eq(WORLD_MUTATING_TOOLS.length, 34, 'C-1 变更类工具清单 34 件（逐类：write/control/shell/memory/resource/device）');
+    // zx_20261030_2 M3：不再写死件数（那是"只为下一轮"的哑雷）——由注册表派生：
+    //   非只读件数 − 刻意豁免的表态类 = 变更类应有件数（逐成员对齐仍由 C-11/C-13 钉）。
+    const nonReadonly = TOOL_METAS.filter((m) => !m.isReadOnly).length;
+    eq(WORLD_MUTATING_TOOLS.length, nonReadonly - NON_MUTATING_CONTROL_TOOLS.length,
+      'C-1 变更类工具清单与注册表非只读件数对账（逐类：write/control/shell/memory/resource/device）');
 
     let allRefused = true; let firstOk = '';
     for (const name of WORLD_MUTATING_TOOLS) {

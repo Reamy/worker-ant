@@ -11,8 +11,11 @@ import DeliveryDigestCard from '../components/DeliveryDigestCard';
 import ServiceCallCard from '../components/ServiceCallCard';
 import KnowledgeFaceCard from '../components/KnowledgeFaceCard';
 import KnowledgePackCard from '../components/KnowledgePackCard';
+import KnowledgeInboxCard from '../components/KnowledgeInboxCard';
 import DomainPackCard from '../components/DomainPackCard';
-import { ArrowLeft, Play, Pause, Check, Archive, Edit, Trash2, Brain, Clock, Terminal, Activity, AlertTriangle, Lightbulb, RefreshCw, Package } from 'lucide-react';
+import { ArrowLeft, Play, Pause, Check, Archive, Edit, Trash2, Brain, Clock, Terminal, Activity, AlertTriangle, Lightbulb, RefreshCw, Package, BookOpen } from 'lucide-react';
+// zx_20261029_1「知」: 须知的渲染数据类型与 main 侧同形（IPC 只传纯数据）。
+import type { ProjectBriefRecord } from '../lib/ipc';
 // zx_20260910_3 M3(G3): 布尔 setting 判据**两侧共用同一文件**——渲染层不再自带第二份写法
 import { boolSetting } from '../../../src/main/core/settings-bool.js';
 // zx_20260920_1 M7: ★ 的语义是「**高于**基线」。基线抬到 0.6 后若仍写 `> 0.5`，则**每条新记忆默认带 ★**
@@ -71,6 +74,8 @@ export default function ProjectDetailPage() {
   const [milestones, setMilestones] = useState<Array<Record<string, unknown>>>([]);
   // zx_20260905 批4: 方案里程碑(M0-M6) 项目级聚合（含 doing/done/pending 自动流转展示）
   const [planMilestones, setPlanMilestones] = useState<Array<Record<string, unknown>>>([]);
+  // zx_20261027_1 M6: 空转看板（done+doing=0）默认折叠——真库多块「九行全 pending」的板与真在推进的板混排。
+  const [showIdleBoards, setShowIdleBoards] = useState(false);
   const [milestoneLoading, setMilestoneLoading] = useState(false);
   // zx_20260905 批5: 项目质量聚合（均质/趋势）
   const [qualityStats, setQualityStats] = useState<Record<string, unknown> | null>(null);
@@ -95,7 +100,7 @@ export default function ProjectDetailPage() {
   const [strategyInfo, setStrategyInfo] = useState<{ modelStrategy?: string | null; temperature?: number | null; maxSteps?: number | null; updatedAt?: string | null; adjustments?: Array<Record<string, unknown>> } | null>(null);
   const [bottleneck, setBottleneck] = useState<{ summary?: string; principals?: Array<Record<string, unknown>>; computedAt?: string } | null>(null);
 
-  useEffect(() => { if (id) { void load(); void loadQuality(); } }, [id]);
+  useEffect(() => { if (id) { void load(); void loadQuality(); void loadBrief(); } }, [id]);
   // A1/A2 (2026-09-04_2): 项目详情保鲜度——事件驱动静默刷新头部统计（无常·保鲜；不打断编辑态）
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const projStale = useStaleness(lastUpdated);
@@ -279,6 +284,46 @@ export default function ProjectDetailPage() {
     try { await projects.addMember(id!, addMemberId); setAddMemberId(''); loadMembers(); } catch {}
   }
 
+  // zx_20261029_1「知」: 项目须知（模型读工作目录一次生成；生成在后台作业里，页面只读不生成）。
+  const [briefRec, setBriefRec] = useState<ProjectBriefRecord | null>(null);
+  const [briefStale, setBriefStale] = useState<boolean | null>(null);
+  const [briefLoading, setBriefLoading] = useState(true);
+  const [briefWait, setBriefWait] = useState(false);
+  const briefTimer = useRef<number | undefined>(undefined);
+  async function loadBrief(): Promise<ProjectBriefRecord | null> {
+    if (!id) return null;
+    try {
+      const d = await projects.brief(id);
+      setBriefRec(d.brief);
+      setBriefStale(d.stale);
+      return d.brief;
+    } catch { setBriefRec(null); setBriefStale(null); return null; }
+    finally { setBriefLoading(false); }
+  }
+  async function handleInitBrief() {
+    if (!id || briefWait) return;
+    const prevAt = briefRec?.updatedAt || '';
+    setBriefWait(true);
+    try { await projects.initBrief(id); } catch { setBriefWait(false); return; }
+    // 轮询：看到 `updatedAt` 变化（新一轮已落账）或进入 failed 即停；最多 3 分钟。
+    let attempts = 0;
+    const tick = async () => {
+      const rec = await loadBrief();
+      attempts += 1;
+      const landed = !!rec && ((!!rec.updatedAt && rec.updatedAt !== prevAt) || rec.status === 'failed');
+      if (landed || attempts >= 60) { setBriefWait(false); return; }
+      briefTimer.current = window.setTimeout(() => { void tick(); }, 3000);
+    };
+    briefTimer.current = window.setTimeout(() => { void tick(); }, 1500);
+  }
+  useEffect(() => () => { if (briefTimer.current !== undefined) window.clearTimeout(briefTimer.current); }, []);
+  // 打开页面时恰在生成中 ⇒ 自动跟进到落定（否则要用户手动刷新才看得到结果）。
+  useEffect(() => {
+    if (briefRec?.status !== 'running') return;
+    const t = window.setTimeout(() => { void loadBrief(); }, 3000);
+    return () => window.clearTimeout(t);
+  }, [briefRec]);
+
   async function loadHealthViews() {
     try { const d = await projects.healthViews(id!) as unknown as Record<string, Record<string, unknown>>; setHealthViews(d || {}); } catch { setHealthViews({}); }
   }
@@ -307,6 +352,12 @@ export default function ProjectDetailPage() {
 
   if (loading) return <div className="flex justify-center py-12"><div className="animate-spin h-8 w-8 border-2 border-blue-500 border-t-transparent rounded-full"/></div>;
   if (!project) return <p className="text-red-500 p-6">项目不存在</p>;
+
+  // zx_20261027_1 M6: 有推进的板在前；空转板（done+doing=0）折叠到开关后。
+  const boardProgress = (p: Record<string, unknown>) => Number(p.done || 0) + Number(p.doing || 0);
+  const activeBoards = planMilestones.filter((p) => boardProgress(p) > 0);
+  const idleBoards = planMilestones.filter((p) => boardProgress(p) === 0);
+  const shownBoards = showIdleBoards ? [...activeBoards, ...idleBoards] : activeBoards;
 
   return (
     <div className="space-y-6">
@@ -368,6 +419,85 @@ export default function ProjectDetailPage() {
 
       {/* zx_20261017_1 批七: 项目知识包——预览（与注入同一把尺）+ 导出 JSONL（仅导出，不训练） */}
       <KnowledgePackCard projectId={id!} />
+
+      {/* zx_20261030_1 M6「荐」: 知识收件箱——增量水位 / 建议的领域包（候选永不自动启用）/ 相似项目（只展示） */}
+      <KnowledgeInboxCard projectId={id!} />
+
+      {/* zx_20261029_1「知」: 项目须知——模型读工作目录一次生成的仓库快照。
+          它不进普通记忆表（记忆按年限衰减、按相关度检索），而是单独成表 + 稳定前缀注入。 */}
+      <div className="bg-white rounded-lg border p-4">
+        <div className="flex items-center justify-between mb-2 gap-2">
+          <h3 className="font-semibold flex items-center gap-2"><BookOpen className="w-4 h-4 text-cyan-600"/>项目须知
+            <span className="text-xs font-normal text-gray-400">· 读工作目录生成的仓库快照，任务执行时自动带上</span>
+          </h3>
+          <button onClick={() => void handleInitBrief()} disabled={briefWait || briefRec?.status === 'running' || !project.working_dir}
+            title={!project.working_dir ? '未设置工作目录，无法初始化' : '重新读一遍工作目录并生成须知（后台执行，不阻塞页面）'}
+            className="flex items-center gap-1 px-2.5 py-1 border rounded-lg text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50 shrink-0">
+            <RefreshCw className={`w-3.5 h-3.5 ${briefWait || briefRec?.status === 'running' ? 'animate-spin' : ''}`} />
+            {briefWait || briefRec?.status === 'running' ? '生成中…' : briefRec?.brief ? '重新初始化' : '生成须知'}
+          </button>
+        </div>
+        {briefStale === true && (
+          <div className="mb-2 text-xs text-amber-700 bg-amber-50 rounded px-2 py-1">仓库文件已变化，须知可能过期——可点「重新初始化」更新。</div>
+        )}
+        {briefLoading ? (
+          <p className="text-sm text-gray-400 py-2">加载中…</p>
+        ) : !briefRec?.brief ? (
+          briefRec?.status === 'failed' ? (
+            <div className="text-sm p-2 bg-red-50 rounded">
+              <p className="text-red-700">生成失败：{briefRec.error || '原因未记录'}</p>
+              <p className="text-xs text-gray-500 mt-1">确认工作目录可读、ANS 已连接后点「生成须知」重试。</p>
+            </div>
+          ) : briefRec?.status === 'running' || briefWait ? (
+            <p className="text-sm text-gray-500 py-2">正在读工作目录生成须知（通常 1 分钟内完成，可离开本页）。</p>
+          ) : (
+            <p className="text-sm text-gray-400 py-2">{project.working_dir ? '尚未生成须知。' : '未设置工作目录，无法初始化。'}</p>
+          )
+        ) : (
+          <div className="space-y-2 text-sm">
+            {briefRec.status === 'failed' && briefRec.error && (
+              <p className="text-xs text-red-700 bg-red-50 rounded px-2 py-1">上次重跑失败：{briefRec.error}（下方仍是上一份成功的须知）</p>
+            )}
+            {briefRec.brief.summary && <p className="text-gray-700">{briefRec.brief.summary}</p>}
+            {briefRec.brief.stack.length > 0 && (
+              <div className="flex items-center gap-1 flex-wrap">
+                <span className="text-xs text-gray-400">技术栈</span>
+                {briefRec.brief.stack.map((s, i) => <span key={i} className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-50 text-cyan-700">{s}</span>)}
+              </div>
+            )}
+            {briefRec.brief.commands.length > 0 && (
+              <div>
+                <p className="text-xs text-gray-400 mb-0.5">常用命令</p>
+                <ul className="space-y-0.5">{briefRec.brief.commands.map((c, i) => (
+                  <li key={i} className="text-xs"><span className="text-gray-600">{c.name}</span><span className="text-gray-400 mx-1">·</span><code className="font-mono text-gray-700 bg-gray-50 rounded px-1">{c.cmd}</code></li>
+                ))}</ul>
+              </div>
+            )}
+            {briefRec.brief.entry_points.length > 0 && (
+              <p className="text-xs text-gray-600"><span className="text-gray-400">入口：</span><span className="font-mono">{briefRec.brief.entry_points.join(' · ')}</span></p>
+            )}
+            {briefRec.brief.layout.length > 0 && (
+              <div>
+                <p className="text-xs text-gray-400 mb-0.5">目录职责</p>
+                <ul className="space-y-0.5">{briefRec.brief.layout.map((l, i) => (
+                  <li key={i} className="text-xs"><code className="font-mono text-gray-700">{l.path}</code><span className="text-gray-400 mx-1">—</span><span className="text-gray-600">{l.purpose}</span></li>
+                ))}</ul>
+              </div>
+            )}
+            {briefRec.brief.conventions.length > 0 && (
+              <p className="text-xs text-gray-600"><span className="text-gray-400">约定：</span>{briefRec.brief.conventions.join('；')}</p>
+            )}
+            {briefRec.brief.gotchas.length > 0 && (
+              <p className="text-xs text-amber-700"><span className="text-gray-400">注意：</span>{briefRec.brief.gotchas.join('；')}</p>
+            )}
+          </div>
+        )}
+        {briefRec?.brief && (
+          <p className="text-[10px] text-gray-400 mt-2">
+            生成于 {formatDbTime(briefRec.updatedAt)} · 模型 {briefRec.model || '—'} · 约 {(briefRec.tokensIn + briefRec.tokensOut).toLocaleString()} tokens · {briefRec.trigger === 'create' ? '创建时生成' : '手动重跑'}
+          </p>
+        )}
+      </div>
 
       {/* Tab 切换 */}
       <div className="flex gap-2">
@@ -611,7 +741,7 @@ export default function ProjectDetailPage() {
           {!milestoneLoading && planMilestones.length > 0 && (
             <div className="bg-white rounded-lg border p-4">
               <h3 className="font-semibold mb-3 flex items-center gap-2"><Check className="w-4 h-4 text-teal-500"/>方案里程碑(M0-M6)进度</h3>
-              <div className="space-y-3">{planMilestones.map((p: Record<string,unknown>)=>(
+              <div className="space-y-3">{shownBoards.map((p: Record<string,unknown>)=>(
                 <div key={String(p.plan_task_id)} className="border border-gray-100 rounded p-3">
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="font-medium text-sm text-gray-800 truncate max-w-[55%]">{String(p.plan_title || '方案')}</span>
@@ -630,6 +760,16 @@ export default function ProjectDetailPage() {
                   </div>
                 </div>
               ))}</div>
+              {idleBoards.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setShowIdleBoards((v) => !v)}
+                  className="mt-3 text-xs text-gray-500 hover:text-teal-700 underline underline-offset-2"
+                  title="空转看板：板上没有任何里程碑处于进行中或已落地"
+                >
+                  {showIdleBoards ? '收起空转看板' : `另有 ${idleBoards.length} 块方案看板尚无任何里程碑推进`}
+                </button>
+              )}
             </div>
           )}
           {/* 阻塞分析（修复：analyzeBlockers 实际返回 taskId/title/status/blockedCount/impactScore） */}

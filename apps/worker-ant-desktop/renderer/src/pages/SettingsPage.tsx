@@ -15,7 +15,7 @@ import type { PricingPayload } from '../../../src/main/core/pricing.js';
 import type { TierCatalogPayload } from '../../../src/main/core/tier-catalog.js';
 // zx_20261022_3 批九: 用量形状同引 main 侧真源（`core/tier-usage.ts`）；本页只上屏，不自行数库/猜上限。
 import type { TierUsagePayload } from '../../../src/main/core/tier-usage.js';
-import { Monitor, Cpu, HardDrive, RefreshCw, Lock, Check, Globe, Save, Bell, Package, GitBranch, Shield, ShieldCheck } from 'lucide-react';
+import { Monitor, Cpu, HardDrive, RefreshCw, Lock, Check, Globe, Save, Bell, Package, GitBranch, Shield, ShieldCheck, ListTree, Terminal } from 'lucide-react';
 // zx_20260910_3 M3(G3): 布尔 setting 判据**两侧共用同一文件**——读写同一口径，防"写 '0' 而读只认 'false'"
 import { boolSetting } from '../../../src/main/core/settings-bool.js';
 // zx_20260924 M6-c: 成本上限的**键名**同样不手抄——读端（`readMaxCostPer1k`）在哪，键就在哪
@@ -118,6 +118,12 @@ export default function SettingsPage() {
   const [capGate, setCapGate] = useState(true);
   // zx_20261022_3 批六：严格备用（缺省关——保持「可用性优先」裁定；见 settings-bool.ts 该键注释）。
   const [strictFallback, setStrictFallback] = useState(false);
+  // zx_20261028_2 M4：计划自动拆解（`engine.plan_auto_decompose`，**缺省即开**）。
+  //   关 ⇒ `autoDecomposeForTask` 直接 null，逐字回"模型不主动进计划模式就不拆"的旧行为。
+  const [planAutoDecompose, setPlanAutoDecompose] = useState(true);
+  // zx_20261029_3 M5：多段命令逐段校验（缺省即开）。关 ⇒ `execute_command` 回"分隔符一律拒"旧行为。
+  const [shellMultiSegment, setShellMultiSegment] = useState(true);
+  const [killBackgroundOnExit, setKillBackgroundOnExit] = useState(true);
   // zx_20260924 M6-c: 模型选型成本上限（美元/1k tokens）的**写端**。
   //   此前该键只有读端（`readMaxCostPer1k`，由 `exec-model-select` 喂进 ANS 的 `maxCostPer1k`），
   //   GUI 无处可点 ⇒ 成本闸实际上是一条"装好了却没人能上电"的线。此处补上入口。
@@ -154,8 +160,9 @@ export default function SettingsPage() {
   //   （`nodes:orchestrate-mode` 随读回传 `modes`）——本页只按它摆选项，不手抄 `off`/`auto`。
   const [orchMode, setOrchMode] = useState('off');
   const [orchModes, setOrchModes] = useState<string[]>([]);
-  // zx_20261017_1 批三: 建单即派（缺省关；main 只认显式 '1'）
+  // zx_20261017_1 批三: 建单即派；zx_20261029_2 M7 起为三态（显式/缺省），策略与理由随读口一并回。
   const [autoDispatch, setAutoDispatch] = useState(false);
+  const [autoPolicy, setAutoPolicy] = useState<{ source: 'explicit' | 'default'; reason: string } | null>(null);
   const ORCH_LABEL: Record<string, string> = {
     off: '关闭（默认）—— 全部在本机跑',
     auto: '自动外派 —— 本机并发占满时把溢出的就绪子任务派给他机',
@@ -254,6 +261,12 @@ export default function SettingsPage() {
         //   引擎侧消费 `readBoolSettingDefaultOff`（同一把尺：「只有明确说开才算开」），面板侧按字面三写法读。
         const sf = all['engine.capability_strict_fallback'];
         setStrictFallback(sf === 'true' || sf === '1' || sf === 'on');
+        // zx_20261028_2 M4：计划自动拆解（同一把 `boolSetting` 尺；缺省即开）
+        setPlanAutoDecompose(boolSetting(all['engine.plan_auto_decompose']));
+        // zx_20261029_3 M5：多段命令逐段校验（同一把 `boolSetting` 尺；缺省即开）
+        setShellMultiSegment(boolSetting(all['engine.shell_multi_segment']));
+        // zx_20261029_3 M3：退出带走后台进程组（同一把 `boolSetting` 尺；缺省即开）
+        setKillBackgroundOnExit(boolSetting(all['engine.kill_background_on_exit']));
         const pn: Record<string, string> = {};
         for (const o of POLICY_OVERRIDES) pn[o.key] = all[o.key] ?? '';
         setPolicyNums(pn);
@@ -261,8 +274,8 @@ export default function SettingsPage() {
         setMachineMaxConcurrency(all[MACHINE_CONCURRENCY_SETTING_KEY] ?? '');
         // zx_20261011_4 M4: 编排模式（词表随读回传；取不到就留空态，不下发假模式）
         nodesApi.orchestrateMode().then((r) => { setOrchMode(r.mode); setOrchModes(Array.isArray(r.modes) ? r.modes : []); }).catch(() => { /* 浏览器态无此通道 */ });
-        // zx_20261017_1 批三: 建单即派开关（缺省关；取不到即保持关，不假装已开）
-        nodesApi.autoDispatch().then((r) => setAutoDispatch(!!r.enabled)).catch(() => { /* 浏览器态无此通道 */ });
+        // zx_20261017_1 批三: 建单即派开关（zx_20261029_2 M7：连同策略/理由读回；取不到即保持关，不假装已开）
+        nodesApi.autoDispatch().then((r) => { setAutoDispatch(!!r.enabled); setAutoPolicy(r.policy ?? null); }).catch(() => { /* 浏览器态无此通道 */ });
       } catch {} finally { setAnsLoaded(true); }
     })();
   }, []);
@@ -330,6 +343,21 @@ export default function SettingsPage() {
     setStrictFallback(on);
     try { await invoke('settings:set', 'engine.capability_strict_fallback', on ? 'true' : 'false'); } catch {}
   };
+  // zx_20261028_2 M4：计划自动拆解（缺省即开；写 'true'/'false' 与 `readBoolSetting` 同口径）
+  const togglePlanAutoDecompose = async (on: boolean) => {
+    setPlanAutoDecompose(on);
+    try { await invoke('settings:set', 'engine.plan_auto_decompose', on ? 'true' : 'false'); } catch {}
+  };
+  // zx_20261029_3 M5：多段命令逐段校验（缺省即开；写 'true'/'false' 与 `readBoolSetting` 同口径）
+  const toggleShellMultiSegment = async (on: boolean) => {
+    setShellMultiSegment(on);
+    try { await invoke('settings:set', 'engine.shell_multi_segment', on ? 'true' : 'false'); } catch {}
+  };
+  // zx_20261029_3 M3：退出带走后台进程组（缺省即开；写 'true'/'false' 与 `readBoolSetting` 同口径）
+  const toggleKillBackgroundOnExit = async (on: boolean) => {
+    setKillBackgroundOnExit(on);
+    try { await invoke('settings:set', 'engine.kill_background_on_exit', on ? 'true' : 'false'); } catch {}
+  };
   const commitPolicyNum = async (key: string, raw: string, min: number, max: number) => {
     const t = raw.trim();
     const n = Number(t);
@@ -353,11 +381,16 @@ export default function SettingsPage() {
     setOrchMode(mode);
     try { await nodesApi.setOrchestrateMode(mode); } catch { setOrchMode(prev); }
   };
-  /** zx_20261017_1 批三: 建单即派开关提交口（失败回滚显示，不把"没写进去"显示成"已开"）。 */
+  /** zx_20261017_1 批三: 建单即派开关提交口（失败回滚显示，不把"没写进去"显示成"已开"）。
+   *  zx_20261029_2 M7：写口落的是**显式**值——成功后策略来源随之变为 `explicit`（理由跟 main 同一句话）。 */
   const toggleAutoDispatch = async (on: boolean) => {
     const prev = autoDispatch;
+    const prevPolicy = autoPolicy;
     setAutoDispatch(on);
-    try { await nodesApi.setAutoDispatch(on); } catch { setAutoDispatch(prev); }
+    try {
+      await nodesApi.setAutoDispatch(on);
+      setAutoPolicy({ source: 'explicit', reason: on ? '已手动开启' : '已手动关闭' });
+    } catch { setAutoDispatch(prev); setAutoPolicy(prevPolicy); }
   };
   const commitMaxCostPer1k = async (raw: string) => {
     const n = Number(raw);
@@ -614,6 +647,50 @@ export default function SettingsPage() {
           </div>
         </div>
 
+        {/* zx_20261028_2 M4(能拆则拆，不硬拆): 计划自动拆解——引擎"到点即拆"的开关。
+            键早已在 `settings-bool.ts` 的白名单里、主进程也在读，缺的只是这一处读写口。 */}
+        <div className="bg-white rounded-lg border p-6">
+          <h3 className="font-semibold mb-1 flex items-center gap-2"><ListTree className="w-4 h-4"/>任务拆解</h3>
+          <p className="text-xs text-gray-400 mb-3">计划类任务到点即拆为可执行子任务（模板或 LLM 规划）。主进程消费，下一个任务生效。</p>
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-sm font-medium">计划自动拆解<span className="ml-1 text-[9px] px-1 py-0.5 rounded bg-amber-100 text-amber-700 align-middle">主进程</span></p>
+              <p className="text-xs text-gray-400 mt-0.5">
+                关 ⇒ 引擎不再代拆，只有模型主动进入「计划模式」时才拆（逐字回旧行为）。
+                修复/排查类任务另有模板守卫跳过套模板拆解，与本开关无关。
+              </p>
+            </div>
+            <Switch on={planAutoDecompose} onToggle={togglePlanAutoDecompose} />
+          </div>
+        </div>
+
+        {/* zx_20261029_3 M5(维特根斯坦·语言游戏): 多段命令——语法（有分隔符）不等于权限（要 sudo）。
+            开关必须有 GUI 读写口，否则"承诺的一键回退"只是白名单里的一行字。 */}
+        <div className="bg-white rounded-lg border p-6">
+          <h3 className="font-semibold mb-1 flex items-center gap-2"><Terminal className="w-4 h-4"/>命令执行</h3>
+          <p className="text-xs text-gray-400 mb-3">决定智能体执行通用命令时如何读分隔符。主进程消费，下一次工具调用生效。</p>
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-sm font-medium">多段命令逐段校验<span className="ml-1 text-[9px] px-1 py-0.5 rounded bg-amber-100 text-amber-700 align-middle">主进程</span></p>
+              <p className="text-xs text-gray-400 mt-0.5">
+                开 ⇒ 允许用「;」「&amp;&amp;」「||」连接多条命令，但每一段都逐段检查（破坏性/系统管理/解释器/非法字符）。
+                关 ⇒ 分隔符一律拒绝（逐字回旧行为）。
+              </p>
+            </div>
+            <Switch on={shellMultiSegment} onToggle={toggleShellMultiSegment} />
+          </div>
+          <div className="flex items-center justify-between gap-4 mt-4 pt-4 border-t border-gray-100">
+            <div>
+              <p className="text-sm font-medium">退出时带走后台进程<span className="ml-1 text-[9px] px-1 py-0.5 rounded bg-amber-100 text-amber-700 align-middle">主进程</span></p>
+              <p className="text-xs text-gray-400 mt-0.5">
+                开 ⇒ 退出应用时结束工蚁启动、仍活着的后台进程组（仅限活动页「后台进程」账上的；外部进程不碰）。
+                关 ⇒ 退出后让它们继续跑。
+              </p>
+            </div>
+            <Switch on={killBackgroundOnExit} onToggle={toggleKillBackgroundOnExit} />
+          </div>
+        </div>
+
         {/* zx_20261012_2 批一(策略可配): 策略引擎——阈值/窗口此前写死在源码，GUI 无处可调（只能 DB 直改） */}
         <div className="bg-white rounded-lg border p-6">
           <h3 className="font-semibold mb-1 flex items-center gap-2"><Shield className="w-4 h-4"/>策略引擎</h3>
@@ -688,14 +765,19 @@ export default function SettingsPage() {
               {(orchModes.length ? orchModes : ['off', 'auto']).map((m) => (<option key={m} value={m}>{ORCH_LABEL[m] ?? m}</option>))}
             </select>
           </div>
-          {/* zx_20261017_1 批三: 建单即派——新建任务那一刻就交给擅长这类活的对端（缺省关，不影响既有行为） */}
+          {/* zx_20261017_1 批三: 建单即派——新建任务那一刻就交给擅长这类活的对端。
+              zx_20261029_2 M7：三态（显式开 / 显式关 / Team+入网时缺省开），缺省开**只在满负荷时溢出**。 */}
           <div className="flex items-center justify-between gap-4 mt-4 pt-4 border-t">
             <div>
               <p className="text-sm font-medium">建单即派<span className="ml-1 text-[9px] px-1 py-0.5 rounded bg-amber-100 text-amber-700 align-middle">主进程</span></p>
               <p className="text-xs text-gray-400 mt-0.5">
-                开启后，新建任务且**确属可外派**（无父任务 / 无依赖 / 无附件 / 项目无本机工作目录 / 未触发模板拆解 / 形态可路由）
-                时，先预查在线且能力卡含该类目的对端，再提交给他机执行；失败**不阻断建单**，任务留在本机。仅对开启之后新建的任务生效。
+                团队版已解锁且本机已入网时<strong>默认开启</strong>，但只在<strong>本机满负荷</strong>时溢出——本机跑得动就先在本机跑；
+                手动开启则不受余力限制，符合条件就派。可外派指：无父任务 / 无依赖 / 无附件 / 项目无本机工作目录 /
+                未触发模板拆解 / 形态可路由；派发失败<strong>不阻断建单</strong>，任务留在本机。仅对开启之后新建的任务生效。
               </p>
+              {autoPolicy && (
+                <p className="text-xs text-gray-500 mt-1">当前策略：{autoDispatch ? '已开启' : '未开启'}——{autoPolicy.reason}。</p>
+              )}
             </div>
             <Switch on={autoDispatch} onToggle={toggleAutoDispatch} />
           </div>
@@ -732,7 +814,9 @@ export default function SettingsPage() {
 
         <div className="bg-white rounded-lg border p-6"><h3 className="font-semibold mb-4 flex items-center gap-2"><Package className="w-4 h-4"/>许可与激活</h3>
           <div className="space-y-2 text-sm">
-            <div className="flex justify-between"><span className="text-gray-500">当前档位</span><span className="font-medium">{lic?.tierLabel ?? '—'}{lic?.kind === 'trial' && lic.trialDaysLeft != null ? `（试用中，还剩 ${lic.trialDaysLeft} 天）` : ''}</span></div>
+            {/* zx_20261027_3 M3「试得真」：试用给的就是团队版能力——档位行直说"团队版能力（剩 N 天）"，
+                与 `license.ts` 的 `tier:'team'` 及价目表 `trial.grantsTier` 同一事实。 */}
+            <div className="flex justify-between"><span className="text-gray-500">当前档位</span><span className="font-medium">{lic?.kind === 'trial' && lic.trialDaysLeft != null ? `${lic.tierLabel ?? '团队版'}能力（剩 ${lic.trialDaysLeft} 天）` : (lic?.tierLabel ?? '—')}</span></div>
             <div className="flex justify-between"><span className="text-gray-500">状态</span><span className="text-gray-600 text-right">{lic?.detail ?? '—'}</span></div>
             {/* zx_20261017_1 批五: 席位用量与用户页同源（`license:status.seats`）。
                 zx_20261023_1「称」: 席位只数**本机**登录账号、跨机不可聚合 ⇒ 界面如实称「本机账号」，
@@ -887,10 +971,17 @@ export default function SettingsPage() {
                           })}
                         </tr>
                       ))}
+                      {/* zx_20261030_1 M5「限」：容量维度对照（`capacity` 由 main 的 `TIER_LIMITS` 派生，本页只上屏）。 */}
+                      <tr className="border-t border-gray-100">
+                        <td className="py-1 text-gray-600">容量上限</td>
+                        {catalog.tiers.map((t) => (
+                          <td key={t.tier} className="py-1 text-center text-gray-500 px-2">{t.capacity}</td>
+                        ))}
+                      </tr>
                     </tbody>
                   </table>
                 </div>
-                <p className="text-[11px] text-gray-400 mt-1">试用期 {catalog.trial.days} 天，可体验{catalog.trial.grantsLabel}能力。</p>
+                <p className="text-[11px] text-gray-400 mt-1">试用期 {catalog.trial.days} 天：{catalog.trial.grantsLabel}能力（并发 {catalog.tiers.find((t) => t.tier === catalog.trial.grantsTier)?.maxProjectConcurrency ?? '—'} / 协同节点 {catalog.tiers.find((t) => t.tier === catalog.trial.grantsTier)?.maxNodes ?? '—'} / 本机账号 {catalog.tiers.find((t) => t.tier === catalog.trial.grantsTier)?.maxMembers ?? '—'}）。</p>
               </div>
             )}
             <div className="pt-3 border-t mt-3">

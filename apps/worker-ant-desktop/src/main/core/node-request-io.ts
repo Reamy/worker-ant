@@ -55,6 +55,30 @@ export function makeAnsRequestIo(db: Database.Database): RequestIo & ClarifyIo {
       return r.status;
     },
 
+    /**
+     * zx_20261030_1 M2：`POST /requests/:id/progress`——进度**尽力而为**。
+     *   ⚠ 与 `report` 同形抛（由 worker 侧吞），但**不去噪**：进度失败本来就该安静（每 2s 一次，
+     *     若对端版本旧/服务端不可达，逐跳出声等于刷屏），故这里只抛、不 `noteOnce`。
+     */
+    async progress(id, p) {
+      const r = await ansSignedRequest(resolveAnsCreds(credsDb), `/api/v1/nodes/requests/${encodeURIComponent(id)}/progress`, { method: 'POST', body: p });
+      if (!r.ok) throw new Error(ansFailureNote(r));
+      return r.status;
+    },
+
+    /**
+     * zx_20261030_1 M3：叫停探针——`GET /requests/:id` 取 `cancel_requested`（被派方有读该单的权限）。
+     *   ⚠ 同 `progress`：**抛而不去噪**（每 2s 一次探测；对端版本旧/不可达时逐跳出声等于刷屏），
+     *     由执行体按"查询故障 ⇒ 未叫停"吞掉。
+     *   缺该字段（旧 ANS/旧行）⇒ `false`（不把"读不到"当"已叫停"）。
+     */
+    async cancelStatus(id: string): Promise<boolean> {
+      const r = await ansSignedRequest(resolveAnsCreds(credsDb), `/api/v1/nodes/requests/${encodeURIComponent(id)}`, { method: 'GET' });
+      if (!r.ok) throw new Error(ansFailureNote(r));
+      const body = (await r.response!.json()) as { data?: AnsNodeRequest };
+      return body.data?.cancel_requested === true;
+    },
+
     // ==================== M4 双向澄清（B 端提问 / 读作答） ====================
     /** `POST /requests/:id/question`——本机（被派方）就这一单提问；`node_id` 由本机身份派生（不自报）。 */
     async ask(id: string, question: NodeQuestion): Promise<void> {

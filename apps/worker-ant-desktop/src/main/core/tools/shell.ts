@@ -10,13 +10,15 @@ import { readBoolSetting } from '../settings-bool.js';
 import { jsonSchema } from 'ai';
 import { runShellCommand, truncationNote } from '../shell-exec.js';
 
-import { validateReadonlyBashCommand, sanitizeLoneSurrogates, searchPathForPattern, paginateReadFile, shellRejectPayload, shellRejectPayloadForChar, buildToolConstraintBrief } from '../tool-guards.js';
+import { validateReadonlyBashCommand, sanitizeLoneSurrogates, searchPathForPattern, paginateReadFile, shellRejectPayload, shellRejectPayloadForChar, buildToolConstraintBrief, evaluateMultiSegment } from '../tool-guards.js';
+// zx_20261029_3 M3：四个工具在**唯一执行口** `runShellCommand` 前后登记后台进程（账不是闸，失败不阻断）。
+import { makeShellHooks, leftoverNote } from '../background-jobs.js';
 
 export function shellTools(deps: ToolDeps) {
   const { db, taskId, projectId, workingDir, pauseForDecision, registerFilesWrittenByCommand } = deps;
   return {
     execute_command: {
-      description: '执行通用shell命令（超时30s，配额20次；**可 `cd`、可多步写操作**）。**不支持 `&&`/`;`/`|` 等分隔符**——要管道请用 `bash` 工具。⚠ 工作目录**已经是本任务的项目目录**，一般**无需 `cd`**。',
+      description: '执行通用shell命令（超时30s，配额20次；**可 `cd`、可多步写操作**）。开启 `engine.shell_multi_segment` 时可用 `;`/`&&`/`||` 分段（**每一段都逐段检查**）；**不支持 `|` 管道与后台 `&`**——要管道请用 `bash` 工具。⚠ 工作目录**已经是本任务的项目目录**，一般**无需 `cd`**。',
       parameters: jsonSchema({
         type: 'object' as const,
         properties: {
@@ -43,16 +45,24 @@ export function shellTools(deps: ToolDeps) {
         // zx_20260915 M5/P0-7：裸正则删去，改由真源判定（两处**调用**、一处**实现**）；
         // 命中时回的是「指名被拒字符 + 给正解」的如实文案，**不再把语法问题说成权限问题**
         // （旧文案建议 `run_privileged`，把只读命令推向审批通道）。回退开关 `engine.shell_advice_honest`。
-        const cmdReject = shellRejectPayload(args.command, 'execute_command', workingDir, readBoolSetting(db, 'engine.shell_advice_honest'));
-        if (cmdReject) return JSON.stringify(cmdReject);
+        // zx_20261029_3 M5：开关开 ⇒ 逐段判定（语法与权限分开看）；关 ⇒ 逐字回字符层的旧行为。
+        //   整串原检查（上面 DESTROY / 整串 classify / 解释器首 token）仍先跑；本层是**加一道**。
+        if (readBoolSetting(db, 'engine.shell_multi_segment')) {
+          const mv = evaluateMultiSegment(args.command, 'execute_command', workingDir);
+          if (!mv.ok) return JSON.stringify(mv.payload);
+        } else {
+          const cmdReject = shellRejectPayload(args.command, 'execute_command', workingDir, readBoolSetting(db, 'engine.shell_advice_honest'));
+          if (cmdReject) return JSON.stringify(cmdReject);
+        }
         // zx_20260917 M4·§6.1-3: 子进程落盘**零登记**是判卷盲的第二个来源。基准时刻取在命令**启动前**，
         // 命令返回后按它盘点——归因窗口＝该条命令自身（不是"最近 N 分钟"，§6.1-3 红线）。
         const writeBaselineMs = Date.now();
         // zx_20260916_2 M1: 改走异步外壳——命令跑多久不再等于事件循环被占多久
-        const r = await runShellCommand(args.command, { cwd: workingDir, timeoutMs: 30_000, maxBuffer: 1024 * 1024 });
+        const tracked = makeShellHooks(db, { projectId, taskId, tool: 'execute_command', command: args.command, cwd: workingDir });
+        const r = await runShellCommand(args.command, { cwd: workingDir, timeoutMs: 30_000, maxBuffer: 1024 * 1024, ...tracked.hooks });
         await registerFilesWrittenByCommand(db, { projectId, taskId, workingDir, sinceMs: writeBaselineMs, via: 'execute_command' });
         if (!r.ok) return JSON.stringify({ error: r.error, stdout: r.stdout.slice(0, 5000), stderr: r.stderr.slice(0, 5000) });
-        return r.stdout.slice(0, 10000) + truncationNote(r);
+        return r.stdout.slice(0, 10000) + truncationNote(r) + leftoverNote(db, tracked.jobId);
       },
     },
     bash: {
@@ -76,9 +86,10 @@ export function shellTools(deps: ToolDeps) {
           }
           return JSON.stringify(verdict.payload);
         }
-        const r = await runShellCommand(command, { cwd: workingDir, timeoutMs: 30_000, maxBuffer: 1024 * 1024 });
+        const tracked = makeShellHooks(db, { projectId, taskId, tool: 'bash', command, cwd: workingDir });
+        const r = await runShellCommand(command, { cwd: workingDir, timeoutMs: 30_000, maxBuffer: 1024 * 1024, ...tracked.hooks });
         if (!r.ok) return JSON.stringify({ error: r.error, stdout: r.stdout.slice(0, 3000), stderr: r.stderr.slice(0, 3000) });
-        return r.stdout.slice(0, 10000) + truncationNote(r);
+        return r.stdout.slice(0, 10000) + truncationNote(r) + leftoverNote(db, tracked.jobId);
       },
     },
     git_clone: {
@@ -96,7 +107,9 @@ export function shellTools(deps: ToolDeps) {
         const repoName = args.repoUrl.split('/').pop()?.replace('.git', '') || 'repo';
         const targetPath = path.join(workingDir, args.targetDir || repoName);
         if (!path.resolve(targetPath).startsWith(path.resolve(workingDir))) return JSON.stringify({ error: '路径越界' });
-        const r = await runShellCommand(`git clone --depth 1 ${args.repoUrl} ${targetPath}`, { cwd: workingDir, timeoutMs: 60_000, maxBuffer: 1024 * 1024 });
+        const cloneCmd = `git clone --depth 1 ${args.repoUrl} ${targetPath}`;
+        const tracked = makeShellHooks(db, { projectId, taskId, tool: 'git_clone', command: cloneCmd, cwd: workingDir });
+        const r = await runShellCommand(cloneCmd, { cwd: workingDir, timeoutMs: 60_000, maxBuffer: 1024 * 1024, ...tracked.hooks });
         if (!r.ok) return JSON.stringify({ error: `clone失败: ${(r.error || '').slice(0, 200)}` });
         return JSON.stringify({ repoUrl: args.repoUrl, targetPath, status: 'cloned' });
       },
@@ -150,10 +163,13 @@ export function shellTools(deps: ToolDeps) {
         // zx_20260917 M4·§6.1-3: 同 `execute_command`——本工具是最能写的一个（pip/git/npm），
         // 而它此前**零登记**。边界如实：写到**工作目录外**的（site-packages 等）本函数看不见（§6.0bis-d）。
         const writeBaselineMs = Date.now();
-        const r = await runShellCommand(args.command, { cwd: workingDir, timeoutMs: 60_000, maxBuffer: 2 * 1024 * 1024 });
+        // zx_20261029_3 M3：`run_privileged` 是最能起常驻服务的一路（`npm run dev &` 之类——
+        //   shell 秒退、进程组由孙进程持有），同样登记；回话里如实补一句"可在活动页查看/停止"。
+        const tracked = makeShellHooks(db, { projectId, taskId, tool: 'run_privileged', command: args.command, cwd: workingDir });
+        const r = await runShellCommand(args.command, { cwd: workingDir, timeoutMs: 60_000, maxBuffer: 2 * 1024 * 1024, ...tracked.hooks });
         await registerFilesWrittenByCommand(db, { projectId, taskId, workingDir, sinceMs: writeBaselineMs, via: 'run_privileged' });
         if (!r.ok) return JSON.stringify({ error: r.error, stdout: r.stdout.slice(0, 5000), stderr: r.stderr.slice(0, 5000) });
-        return r.stdout.slice(0, 10000) + truncationNote(r);
+        return r.stdout.slice(0, 10000) + truncationNote(r) + leftoverNote(db, tracked.jobId);
       },
     },
   };

@@ -67,8 +67,8 @@ export function DeviceOnboardingWizard({ devices, onClose, onDone }: DeviceOnboa
         const r: DeviceChannelsPayload = await devicesApi.channels();
         if (!alive) return;
         setChannels(r.channels);
-        // 全部渠道被锁（非 Team 档）⇒ 如实说清原因，不给一条走不通的路。
-        if (r.channels.length === 0) setChannelsError(r.gate.detail);
+        // 全部渠道被锁（非 Pro 档，zx_20261029_2 M6 起渠道接入归专业版）⇒ 如实说清原因，不给一条走不通的路。
+        if (r.channels.length === 0) setChannelsError(r.discoveryGate.detail);
       } catch (e) {
         if (alive) setChannelsError((e as Error)?.message || '读取渠道目录失败');
       }

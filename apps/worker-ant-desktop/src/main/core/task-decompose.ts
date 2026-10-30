@@ -40,6 +40,7 @@ import { hasFinalCause } from './four-causes.js';
 import { auxModelRequest } from './model-request.js';
 import { ansSignedRequest, ansFailureNote, type AnsCreds } from './ans-signed-request.js';
 import { extractExpectedOutputPaths, normalizeOutputPath } from './output-paths.js';
+import { describeExecutionError } from './exec-error.js';
 
 const logger = createLogger('decompose');
 
@@ -653,8 +654,11 @@ export function shortfallNotice(
   const msNote = labels.length > 0 ? `本方案点名 ${labels.length} 个里程碑（${labels.join('、')}），` : '';
   // zx_20261023_2 批四：**只有余量真落了库**才说"会自动续建"（`deferred` 由调用方按事实传）。
   //   缺省仍逐字是旧文案——不许对没登记的东西做承诺（名实相符）。
+  // zx_20261028_1 M3（维特根斯坦·意义即用法）：触发条件如实写成"全部在途子任务定局"，
+  //   并**补上它失效的那一格**——子任务若全部卡住，不会再有"定局"事件 ⇒ 续建不会发生。
+  //   「已登记」「自动续建」两个词保留（既有判据按词识别），改的是**语义边界**。
   const tail = opts?.deferred
-    ? `余下 ${missing} 个已登记，待前批完成、槽位释放后**自动续建**（无需人工补建）。`
+    ? `余下 ${missing} 个已登记：待全部在途子任务定局（完成/失败/归档/暂停）后**自动续建**；若它们卡住不动，续建不会发生，需人工处置。`
     : `余下 ${missing} 个本轮**未建、亦未自动排期**——须由人工补齐，或待前批完成、槽位释放后择机再拆。`;
   return `${msNote}本轮规划 ${planned} 个子任务、实建 ${created} 个，余 ${missing} 个未建`
     + '（触发原因为槽位上限闸，非拆解失败）。'
@@ -766,6 +770,77 @@ function writeDeferredState(db: AccountingDb, taskId: string, state: DeferredSta
   } catch { /* 留痕失败不阻断：本批已建出的行照常执行 */ }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// zx_20261028_1 M2：**拆解占位**——闸门与落标记之间隔着一个 `await`，两条派发只要同时越过闸③
+// 就必然各拆一遍（真实标本：一次 GUI 重试，两条 `[智能拆解] 任务启动`、两套同名子任务）。
+// 占位键 `$.auto_decompose_claim`：先到者写时刻、后到者读到时未过期即退让；进程半途被杀则
+// 15 分钟后视为残留可重占（有界代价：宁可 15 分钟后可重试，也不让一次崩溃永久锁死拆解）。
+
+export const AUTO_DECOMPOSE_CLAIM_TTL_MS = 15 * 60_000;
+
+/**
+ * 抢占拆解权。`true` = 本方可以拆；`false` = 别人正在拆（或任务不存在/坏账）。
+ * 旧值超过 TTL ⇒ 视为崩溃残留，允许覆盖（仍走 CAS：带着旧值做条件更新，输者得 0 行）。
+ */
+export function claimAutoDecompose(db: AccountingDb, taskId: string, nowIso?: string): boolean {
+  const nowMs = Date.parse(nowIso ?? new Date().toISOString());
+  const stamp = new Date(Number.isFinite(nowMs) ? nowMs : Date.now()).toISOString();
+  let old: string | null = null;
+  try {
+    const row = db.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get(taskId) as { context_json?: string | null } | undefined;
+    if (!row) return false;
+    const v = (JSON.parse(row.context_json || '{}') as { auto_decompose_claim?: unknown }).auto_decompose_claim;
+    if (typeof v === 'string' && v) old = v;
+  } catch { return false; }
+  if (old) {
+    const t = Date.parse(old);
+    if (Number.isFinite(t) && Date.parse(stamp) - t < AUTO_DECOMPOSE_CLAIM_TTL_MS) return false;
+  }
+  try {
+    const res = old
+      ? db.prepare("UPDATE wa_tasks SET context_json = json_set(COALESCE(context_json,'{}'), '$.auto_decompose_claim', json_quote(?)), updated_at = datetime('now') WHERE id = ? AND json_extract(context_json, '$.auto_decompose_claim') = ?")
+        .run(stamp, taskId, old)
+      : db.prepare("UPDATE wa_tasks SET context_json = json_set(COALESCE(context_json,'{}'), '$.auto_decompose_claim', json_quote(?)), updated_at = datetime('now') WHERE id = ? AND json_extract(context_json, '$.auto_decompose_claim') IS NULL")
+        .run(stamp, taskId);
+    return res.changes === 1;
+  } catch { return false; }
+}
+
+/** 释放拆解权（成功与失败都调）。失败也不阻断——残留由 TTL 兜底。 */
+export function releaseAutoDecomposeClaim(db: AccountingDb, taskId: string): void {
+  try {
+    db.prepare("UPDATE wa_tasks SET context_json = json_remove(COALESCE(context_json,'{}'), '$.auto_decompose_claim') WHERE id = ?").run(taskId);
+  } catch { /* TTL 兜底 */ }
+}
+
+/**
+ * zx_20261028_1 M3「同」：同名不重造。
+ *
+ * 真实标本：余量账里写着 `{index:3,title:'验证修复结果'}`，而同名子任务**早已存在**——
+ * 续拆一触发就会建出第三个同名行（D3）。判据按**规范化标题**（空白折叠）对既有子任务比，
+ * 命中即视为"这一个已经在了"，只把序号映射到既有 id，不建新行。
+ *
+ * `archived` 不参与：归档 = 放弃；同名的新活允许重开，不并入已放弃的行。
+ */
+export function normalizeSubtaskTitle(title: string): string {
+  return (title || '').replace(/\s+/g, ' ').trim();
+}
+
+/** 父任务名下**未归档**子任务的 标题(规范化) → id；同名的取最早一行（`created_at` 升序）。 */
+export function existingChildTitles(db: AccountingDb, parentTaskId: string): Map<string, string> {
+  const out = new Map<string, string>();
+  try {
+    const rows = db.prepare(
+      "SELECT id, title FROM wa_tasks WHERE parent_task_id = ? AND status != 'archived' ORDER BY created_at ASC",
+    ).all(parentTaskId) as Array<{ id: string; title: string | null }>;
+    for (const r of rows) {
+      const key = normalizeSubtaskTitle(r.title || '');
+      if (key && !out.has(key)) out.set(key, r.id);
+    }
+  } catch { /* 读不到就不去重（保持旧行为，不阻断续拆） */ }
+  return out;
+}
+
 export interface CreateDeferredResult {
   created: number;
   /** 续拆后仍待建的条数 */
@@ -798,14 +873,31 @@ export function createDeferredSubtasks(
   let depth = 0;
   try { depth = Number((JSON.parse(row.context_json || '{}') as { depth?: unknown }).depth) || 0; } catch { /* 坏账按顶层 */ }
 
+  // zx_20261028_1 M3：先把 `remaining` 按规范化标题对一遍既有子任务——命中即"已经在"，
+  //   不建行，只把这个原序号映射到既有 id（依赖边因此仍解析得到真实前置）。
   const remaining = state.remaining;
-  const localOf = new Map<number, number>(); // 原序号 → 本批 1-based 序号
-  remaining.forEach((it, i) => localOf.set(it.index, i + 1));
-  const idOf = new Map<number, string>(); // 原序号 → 已建出的真实 id
+  const existing = existingChildTitles(db, parentTaskId);
+  const merged: DeferredItem[] = remaining.filter((it) => existing.has(normalizeSubtaskTitle(it.title)));
+  const remainingTodo = remaining.filter((it) => !existing.has(normalizeSubtaskTitle(it.title)));
+  if (merged.length > 0 && remainingTodo.length === 0) {
+    // 全是同名旧账：清空余量账（remaining 归零 ⇒ 父按既有路径被唤醒，不再每轮重试）+ 留一行会话。
+    writeDeferredState(db, parentTaskId, null);
+    db.prepare('INSERT INTO wa_task_conversations (id, task_id, role, content) VALUES (?, ?, ?, ?)').run(
+      randomUUID(), parentTaskId, 'system',
+      `[续拆] 余下 ${merged.length} 个与既有子任务同名，已并入，不重复建`,
+    );
+    logger.info({ taskId: parentTaskId.slice(0, 8), merged: merged.length }, '续拆余量与既有子任务同名，已并入');
+    return { created: 0, remaining: 0 };
+  }
+
+  const localOf = new Map<number, number>(); // 原序号 → 本批 1-based 序号（只含真要建的）
+  remainingTodo.forEach((it, i) => localOf.set(it.index, i + 1));
+  const idOf = new Map<number, string>(); // 原序号 → 真实 id（前批已建 + 本次并入的既有行）
   for (const ref of state.createdRefs) if (ref?.id) idOf.set(ref.index, ref.id);
+  for (const it of merged) idOf.set(it.index, existing.get(normalizeSubtaskTitle(it.title))!);
 
   const templateExtra: string[][] = [];
-  const template: DecompositionTemplate[] = remaining.map((it) => {
+  const template: DecompositionTemplate[] = remainingTodo.map((it) => {
     const numeric: number[] = [];
     const externalIds: string[] = [];
     for (const d of it.dependsOn ?? []) {
@@ -832,16 +924,21 @@ export function createDeferredSubtasks(
   });
   if (r.created === 0) {
     // 不写会话行：同一情形会在每次子结束时复现，重复的 system 行只会刷屏（如实记日志即可）。
-    logger.info({ taskId: parentTaskId.slice(0, 8), remaining: remaining.length, refusal: r.refusal }, '续拆未建出（槽位仍未释放）');
-    return { created: 0, remaining: remaining.length };
+    logger.info({ taskId: parentTaskId.slice(0, 8), remaining: state.remaining.length, refusal: r.refusal }, '续拆未建出（槽位仍未释放）');
+    return { created: 0, remaining: state.remaining.length };
   }
 
-  const built = remaining.slice(0, r.created);
-  const nextRemaining = remaining.slice(r.created);
+  const built = remainingTodo.slice(0, r.created);
+  const nextRemaining = remainingTodo.slice(r.created);
   const nextState: DeferredState = {
     planned: state.planned,
     created: state.created + r.created,
-    createdRefs: [...state.createdRefs, ...built.map((it, k) => ({ index: it.index, title: it.title, id: r.childIds[k]! }))],
+    createdRefs: [
+      ...state.createdRefs,
+      // 本次并入的既有行也要进册：后续批次的依赖边可能指向它们（映射成真实 id 才有边可指）。
+      ...merged.map((it) => ({ index: it.index, title: it.title, id: existing.get(normalizeSubtaskTitle(it.title))! })),
+      ...built.map((it, k) => ({ index: it.index, title: it.title, id: r.childIds[k]! })),
+    ],
     remaining: nextRemaining,
   };
   writeDeferredState(db, parentTaskId, nextState);
@@ -849,6 +946,7 @@ export function createDeferredSubtasks(
   db.prepare('INSERT INTO wa_task_conversations (id, task_id, role, content) VALUES (?, ?, ?, ?)').run(
     randomUUID(), parentTaskId, 'system',
     `[续拆] 槽位释放，本轮续建 ${r.created} 个子任务（状态 pending；${r.noDepCount} 个无前置，立即启动，其余待前置完成）`
+    + (merged.length > 0 ? `\n（其中 ${merged.length} 个与既有子任务同名，已并入，不重复建。）` : '')
     + (nextRemaining.length > 0 ? `\n（仍未建：余 ${nextRemaining.length} 个已登记，待下一批槽位释放后继续续建。）` : '')
     + (r.refusal ? `\n（闸的真因：${r.refusal}）` : '')
     + droppedDepsNotice(r.droppedDepNotes),
@@ -897,7 +995,8 @@ export async function autoDecomposeForTask(opts: AutoDecomposeOptions): Promise<
       onFailure: (reason) => {
         opts.db.prepare('INSERT INTO wa_task_conversations (id, task_id, role, content) VALUES (?, ?, ?, ?)').run(
           randomUUID(), opts.taskId, 'system',
-          `[智能拆解] ${opts.label}：未能拆解（${reason}），本任务按单任务执行。`,
+          // zx_20261028_1 M4：拆解失败同样说清怎么办（`fetch failed` ⇒ 先启 ANS）；非已知故障逐字不变。
+          `[智能拆解] ${opts.label}：未能拆解（${describeExecutionError(reason)}），本任务按单任务执行。`,
         );
       },
     });
@@ -911,23 +1010,31 @@ export async function autoDecomposeForTask(opts: AutoDecomposeOptions): Promise<
     //   槽位释放时由 `createDeferredSubtasks` 续建——M2.5/M3 那种"永远没被创建"的饿死不再发生。
     let deferredPersisted = false;
     if (r.created < r.planned) {
-      // 用**推断后**的模板（与落库那批同形）：推断出的跨批前置边也要随余量一起带走。
-      const inferredTemplates = inferSubtaskDeps(template).templates;
-      const deferred: DeferredState = {
-        planned: r.planned,
-        created: r.created,
-        createdRefs: inferredTemplates.slice(0, r.created).map((t, i) => ({ index: i + 1, title: t.title, id: r.childIds[i]! })),
-        remaining: inferredTemplates.slice(r.created).map((t, i) => ({
-          index: r.created + i + 1,
-          title: t.title,
-          description: t.description,
-          acceptance_criteria: t.acceptance_criteria,
-          ...(t.purpose ? { purpose: t.purpose } : {}),
-          ...(t.dependsOn ? { dependsOn: [...t.dependsOn] } : {}),
-        })),
-      };
-      writeDeferredState(opts.db, opts.taskId, deferred);
-      deferredPersisted = deferred.remaining.length > 0;
+      // zx_20261028_1 M3：已有**非空**余量账 ⇒ 不覆写——旧账才是"还没建的东西"的真账，
+      //   用本轮的新模板盖掉它，等于把已登记待建项静默丢弃（标本里那条 `验证修复结果` 就是这么留下的）。
+      const prior = deferredStateOf(opts.db, opts.taskId);
+      if (prior && prior.remaining.length > 0) {
+        deferredPersisted = true;
+        logger.info({ taskId: opts.taskId.slice(0, 8), remaining: prior.remaining.length }, '既有未建余量账仍在，本轮不覆写');
+      } else {
+        // 用**推断后**的模板（与落库那批同形）：推断出的跨批前置边也要随余量一起带走。
+        const inferredTemplates = inferSubtaskDeps(template).templates;
+        const deferred: DeferredState = {
+          planned: r.planned,
+          created: r.created,
+          createdRefs: inferredTemplates.slice(0, r.created).map((t, i) => ({ index: i + 1, title: t.title, id: r.childIds[i]! })),
+          remaining: inferredTemplates.slice(r.created).map((t, i) => ({
+            index: r.created + i + 1,
+            title: t.title,
+            description: t.description,
+            acceptance_criteria: t.acceptance_criteria,
+            ...(t.purpose ? { purpose: t.purpose } : {}),
+            ...(t.dependsOn ? { dependsOn: [...t.dependsOn] } : {}),
+          })),
+        };
+        writeDeferredState(opts.db, opts.taskId, deferred);
+        deferredPersisted = deferred.remaining.length > 0;
+      }
     }
     // zx_20261013_2 批三: 没拆满时**明说**（给人看的那句由 `shortfallNotice` 一处产出，不在本处另写）；
     //   紧跟一行「闸的真因」保留原有那句**面向模型**的操作指引（含"此刻可走的路"），信息不丢。

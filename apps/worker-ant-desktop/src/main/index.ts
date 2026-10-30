@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { createTray, destroyTray, updateTrayStatus, updateTrayPresence, setTrayRunningMenu, updateTrayImUnread, updateTrayOutboxDead } from './tray.js';
 import { setImUnreadSink, refreshImUnread } from './core/im/im-unread.js';
 import { imChannelEnabledSql } from './core/im/im-channel-status.js';
-import { registerIpcHandlers, setAnsDb } from './ipc-handlers.js';
+import { getAnsClient, registerIpcHandlers, setAnsDb } from './ipc-handlers.js';
 import { initAuthIpc } from './ipc/auth.ipc.js';
 import { initProjectIpc, stopAllRuntimeProcesses } from './ipc/project.ipc.js';
 import { initImIpc, stopAllImAdapters } from './ipc/im.ipc.js';
@@ -26,7 +26,7 @@ import { initAuditIpc } from './ipc/audit.ipc.js';
 import { initTeamIpc } from './ipc/team.ipc.js';
 import { initKnowledgeIpc } from './ipc/knowledge.ipc.js';
 import { initPacksIpc } from './ipc/packs.ipc.js';
-import { initExternalIpc, type InboundControl, type InboundStatusPayload } from './ipc/external.ipc.js';
+import { initExternalIpc, type InboundControl, type InboundStatusPayload, type TerminalBrowseLifecycle } from './ipc/external.ipc.js';
 // zx_20261014_4 批三（管子·度量衡 / 道德经·善闭无关楗而不可开）: 「门」的**能力面 + 起停控制面**。
 //   ⚠ 一律**静态**引入：`device-registry` / `tools/device` / `external-terminals` 本已在模块图内
 //     （经 `devices.ipc.ts` / `external.ipc.ts` 静态引），`inbound-gate` 只多一个 `node:http`。
@@ -42,8 +42,10 @@ import { emitExternalCallRecorded, emitExternalStatusChanged } from './core/refr
 import { listDevices, listRooms, resolveDeviceByName, type DeviceControlOutcome } from './core/device-registry.js';
 import { deviceCallName } from './core/device-name.js';
 import { runDeviceControl, defaultDeviceControl } from './core/tools/device.js';
-// zx_20261018_1 批五: 意图解析器（home.comfort 确定性规则表）——门外 `/intent/resolve` 的注入面。
-import { createHomeIntentResolver } from './core/home-intent.js';
+// zx_20261018_1 批五 / zx_20261029_2 M2: 意图解析链——规则优先，规则排不出且开关允许时才请模型补。
+//   门外 `/intent/resolve`、设备面板预览、任务工具 `device_intent` 三处**共用** `resolveComfortIntent`。
+import { resolveComfortIntent } from './core/home-intent.js';
+import { runComfortModelPlan, type IntentModelClient } from './core/intent-model-plan.js';
 import { ensureNodeIdentity } from './core/node-identity.js';
 // zx_20261010_1 M3: 起心跳/中转的可注入 starter（注册成功后可再调 ⇒ 免重启即时生效）。
 import { setNodeRuntimeStarter } from './core/node-runtime.js';
@@ -166,6 +168,16 @@ async function stopCore(): Promise<void> {
   try { const { stopSelfHealingMonitor } = await import('./core/self-healing-monitor.js'); stopSelfHealingMonitor(); } catch {}
   if (_nodeHeartbeat) { _nodeHeartbeat.stop(); _nodeHeartbeat = null; }
   if (_scheduler) { _scheduler.stop(); _scheduler = null; }
+  // zx_20261029_3 M3: 退出带走**本进程登记过**的后台进程组（shell 秒退、进程组仍在的那类）。
+  //   有界（SIGTERM → 2s 宽限 → SIGKILL）、失败不阻断退出；未登记/已退出一律空操作。
+  //   开关 `engine.kill_background_on_exit`（缺省开）——关 ⇒ 一个进程都不碰，让常驻服务活着。
+  if (db && readBoolSetting(db, 'engine.kill_background_on_exit')) {
+    try {
+      const { stopTrackedBackgroundJobs } = await import('./core/background-jobs.js');
+      const n = await stopTrackedBackgroundJobs(db);
+      if (n > 0) console.log(`[工蚁] 已带走 ${n} 个后台进程组`);
+    } catch (e) { console.error('[工蚁] 带走后台进程失败（不影响退出）:', (e as Error).message); }
+  }
   if (db) {
     db.close();
     db = null;
@@ -181,6 +193,7 @@ function createWindow(): void {
     minWidth: 900,
     minHeight: 600,
     title: '工蚁',
+    icon: path.join(__dirname, '..', '..', 'assets', 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, '..', 'preload', 'index.js'),
       contextIsolation: true,
@@ -242,6 +255,8 @@ app.whenReady().then(async () => {
     copyright: 'Copyright © 2026 Reamy',
     credits: 'AGPL-3.0-only · 源码 https://github.com/Reamy/worker-ant',
   });
+  // dev 下 Dock 默认显示 Electron 图标；打包版用 bundle 的 icon.icns。这里统一成本项目的应用图标。
+  try { app.dock?.setIcon(path.join(__dirname, '..', '..', 'assets', 'icon.png')); } catch { /* 图标缺失不影响启动 */ }
 
   // 阻止 macOS App Nap 节流：Electron GUI 应用窗口不可见时，App Nap 会节流 main 进程的
   // 长 setTimeout，导致 node-cron（基于 setTimeout 调度）的 cron 定时任务不触发，
@@ -280,6 +295,9 @@ app.whenReady().then(async () => {
   // A3 (2026-09-03): 通知中心 IPC（list/unread/markRead/markAllRead + 角标刷新）
   const { initNotificationsIpc } = await import('./ipc/notifications.ipc.js');
   initNotificationsIpc(db);
+  // zx_20261029_3 M3: 后台进程面板（list/stop/stopOrphan）——只报孤儿不自动杀，停前一律复核。
+  const { initBackgroundIpc } = await import('./ipc/background.ipc.js');
+  initBackgroundIpc(db);
   // zx_20261004 M4/M5/M6: 协同面板 IPC（nodes:list / nodes:update / nodes:card）。
   initNodesIpc(db);
   // zx_20261017_1 批二: 审计视图（只读；Team 闸在 core 一处判，锁定不查库）。
@@ -295,24 +313,72 @@ app.whenReady().then(async () => {
   //   装配须先于设备 IPC——它的 settings 读口要在首次读凭据前就能解密/迁移旧明文。
   //   ⚠ safeStorage 不可用（Linux 无 keyring）⇒ 写口如实拒，不悄悄退回明文。
   initDeviceSecrets(electronSecretCipher());
+  // zx_20261029_2 M2: 模型兜底的取模型口——设备面板预览与门外 `/intent/resolve` **共用这一处**。
+  //   复用 `ipc-handlers.getAnsClient` 的懒建缓存（其 `_dbForAns` 已由上面 `setAnsDb(db)` 注入），
+  //   不在此另造一份取凭据的闭包——否则"取身份三元组"又多一个落点（承 M2-E 的自助注册先于取身份）。
+  const getAnsClientForSide = async (): Promise<IntentModelClient> =>
+    (await getAnsClient()) as unknown as IntentModelClient;
   // zx_20261004 M9/M10: 设备面板 IPC（devices:list / discover / stop / authorize / control）。
   //   ⚠ 只注册**出口**，不起发现——起发现是用户显式动作（面板按钮），见 devices.ipc.ts 头注释。
-  initDevicesIpc(db);
+  initDevicesIpc(db, getAnsClientForSide);
   // zx_20261014_4 批三（管子·度量衡 / 道德经·善闭无关楗而不可开 / 罗尔斯·无知之幕）: 「门」的
   //   **起停控制面**——启动那一跳（`teamGate.unlocked` 之后）与用户开关那一跳（`external:setInbound`）
   //   **共用这一条路**（`applyInboundDoor`），不各写一份起停次序。
   //   ⚠ "真起、真停"= 既写库（`node.external_inbound`）又真开/关 socket——只写库=重启才生效（名实不符）。
   //   ⚠ 能力面的**设备传动**在此装配（`createExternalCapabilityPort` 的 `controlDevice`）——"按名解析成
   //     哪台设备"由装配层决定（复用 `resolveDeviceByName`），`core/external-calls.ts` 不掺和台账语义。
+  // zx_20261029_2 M4：局域网 AI 终端的**常驻发现**——与入站门**同一起停**（开则起、关则停），
+  //   不再等用户打开「协同面板」。控制器在 `initExternalIpc` 里铸出（它才知道库与门态注入面），
+  //   此处先声明，起停发生在下面的 `applyInboundDoor`（启动那一跳与用户开关那一跳共用）。
+  let terminalBrowseLifecycle: TerminalBrowseLifecycle | null = null;
   const applyInboundDoor = async (enabled: boolean): Promise<{ started: boolean; reason: string; port: number }> => {
-    if (!enabled) { stopInboundGate(); return { started: false, reason: 'disabled', port: 0 }; }
+    if (!enabled) {
+      stopInboundGate();
+      terminalBrowseLifecycle?.stop();
+      return { started: false, reason: 'disabled', port: 0 };
+    }
     const identity = ensureNodeIdentity(db!);
     const capability = createExternalCapabilityPort(db!, {
       listDevices: () => listDevices(db!),
       // zx_20261018_1 批三: `/capabilities.rooms` 的唯一真源——台账里非空房间的去重集合（不另数一遍）。
       listRooms: () => listRooms(db!),
       // zx_20261018_1 批五: 意图 → 计划（**零设备动作**，只读台账；规则表在 `core/home-intent.ts`）。
-      resolveIntentSteps: createHomeIntentResolver(() => listDevices(db!)),
+      // zx_20261029_2 M2：与面板/工具同一条解析链——规则 → 失败且开关开 ⇒ 模型 → 再校验。
+      resolveIntentSteps: async (input) => {
+        const modelFallback = readBoolSetting(db!, 'device.intent_model_fallback');
+        return resolveComfortIntent(input, {
+          listDevices: () => listDevices(db!),
+          ...(modelFallback
+            ? { modelPlan: (m) => runComfortModelPlan(m, { getAnsClient: getAnsClientForSide }) }
+            : {}),
+        });
+      },
+      // zx_20261027_3 M5b：外部终端的「任务请求」——**复用中转执行器**（建任务 → 入队 → 等终态 → 回摘要），
+      //   落在同名中转项目里（与 ANS 派来的活同一处，不借用户项目）；`requester_node_id: null` ⇒
+      //   走 `no_interaction`（外部终端无处作答）。动态 import：门未开时零加载成本。
+      runTask: async (input) => {
+        const { makeRelayRunner } = await import('./core/node-request-runner.js');
+        const { categoryToolFace } = await import('./core/node-request-worker.js');
+        const face = categoryToolFace('project_task');
+        const req = {
+          id: randomUUID(),
+          category: 'project_task',
+          payload: {
+            title: input.prompt.slice(0, 40),
+            description: input.prompt,
+            acceptance_criteria: input.acceptanceCriteria,
+          },
+          requester_node_id: null,
+          answer: null,
+        } as unknown as import('@worker-ant/shared-types').AnsNodeRequest;
+        const res = await makeRelayRunner({ db: db! })(req, face.tools, face.archetype ?? 'conversation');
+        const r = res.result;
+        const taskId = typeof r.taskId === 'string' ? r.taskId : '';
+        const taskStatus = typeof r.taskStatus === 'string' ? r.taskStatus : '';
+        const summary = typeof r.summary === 'string' ? r.summary : '';
+        if (res.status === 'done') return { ok: true, taskId, taskStatus, summary };
+        return { ok: false, taskId, taskStatus, summary, error: typeof r.error === 'string' ? r.error : 'task failed' };
+      },
       // zx_20261018_2 批六: 每次调用落账后**旁挂**一声（含被拒）——`external-calls` 保持零 eventBus 依赖。
       onCallRecorded: (entry) => emitExternalCallRecorded(entry),
       controlDevice: async (inner): Promise<DeviceControlOutcome> => {
@@ -371,7 +437,11 @@ app.whenReady().then(async () => {
       agentVersion: app.getVersion(),
       pairing,
       capability,
+      // zx_20261029_2 M3：门牌自报设备**类目**（只读品类，实例仍不出门）。
+      listDevices: () => listDevices(db as unknown as Parameters<typeof listDevices>[0]),
     });
+    // 门真在监听 ⇒ 常驻发现随之而起（门没起来则不空转；状态 IPC 会如实说"门未开"）。
+    if (res.started) terminalBrowseLifecycle?.start();
     return res;
   };
 
@@ -393,7 +463,7 @@ app.whenReady().then(async () => {
 
   // zx_20261014_4 批二/批三: 外部终端 IPC——配对人侧（listPending/list/approve/reject/revoke）+ 门态/开关/留痕。
   //   ⚠ 只注册出口，**不**把凭据回给渲染层——凭据只从门端点直发终端（见 external.ipc.ts 头注释）。
-  initExternalIpc(db, {
+  terminalBrowseLifecycle = initExternalIpc(db, {
     status: inboundStatus,
     setEnabled: async (on: boolean) => {
       // 真起/真停 + 写库（**同一事务语义**：先落库再起停 ⇒ 起不来时库值仍如实反映用户意图）。
@@ -405,7 +475,7 @@ app.whenReady().then(async () => {
         : `[工蚁] 入站门${on ? `未开（${res.reason}）` : '已关'}`);
       return inboundStatus();
     },
-  } satisfies InboundControl);
+  } satisfies InboundControl, { isDoorRunning: isInboundRunning });
 
   // A1 事件溯源：持久化事件到 wa_event_log + 状态投影
   eventBus.setEventStore(new EventStore(db));
@@ -646,6 +716,19 @@ app.whenReady().then(async () => {
     const { backfillHumanCompletedDocPromotion } = await import('./core/deliverable-lifecycle.js');
     backfillHumanCompletedDocPromotion(db);
   } catch { /* 回填失败不阻断启动 */ }
+
+  // zx_20261028_2 M1（为学日益，为道日损）: 存量终态任务里的**内联**世界快照一次性回收
+  //   （新快照已走侧表；旧的内联块只写不读——收口路不经过审计，after 恒缺）。
+  //   migration.ws_inline_pruned 守护，仅首启跑一次；只摘快照两键，finalize_checks 等原样保留；失败不阻断启动。
+  try {
+    const done = db.prepare("SELECT 1 FROM wa_settings WHERE key = 'migration.ws_inline_pruned'").get();
+    if (!done) {
+      const { pruneTerminalInlineSnapshots } = await import('./core/world-snapshot.js');
+      const r = pruneTerminalInlineSnapshots(db);
+      db.prepare("INSERT OR IGNORE INTO wa_settings (key, value) VALUES ('migration.ws_inline_pruned', 'done')").run();
+      console.log(`[维护] 终态任务内联世界快照已回收：${r.tasks} 个任务，${Math.round(r.bytes / 1024)} KB`);
+    }
+  } catch { /* 回收失败不阻断启动，下次启动重试 */ }
 
   // zx_20260910_3 M3(G3 名实相符): 布尔 setting 库值规范化——'0'→'false' / '1'→'true' 同义改写，
   // 使"关"在库里只有一种写法(与 boolSetting 口径一致)。迁移标记守护，仅首启一次；失败不阻断启动。

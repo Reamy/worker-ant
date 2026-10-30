@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
-import { ansProxy } from '../lib/ipc';
-import { Puzzle, RefreshCw, Trash2, Plus, Search, Download, Eye, Globe, X, Tag } from 'lucide-react';
+import { ansProxy, license } from '../lib/ipc';
+import type { ProFeatureGatePayload } from '../../../src/main/ipc/license.ipc.js';
+import { Puzzle, RefreshCw, Trash2, Plus, Search, Download, Eye, Globe, X, Tag, Lock } from 'lucide-react';
 
 interface Marketplace { id: string; name: string; source_type: string; source_url: string; status: string; last_refresh_at?: string; }
 interface Plugin { id: string; marketplace_id: string; name: string; version: string; display_name?: string; description?: string; description_zh?: string; author?: string; language?: string; category?: string; tags?: string; state?: string; installed_version?: string; installed_at?: string; stars?: number; install_count?: number; enabled?: number; }
@@ -24,8 +25,15 @@ export default function PluginsPage() {
   const [pluginsTotal, setPluginsTotal] = useState(0);
   const [pluginsHasMore, setPluginsHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
+  // zx_20261029_2 M6：安装是专业版能力（判据在 main `pro-gate.ts`）。这里只读裁定结果——
+  //   浏览/搜索/详情/卸载/启停**不挂闸**，故只有「安装」按钮受它影响。
+  const [installGate, setInstallGate] = useState<ProFeatureGatePayload | null>(null);
 
   useEffect(() => { load(); }, [stateFilter, activeCat, activeMarket]);
+  useEffect(() => {
+    license.proFeature('plugin_install').then(setInstallGate).catch(() => setInstallGate(null));
+  }, []);
+  const installLocked = installGate != null && !installGate.unlocked;
 
   /** 筛选条件 → 查询串（首屏与"加载更多"共用**同一处**，免得两处各拼一遍漂开）。 */
   function pluginsQuery() {
@@ -103,6 +111,12 @@ export default function PluginsPage() {
         </div>
       </div>
       {error && <p className="text-red-500 text-sm mb-4">错误: {error}</p>}
+      {installLocked && (
+        <div className="mb-4 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-800 flex items-start gap-2">
+          <Lock className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+          <span>{installGate!.detail}<span className="text-amber-600">（浏览、搜索、详情不限档位）</span></span>
+        </div>
+      )}
 
       {/* 状态切换 */}
       <div className="flex gap-2 mb-3">
@@ -206,7 +220,8 @@ export default function PluginsPage() {
                     ) : p.state === 'error' ? (
                       <button onClick={() => handleUninstall(p.id)} className="text-xs px-2 py-0.5 bg-red-100 text-red-700 rounded">重试</button>
                     ) : (
-                      <button onClick={() => handleInstall(p.id)} disabled={installing.has(p.id)}
+                      <button onClick={() => handleInstall(p.id)} disabled={installing.has(p.id) || installLocked}
+                        title={installLocked ? installGate!.detail : undefined}
                         className="flex items-center gap-1 text-xs px-2 py-0.5 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50">
                         <Download className="w-3 h-3" />{installing.has(p.id) ? '安装中...' : '安装'}
                       </button>
@@ -241,7 +256,7 @@ export default function PluginsPage() {
         onUninstall={() => { handleUninstall(detailPlugin.id); setDetailPlugin(null); }}
         onEnable={() => { handleEnable(detailPlugin.id); showDetail(detailPlugin.id); }}
         onDisable={() => { handleDisable(detailPlugin.id); showDetail(detailPlugin.id); }}
-        installing={installing} />}
+        installing={installing} installLocked={installLocked} installDetail={installGate?.detail ?? ''} />}
     </div>
   );
 }
@@ -292,8 +307,10 @@ function MarketplaceDialog({ onClose, onSuccess }: { onClose: () => void; onSucc
   );
 }
 
-function PluginDetailDialog({ plugin, onClose, onInstall, onUninstall, onEnable, onDisable, installing }: {
+function PluginDetailDialog({ plugin, onClose, onInstall, onUninstall, onEnable, onDisable, installing, installLocked, installDetail }: {
   plugin: Plugin; onClose: () => void; onInstall: () => void; onUninstall: () => void; onEnable: () => void; onDisable: () => void; installing: Set<string>;
+  /** zx_20261029_2 M6：安装属专业版；锁定时按钮禁用并如实给因（浏览/详情照常）。 */
+  installLocked: boolean; installDetail: string;
 }) {
   const isInstalled = plugin.state === 'installed';
   const isEnabled = plugin.enabled !== 0;
@@ -365,7 +382,7 @@ function PluginDetailDialog({ plugin, onClose, onInstall, onUninstall, onEnable,
               }
               <button onClick={onUninstall} className="px-3 py-1.5 border border-red-300 rounded-lg text-sm text-red-500 hover:bg-red-50"><Trash2 className="w-3 h-3 inline mr-1" />卸载</button>
             </>) : (
-              <button onClick={onInstall} disabled={installing.has(plugin.id)} className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50"><Download className="w-3 h-3 inline mr-1" />{installing.has(plugin.id) ? '安装中...' : '安装'}</button>
+              <button onClick={onInstall} disabled={installing.has(plugin.id) || installLocked} title={installLocked ? installDetail : undefined} className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50"><Download className="w-3 h-3 inline mr-1" />{installing.has(plugin.id) ? '安装中...' : '安装'}</button>
             )}
           </div>
         </div>

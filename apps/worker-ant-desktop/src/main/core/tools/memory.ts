@@ -5,10 +5,11 @@
  * 依赖面（3 项）由 `ToolDeps` 声明式给出，不再依赖隐式闭包。
  */
 import type { ToolDeps } from './deps.js';
+import path from 'node:path';
 import { jsonSchema } from 'ai';
 
 export function memoryTools(deps: ToolDeps) {
-  const { ctx, taskId, projectId } = deps;
+  const { ctx, taskId, projectId, workingDir, readFiles } = deps;
   return {
     search_project_memory: {
       description: '搜索项目的记忆和知识库（混合BM25词法+向量语义检索），支持自然语言查询。',
@@ -64,16 +65,30 @@ export function memoryTools(deps: ToolDeps) {
       },
     },
     note_working_context: {
-      description: '记录当前任务的工作记忆：既可用于临时情境（如"正在编辑的文件X""待办子步骤Y"），也可记录值得复用的关键约束、有效做法或踩坑经验（如"某配置需重启才生效"）；后者在任务完成后会被自动沉淀为长期记忆，供后续相似任务召回。',
+      description: '记录当前任务的工作记忆：既可用于临时情境（如"正在编辑的文件X""待办子步骤Y"），也可记录值得复用的关键约束、有效做法或踩坑经验（如"某配置需重启才生效"）；后者在任务完成后会被自动沉淀为长期记忆，供后续相似任务召回。若结论依据某份文件，请用 source_file 给出出处——本任务确实读过该文件时，沉淀为"已核验"，否则如实记为"推断"。',
       parameters: jsonSchema({
         type: 'object' as const,
-        properties: { content: { type: 'string', description: '情境或经验内容：临时情境记轻量上下文，关键约束/有效做法记可复用的具体结论' } },
+        properties: {
+          content: { type: 'string', description: '情境或经验内容：临时情境记轻量上下文，关键约束/有效做法记可复用的具体结论' },
+          source_file: { type: 'string', description: '可选：支撑该结论的文件路径（相对工作目录或绝对路径）。仅当本任务确实 read_file 过该文件时才记为"已核验"' },
+        },
         required: ['content'],
       }),
-      execute: async (args: { content: string }) => {
+      execute: async (args: { content: string; source_file?: string }) => {
         if (!ctx.memory) return JSON.stringify({ error: '记忆管理器不可用' });
-        ctx.memory.addWorkingMemory(taskId, args.content);
-        return JSON.stringify({ status: 'noted', workingMemoryCount: ctx.memory.getWorkingMemory(taskId).length });
+        // zx_20261027_1 M5: 出处**由引擎核验**，不接受自我声明——`readFiles` 是本任务真读过的文件集。
+        const rawFile = (args.source_file || '').trim();
+        const absFile = rawFile ? path.resolve(workingDir, rawFile) : undefined;
+        const verified = !!absFile && readFiles?.has(absFile);
+        ctx.memory.addWorkingMemory(taskId, args.content, absFile ? { file_path: absFile, verified } : undefined);
+        const item = ctx.memory.getWorkingMemory(taskId).find((w) => w.content === args.content.slice(0, 500));
+        return JSON.stringify({
+          status: 'noted',
+          workingMemoryCount: ctx.memory.getWorkingMemory(taskId).length,
+          ...(absFile ? { source_file: absFile, verified } : {}),
+          ...(absFile && !verified ? { note: '该文件不在本任务已读清单内——按"推断"沉淀；如需"已核验"，请先 read_file 该文件' } : {}),
+          ...(item ? { evidence: item.verified ? 'verified' : 'inferred' } : {}),
+        });
       },
     },
     register_unknown: {

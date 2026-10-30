@@ -214,12 +214,30 @@ export const NODE_CARD_CATEGORY_LABEL: Record<NodeCardCategory, string> = {
  * 用 `type` 别名而非 `interface`：结构类型下可直接赋给 `Record<string, unknown>`（心跳 `card` 字段的形状），
  * 不必额外加索引签名（interface 无隐式索引签名，赋给 `Record` 会报错）。
  */
+/** 节点卡上的设备类目（zx_20261029_2 M3）——**类目+数量**，无实例/无房间/无地址。 */
+export type NodeCardDeviceCategory = {
+  /** 归一类目键（真源桌面侧 `device-kind.DEVICE_KIND_CLASSES`；此处只留字符串，shared-types 不反向依赖桌面模块）。 */
+  class: string;
+  label: string;
+  count: number;
+};
+
+/** 节点卡上的意图词（id/label；参数属协议细节，不上能力卡）。 */
+export type NodeCardIntent = { id: string; label: string };
+
 export type NodeCard = {
   name: string;
   node_id: string;
   platform: string;
   /** **仅列本机实际可做者**（由工具面/台账派生，不手抄——空台账的机器不自称能控设备）。 */
   categories: NodeCardCategory[];
+  /**
+   * zx_20261029_2 M3：屋里有哪几类设备（`unknown` 不列）。
+   * **可选**：旧版心跳没有这两项，读端须按"未上报"处理（不是"没有设备"）。
+   */
+  device_categories?: NodeCardDeviceCategory[];
+  /** zx_20261029_2 M3：本机可接的意图词（id/label）。同上，旧卡可能没有。 */
+  intents?: NodeCardIntent[];
 };
 
 // ==================== M12 中转队列（AI 终端 → ANS → 工蚁 → 回传） ====================
@@ -233,10 +251,12 @@ export type NodeCard = {
  * ⚠ `awaiting_answer` 是 `assigned` 与终态之间的**一个可答中间态**，不是终态：作答后回 `assigned`
  *   （工蚁可继续跑）、或等不到答案时由工蚁按 M11 自决后照常走到 `done`/`error`。
  *   ⚠ 读点须知（承 auto-memory `feedback_enum_value_sweep_readers`）：凡"是否终态"的判据须**显式列**
- *     `done`/`error`（如 `node-dispatcher.ts`），**不可**写成 `!== 'pending'` 之类——否则会把
+ *     `done`/`error`/`cancelled`（如 `node-dispatcher.ts`），**不可**写成 `!== 'pending'` 之类——否则会把
  *     `awaiting_answer` 误当终态收口。
+ * zx_20261030_1 M3「止」：终态新增 `cancelled`（派活方叫停；**不是失败**——取消不计入可靠性分母的失败侧，
+ *   也不按"教训"看待）。停是**真停**：执行方在检查点读到 `cancel_requested` 后中止在途执行体并回传该态。
  */
-export const NODE_REQUEST_STATUSES = ['pending', 'assigned', 'awaiting_answer', 'done', 'error'] as const;
+export const NODE_REQUEST_STATUSES = ['pending', 'assigned', 'awaiting_answer', 'done', 'error', 'cancelled'] as const;
 export type NodeRequestStatus = (typeof NODE_REQUEST_STATUSES)[number];
 
 export function isNodeRequestStatus(value: unknown): value is NodeRequestStatus {
@@ -267,6 +287,33 @@ export interface NodeAnswer {
   answer: string;
 }
 
+/**
+ * zx_20261030_1 M2「见」：中转单的**进度快照**（`ans_node_requests.progress_json`；`null` = 对端未上报）。
+ *
+ * 为什么是"第几步"而不是百分比：执行体只有**已完成步数**这一样真数，`total` 还是历史估时
+ *   （`task.estimated.steps`，常为空）。由两个真数算出一个百分比是**推算冒充事实**；
+ *   总量未知时界面只能如实说"已进行 X 分钟"（由派出时刻算，不编分母）。
+ * `at` 为 ANS 落库时刻（库内 UTC 串，与其它时刻列同基准）。
+ */
+export interface NodeRequestProgress {
+  /** 已完成步数（≥ 0；0 = 已接手、尚未走完第一步）。 */
+  step: number;
+  /** 估计总步数（历史估时；未知为 `null`——**不得**拿 `step` 充当分母）。 */
+  total: number | null;
+  /** 最近一步做了什么（执行体自报的工具摘要；可为空串 = 没说，不编）。 */
+  note: string;
+  /** 上报落库时刻（'YYYY-MM-DD HH:MM:SS' UTC）。 */
+  at: string;
+}
+
+/** 进度上报体（`POST /api/v1/nodes/requests/:id/progress`）——`node_id` 由本机身份派生。 */
+export interface NodeRequestProgressReport {
+  node_id: string;
+  step: number;
+  total?: number | null;
+  note?: string;
+}
+
 /** 中转请求行（`ans_node_requests` 的投影；JSON 列已解出）。 */
 export interface AnsNodeRequest {
   id: string;
@@ -293,6 +340,22 @@ export interface AnsNodeRequest {
   answer: NodeAnswer | null;
   /** 问题状态机（`asked`/`answered`）；从未提问为 `null`。 */
   question_status: NodeQuestionStatus | null;
+  /**
+   * zx_20261027_3 M1：**择机快照**——为什么派给它（层组 / 净收益 / 余力 / 槽位 / 人话理由）。
+   *   自动择机与手动指定都留快照（手动理由以「手动指定：」开头）；旧行/未派单为 `null`。
+   */
+  selection: Record<string, unknown> | null;
+  /**
+   * zx_20261030_1 M2：执行方（B 端）**最近一次进度上报**；从未上报 / 对端版本不上报 ⇒ `null`。
+   *   界面据"有无 `total`"分两种说法（第 N/M 步 / 已进行 X 分钟），**不得**把 `null` 画成 0%。
+   */
+  progress: NodeRequestProgress | null;
+  /**
+   * zx_20261030_1 M3「止」：派活方**已请求停止**（`ans_node_requests.cancel_requested`）。
+   *   只对尚未终态的件有意义：执行方在检查点读到它即真停并回传 `cancelled`；
+   *   旧版本执行方不读该位 ⇒ 仍会跑完——界面据 `status` 的最终值如实说话，不假设"点了就停"。
+   */
+  cancel_requested: boolean;
   created_at: string;
   claimed_at: string | null;
   done_at: string | null;
@@ -318,6 +381,7 @@ export interface NodeRequestSubmit {
 /** 工蚁回传体（`POST /api/v1/nodes/requests/:id/result`）。 */
 export interface NodeRequestResultReport {
   node_id: string;
-  status: 'done' | 'error';
+  /** zx_20261030_1 M3：`cancelled` = 派活方叫停后执行方的如实回传（既非完成也非失败）。 */
+  status: 'done' | 'error' | 'cancelled';
   result?: Record<string, unknown>;
 }

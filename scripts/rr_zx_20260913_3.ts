@@ -104,10 +104,18 @@ console.log('\n[S0 M3-2 依赖判据·一处真源（跨 root 同引）]');
   const hand = ['TaskDetailPage.tsx', 'TasksPage.tsx'].filter((f) =>
     /被前置依赖阻塞|前置依赖未完成/.test(stripComments(RD(`${A}/renderer/src/pages/${f}`))));
   eq(hand, [], '反证：渲染层已无「一概喊被阻塞」的旧文案（M3-5 的病除）');
-  // 编译产物确含该跨 root 模块（renderer dist 里有 dep-graph chunk 才算真接上，不只是 import 语句在）
+  // 编译产物确含该跨 root 模块的**实现本体**，且全 dist 恰一份（同一份实现跨页共享）。
+  // ★zx_20261029_3 M4 改锚：旧判据认文件名 `dep-graph-*.js`——chunk 名是打包器给共享模块起的名字，
+  //   随 import 图变化（本轮新增 `lib/task-source.ts` 同被两页消费后，共享 chunk 改名为 `task-source-*`）。
+  //   文件名是排布细节，实现本体是模块指纹：改锚在由真源**派生**的文案指纹上，并加钉"恰一份"。
   const distDir = path.join(__dirname, '..', `${A}/renderer/dist/assets`);
-  const hasChunk = fs.existsSync(distDir) && fs.readdirSync(distDir).some((f) => /^dep-graph-.*\.js$/.test(f));
-  ok(hasChunk, 'renderer 构建产物含 dep-graph chunk ⇒ 跨 root 引入确实成立（非仅语句在）');
+  const depProbeId = '__dep_probe_missing__';
+  const depMark = depBlockInfo([depProbeId], () => undefined, () => '').text.split(depProbeId).pop() ?? '';
+  const jsAssets = fs.existsSync(distDir) ? fs.readdirSync(distDir).filter((f) => f.endsWith('.js')) : [];
+  const depHolders = jsAssets.filter((f) => fs.readFileSync(path.join(distDir, f), 'utf-8').includes(depMark));
+  ok(depMark.length > 8 && depHolders.length === 1,
+    'renderer 构建产物含 dep-graph 实现本体且全 dist 恰一份 ⇒ 跨 root 引入确实成立（非仅语句在）',
+    `${depHolders.join(',') || '(未找到)'}；指纹 ${JSON.stringify(depMark)}`);
 }
 
 // ══════════════════════════════════════════════════════════════════

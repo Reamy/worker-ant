@@ -1,6 +1,7 @@
 /**
  * B2: 世界模型快照与一致性校验（从原工蚁 world-snapshot.ts 移植）。
  */
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
@@ -214,11 +215,125 @@ export async function captureWorldSnapshot(db: Database.Database, projectId: str
   } catch { return null; }
 }
 
-/** B2: 对比执行前后快照，检测意外副作用和不一致。`opts` 仅供大批变更落盘（缺省=纯函数零 IO） */
+/**
+ * zx_20261028_2 M1（为学日益，为道日损）：`context_json` 里只留**引用 + 摘要**，快照原文进侧表。
+ *
+ * 病根（真标本 `f021a2a4`）：ctx 217,629 B 中 198,036 B 是一份**从未被比对**的 before——
+ * 收口路不经过 `auditWorldConsistency`，after 恒缺；全库同类载荷 28.3 MB / 31.3 MB。
+ * 快照的用途是"事后比对一次"，不是"永久收藏"，故原文按引用取，ctx 只留四个摘要字段。
+ */
+export interface WorldSnapshotRef {
+  ref: string;
+  timestamp: string;
+  fileCount: number;
+  truncated: boolean;
+}
+
+/** 同一任务在侧表的保留条数（两轮成对 + 余量）；超出即删最旧，防无限长。 */
+const SNAPSHOT_KEEP_PER_TASK = 4;
+
+/**
+ * 落一条快照并返回引用。侧表不可用（如夹具自建 DDL 未建该表）⇒ 返回 `null`，
+ * **调用方退回内联**（与改造前逐字节同形）——降级可见（logger.warn），不静默丢快照。
+ */
+export function persistWorldSnapshot(
+  db: Database.Database,
+  taskId: string,
+  kind: 'before' | 'after',
+  snap: Record<string, unknown>,
+): WorldSnapshotRef | null {
+  const fileCount = Number(snap.fileCount) || 0;
+  const truncated = snap.truncated === true;
+  const timestamp = String(snap.timestamp || new Date().toISOString());
+  try {
+    const ref = crypto.randomUUID();
+    db.prepare(`INSERT INTO wa_world_snapshots (id, task_id, kind, captured_at, file_count, truncated, payload_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
+      ref, taskId, kind, timestamp, fileCount, truncated ? 1 : 0,
+      JSON.stringify({
+        fileHashes: Array.isArray(snap.fileHashes) ? snap.fileHashes : [],
+        taskStates: Array.isArray(snap.taskStates) ? snap.taskStates : [],
+        deliverableStates: Array.isArray(snap.deliverableStates) ? snap.deliverableStates : [],
+      }),
+    );
+    db.prepare(`DELETE FROM wa_world_snapshots WHERE task_id = ? AND id NOT IN (
+      SELECT id FROM wa_world_snapshots WHERE task_id = ? ORDER BY captured_at DESC, rowid DESC LIMIT ${SNAPSHOT_KEEP_PER_TASK}
+    )`).run(taskId, taskId);
+    return { ref, timestamp, fileCount, truncated };
+  } catch (err) {
+    logger.warn({ taskId, reason: (err as Error).message?.slice(0, 80) }, '世界快照落侧表失败——退回内联（行为同改造前）');
+    return null;
+  }
+}
+
+/** 按引用取回整份快照（含 fileHashes/taskStates/deliverableStates）。 */
+export function loadWorldSnapshot(db: Database.Database, ref: string): Record<string, unknown> | null {
+  try {
+    const row = db.prepare('SELECT captured_at, file_count, truncated, payload_json FROM wa_world_snapshots WHERE id = ?')
+      .get(ref) as { captured_at: string; file_count: number; truncated: number; payload_json: string } | undefined;
+    if (!row) return null;
+    return {
+      timestamp: row.captured_at,
+      fileCount: row.file_count,
+      truncated: row.truncated === 1,
+      ...(JSON.parse(row.payload_json || '{}') as Record<string, unknown>),
+    };
+  } catch { return null; }
+}
+
+/** ctx 里存的那一格 → 整份快照：新形（ref）按引用取，旧形（内联对象，含 rr 标本）原样用。 */
+function resolveStoredSnapshot(db: Database.Database, stored: unknown): Record<string, unknown> | null {
+  if (!stored || typeof stored !== 'object') return null;
+  const o = stored as Record<string, unknown>;
+  if (Array.isArray(o.fileHashes)) return o;
+  if (typeof o.ref === 'string' && o.ref) return loadWorldSnapshot(db, o.ref);
+  return null;
+}
+
+/**
+ * zx_20261028_2 M1：一次性清掉**终态任务**里的内联快照（新快照已走侧表，旧的仅此处回收）。
+ * 只动 `status IN ('completed','failed','archived')` 的行，且只摘 `world_snapshot_before/after` 两键
+ * （`finalize_checks`、对话、成果等其它键原样保留）；运行中/暂停中的任务不动（审计还要用）。
+ */
+export function pruneTerminalInlineSnapshots(db: Database.Database): { tasks: number; bytes: number } {
+  let tasks = 0;
+  let bytes = 0;
+  const rows = db.prepare(`SELECT id, context_json FROM wa_tasks
+    WHERE status IN ('completed','failed','archived')
+      AND (context_json LIKE '%"world_snapshot_before":{%' OR context_json LIKE '%"world_snapshot_after":{%')`)
+    .all() as Array<{ id: string; context_json: string }>;
+  const upd = db.prepare('UPDATE wa_tasks SET context_json = ? WHERE id = ?');
+  for (const r of rows) {
+    let ctx: Record<string, unknown>;
+    try { ctx = JSON.parse(r.context_json || '{}') as Record<string, unknown>; } catch { continue; }
+    let changed = false;
+    for (const key of ['world_snapshot_before', 'world_snapshot_after'] as const) {
+      const v = ctx[key];
+      // 只摘**内联**原文（带 fileHashes）；已经是 ref 摘要的留着（它只有几十字节，且是审计的成对凭证）
+      if (v && typeof v === 'object' && Array.isArray((v as { fileHashes?: unknown }).fileHashes)) {
+        delete ctx[key];
+        changed = true;
+      }
+    }
+    if (!changed) continue;
+    const next = JSON.stringify(ctx);
+    try {
+      upd.run(next, r.id);
+      tasks++;
+      bytes += Math.max(0, r.context_json.length - next.length);
+    } catch { /* 单行失败不阻断其余行 */ }
+  }
+  if (tasks > 0) logger.info({ tasks, freedKB: Math.round(bytes / 1024) }, '已清理终态任务的内联世界快照');
+  return { tasks, bytes };
+}
+
+/** B2: 对比执行前后快照，检测意外副作用和不一致。
+ *  `opts` 仅供大批变更落盘（缺省=纯函数零 IO）；`scopeTaskIds` 给了就只比这部分任务的流转
+ *  （供审计「只对自己的变化负责」用），且本次审计主体（`opts.taskId`）自身的流转不算告警。 */
 export function compareSnapshots(
   before: Record<string, unknown>,
   after: Record<string, unknown>,
-  opts?: { taskId?: string; dataDir?: string },
+  opts?: { taskId?: string; dataDir?: string; scopeTaskIds?: string[] },
 ): string[] {
   const issues: string[] = [];
   const beforeFiles = new Set(before.fileHashes as string[]);
@@ -265,7 +380,11 @@ export function compareSnapshots(
   const beforeTasks = new Map((before.taskStates as string[]).map(s => s.split(':') as [string, string]));
   const afterTasks = new Map((after.taskStates as string[]).map(s => s.split(':') as [string, string]));
   const taskChanges: string[] = [];
+  // zx_20261030_2 M6: 给了 scope 就只看 scope 内的任务；审计主体自己的流转只用于排除，不报。
+  const scope = opts?.scopeTaskIds ? new Set(opts.scopeTaskIds) : null;
   for (const [tid, afterStatus] of afterTasks) {
+    if (scope && !scope.has(tid)) continue;
+    if (scope && opts?.taskId && tid === opts.taskId) continue;
     const beforeStatus = beforeTasks.get(tid);
     if (beforeStatus && beforeStatus !== afterStatus) taskChanges.push(`${tid.slice(0, 8)}:${beforeStatus}→${afterStatus}`);
   }
@@ -286,11 +405,28 @@ export async function auditWorldConsistency(
     const task = db.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get(taskId) as { context_json: string } | undefined;
     let ctx: Record<string, unknown> = {};
     try { ctx = JSON.parse(task?.context_json || '{}'); } catch { /* ignore */ }
-    const before = ctx.world_snapshot_before as Record<string, unknown> | undefined;
-    if (!before) return;
+    if (!ctx.world_snapshot_before) return;
+    // zx_20261028_2 M1: 新形是 `{ref,…}` 摘要（原文在 `wa_world_snapshots`）；旧形内联对象原样用。
+    //   引用取不到（行被清/库被换）⇒ 如实说"没做判定"，不拿空快照去比（否则全库文件都成"新增"）。
+    const before = resolveStoredSnapshot(db, ctx.world_snapshot_before);
+    if (!before) {
+      const checks = Array.isArray(ctx.finalize_checks) ? (ctx.finalize_checks as string[]) : [];
+      checks.push('[INFO] 世界模型审计：执行前快照不可读，未做增删判定');
+      ctx.finalize_checks = checks;
+      db.prepare('UPDATE wa_tasks SET context_json = ? WHERE id = ?').run(JSON.stringify(ctx), taskId);
+      return;
+    }
     const after = await captureWorldSnapshot(db, projectId);
     if (!after) return;
-    const issues = compareSnapshots(before, after, { taskId, dataDir: opts?.dataDir });
+    // zx_20261030_2 M6: 只对本任务自己造成的世界变化负责——范围 = 本任务 + 直接子任务；
+    //   本任务自身的 executing→paused 属正常流转，由 compareSnapshots 按 opts.taskId 排除。
+    let childIds: string[] = [];
+    try {
+      childIds = (db.prepare('SELECT id FROM wa_tasks WHERE parent_task_id = ?').all(taskId) as Array<{ id: string }>).map((r) => r.id);
+    } catch { /* 子任务读不到时范围收窄为本任务（自身流转仍被排除） */ }
+    const issues = compareSnapshots(before, after, {
+      taskId, dataDir: opts?.dataDir, scopeTaskIds: [taskId, ...childIds],
+    });
     // zx_20260922_1 M5（F7）：**分级**——「截断 ⇒ 没做判断」是如实说明（info），
     //   「比出 N 项不一致」才是告警（warn）。此前二者共用一条通道 ⇒ 大工作树上恒真的 [WARN]（狼来了）。
     //   分级只按 `TRUNCATION_ISSUE_PREFIX` 一处判（与 `compareSnapshots` 的产出同源），不另抄一份字面量。
@@ -298,7 +434,8 @@ export async function auditWorldConsistency(
     const warns = issues.filter((s) => !s.startsWith(TRUNCATION_ISSUE_PREFIX));
     // M3②: 事后快照落库——"报了 N 个文件消失"这句话从此**事后可被独立复核**（此前全仓只存 before）。
     //   无论有无结论都落（干净的一次执行同样是证据）。写回走与 before 同一处 ctxJson 读写。
-    ctx.world_snapshot_after = after;
+    // zx_20261028_2 M1: 原文进侧表，ctx 只留 ref；侧表不可用 ⇒ 退回内联（行为同改造前）。
+    ctx.world_snapshot_after = persistWorldSnapshot(db, taskId, 'after', after) ?? after;
     if (warns.length > 0 || infos.length > 0) {
       // M3④: 结论进收口 checks（与其余 checks 同处可见，renderer 按前缀着色：[WARN] 黄、[INFO] 蓝）。
       //   **仍不阻断**——它不是闸，只求"用户看得见"。任务未 finalize 过则新建该键，否则该结论无处可见。

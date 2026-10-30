@@ -26,7 +26,7 @@ import {
   type LicenseTier,
   type TierLimits,
 } from './feature-limits.js';
-import { PRICING, EARLY_BIRD, PURCHASE_URL, capabilityLine, type EarlyBird } from './pricing.js';
+import { PRICING, EARLY_BIRD, PURCHASE_URL, capabilityLine, capacityLine, type EarlyBird } from './pricing.js';
 import { PRO_FEATURES, PRO_FEATURE_LABEL, proUnlocked } from './pro-gate.js';
 import { TEAM_FEATURES, TEAM_FEATURE_LABEL, teamUnlocked } from './team-gate.js';
 import { TRIAL_DAYS, type LicenseKind } from './license.js';
@@ -53,12 +53,20 @@ export interface TierCatalogRow {
   benefits: string[];
   /** 由 `TIER_LIMITS` 派生的上限行（不另抄字面量）。 */
   capability: string;
+  /** zx_20261030_1 M5「限」：由 `TIER_LIMITS` 派生的容量行（五项容量维度，`0 = 不限`）。 */
+  capacity: string;
   maxProjectConcurrency: number;
   maxProjects: number;
   /** 本机账号（席位）上限；只数本机 `wa_users`。 */
   maxMembers: number;
   /** 协同节点数上限（含本机）；`0 = 不限`。 */
   maxNodes: number;
+  /** 容量维度（`0 = 不限`）——与 `tier-capacity.ts` / `tier-usage.ts` 同一把尺。 */
+  maxDevices: number;
+  maxExternalTerminals: number;
+  maxA2AServers: number;
+  maxKnowledgeCardsPerProject: number;
+  maxTeamLibraryMemories: number;
   /** 逐项能力：`PRO_FEATURES` + `TEAM_FEATURES` 全量，**每档都全列**（一处对照，锁项不藏）。 */
   capabilities: TierCapability[];
 }
@@ -143,6 +151,10 @@ export const BENEFIT_COVERAGE: Record<LicenseTier, BenefitCoverageEntry[]> = {
   ],
   pro: [
     { benefit: '不限项目', target: { kind: 'quota', field: 'maxProjects', rule: 'unlimited' } },
+    // zx_20261029_2 M6「阶梯」：发现/只读台账有真闸（`device_discovery`）；控制不在这一句里。
+    { benefit: '设备发现（只读台账）', target: { kind: 'capability', keys: ['device_discovery'] } },
+    // zx_20261030_1 M5「限」：设备登记上限（`device-registry.ts` 只拦新登记）。
+    { benefit: `设备登记（最多 ${TIER_LIMITS.pro.maxDevices} 台）`, target: { kind: 'quota', field: 'maxDevices', rule: 'positive' } },
     // zx_20261022_3 批七：一句卖点兑现**两跳**（导出 + 导入），两键同列——任一跳缺闸即 rr 红。
     { benefit: '项目知识包（预览注入常开 + JSONL 导出/导入）', target: { kind: 'capability', keys: ['knowledge_export', 'knowledge_import'] } },
     { benefit: '图片内容理解（视觉子调用）', target: { kind: 'capability', keys: ['image_vision'] } },
@@ -152,17 +164,26 @@ export const BENEFIT_COVERAGE: Record<LicenseTier, BenefitCoverageEntry[]> = {
     // zx_20261023_5 批五：批二落地的 `knowledge_cards` 已在 `PRO_FEATURES` 并有真闸（生成/落候选卡两跳 + 注入按档判），
     //   本轮把它写进价目表——卖点与兑现逐字对齐，`T-3a/T-3b` 双向兜底。
     { benefit: '项目知识卡（开工前注入最用得上的几张蒸馏卡）', target: { kind: 'capability', keys: ['knowledge_cards'] } },
+    // zx_20261030_1 M5「限」：每项目知识卡张数上限（`knowledge-cards.ts` 蒸馏落卡）。
+    { benefit: `每项目知识卡（最多 ${TIER_LIMITS.pro.maxKnowledgeCardsPerProject} 张）`, target: { kind: 'quota', field: 'maxKnowledgeCardsPerProject', rule: 'positive' } },
+    // zx_20261029_2 M6：安装动作口有真闸；「浏览不限」是同一句里的边界说明，不另登记一条。
+    { benefit: '市场插件安装（浏览不限）', target: { kind: 'capability', keys: ['plugin_install'] } },
     { benefit: '优先支持', target: { kind: 'service', reason: '支持优先级是交付承诺，不在代码中设闸' } },
   ],
   team: [
     { benefit: '多机协同（自动外派）', target: { kind: 'capability', keys: ['multi_node'] } },
-    { benefit: '设备发现与控制', target: { kind: 'capability', keys: ['device_discovery', 'device_control'] } },
+    // zx_20261029_2 M6：发现已归 Pro；本档只兑现「控制（含意图执行）」。
+    { benefit: '设备控制（含意图执行）', target: { kind: 'capability', keys: ['device_control'] } },
+    // zx_20261030_1 M5「限」：团队档登记上限更高（派生自 `TIER_LIMITS`）。
+    { benefit: `设备登记（最多 ${TIER_LIMITS.team.maxDevices} 台）`, target: { kind: 'quota', field: 'maxDevices', rule: 'positive' } },
     { benefit: 'AI 终端意图接入', target: { kind: 'capability', keys: ['external_terminal'] } },
     { benefit: '审计视图', target: { kind: 'capability', keys: ['audit_view'] } },
     { benefit: '审计导出（CSV）', target: { kind: 'capability', keys: ['audit_export'] } },
     { benefit: '团队共享库（模板 / 记忆 / 成果 / 领域包 / 项目画像）', target: { kind: 'capability', keys: ['team_library'] } },
     // zx_20261022_3 批八：画像**搬运**另立一项能力（本机生成/注入常开，不在此闸）。
     { benefit: '项目画像共享（跨节点带项目画像）', target: { kind: 'capability', keys: ['project_profile_share'] } },
+    // zx_20261030_1 M5「限」：容量维度有真闸（`tier-capacity.ts` + 五处动作点），卖点指回派生上限。
+    { benefit: `每项目知识卡（最多 ${TIER_LIMITS.team.maxKnowledgeCardsPerProject} 张）`, target: { kind: 'quota', field: 'maxKnowledgeCardsPerProject', rule: 'positive' } },
   ],
 };
 
@@ -212,10 +233,16 @@ export function tierCatalog(): TierCatalogPayload {
       tagline: p.tagline,
       benefits: [...p.benefits],
       capability: capabilityLine(tier),
+      capacity: capacityLine(tier),
       maxProjectConcurrency: l.maxProjectConcurrency,
       maxProjects: l.maxProjects,
       maxMembers: l.maxMembers,
       maxNodes: l.maxNodes,
+      maxDevices: l.maxDevices,
+      maxExternalTerminals: l.maxExternalTerminals,
+      maxA2AServers: l.maxA2AServers,
+      maxKnowledgeCardsPerProject: l.maxKnowledgeCardsPerProject,
+      maxTeamLibraryMemories: l.maxTeamLibraryMemories,
       capabilities: capabilitiesFor(tier),
     };
   });

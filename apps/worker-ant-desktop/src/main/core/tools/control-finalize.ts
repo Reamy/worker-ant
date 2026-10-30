@@ -26,12 +26,12 @@ import { boolSetting, readBoolSetting } from '../settings-bool.js';
 import { MEM_LIVE_SQL } from '../memory-lifecycle.js';
 import { buildCompletionAccount, goalAchievedOf } from '../task-outcome.js';
 import { readTaskAcceptanceCriteria, criteriaSourceOf, UNVERIFIED_REASON_LABEL, isAcceptanceVerified, acceptanceVerdictOf } from '../acceptance-check.js';
-import { MAX_VERIFICATION_ISSUES, createVerificationFixTask, extractVerificationIssues, isReportDocPath } from '../verification-issues.js';
+import { MAX_MANUAL_ITEMS, MAX_VERIFICATION_ISSUES, createVerificationFixTask, extractVerificationIssues, isReportDocPath } from '../verification-issues.js';
 import { eventBus } from '../event-bus.js';
 import { failedChildren, childNames } from '../children-gate.js';
 import { getTensions } from '../tension-engine.js';
 import { pauseTask } from '../pause-task.js';
-import { childCompletionCheckLabel, classifyChildCompletion, milestoneBoardOwner, milestoneSubjectVerdict, isPlanOrImplTask, declaredMilestones, unclaimedMilestones, childBreadthRefusal, writeMilestoneDone, backfillBoardRemainderToSelf } from '../task-accounting.js';
+import { childCompletionCheckLabel, classifyChildCompletion, milestoneBoardOwner, milestoneSubjectVerdict, isPlanOrImplTask, declaredMilestones, unclaimedMilestones, childBreadthRefusal, writeMilestoneDone, backfillBoardRemainderToSelf, milestoneTokenRegex, isVerificationTask } from '../task-accounting.js';
 import { runShellCommand } from '../shell-exec.js';
 // zx_20260922_1 M6（F8）: 「预算到没到顶」的唯一判据（零依赖纯函数，与禁用侧同源）——不在此另算一遍。
 import { budgetCapReached } from '../step-budget.js';
@@ -56,7 +56,7 @@ export function proposedMissWarning(
 }
 
 export async function runFinalizeTask(deps: ToolDeps, args: { summary: string; quality?: string; probe_disposition?: string; probe_keep_reason?: string; scheme_ref_mode?: string }): Promise<string> {
-  const { ctx, db, taskId, projectId, workingDir, checkAcceptanceCriteria, syncQualityColumn, archetypeForFile, formatInsufficiencyReasons, fileSig, addSideTokens, checkMCPRegistrationIntegrity, expectedOutputMiss, docValidationTargets, completionCapFloors } = deps;
+  const { ctx, db, taskId, projectId, workingDir, checkAcceptanceCriteria, syncQualityColumn, archetypeForFile, formatInsufficiencyReasons, fileSig, addSideTokens, checkMCPRegistrationIntegrity, expectedOutputMiss, docValidationTargets, completionCapFloors, truncatedReads } = deps;
   // 任务完成自检：子任务完成状态 + 产出物注册状态 + AI内容
   const checks: string[] = [];
 
@@ -68,7 +68,7 @@ export async function runFinalizeTask(deps: ToolDeps, args: { summary: string; q
   const failedKids = failedChildren(db, taskId);
   if (failedKids.length > 0) {
     return JSON.stringify({
-      error: `有${failedKids.length}个子任务失败未处置(${childNames(failedKids)}). 请先重试或人工处置这些子任务后再finalize。`,
+      error: `有${failedKids.length}个子任务失败未处置(${childNames(failedKids)}). 请先重试；确属失败的用 update_task_status 置为 archived（带 reason）＝放弃，父任务即可继续收口。`,
       failedChildren: failedKids.map(c => c.id),
     });
   }
@@ -80,6 +80,18 @@ export async function runFinalizeTask(deps: ToolDeps, args: { summary: string; q
   }
   // zx_20260911_3 M4(如實): 完成计数须分类——空壳(置完成但无产出证据)不得冒名"全部完成"（E7）
   checks.push(childCompletionCheckLabel(classifyChildCompletion(myChildren)));
+  // zx_20261028_2 M4：模板拆出的子任务**从未启动就被归档**（"没被采用"）与"做了没成"是两件事，
+  //   后者已由上面那条如实计数，前者此前一个字都不说。按"归档 ∧ 无任何对话行"判定（启动过必留对话）。
+  try {
+    const unusedTpl = db.prepare(`
+      SELECT c.title FROM wa_tasks c
+      WHERE c.parent_task_id = ? AND c.source = 'template' AND c.status = 'archived'
+        AND NOT EXISTS (SELECT 1 FROM wa_task_conversations v WHERE v.task_id = c.id)
+    `).all(taskId) as Array<{ title: string }>;
+    if (unusedTpl.length > 0) {
+      checks.push(`[INFO] 模板子任务未被采用 ${unusedTpl.length} 个（均未启动）：${unusedTpl.map((u) => u.title).join('、')}——已归档，不计入交付`);
+    }
+  } catch { /* 未采用盘点 best-effort */ }
   // zx_20260904_6 D2 (2026-09-04): 父编排收尾前"里程碑缺口核查"——编排父(有子任务)文本声明 M 里程碑但缺对应子任务 → 阻止 finalize
   // zx_20260923 M4-a（G5）: `myChildren.length > 0` 短路**去掉**——0 子任务时整段跳过，恰是需求
   //   "逐里程碑建子任务"最没被满足的一刻（真库标本 a290ae2b：0 子任务、板上 M0–M5 齐全、一路放行）。
@@ -216,7 +228,17 @@ export async function runFinalizeTask(deps: ToolDeps, args: { summary: string; q
       // zx_20261021_2 D4（批四）：抽取规则收进 `verification-issues.ts`——取**主语**而非判定列
       //   （旧实现取"第一个含 ❌/⚠️ 的单元格"，真库派生任务因此长出「1. 不通过」「8. ️」）。
       //   零依赖模块，rr 可喂真报告片段直接断言。
-      const { issues, overflow } = extractVerificationIssues(contents);
+      const { issues, manualItems, manualOverflow, overflow } = extractVerificationIssues(contents);
+      // zx_20261029_3 M1：待人事项（GUI/真机/外部实例/凭据/部署）**不立项**——派给智能体只能空转。
+      //   登记进 context_json 供界面/后续轮次查账；与下面"建修复任务"共用同一份 fixCtx，键不互相覆盖。
+      if (manualItems.length > 0) {
+        fixCtx.verification_manual_items = manualItems;
+        db.prepare('UPDATE wa_tasks SET context_json = ? WHERE id = ?').run(JSON.stringify(fixCtx), taskId);
+        checks.push(
+          `[INFO] 其中 ${manualItems.length} 条需人工执行（已登记，不自动立项）：${manualItems.map((s, i) => `${i + 1}. ${s}`).join(' ')}` +
+            (manualOverflow > 0 ? `；另 ${manualOverflow} 条未列出（展示上限 ${MAX_MANUAL_ITEMS} 条）` : ''),
+        );
+      }
       if (issues.length > 0) {
         // E4 (2026-09-03): 规划/排期类任务默认不自动下钻实现子任务——
         // 其 ⚠️/❌ 是「待后续实施/待闭环」的里程碑项，而非应立即修复的未落地问题；
@@ -279,7 +301,7 @@ export async function runFinalizeTask(deps: ToolDeps, args: { summary: string; q
         if (!d.file_path) continue;
         let c = '';
         try { c = await fsp.readFile(d.file_path, 'utf-8'); } catch { continue; }
-        const re = /\bM\d+\b/g; let mm;
+        const re = milestoneTokenRegex(); let mm;
         while ((mm = re.exec(c)) !== null) found.add(mm[0]);
       }
       // archetype 取**持久化**值（:3058 `taskCtx.archetype = archetype` 落 context_json）——
@@ -364,32 +386,37 @@ export async function runFinalizeTask(deps: ToolDeps, args: { summary: string; q
     const finalizeTargets = docValidationTargets(db, taskId, workingDir);
     if (finalizeTargets.length > 0) {
       try {
-        const { validateOutput, VALIDATION_CRITERIA_VERSION } = await import('../output-validator.js');
+        const { validateOutputs, VALIDATION_CRITERIA_VERSION, LLM_VALIDATION_TIMEOUT_MS } = await import('../output-validator.js');
         const ansClient = await ctx.getAnsClient();
-        // zx_20260922_1 M7（F9）：此处原先为取任务题面而多查一次 `wa_tasks`（`fRow`/`fText`），
-        // 把那句题面当第三参交给 `validateOutput`——判词于是记在**文件名**头上。
-        // 该参数已整体删除，这条查询随之无用，一并删（不留"读了不用"的死输入）。
+        // zx_20261028_2 M3：逐文件串行（单文件 30s abort ⇒ N 个文件最坏 N×30s，收口假死的病根）
+        //   改为有界并发一批问完。结论仍按输入序返回，账目顺序与拒收文案一字未改。
+        // zx_20260922_1 M7（F9）：`validateOutput` 的第三参（任务题面）早已删除——量文件，就问文件。
+        const targets = finalizeTargets.map((abs) => ({ file: abs, archetype: archetypeForFile(abs) }));
+        const results = await validateOutputs(ansClient as never, targets);
         const ov: Array<Record<string, unknown>> = [];
         const insufficient: string[] = [];
         const insuffReasons: Array<{ file: string; reasons: string[] }> = [];
-        for (const abs of finalizeTargets) {
-          // zx_20260911_1 M1: 判型归位——按**产物本身**决定用哪套规则（原为硬编码 'document'，把 .py 当文档量）
-          const arch = archetypeForFile(abs);
-          const v = await validateOutput(ansClient as never, abs, arch) as { status?: string; sufficient?: boolean; confidence?: number; usage?: number; quickCheck?: { issues?: string[] }; llmCheck?: { missingAspects?: string[]; suggestion?: string } };
-          // 省耗账实(1a): 内容校验为旁路子 LLM——usage 记入执行期账本，收口并账
-          addSideTokens(ctx, v.usage);
+        // zx_20261028_2 M3：`unknown`（辅助模型超时/不可用/内容不可解码）**不阻断但必须可见**——
+        //   此前只落库不发声，收口后无人知道"充分"那栏其实是没问出来。
+        const unverified: string[] = [];
+        for (const r of results) {
+          const abs = r.file;
+          // 省耗账实(1a): 内容校验为旁路子 LLM——usage 记入执行期账本，收口并账（逐条累加）
+          addSideTokens(ctx, r.usage);
           // zx_20260911_1 M2: issues(快检诊断) 与 missingAspects/suggestion(LLM诊断) 两条来源并存，如实各归其位
-          const issues = v.quickCheck?.issues ?? [];
-          const missingAspects = v.llmCheck?.missingAspects ?? [];
-          const suggestion = v.llmCheck?.suggestion ?? '';
+          const issues = r.quickCheck?.issues ?? [];
+          const missingAspects = r.llmCheck?.missingAspects ?? [];
+          const suggestion = r.llmCheck?.suggestion ?? '';
           const sig = fileSig(abs);
           // zx_20260906 批2: 记录 archetype/size/mtimeMs 供 run 收口处复用（同文件内容未变不再二次校验）
           // zx_20260923 M3（G8）：落**判据版本**——否则本 run 收口复用这条结论时无从判断
           //   "它是不是按当前判据问出来的"（写点与读点必须同源，故取同一个 `VALIDATION_CRITERIA_VERSION`）
-          ov.push({ file: abs, archetype: arch, status: v.status, sufficient: v.sufficient, confidence: v.confidence, issues, missingAspects, suggestion, size: sig?.size ?? null, mtimeMs: sig?.mtimeMs ?? null, criteriaVersion: VALIDATION_CRITERIA_VERSION });
-          if (v.status === 'insufficient') {
+          ov.push({ file: abs, archetype: r.archetype, status: r.status, sufficient: r.sufficient, confidence: r.confidence, issues, missingAspects, suggestion, reason: r.reason, size: sig?.size ?? null, mtimeMs: sig?.mtimeMs ?? null, criteriaVersion: VALIDATION_CRITERIA_VERSION });
+          if (r.status === 'insufficient') {
             insufficient.push(abs);
             insuffReasons.push({ file: abs, reasons: issues.length > 0 ? issues : (missingAspects.length > 0 ? missingAspects : [suggestion].filter(Boolean)) });
+          } else if (r.status === 'unknown') {
+            unverified.push(path.basename(abs));
           }
         }
         ctxJson.output_validations = ov;
@@ -397,6 +424,9 @@ export async function runFinalizeTask(deps: ToolDeps, args: { summary: string; q
         db.prepare('UPDATE wa_tasks SET context_json = ? WHERE id = ?').run(JSON.stringify(ctxJson), taskId);
         if (insufficient.length > 0) {
           return JSON.stringify({ error: `finalize 内容充分性门禁未通过：产出文件 ${insufficient.join('、')} 已生成但内容校验不充分。${formatInsufficiencyReasons(insuffReasons)}请按上述原因补全后再 finalize；若确需收口请在任务管理执行"标记完成"。`, insufficientOutputs: insufficient, insufficientReasons: insuffReasons });
+        }
+        if (unverified.length > 0) {
+          checks.push(`[INFO] 内容充分性未核 ${unverified.length} 个（辅助模型 ${Math.round(LLM_VALIDATION_TIMEOUT_MS / 1000)}s 内无结论/不可用）：${unverified.join('、')}——不阻断收口，可人工复核`);
         }
       } catch { /* 校验失败不阻断 finalize（回退到存在性门禁） */ }
     }
@@ -408,7 +438,7 @@ export async function runFinalizeTask(deps: ToolDeps, args: { summary: string; q
     try {
       const failedPend = failedChildren(db, taskId);
       if (failedPend.length > 0) {
-        return JSON.stringify({ error: `finalize 被拦：有 ${failedPend.length} 个子任务失败未处置（${childNames(failedPend)}）。须先重试至完成或人工处置；确需收口请在任务管理"标记完成"。` });
+        return JSON.stringify({ error: `finalize 被拦：有 ${failedPend.length} 个子任务失败未处置（${childNames(failedPend)}）。须先重试至完成；确属失败的用 update_task_status 置为 archived（带 reason）＝放弃，父任务即可继续收口；确需人工收口请在任务管理"标记完成"。` });
       }
       const pend = db.prepare("SELECT id, title FROM wa_tasks WHERE parent_task_id = ? AND status NOT IN ('completed','failed','archived')").all(taskId) as Array<{ id: string; title: string }>;
       if (pend.length > 0) {
@@ -623,6 +653,21 @@ export async function runFinalizeTask(deps: ToolDeps, args: { summary: string; q
   // zx_20260910_3 M1(名实相符·注释订正): 原注释写"finalize 验收全过 →"，但本块**从不读验收结果**——
   //   无验收标准的任务同样需要主要成果，加验收闸反而是错的。此处只订正注释，不改行为。
   autoAssignPrimary(db, taskId);
+  // zx_20261027_1 M4（道德经·知不知，上）: "只读到一部分"必须在收口账上说出来。
+  //   此前 `read_file` 把 `paginateReadFile` 的 `truncated` 丢弃，只记"读过"——核验类任务
+  //   读了前 50k 字没看到，与"整个文件里没有"在账上长得一模一样。此处只**如实报**，不阻断收口。
+  try {
+    const truncated = [...(truncatedReads ?? [])];
+    if (truncated.length > 0) {
+      const tro = db.prepare('SELECT title, description FROM wa_tasks WHERE id = ?').get(taskId) as { title?: string; description?: string } | undefined;
+      const shown = truncated.slice(0, 3).map((p) => p.split(/[\\/]/).pop() || p).join('、');
+      const more = truncated.length > 3 ? `等 ${truncated.length} 个` : '';
+      const tail = isVerificationTask(`${tro?.title || ''} ${tro?.description || ''}`)
+        ? '本任务为核验类——据此判定"未发现/无问题"前须读完或明确声明核验范围。'
+        : '若要据此下结论，请补读（read_file 续读 offset）。';
+      checks.push(`[WARN] 本次有 ${truncated.length} 个文件只读取了部分内容（${shown}${more}）——"没读到"不等于"不存在"。${tail}`);
+    }
+  } catch { /* 如实性提示 best-effort，不阻断收口 */ }
   ctxJson.finalize_checks = checks;
   // B1 回写 (2026-09-03_1): 实施任务带 scheme_ref → 完成时回写对应方案里程碑 done + 落地任务 id
   // zx_20260907: 补自动联动——scheme_ref 无生产者时回退按标题 M 前缀(父方案优先/同项目唯一)解析，新建"方案实施任务"finalize 即自动 done

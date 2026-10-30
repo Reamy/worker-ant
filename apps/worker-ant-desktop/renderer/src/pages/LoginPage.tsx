@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { auth } from '../lib/ipc';
+import brandLogo from '../assets/worker-ant-logo.png';
 
 const REMEMBER_KEY = 'wa_remembered_credentials';
 
@@ -87,7 +88,8 @@ export default function LoginPage() {
     <div className="min-h-screen flex items-center justify-center bg-gray-50">
       <div className="w-full max-w-md bg-white rounded-xl shadow-sm border p-8 space-y-6">
         <div className="text-center">
-          <h1 className="text-2xl font-bold">🐜 工蚁系统</h1>
+          <img src={brandLogo} alt="工蚁" className="mx-auto h-16 w-16 rounded-xl" />
+          <h1 className="mt-3 text-2xl font-bold">工蚁系统</h1>
           <p className="text-gray-500 mt-1">Worker Ant Desktop {mode === 'register' ? '· 注册' : '· 登录'}</p>
         </div>
 

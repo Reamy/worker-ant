@@ -15,7 +15,7 @@
  *   派发本身是**对等**的：本机也须已入网（有身份才有读回凭据），失败一律如实上屏。
  */
 import { useEffect, useState } from 'react';
-import { nodes as nodesApi, external as externalApi } from '../lib/ipc';
+import { nodes as nodesApi, external as externalApi, type NodesClusterPayload, type ClusterNode } from '../lib/ipc';
 import { useLiveQuery } from '../lib/useLiveQuery';
 // zx_20261018_2 批六「见新」：门态/留痕以事件驱动为主，轮询只作兜底——节拍一处真源。
 import { ACTIVE_POLL_MS, FALLBACK_POLL_MS } from '../lib/refresh';
@@ -148,7 +148,8 @@ function resultTaskStatus(result: Record<string, unknown> | null): string {
 
 function CallRecordRow({ rec }: { rec: NodeCallRecord }) {
   const tone = rec.status === 'done' ? 'bg-emerald-50 text-emerald-600'
-    : rec.status === 'error' ? 'bg-red-50 text-red-600' : 'bg-amber-50 text-amber-600';
+    : rec.status === 'error' ? 'bg-red-50 text-red-600'
+      : rec.status === 'cancelled' ? 'bg-slate-100 text-slate-600' : 'bg-amber-50 text-amber-600';
   const brief = resultBrief(rec.result);
   const asked = requestBrief(rec.requestPayload);
   const taskStatus = resultTaskStatus(rec.result);
@@ -225,13 +226,63 @@ function QuestionBlock({ rec, onDone }: { rec: NodeDispatchRecord; onDone: () =>
 }
 
 /** zx_20261011 M4: 一条**出站**记录行（与入站 `CallRecordRow` 对照：这里多一个「目标节点」）。 */
+/**
+ * zx_20261030_1 M2「见」：**这一单走到哪了**——只印三项真数，不编百分比。
+ *
+ *   · 有 `total`（历史估时）⇒「第 3/8 步」；
+ *   · 无 `total` ⇒「已进行 4 分钟」（由**派出时刻**算，不拿 `step` 当分母）；
+ *   · 无 `progress`（对端旧版本 / 尚未开始）⇒「对方未上报进度」——**不退化成 0%**。
+ * `note` 是"最近一步做了什么"（事件在步末发），文案写「最近一步」，不写「正在」。
+ */
+function DispatchProgressLine({ rec }: { rec: NodeDispatchRecord }) {
+  const p = rec.progress;
+  if (!p) {
+    return <p className="mt-1.5 text-[10px] text-gray-400">对方未上报进度（对端为旧版本，或尚未走到第一步）。</p>;
+  }
+  const started = Date.parse(rec.dispatchedAt);
+  const elapsedMs = Number.isFinite(started) ? Math.max(0, Date.now() - started) : null;
+  const head = p.total != null
+    ? `第 ${Math.min(p.step, p.total)}/${p.total} 步${p.step > p.total ? '（已超出估时）' : ''}`
+    : `已进行 ${formatDuration(elapsedMs)}`;
+  return (
+    <div className="mt-1.5 flex items-start gap-1.5 text-[11px] text-amber-700">
+      <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-500 mt-1.5 animate-pulse shrink-0" />
+      <span className="break-all">
+        {head}
+        {p.note ? <span className="text-gray-500"> · 最近一步：{p.note}</span> : null}
+        <span className="text-gray-400"> · 更新于 {formatDbTime(p.at) || p.at}</span>
+      </span>
+    </div>
+  );
+}
+
 function DispatchRow({ rec, nameOf, onDone }: { rec: NodeDispatchRecord; nameOf: (id: string) => string; onDone: () => void }) {
+  const [stopBusy, setStopBusy] = useState(false);
+  const [stopNote, setStopNote] = useState('');
   const tone = rec.status === 'done' ? 'bg-emerald-50 text-emerald-600'
-    : rec.status === 'error' ? 'bg-red-50 text-red-600' : 'bg-amber-50 text-amber-600';
+    : rec.status === 'error' ? 'bg-red-50 text-red-600'
+      : rec.status === 'cancelled' ? 'bg-slate-100 text-slate-600' : 'bg-amber-50 text-amber-600';
   const brief = resultBrief(rec.result);
   const asked = requestBrief(rec.requestPayload);
   const taskStatus = resultTaskStatus(rec.result);
   const target = rec.targetNodeId ? (nameOf(rec.targetNodeId) || rec.targetNodeId.slice(0, 8)) : '待分配';
+
+  // zx_20261030_1 M3「止」: 叫停。回来的 `status` 即真实处置——已停 ⇒ 台账刷新成「已停止」；
+  //   仍在跑 ⇒ 只说"已请求"，**不谎称已停**（旧版对端不读叫停位，会照常跑完并按真实结局回传）。
+  async function onStop() {
+    setStopBusy(true); setStopNote('');
+    try {
+      const r = await nodesApi.cancelDispatch(rec.requestId);
+      if (!r.ok) { setStopNote(r.note === 'not-enrolled' ? '本机尚未入网，无法叫停。' : `叫停失败：${r.note || '未知原因'}`); return; }
+      if (r.request?.status === 'cancelled') {
+        setStopNote('已停止。');
+        onDone();
+      } else {
+        setStopNote('已请求停止——对端将在下一步检查点真停并回传「已停止」。若对端版本较旧（不认叫停位），这单会照常跑完并按真实结局回传。');
+      }
+    } catch (e) { setStopNote((e as Error)?.message || String(e)); }
+    finally { setStopBusy(false); }
+  }
   return (
     <div className="rounded-lg border bg-white p-3">
       <div className="flex items-center gap-2 flex-wrap">
@@ -246,6 +297,18 @@ function DispatchRow({ rec, nameOf, onDone }: { rec: NodeDispatchRecord; nameOf:
         {rec.resultAt && <span>收口 {formatDbTime(rec.resultAt)}</span>}
         <span className="font-mono text-gray-300">{rec.requestId.slice(0, 8)}</span>
       </div>
+      {/* M2：未收口才谈得上"进行中"——收口后由结果行说话。 */}
+      {rec.status === 'pending' && <DispatchProgressLine rec={rec} />}
+      {/* M3：未收口才有"停"可言——终态件不再提供死动作。 */}
+      {rec.status === 'pending' && (
+        <div className="mt-1.5 flex items-start gap-2 flex-wrap">
+          <button onClick={() => void onStop()} disabled={stopBusy}
+            className="text-[10px] px-2 py-0.5 border border-red-300 text-red-600 rounded hover:bg-red-50 disabled:opacity-50 shrink-0">
+            {stopBusy ? '叫停中…' : '停止'}
+          </button>
+          {stopNote && <span className="text-[10px] text-gray-500 break-all">{stopNote}</span>}
+        </div>
+      )}
       {asked && (
         <div className="mt-1.5 text-xs text-gray-700 whitespace-pre-wrap break-words line-clamp-2">
           <span className="text-[10px] text-gray-400 mr-1">派单内容</span>{asked}
@@ -258,7 +321,10 @@ function DispatchRow({ rec, nameOf, onDone }: { rec: NodeDispatchRecord; nameOf:
           是一条**已被堵死**的路（作答只会被 400 拒绝），名实不符。 */}
       {rec.questionStatus === 'asked' && rec.status !== 'pending' && (
         <p className="mt-1.5 text-[10px] text-amber-700">
-          本单已收口（{DISPATCH_STATUS_LABEL[rec.status]}）——未获作答即收口：执行方已就这一问自行决断（该提问已过期，不能再作答）。
+          本单已收口（{DISPATCH_STATUS_LABEL[rec.status]}）——未获作答即收口
+          {rec.status === 'cancelled'
+            ? '：已叫停，这一问不再作答（该提问已过期）。'
+            : '：执行方已就这一问自行决断（该提问已过期，不能再作答）。'}
         </p>
       )}
       {rec.questionStatus === 'asked' && rec.status === 'pending' && <QuestionBlock rec={rec} onDone={onDone} />}
@@ -269,7 +335,7 @@ function DispatchRow({ rec, nameOf, onDone }: { rec: NodeDispatchRecord; nameOf:
       )}
       {brief && (
         <div className="mt-1 text-xs text-gray-600 whitespace-pre-wrap break-words line-clamp-3">
-          <span className="text-[10px] text-gray-400 mr-1">执行方回传{taskStatus ? `（任务 ${taskStatus}）` : ''}</span>{brief}
+          <span className="text-[10px] text-gray-400 mr-1">{rec.status === 'cancelled' ? '叫停记录' : '执行方回传'}{taskStatus ? `（任务 ${taskStatus}）` : ''}</span>{brief}
         </div>
       )}
     </div>
@@ -374,7 +440,9 @@ function DispatchLedger({ nameOf }: { nameOf: (id: string) => string }) {
     //   行**永远停在"待回"**（唯一出路是切页再回来重挂效应）。行离开 `pending` 本身即止
     //   （`pendingKey` 变 ⇒ 效应重跑；空 ⇒ 提前 return 并清旧 interval），不再靠一个猜出来的窗长。
     const t = window.setInterval(() => {
-      for (const id of ids) { void nodesApi.dispatchResult(id).catch(() => { /* 读回失败下次再试 */ }); }
+      // zx_20261030_1 M2：读回落地后**重取台账**——进度是本机内存投影（不落事件日志），
+      //   没有事件驱动刷新，只能由这条既有轮询把最新一份带上来（同一条节拍，不另开时钟）。
+      void Promise.allSettled(ids.map((id) => nodesApi.dispatchResult(id))).then(() => q.reload());
     }, 5000);
     return () => window.clearInterval(t);
   }, [pendingKey]);
@@ -632,8 +700,14 @@ function DoorCard() {
   const st = useLiveQuery(async () => externalApi.status(), [], { debounceMs: 500, liveTypes: ['external.status_changed'] });
   const list = useLiveQuery(async () => externalApi.list(), [], { debounceMs: 500, liveTypes: ['external.status_changed'] });
   const calls = useLiveQuery(async () => externalApi.listCalls(50), [], { debounceMs: 500, liveTypes: ['external.call_recorded'] });
-  // zx_20261023_5 批四：局域网里**看见的**终端（30 秒无广播即散）。`lanList` 首调即起浏览。
+  // zx_20261023_5 批四：局域网里**看见的**终端（30 秒无广播即散）。
+  // zx_20261029_2 M4：浏览**常驻**（随入站门起停），本页只读——不再由 `lanList` 首调兼任开关。
   const lan = useLiveQuery(async () => externalApi.lanList(), [], {
+    debounceMs: 500,
+    liveTypes: ['external.lan_changed', 'external.status_changed'],
+  });
+  // 常驻发现的实况（运行中 / 未运行的原因）——门一开就随门而起，不依赖本页是否打开。
+  const browse = useLiveQuery(async () => externalApi.lanStatus(), [], {
     debounceMs: 500,
     liveTypes: ['external.lan_changed', 'external.status_changed'],
   });
@@ -653,7 +727,7 @@ function DoorCard() {
   const approved = terminals.filter(t => t.status === 'approved');
   const lanItems = lan.data?.items ?? [];
 
-  const reloadAll = () => { void st.reload(); void list.reload(); void calls.reload(); void lan.reload(); };
+  const reloadAll = () => { void st.reload(); void list.reload(); void calls.reload(); void lan.reload(); void browse.reload(); };
   const capLabel = (id: string) => caps.find(c => c.id === id)?.label ?? id;
   const termName = (id: string) => terminals.find(t => t.id === id)?.name || id.slice(0, 8);
 
@@ -709,6 +783,10 @@ function DoorCard() {
       </div>
       {/* `enabled`（用户意图）与 `running`（真在监听）**分开如实说**——锁定时不被误说成"已开"。 */}
       <p className="mt-1 text-[11px] text-gray-600">{status ? status.detail : '读不到门的实况（IPC 未就绪）…'}</p>
+      {/* zx_20261029_2 M4：常驻发现的实况——未运行时把原因如实说出（门未开 / Team 未解锁 / 起不来）。 */}
+      <p className="mt-0.5 text-[10px] text-gray-400">
+        {browse.data ? `常驻发现：${browse.data.running ? '运行中' : '未运行'} — ${browse.data.detail}` : '常驻发现：读取中…'}
+      </p>
       <p className="mt-1 text-[10px] text-gray-400">
         开门后，局域网内的 AI 终端可发现本机并申请配对。批准后它们<b>只能</b>读设备清单（<b>脱敏</b>：只给名字/类型/可做的动作，
         不给网络地址与授权态）并按名字控设备——每一次调用（<b>含被拒</b>）都在下方留痕。
@@ -919,6 +997,88 @@ function DispatchBoardCard({ board }: { board: DispatchBoardPayload }) {
   );
 }
 
+/** 0–1 → 百分比；`null` 如实 `—`（不知道不伪造成 0%）。 */
+function pct(v: number | null): string {
+  return v == null ? '—' : `${Math.round(v * 100)}%`;
+}
+
+/** 耗时毫秒 → 人话；`null` 如实 `—`。 */
+function latencyText(ms: number | null): string {
+  if (ms == null) return '—';
+  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
+}
+
+function ClusterStat({ label, value, tone }: { label: string; value: number; tone?: string }) {
+  return (
+    <div className="rounded-md bg-gray-50 px-3 py-2">
+      <div className={`text-lg font-semibold leading-tight ${tone ?? 'text-gray-900'}`}>{value}</div>
+      <div className="text-[11px] text-gray-500">{label}</div>
+    </div>
+  );
+}
+
+/** 逐节点一行（集群卡展开后）——只放上屏用得到的数，不知道的一律 `—`。 */
+function ClusterNodeRow({ n }: { n: ClusterNode }) {
+  const caps = n.capabilities.map(c => NODE_CARD_CATEGORY_LABEL[c]).join(' / ') || '未上报能力';
+  return (
+    <div className={`text-xs px-2 py-1.5 rounded ${n.local ? 'bg-indigo-50/60' : 'bg-gray-50'}`}>
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className={`w-2 h-2 rounded-full shrink-0 ${n.online ? 'bg-emerald-500' : 'bg-gray-300'}`} />
+        <span className="font-medium text-gray-800 truncate max-w-[14rem]" title={n.name}>{n.name}</span>
+        {n.local && <span className="text-[10px] px-1 rounded bg-indigo-100 text-indigo-700">本机</span>}
+        <span className="text-gray-400">{NODE_ROLE_LABEL[n.role]}{n.tier ? ` · ${n.tier}` : ''}</span>
+        {!n.online && <span className="text-gray-400">离线</span>}
+        {n.atCapacity && <span className="text-amber-700 font-medium">满载</span>}
+      </div>
+      <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-gray-500">
+        <span>{n.online ? '在线' : '离线'} · 槽位 {n.freeSlots ?? '—'} · 运行 {n.running ?? '—'} · 排队 {n.queued}</span>
+        <span>CPU {n.cpu != null ? `${n.cpu}%` : '—'} · 内存 {pct(n.mem)} · 磁盘 {pct(n.disk)}</span>
+        <span>成功率 {pct(n.successRate)} · 延迟 {latencyText(n.latency)}</span>
+        <span className="text-gray-400">能力：{caps}</span>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * zx_20261030_1 M4「认」: **集群概览卡**——一屏四数（在线 / 运行中 / 排队 / 满载）+ 瓶颈一句话，
+ *   逐节点详情默认收起（米勒 7±2：先给"需要你知道的"）。数取 main 纯函数 `buildClusterView`，
+ *   本组件只摆盘不另算（聚合与逐行同源，防两处各记各的）。
+ */
+function ClusterCard({ view }: { view: NodesClusterPayload }) {
+  const [open, setOpen] = useState(false);
+  const t = view.totals;
+  return (
+    <div className="mb-4 rounded-lg border border-gray-200 bg-white px-4 py-3">
+      <div className="flex items-center justify-between">
+        <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">集群一屏</p>
+        <button type="button" onClick={() => setOpen(v => !v)} className="text-[11px] text-blue-600 hover:underline">
+          {open ? '收起逐节点' : `逐节点详情（${view.nodes.length}）`}
+        </button>
+      </div>
+      <div className="mt-2 grid grid-cols-4 gap-2">
+        <ClusterStat label="在线" value={t.online} tone={t.online > 0 ? 'text-emerald-600' : 'text-gray-500'} />
+        <ClusterStat label="运行中" value={t.running} />
+        <ClusterStat label="排队" value={t.queued} tone={t.queued > 0 ? 'text-amber-600' : undefined} />
+        <ClusterStat label="满载" value={t.atCapacity} tone={t.atCapacity > 0 ? 'text-red-600' : 'text-gray-500'} />
+      </div>
+      {view.bottlenecks.length > 0 && (
+        <p className="mt-2 text-xs text-amber-700">瓶颈：{view.bottlenecks.join('；')}</p>
+      )}
+      {view.error && (
+        <p className="mt-1 text-xs text-red-600">台账读取失败：{view.error}（下方本机计数为本地实时读）</p>
+      )}
+      {open && (
+        <div className="mt-3 space-y-1.5 border-t border-gray-100 pt-2">
+          {view.nodes.length === 0
+            ? <p className="text-xs text-gray-400 py-2">还没有任何节点。</p>
+            : view.nodes.map(n => <ClusterNodeRow key={n.id} n={n} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function PeersPage() {
   const nowMs = useTick();
   // zx_20261011_3: 「移出网络」失败时的如实上屏（不清空即一直显示，成功/重试时清）。
@@ -957,6 +1117,11 @@ export default function PeersPage() {
     liveTypes: ['node.request_dispatched', 'node.presence_changed', 'task.completed', 'task.failed'],
     debounceMs: 700,
   });
+  // zx_20261030_1 M4「认」: 集群一屏（本机 + 对端汇总）。在线/槽位随心跳变，运行/排队随任务与派发变。
+  const cluster = useLiveQuery(async () => nodesApi.cluster(), [], {
+    liveTypes: ['node.presence_changed', 'node.heartbeat', 'node.request_dispatched', 'node.request_result', 'task.status_changed', 'task.completed', 'task.failed'],
+    debounceMs: 700,
+  });
   // zx_20261005 M22（Team 档软闸）：锁定则整页只显示升级提示（导航项仍保留，见方案批六 M22）。
   const gate = data?.gate ?? null;
   const localId = data?.localNodeId ?? null;
@@ -975,11 +1140,12 @@ export default function PeersPage() {
   // zx_20261011_3: 把一台**离线他机**移出协同网络（`nodes:delete` ⇒ ANS 硬删除 + 吊销其 key）。
   //   确认文案**说清后果**（不是"删一行"那么轻）——对方对 ANS 的全部调用将失效，需重新入网。
   /**
-   * 一次性引导：Team 已解锁 ∧ 已入网 ∧ 开关未开 ∧ 尚未问过，才出现（判据在 main 一处，
-   * 此处只按三样如实状态摆卡片——不自行推导"该不该问"）。
+   * 一次性**告知**（zx_20261029_2 M7：询问 → 告知）：Team 已解锁 ∧ 已入网 ∧ **此刻确由缺省开着** ∧ 尚未告知。
+   * 判据在 main 一处（`shouldPromptAutoDispatch`），此处只按如实状态摆卡片——不自行推导"该不该说"。
+   * 显式设置过的（用户自己的选择）不再打扰；社区/Pro 永不出现。
    */
   const showOnboard = !!gate?.unlocked && es.data?.enrolled === true
-    && !!auto.data && !auto.data.enabled && !auto.data.prompted;
+    && !!auto.data && auto.data.enabled && auto.data.policy.source === 'default' && !auto.data.prompted;
   async function answerOnboard(accept: boolean) {
     setOnboardBusy(true); setOnboardErr(null);
     try {
@@ -1035,36 +1201,41 @@ export default function PeersPage() {
         </div>
       )}
 
-      {/* zx_20261017_1 批三: 建单即派状态——开关在「设置 · 多机协同编排」；此处**如实**显示开/关与最近一次自动外派。
+      {/* zx_20261030_1 M4「认」: 集群一屏——先给"现在卡在哪"（在线/运行中/排队/满载 + 瓶颈），逐节点可展开。 */}
+      {cluster.data && <ClusterCard view={cluster.data} />}
+
+      {/* zx_20261017_1 批三: 建单即派状态——开关在「设置 · 多机协同编排」；此处**如实**显示开/关、
+          来由（缺省替用户开 / 用户自己设的）与最近一次自动外派。
           未读到（`auto.data == null`）不渲染，不把"还没读到"显示成"未开启"。 */}
       {auto.data && (
         <div className={`mb-4 rounded-lg border px-3 py-2 text-xs ${auto.data.enabled ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-gray-200 bg-gray-50 text-gray-600'}`}>
           <span className="font-medium">建单即派：{auto.data.enabled ? '已开启' : '未开启'}</span>
+          <span>　{auto.data.policy.reason}。</span>
           {auto.data.enabled
             ? (auto.data.last
               ? <span>　最近一次：{formatDbTime(auto.data.last.at)} 派给 {nameOf(auto.data.last.nodeId) || auto.data.last.nodeId.slice(0, 8)}（类目 {auto.data.last.category}）</span>
-              : <span>　还没有自动外派记录——符合条件的新任务会先预查在线对端，预查无果则留在本机。</span>)
-            : <span>　开启后，符合条件的新建任务会在建单那一刻交给擅长这类活的对端；可在「设置」页切换。</span>}
+              : <span>　还没有自动外派记录——本机满负荷时，符合条件的新任务会先预查在线对端，预查无果则留在本机。</span>)
+            : <span>　开启后，本机满负荷时符合条件的新建任务会交给擅长这类活的对端；可在「设置」页切换。</span>}
         </div>
       )}
 
-      {/* zx_20261018_1 批一: 首次入网的**一次性**引导——应/不应都算回答（问过即不再出现）。 */}
+      {/* zx_20261018_1 批一: 首次满足条件的**一次性告知**（zx_20261029_2 M7：询问→告知）——说过即不再出现。 */}
       {showOnboard && (
         <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2.5 text-xs text-blue-900">
-          <div className="font-medium">要开启「建单即派」吗？</div>
+          <div className="font-medium">已为本机开启「建单即派」：仅在本机满负荷时溢出到其他节点</div>
           <div className="mt-0.5 text-blue-800">
-            开启后，新任务在创建那一刻会先看网络上有没有擅长这类活的对端；有就派出去，没有就留在本机。
-            只外派无父、无依赖、无附件、项目未指定本机工作目录的任务——其余一律留在本机跑。
+            团队版已解锁且本机已入网，因此默认替你打开了它——本机跑得动就先在本机跑，跑满了才把新任务交给擅长这类活的对端。
+            只外派无父、无依赖、无附件、项目未指定本机工作目录的任务；其余一律留在本机。
           </div>
           {onboardErr && <div className="mt-1 text-red-600">{onboardErr}</div>}
           <div className="mt-1.5 flex items-center gap-2">
             <button onClick={() => void answerOnboard(true)} disabled={onboardBusy}
               className="px-2.5 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50">
-              {onboardBusy ? '处理中…' : '开启'}
+              {onboardBusy ? '处理中…' : '知道了'}
             </button>
             <button onClick={() => void answerOnboard(false)} disabled={onboardBusy}
               className="px-2.5 py-1 border border-blue-300 text-blue-800 rounded hover:bg-white disabled:opacity-50">
-              暂不开启
+              一键关闭
             </button>
             <span className="text-[10px] text-blue-600">以后可在「设置 · 多机协同编排」随时改。</span>
           </div>

@@ -46,12 +46,15 @@ import {
   type IntentPlanDb,
   type IntentStepResult,
 } from '../intent-plans.js';
-import { planHomeComfort } from '../home-intent.js';
+// zx_20261029_2 M2「通」: 门外/门内共用同一条解析链——规则优先，规则排不出且开关允许时才请模型补，
+//   模型步骤再按台账与 K-6 校验一遍（`home-intent.resolveComfortIntent`）。
+import { resolveComfortIntent } from '../home-intent.js';
+import { runComfortModelPlan } from '../intent-model-plan.js';
+import { readBoolSetting } from '../settings-bool.js';
 import {
   HOME_COMFORT_INTENT,
   INTENT_CAPABILITY,
   validateIntent,
-  type ComfortFeeling,
 } from '../intent-protocol.js';
 // zx_20261013_1 批五（适配层）: MQTT 传动与地址约定取自适配层真源——**只此一处**选路（`defaultDeviceControl`）。
 import { mqttBrokerHost, mqttDeviceControl, type MqttIo } from '../device-mqtt.js';
@@ -447,12 +450,30 @@ export function deviceTools(deps: ToolDeps) {
         // 词表/参数校验只问协议面（多余键不进计划）。
         const v = validateIntent({ intent: HOME_COMFORT_INTENT, params: raw });
         if (!v.ok) return JSON.stringify({ ok: false, error: v.body.error, errors: v.body.errors ?? [] });
-        const plan = planHomeComfort(listDevices(ddb), String(v.params.room), v.params.feeling as ComfortFeeling);
-        if (!plan.ok) return JSON.stringify({ ok: false, error: plan.reason, skipped: plan.skipped ?? [] });
+        // 与门外 `/intent/resolve` 同一条解析链：规则 → 失败且开关开 ⇒ 模型 → 再校验。
+        //   开关缺省即开；关掉即只走规则（`modelPlan` 不注入）。
+        const modelFallback = readBoolSetting(db, 'device.intent_model_fallback');
+        const plan = await resolveComfortIntent(
+          { intent: HOME_COMFORT_INTENT, params: v.params },
+          {
+            listDevices: () => listDevices(ddb),
+            ...(modelFallback
+              ? { modelPlan: (input) => runComfortModelPlan(input, { getAnsClient: () => deps.ctx.getAnsClient() }) }
+              : {}),
+          },
+        );
+        if (!plan.ok) {
+          return JSON.stringify({
+            ok: false, error: plan.reason,
+            skipped: plan.skipped ?? [],
+            ...(plan.message ? { message: plan.message } : {}),
+          });
+        }
         const owner = taskId ? `local:${taskId}` : 'local:chat';
         const created = createIntentPlan(ddb as unknown as IntentPlanDb, {
           terminalId: owner, capability: INTENT_CAPABILITY,
           params: v.params, steps: plan.steps, skipped: plan.skipped,
+          source: plan.source ?? 'rule',
         });
         const exec = await executeDeviceIntentPlan(ddb, created.id, {
           actor: taskId ? { kind: 'task', ref: taskId } : { kind: 'panel' },
@@ -461,7 +482,7 @@ export function deviceTools(deps: ToolDeps) {
         if (!exec.ok) return JSON.stringify({ ok: false, planId: created.id, error: exec.reason });
         return JSON.stringify({
           ok: exec.status === 'executed', planId: created.id, status: exec.status,
-          steps: exec.steps, skipped: plan.skipped,
+          steps: exec.steps, skipped: plan.skipped, source: plan.source ?? 'rule',
         });
       },
     },

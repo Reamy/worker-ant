@@ -17,6 +17,7 @@
     "typecheck": "turbo typecheck",
     "test": "turbo test",
     "rr:all": "node scripts/run-rr-all.mjs",
+    "rr:changed": "node scripts/rr-changed.mjs",
     "smoke:phase-a": "tsup scripts/smoke-phase-a.ts --format esm --platform node --target node22 --external @worker-ant/ans-client --external ai --external @ai-sdk/openai --external pino --external pino-pretty --external pino-roll --out-dir apps/worker-ant-desktop/dist-smoke --clean && node apps/worker-ant-desktop/dist-smoke/smoke-phase-a.mjs",
     "smoke:maturity-negative": "tsup scripts/smoke-maturity-negative.ts --format esm --platform node --target node22 --external @worker-ant/ans-client --external ai --external @ai-sdk/openai --external pino --external pino-pretty --external pino-roll --out-dir apps/worker-ant-desktop/dist-smoke --clean && node apps/worker-ant-desktop/dist-smoke/smoke-maturity-negative.mjs",
     "smoke:task-outcome": "tsup scripts/smoke-task-outcome.ts --format esm --platform node --target node22 --external @worker-ant/ans-client --external ai --external @ai-sdk/openai --external pino --external pino-pretty --external pino-roll --out-dir apps/worker-ant-desktop/dist-smoke --clean && node apps/worker-ant-desktop/dist-smoke/smoke-task-outcome.mjs",

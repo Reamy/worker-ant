@@ -32,8 +32,11 @@ export interface NodeCallRecord {
   receivedAt: string;
   /** 收口时刻（`completed` 的 `occurred_at`）；未收口为 `null`。 */
   completedAt: string | null;
-  /** 聚合态：`pending`（只到场）/ `done`/`error`。 */
-  status: 'pending' | 'done' | 'error';
+  /**
+   * 聚合态：`pending`（只到场）/ `done` / `error` / `cancelled`（zx_20261030_1 M3：派活方叫停后真停，
+   *   既非完成也非失败）。
+   */
+  status: 'pending' | 'done' | 'error' | 'cancelled';
   result: Record<string, unknown> | null;
   /** 耗时（毫秒）＝收口 − 到场；两时刻缺一即 `null`（不编一个 0 冒充"瞬时完成"）。 */
   durationMs: number | null;
@@ -81,7 +84,8 @@ export function listNodeCallRecords(db: CallLogDb, limit = 50): NodeCallRecord[]
       rec.receivedAt = r.occurred_at;
     } else {
       rec.completedAt = r.occurred_at;
-      rec.status = p.status === 'error' ? 'error' : 'done';
+      // M3：三档如实分——叫停不是失败，也不能读成"办成了"。
+      rec.status = p.status === 'error' ? 'error' : p.status === 'cancelled' ? 'cancelled' : 'done';
       rec.result = p.result && typeof p.result === 'object' && !Array.isArray(p.result) ? (p.result as Record<string, unknown>) : null;
     }
     byId.set(r.aggregate_id, rec);

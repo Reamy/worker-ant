@@ -4,6 +4,7 @@ import { LogOut, BellRing } from 'lucide-react';
 // zx_20261013_1 批三: 导航表提为**一处真源**（`lib/navConfig`）——侧栏与首启导览消费同一个数组，
 //   不再各自持有入口清单（导览词表由此派生，见 `tourEntries()`）。
 import { NAV_GROUPS } from '../lib/navConfig';
+import brandLogo from '../assets/worker-ant-logo.png';
 import { im, license } from '../lib/ipc';
 import { useActivity } from '../lib/activity';
 import { imReminderChannel, isImRoute, imInboundNotice } from '../lib/im-reminder';
@@ -79,7 +80,10 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     <div className="flex h-screen">
       <aside className="w-56 bg-gray-900 text-white flex flex-col shrink-0">
         <div className="p-4 border-b border-gray-700">
-          <h1 className="text-lg font-bold">🐜 工蚁系统</h1>
+          <h1 className="flex items-center gap-2 text-lg font-bold">
+            <img src={brandLogo} alt="" className="h-7 w-7 rounded-md" />
+            工蚁系统
+          </h1>
           <p className="text-xs text-gray-400 mt-0.5">Worker Ant Desktop</p>
         </div>
         <nav className="flex-1 overflow-y-auto p-2">

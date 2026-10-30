@@ -15,7 +15,7 @@
  *      再喂 `result` ⇒ 同一行翻 `done`/`error` 且算出 `durationMs`（**一次派发一行**，不是两条事件两行）。
  *   D. **接线静态**：IPC 写口 `nodes:dispatch` 过 Team 软闸 + 台账读口 `/dispatch-result` 不过闸；
  *      `event-bus` 两类事件入 `node_dispatch` 聚合映射；`index.ts` 两处转发到渲染层；渲染层通道在册；
- *      ANS 侧**同源判据**（`DISPATCHABLE_WHERE` 一处 WHERE、负载感知 `ORDER BY`、读回端点、`requester_node_id` 列）。
+ *      ANS 侧**同源判据**（`DISPATCHABLE_WHERE` 一处 WHERE、负载感知排序纯函数 `node-ranking.ts`、读回端点、`requester_node_id` 列）。
  *   E. **renderer 第二落点**（词表的第二个落点）：源码 + 产物含「派活」卡的用户可见文案，且**旧横幅已除**。
  *
  * ── 纪律（承 auto-memory 各条）──────────────────────────────────────────────
@@ -279,9 +279,15 @@ async function main(): Promise<void> {
     const NR = RD(`${S}/src/routes/nodes.ts`);
     ok(NR.includes('DISPATCHABLE_WHERE') && (NR.match(/DISPATCHABLE_WHERE/g) ?? []).length >= 2,
       'D-9 ★可派判据**一处 WHERE**（`DISPATCHABLE_WHERE` 定义并复用——自动选与手动校验同一把尺，抄两份必分家）');
-    ok(/ORDER BY[\s\S]{0,120}capacity_free_ratio[\s\S]{0,120}weight/.test(NR),
-      'D-10 ★★负载感知排序：`ORDER BY (weight * COALESCE(capacity_free_ratio,1.0)) … weight … last_seen_at`'
-      + '（空余力未知时取中性 1.0——罗尔斯·无知之幕：不拿"不知道"当"没能力"）');
+    // zx_20261027_3 M1「实况」: 老 SQL 排序把「余力未知」当 1.0 满血 ⇒ 已由**纯函数** `node-ranking.ts` 取代。
+    //   判据按符号重定向到新单一真源（不删不松）：三层序 free<unknown<full，仅 free 层计 weight×ratio。
+    const RANK = RD(`${S}/src/routes/node-ranking.ts`);
+    ok(/free:\s*0[^}]{0,40}unknown:\s*1[^}]{0,40}full:\s*2/.test(RANK)
+      && /group === 'free' && ratio !== null \? weight \* ratio : weight/.test(RANK),
+      'D-10 ★★负载感知排序**单一真源**（`node-ranking.ts`）：三层序 free<unknown<full，只有已知余力层计 `weight × ratio`'
+      + '（余力未知按 weight、不假装满血——罗尔斯·无知之幕：不拿"不知道"当"没能力"）');
+    ok(NR.includes('rankDispatchCandidates(') && !/ORDER BY[\s\S]{0,120}capacity_free_ratio/.test(NR),
+      'D-10b ★接线：`nodes.ts` 排序交给同一纯函数，不再自持一份 SQL ORDER BY（两把尺必分家）');
     ok(/isNodeCardCategory/.test(NR), 'D-11 手动目标以**同源类目判据**校验（不手抄类目串表）');
 
     const SCR = RD(`${S}/src/db/schema.ts`);

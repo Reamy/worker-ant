@@ -41,6 +41,8 @@ const CRON_PRESETS: Array<{ label: string; expr: string }> = [
 export default function ProjectsPage() {
   const navigate = useNavigate();
   const [error, setError] = useState('');
+  // zx_20261029_1「知」: 创建后如实告知"须知是否已排队生成"（不静默）。
+  const [notice, setNotice] = useState('');
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(0);
   const PAGE_SIZE = 10;
@@ -106,15 +108,25 @@ export default function ProjectsPage() {
       };
       if (editing) {
         await projects.update(editing.id, body);
+        setNotice('');
       } else {
-        await projects.create(body);
+        const created = await projects.create(body) as { initBrief?: { state?: string; reason?: string } };
+        const ib = created?.initBrief;
+        setNotice(
+          ib?.state === 'queued'
+            ? '项目已创建，正在后台读取工作目录生成「项目须知」，可在项目详情页查看。'
+            : ib?.state === 'skipped'
+              ? `项目已创建；未生成项目须知：${ib.reason || '工作目录不可用'}。`
+              : '',
+        );
       }
+      setError('');
       setShowModal(false); setEditing(null);
       setForm({ ...emptyForm }); await q.reload(); loadUsage();
     } catch (e) { setError((e as Error).message); }
   }
 
-  function openCreate() { setEditing(null); setForm({ ...emptyForm }); setShowModal(true); }
+  function openCreate() { setEditing(null); setNotice(''); setForm({ ...emptyForm }); setShowModal(true); }
   function openEdit(p: Project) {
     setEditing(p);
     const ctx = (() => { try { return JSON.parse(p.context_json || '{}'); } catch { return {}; } })();
@@ -204,6 +216,12 @@ export default function ProjectsPage() {
       )}
 
       {(error || q.error) && <p className="text-red-500 text-sm mb-4">{error || q.error}</p>}
+      {notice && (
+        <div className="mb-4 rounded-lg border border-cyan-200 bg-cyan-50 px-3 py-2 text-xs text-cyan-800 flex items-start justify-between gap-3">
+          <span>{notice}</span>
+          <button type="button" onClick={() => setNotice('')} className="text-cyan-600 hover:text-cyan-800 shrink-0">关闭</button>
+        </div>
+      )}
 
       <div className="relative mb-4 w-64">
         <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"/>

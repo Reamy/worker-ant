@@ -28,7 +28,7 @@ import {
   machineSlotGuard,
   countMachineRunning,
 } from './task-accounting.js';
-import { captureWorldSnapshot } from './world-snapshot.js';
+import { captureWorldSnapshot, persistWorldSnapshot } from './world-snapshot.js';
 import { pauseTask } from './pause-task.js';
 import { isNoInteraction } from './no-interaction.js';
 import { PAUSE_REASON_PENDING_CONFIRMATION } from './pause-reason.js';
@@ -264,13 +264,17 @@ export async function captureSnapshotBeforeRun(db: Database.Database, projectId:
     const snapshotBefore = await captureWorldSnapshot(db, projectId);
     if (snapshotBefore) {
       const snapCtx = JSON.parse((db.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get(taskId) as { context_json: string })?.context_json || '{}');
-      snapCtx.world_snapshot_before = snapshotBefore;
+      // zx_20261028_2 M1: 原文进侧表，ctx 只留 ref（侧表不可用 ⇒ 退回内联，行为同改造前）。
+      snapCtx.world_snapshot_before = persistWorldSnapshot(db, taskId, 'before', snapshotBefore) ?? snapshotBefore;
       // zx_20261015_2 D4（道德经·知止「知止不殆」／罗尔斯·同一把尺）：写新一轮的 before 时**一并清掉**
       //   上一轮的 after。after 只在 `auditWorldConsistency`（循环之后）里重写，早退路（`finalize_paused`/
       //   中断/硬暂停/偏离重启）跳过它 ⇒ 留下的永远是**上一个 run** 的 after，与新的 before **不成对**，
       //   却被当成"本轮执行前后"对照（真库标本 `7c39678e`：before 04:54:35 晚于 after 04:45:40，倒挂、`resume_count=4`）。
       //   成对才留，不成对即止——清掉后：完整的一轮 = 一新 before + 一新 after；早退的一轮 = 只有新 before（不谎报成对）。
       //   ⚠ 只在**真取到新 before** 时清：取不到就没开新一轮，不动既有账（best-effort，不误伤上一对）。
+      // zx_20261028_2 M1: 清的是引用时，侧表里那一行也一并删（否则成对作废的行永远留在库里）。
+      const staleAfter = snapCtx.world_snapshot_after as { ref?: string } | undefined;
+      if (staleAfter?.ref) { try { db.prepare('DELETE FROM wa_world_snapshots WHERE id = ?').run(staleAfter.ref); } catch { /* 表缺失/已删：忽略 */ } }
       delete snapCtx.world_snapshot_after;
       db.prepare('UPDATE wa_tasks SET context_json = ? WHERE id = ?').run(JSON.stringify(snapCtx), taskId);
     }

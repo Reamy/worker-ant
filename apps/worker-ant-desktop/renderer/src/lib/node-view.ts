@@ -17,10 +17,13 @@ export { isNodeOnline } from '../../../../../packages/shared-types/src/nodes.js'
 import type { NodeCallRecord } from '../../../src/main/core/node-call-log.js';
 // zx_20261011 M4 出站记录的形状取自 main 侧真源（`node-dispatch-log.ts`）——仅类型引用，打包期擦除。
 import type { NodeDispatchRecord } from '../../../src/main/core/node-dispatch-log.js';
+// zx_20261030_1 M4：回执措辞真源（pure、零 IO ⇒ 渲染层可直引；与 `settings-bool.js` 同范式）。
+import { receiptNote, type RemoteReceipt } from '../../../src/main/core/node-receipt.js';
 
 /** 一条调用记录的结局 → 人话标签（**一处映射**，行内与徽标共用；枚举取自 `NodeCallRecord['status']` 不手抄）。 */
 export const CALL_STATUS_LABEL: Record<NodeCallRecord['status'], string> = {
-  pending: '待办中', done: '已完成', error: '失败',
+  // zx_20261030_1 M3：叫停后真停单列一档（不是失败，也不是办成了）。
+  pending: '待办中', done: '已完成', error: '失败', cancelled: '已停止',
 };
 
 /**
@@ -29,7 +32,8 @@ export const CALL_STATUS_LABEL: Record<NodeCallRecord['status'], string> = {
  *   共用一张表就会把"我欠别人"与"别人欠我"说成同一件事（承"同一件事才叫重复"的反面）。
  */
 export const DISPATCH_STATUS_LABEL: Record<NodeDispatchRecord['status'], string> = {
-  pending: '待回', done: '已完成', error: '失败',
+  // zx_20261030_1 M3：`cancelled` 单列一档——"叫停后真停"既不是完成，也不是失败（不并入任何一档）。
+  pending: '待回', done: '已完成', error: '失败', cancelled: '已停止',
 };
 
 /**
@@ -241,6 +245,8 @@ export interface RemoteTaskBadge {
   nodeId: string;
   requestId: string;
   assignedAt: string;
+  /** zx_20261030_1 M4：远端回传原样（含 `receipt`）；未回传 ⇒ `null`。 */
+  result?: Record<string, unknown> | null;
   summary: string;
   resultAt: string;
 }
@@ -270,3 +276,33 @@ export function orchestrationLabel(
  *   远端说完成 ≠ 本机复核过：本机只据远端自报改本地状态，**没有**独立核验其产出。
  */
 export const REMOTE_RESULT_CAVEAT = '远端自报完成，本机未复核';
+
+/**
+ * zx_20261030_1 M4（维特根斯坦·意义即用法）: 从远端回传里**只读**回执（不可信形状一律当没有）。
+ *   回执是 main 侧 `verifyRemoteReceipt` 写的；旧行没有 `receipt` ⇒ `null`，界面回落旧边界话。
+ * ⚠ 措辞真源在 `core/node-receipt.ts`（pure、零 IO）——此处只做形状收窄，不另抄一份词表。
+ */
+export function remoteReceiptOf(result: Record<string, unknown> | null | undefined): RemoteReceipt | null {
+  if (!result || typeof result !== 'object') return null;
+  const raw = (result as { receipt?: unknown }).receipt;
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as Record<string, unknown>;
+  const verdict = o.verdict;
+  if (verdict !== 'verified' && verdict !== 'self-reported' && verdict !== 'failed') return null;
+  return {
+    verdict,
+    missing: Array.isArray(o.missing) ? o.missing.filter((x): x is string => typeof x === 'string') : [],
+    outputCount: typeof o.outputCount === 'number' && Number.isFinite(o.outputCount) ? o.outputCount : null,
+    checkedAt: typeof o.checkedAt === 'string' ? o.checkedAt : '',
+  };
+}
+
+/**
+ * zx_20261030_1 M4: 远端回传的**回执行**文案（三选一），无回执 ⇒ 回落旧边界话。
+ *   ⚠ 「核对通过」也只到回执自洽：措辞不得越过"本机没有独立重跑其产出"这条线。
+ */
+export function remoteResultNote(result: Record<string, unknown> | null | undefined): string {
+  const receipt = remoteReceiptOf(result);
+  if (!receipt) return REMOTE_RESULT_CAVEAT;
+  return `${receiptNote(receipt)}（只核回执自洽，未重跑其产出）`;
+}

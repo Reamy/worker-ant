@@ -21,6 +21,7 @@
  * ⚠ 本模块**零网络依赖**（静态只 `import type` + 复用既有两个纯助手）⇒ 受控回归**直引跑真实现**。
  */
 import type { DiscoveredDevice } from './device-registry.js';
+import { kindClassOf } from './device-kind.js';
 import { deriveDeviceKind, type DiscoveryIo } from './device-discovery.js';
 import {
   deviceStateTopics,
@@ -231,11 +232,16 @@ export function haConfigToDevice(
   if (onPayload) capabilities.push(`on:${onPayload}`);
   if (offPayload) capabilities.push(`off:${offPayload}`);
   const areaHint = deviceAreaHint(cfg);
+  // HA component 是设备自述的类别——逐字采用；认不出（不在 HA 标准集）则回退与 mDNS/SSDP 同一把尺。
+  const kind = HA_COMPONENTS.has(component) ? component : deriveDeviceKind(`${component} ${name} ${id}`);
+  // zx_20261029_2 M1: `device_class` 只有 HA 这里有——`cover` 是窗帘还是车库门/大门要看它，
+  //   故在入口处算好派生类目，落账侧不再从 `kind` 反推。
+  const deviceClass = str(cfg.device_class);
 
   return {
     name,
-    // HA component 是设备自述的类别——逐字采用；认不出（不在 HA 标准集）则回退与 mDNS/SSDP 同一把尺。
-    kind: HA_COMPONENTS.has(component) ? component : deriveDeviceKind(`${component} ${name} ${id}`),
+    kind,
+    kindClass: kindClassOf({ kind, protocol: 'mqtt', deviceClass, capabilities }),
     protocol: 'mqtt',
     address: mqttAddress(brokerHost, id),
     port: brokerPort,

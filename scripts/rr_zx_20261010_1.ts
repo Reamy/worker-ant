@@ -139,8 +139,9 @@ async function main(): Promise<void> {
     // zx_20261011 订正（**强化非放宽**）：M4 新增 `nodes:dispatch` **写口也过同一道 Team 软闸** ⇒ 闸数 3→4。
     // zx_20261011_1 M4 再订正：双向澄清的**作答写口** `nodes:answer-question` 与派发同闸 ⇒ 闸数 4→5（面再扩，非放宽）。
     // zx_20261011_3 再订正：删除离线节点的**写口** `nodes:delete` 同闸 ⇒ 闸数 5→6（面再扩，非放宽）。
-    //   逐 handler 取体核闸（新增写口若漏闸即红），原五处仍须在。
-    const NODE_GATED = ['nodes:update', 'nodes:enroll', 'nodes:request-token', 'nodes:dispatch', 'nodes:answer-question', 'nodes:delete'];
+    // zx_20261030_1 M3 再订正（**强化非放宽**）：派活方叫停的写口 `nodes:request-cancel` 同闸 ⇒ 闸数 6→7（面再扩）。
+    //   逐 handler 取体核闸（新增写口若漏闸即红），原六处仍须在。
+    const NODE_GATED = ['nodes:update', 'nodes:enroll', 'nodes:request-token', 'nodes:dispatch', 'nodes:answer-question', 'nodes:delete', 'nodes:request-cancel'];
     const bodyOf = (h: string): string => {
       const i = NIPC.indexOf(`ipcMain.handle('${h}'`);
       if (i < 0) return '';
@@ -149,7 +150,7 @@ async function main(): Promise<void> {
     };
     const gateOf = (h: string): boolean => bodyOf(h).includes("teamFeatureRefusal(licDb, 'multi_node')");
     ok(NODE_GATED.every(gateOf),
-      'C-1 ★**六个动作出口各一道 Team 软闸**（update / enroll / request-token / dispatch / answer-question / delete——漏一处即可绕过）',
+      `C-1 ★**${NODE_GATED.length} 个动作出口各一道 Team 软闸**（${NODE_GATED.join(' / ')}——漏一处即可绕过）`,
       NODE_GATED.map((h) => `${h}=${gateOf(h)}`).join(' · '));
     // zx_20261018_1 批一订正（**强化非放宽**）：`nodes:confirm-auto-dispatch` 是首次入网引导写口。
     //   它的闸在 **core 一处**（`applyAutoDispatchOnboarding` 先 `teamFeatureRefusal` 再写），IPC 侧
@@ -167,7 +168,7 @@ async function main(): Promise<void> {
     eq(nTotal, nInHandlers,
       'C-2 每处 `code: \'TEAM_REQUIRED\'` 都在枚举的 handler 体内（钉 `code:` 调用形状，避开注释里的裸词）');
     ok(ALL_GATED.every((h) => (bodyOf(h).match(/code: 'TEAM_REQUIRED'/g) ?? []).length === 1),
-      'C-2b 七个出口各恰一处如实回 `TEAM_REQUIRED`（6 先闸 + 1 归因）',
+      `C-2b ${ALL_GATED.length} 个出口各恰一处如实回 \`TEAM_REQUIRED\`（${NODE_GATED.length} 先闸 + ${CORE_GATED.length} 归因）`,
       ALL_GATED.map((h) => `${h}=${(bodyOf(h).match(/code: 'TEAM_REQUIRED'/g) ?? []).length}`).join(' · '));
 
     const enrIdx = NIPC.indexOf("ipcMain.handle('nodes:enroll'");

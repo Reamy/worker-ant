@@ -36,6 +36,7 @@ import {
 import {
   buildProjectProfile,
   currentProfileSourceHash,
+  listProjectProfileHistory,
   profileInjectionStats,
   readProjectProfile,
   saveProjectProfile,
@@ -43,11 +44,22 @@ import {
   PROJECT_PROFILE_VERSION,
   PROFILE_INJECT_MAX_TOKENS,
 } from '../core/project-profile.js';
+// zx_20261027_3 M6a: 知识卡 + 结局账的唯一组装处（本文件只做壳）。
+import { distillKnowledgeCards, listKnowledgeCardsWithUsage } from '../core/knowledge-cards.js';
 import type {
   ProjectProfile,
   ProjectProfileInjectionStats,
   ProjectProfileOrigin,
 } from '../core/project-profile.js';
+// zx_20261030_1 M6「荐」: 水位增量吸收 + 项目级相似推荐（判据全在 core；本文件只做壳）。
+import {
+  absorbProjectIncrement,
+  readWatermark,
+  unabsorbedCount,
+} from '../core/knowledge-watermark.js';
+import { similarProjects } from '../core/project-similarity.js';
+// zx_20261030_1 M6「荐」: 候选领域包的建议/忽略通道与知识收件箱同处（`packs.ipc.ts` 保持五个基础通道）。
+import { dismissAutoCandidateDomainPack, listSuggestedDomainPacks } from '../core/domain-pack.js';
 
 type IpcFailure = { error: { code: string; message: string } };
 
@@ -64,6 +76,8 @@ export interface KnowledgeProfileView {
   currentHash: string;
   stale: boolean;
   stats: ProjectProfileInjectionStats;
+  /** zx_20261027_3 M6b: 旧版留痕条数（自动跟随覆盖前归档；"换过几版"可回溯）。 */
+  history: number;
 }
 
 function projectIdOf(input: { projectId?: unknown } | undefined): string {
@@ -178,8 +192,20 @@ export function initKnowledgeIpc(db: Database.Database, dataDir: string): void {
       currentHash,
       stale: stored ? stored.origin === 'local' && stored.sourceHash !== currentHash : false,
       stats: profileInjectionStats(db as never, projectId),
+      history: listProjectProfileHistory(db as never, projectId).length,
     };
   };
+
+  // zx_20261027_3 M6a: 项目知识卡 + 每张卡的结局账（注入 N / 成 M / 败 K）——只读，不改状态。
+  ipcMain.handle('knowledge:cards', async (_event, input?: { projectId?: unknown }) => {
+    try {
+      const projectId = projectIdOf(input);
+      if (!projectId) return { error: { code: 'INVALID_REQUEST', message: '缺少项目 id' } } satisfies IpcFailure;
+      return { data: listKnowledgeCardsWithUsage(db as never, projectId) };
+    } catch (e) {
+      return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } } satisfies IpcFailure;
+    }
+  });
 
   ipcMain.handle('knowledge:profile', async (_event, input?: { projectId?: unknown }) => {
     try {
@@ -216,6 +242,89 @@ export function initKnowledgeIpc(db: Database.Database, dataDir: string): void {
       const changed = setProjectProfileEnabled(db as never, projectId, input.enabled);
       if (!changed) return { error: { code: 'NOT_FOUND', message: '本项目尚无画像——请先生成或导入' } } satisfies IpcFailure;
       return { data: viewOf(projectId) };
+    } catch (e) {
+      return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } } satisfies IpcFailure;
+    }
+  });
+
+  // ===== zx_20261030_1 M6「荐」: 增量水位 + 相似项目 =====
+  // 未吸收事件数（"旧了要说"）：只读；页面据此写「知识书有 N 条新事件未吸收」并提供手动吸收按钮。
+  ipcMain.handle('knowledge:unabsorbed', async (_event, input?: { projectId?: unknown }) => {
+    try {
+      const projectId = projectIdOf(input);
+      if (!projectId) return { error: { code: 'INVALID_REQUEST', message: '缺少项目 id' } } satisfies IpcFailure;
+      const wm = readWatermark(db as never, projectId);
+      return {
+        data: {
+          count: unabsorbedCount(db as never, projectId),
+          lastEventId: wm.lastEventId,
+          lastRunAt: wm.lastRunAt,
+          lastEventAt: wm.lastEventAt,
+        },
+      };
+    } catch (e) {
+      return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } } satisfies IpcFailure;
+    }
+  });
+
+  // 手动「现在吸收」：只吸收本项目增量（有界），水位吸收成功才前移。返回回执（数要如实）。
+  ipcMain.handle('knowledge:absorb-now', async (_event, input?: { projectId?: unknown }) => {
+    try {
+      const projectId = projectIdOf(input);
+      if (!projectId) return { error: { code: 'INVALID_REQUEST', message: '缺少项目 id' } } satisfies IpcFailure;
+      const r = absorbProjectIncrement(db as never, projectId);
+      // 知识卡在吸收之后按本项目口径蒸馏并计数（Pro 闸在 `distillKnowledgeCards` 内，社区档返 0）；
+      //   卡失败**不抹掉**已成功的知识册吸收回执——如实返回 0 卡。
+      let cards = 0;
+      try {
+        cards = r.absorbedEvents > 0 ? distillKnowledgeCards(db as never, projectId).cards : 0;
+      } catch {
+        cards = 0;
+      }
+      return {
+        data: {
+          absorbedEvents: r.absorbedEvents,
+          sections: r.sections,
+          cards,
+          candidatePackId: r.candidatePackId,
+          remaining: unabsorbedCount(db as never, projectId),
+        },
+      };
+    } catch (e) {
+      return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } } satisfies IpcFailure;
+    }
+  });
+
+  // 系统建议的候选包（只读、未启用、可拒绝）。候选由增量吸收时落 `origin='auto_candidate'`，
+  //   **从不自动启用**；启用仍走 `packs:apply`（Pro 闸）。
+  ipcMain.handle('packs:suggested', async (_event, input?: { projectId?: unknown; limit?: unknown }) => {
+    try {
+      const projectId = projectIdOf(input);
+      if (!projectId) return { error: { code: 'INVALID_REQUEST', message: '缺少项目 id' } } satisfies IpcFailure;
+      const limit = typeof input?.limit === 'number' ? input.limit : 5;
+      return { data: { packs: listSuggestedDomainPacks(db as never, projectId, limit) } };
+    } catch (e) {
+      return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } } satisfies IpcFailure;
+    }
+  });
+
+  // 忽略一条候选：只对 `auto_candidate` 生效，幂等；忽略后同一来源项目不再重复建议。
+  ipcMain.handle('packs:dismiss', async (_event, input?: { packId?: unknown }) => {
+    try {
+      const packId = typeof input?.packId === 'string' ? input.packId : '';
+      if (!packId) return { error: { code: 'INVALID_REQUEST', message: '缺少领域包 id' } } satisfies IpcFailure;
+      return { data: { dismissed: dismissAutoCandidateDomainPack(db as never, packId) } };
+    } catch (e) {
+      return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } } satisfies IpcFailure;
+    }
+  });
+
+  // 项目级相似推荐：确定性、最多 3 个、附「为什么像」；**只展示、不自动注入**。
+  ipcMain.handle('knowledge:similar-projects', async (_event, input?: { projectId?: unknown }) => {
+    try {
+      const projectId = projectIdOf(input);
+      if (!projectId) return { error: { code: 'INVALID_REQUEST', message: '缺少项目 id' } } satisfies IpcFailure;
+      return { data: { projects: similarProjects(db as never, projectId) } };
     } catch (e) {
       return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } } satisfies IpcFailure;
     }

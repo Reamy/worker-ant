@@ -14,6 +14,7 @@
  */
 import { createHash, createHmac, randomUUID } from 'node:crypto';
 import type { DeviceTestResult } from '../device-diagnostics.js';
+import { kindClassOf } from '../device-kind.js';
 import {
   registerDeviceProvider,
   type DeviceProvider,
@@ -381,7 +382,10 @@ function mapTuyaDevice(raw: TuyaDeviceRow): ProviderDevice | null {
       .filter((c) => c !== '')
       .slice(0, 50)
     : [];
-  return { id, name, kind, capabilities: caps, controllable: caps.length > 0 };
+  // zx_20261029_2 M1: `kind` 保留涂鸦原始 category（设备自述），派生类目由唯一归一函数给出；
+  //   表外 category ⇒ `unknown`（不拿设备名猜它是空调）。
+  const kindClass = kindClassOf({ kind, protocol: 'cloud', provider: 'tuya', capabilities: caps });
+  return { id, name, kind, kindClass, capabilities: caps, controllable: caps.length > 0 };
 }
 
 export interface TuyaProviderDeps {

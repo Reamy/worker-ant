@@ -194,6 +194,16 @@ export function isPlanningOrOptimizationIntent(text: string): boolean {
   return /(优化|升级|规划|方案|排期|调研|评估|设计|梳理|撰写|总结|审计|盘点)/.test(text);
 }
 
+/**
+ * zx_20261028_2 M4（「先诊断，后施工」）：修复/排查意图判定——此类任务的第一步是**定位**，
+ *   套用「实现/部署」型模板会把"先查清"跳过去，直接拆成施工步骤（真库标本：「初始化数据库脚本问题修复」
+ *   被拆成建表/写脚本/跑迁移，却没有一步是"复现并定位"）。
+ *   **只跳过模板拆解**；LLM 自主拆解不受影响（`engine.plan_auto_decompose` 那条腿照旧）。
+ */
+export function isRepairOrDiagnosisIntent(text: string): boolean {
+  return /(修复|修正|排查|定位|调试|报错|故障|失效|不生效|异常)/.test(text);
+}
+
 /** 失效模板集合（consolidate-templates 作业标记，成功率过低则失效——为道日损） */
 const invalidTemplateIds = new Set<string>();
 
@@ -225,13 +235,19 @@ export interface TemplateHit {
 }
 
 /** 该不该拆（守卫原因）；非 null 即不拆 */
-export type TemplateSkip = 'explicit_subtasks' | 'planning_intent';
+export type TemplateSkip = 'explicit_subtasks' | 'planning_intent' | 'repair_intent';
+
+/** 语义兜底喂给 embedding 的文本上限（标题+描述合取后截断——过长会稀释相似度，单一真源） */
+export const TEMPLATE_SEMANTIC_TEXT_MAX = 500;
+
+/** 语义兜底的最低余弦相似度（单一真源：低于它不算命中；原散在 `matchTemplateSemantic` 里的 0.4 已收于此） */
+export const TEMPLATE_SEMANTIC_MIN_SIMILARITY = 0.6;
 
 export interface TemplateDecision {
   skip: TemplateSkip | null;
   /** 即便 `skip` 非空也会给出"本可命中谁"——界面据此说明"为什么没拆"（诊断不许只剩一句"没命中"） */
   hit: TemplateHit | null;
-  /** 关键词未命中时，语义兜底该喂哪段文本（标题为空才退到描述前 100 字——长描述会稀释相似度） */
+  /** 关键词未命中时，语义兜底该喂哪段文本（**标题+描述同取**截 500 字——旧 `title || desc` 会整段丢掉描述） */
   semanticText: string;
 }
 
@@ -294,9 +310,14 @@ export function decideTemplateMatch(db: Database.Database, title: string, descri
   const titleText = (title || '').trim();
   const descText = (description || '').trim();
   const fullText = `${titleText} ${descText}`;
-  const semanticText = titleText || descText.slice(0, 100);
+  // zx_20261028_2 M4：两侧**同取**——旧式 `titleText || descText.slice(0,100)` 在标题非空时
+  //   让描述整段不参与语义兜底（与 zx_20260924 缺陷C 同一病根，那次只修了关键词腿）。
+  const semanticText = [titleText, descText].filter(Boolean).join('\n').slice(0, TEMPLATE_SEMANTIC_TEXT_MAX);
   const hit = matchTaskTemplate(db, titleText, descText);
   if (/子任务|报告\s*[A-Za-z]/.test(fullText)) return { skip: 'explicit_subtasks', hit, semanticText };
+  // 修复/排查意图**先于**规划意图判：一段文字既含"修复"又含"方案"时，真相是"先定位再给方案"，
+  //   报成 planning_intent 会让用户以为该交给 AI 做规划。两者都属"不套模板"，仅文案不同。
+  if (isRepairOrDiagnosisIntent(fullText)) return { skip: 'repair_intent', hit, semanticText };
   if (isPlanningOrOptimizationIntent(fullText)) return { skip: 'planning_intent', hit, semanticText };
   return { skip: null, hit, semanticText };
 }
@@ -347,7 +368,7 @@ export function matchTemplateSemantic(textEmb: number[], templateEmbs: Map<strin
     const tEmb = templateEmbs.get(tpl.id);
     if (!tEmb) continue;
     const sim = cosineSimilarity(textEmb, tEmb);
-    if (sim <= 0.4) continue;
+    if (sim < TEMPLATE_SEMANTIC_MIN_SIMILARITY) continue;
     if (!best) { best = { template: tpl, similarity: sim }; continue; }
     if (sim - best.similarity > 0.02) { best = { template: tpl, similarity: sim }; continue; }
     // 相似度接近：按历史成功率偏好

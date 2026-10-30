@@ -20,6 +20,9 @@ import { listProjectKnowledge } from './project-knowledge.js';
 import { MEM_LIVE_SQL } from './memory-lifecycle.js';
 import { extractKeywords } from './memory-select.js';
 import { proFeatureRefusal } from './pro-gate.js';
+// zx_20261030_1 M5「限」：每项目知识卡张数的**落库阈值**改由档位派生（`CARD_MAX_PER_PROJECT` 只留作默认值）。
+import { resolveLicenseTier } from './license.js';
+import { capacityLimit } from './tier-capacity.js';
 
 /** 五类卡——**唯一定处**（新增一类须穷举选择表、来源映射与界面文案）。 */
 export const KNOWLEDGE_CARD_KINDS = ['term', 'acceptance', 'recipe', 'lesson', 'pitfall'] as const;
@@ -33,8 +36,12 @@ export const KNOWLEDGE_CARD_KIND_LABEL: Record<KnowledgeCardKind, string> = {
   pitfall: '坑',
 };
 
-/** 单卡 ≤60 token；每项目 ≤24 张；单次注入 ≤5 张、≤150 token（与总预算 400 同源）。 */
+/** 单卡 ≤60 token；每项目上限按档位（`TIER_LIMITS[tier].maxKnowledgeCardsPerProject`）；单次注入 ≤5 张、≤150 token。 */
 export const CARD_MAX_TOKENS = 60;
+/**
+ * 每项目知识卡的**缺省**上限（24）——zx_20261030_1 M5 起不再作为落库阈值：落库取当前档位
+ *   `TIER_LIMITS[tier].maxKnowledgeCardsPerProject`。本常量保留导出，供选择/回归的缺省值与旧调用方。
+ */
 export const CARD_MAX_PER_PROJECT = 24;
 export const CARD_INJECT_MAX_TOKENS = 150;
 export const CARD_INJECT_MAX_ITEMS = 5;
@@ -104,6 +111,21 @@ function clampCardText(raw: string): { text: string; tokens: number } {
   const maxChars = CARD_MAX_TOKENS * TOKEN_CHARS_PER_UNIT;
   const cut = `${text.slice(0, Math.max(0, maxChars - 1))}…`;
   return { text: cut, tokens: estimateTokensFromChars(cut.length) };
+}
+
+/**
+ * zx_20261030_2 M4：pitfall 卡文的**有界截断**。`clampCardText` 是通用卡文口径（不改）；
+ * 这里只在同一 60-token 预算内换一个更诚实的尾——超预算时以「（详见任务验收）」收口，
+ * 不静默丢尾（旧形只留一个 `…`，读者无从知道全文还在账上）。
+ */
+const PITFALL_DETAIL_POINTER = '（详见任务验收）';
+function clampPitfallText(raw: string): { text: string; tokens: number } {
+  const full = clampCardText(raw);
+  if (full.text === raw) return full;
+  const maxChars = CARD_MAX_TOKENS * TOKEN_CHARS_PER_UNIT;
+  const head = raw.slice(0, Math.max(0, maxChars - PITFALL_DETAIL_POINTER.length - 1));
+  const text = `${head}…${PITFALL_DETAIL_POINTER}`;
+  return { text, tokens: estimateTokensFromChars(text.length) };
 }
 
 /** 稳定 id（FNV-1a 32 位；不用 node:crypto，保持本模块可被更宽的打包面引入）。 */
@@ -180,8 +202,14 @@ export function deriveKnowledgeCardCandidates(db: ReadDb, projectId: string): Kn
   return out;
 }
 
-/** 去重 + 排序 + 截到每项目上限（确定性：同输入必得同序）。 */
-export function planKnowledgeCards(candidates: readonly KnowledgeCardCandidate[]): Array<KnowledgeCardCandidate & { text: string; tokens: number }> {
+/**
+ * 去重 + 排序 + 截到每项目上限（确定性：同输入必得同序）。
+ * `limit` 缺省 `CARD_MAX_PER_PROJECT`（旧调用方/回归的缺省）；`0` = 不限（与 `TIER_LIMITS` 同约定）。
+ */
+export function planKnowledgeCards(
+  candidates: readonly KnowledgeCardCandidate[],
+  limit: number = CARD_MAX_PER_PROJECT,
+): Array<KnowledgeCardCandidate & { text: string; tokens: number }> {
   const seen = new Set<string>();
   const kept: Array<KnowledgeCardCandidate & { text: string; tokens: number }> = [];
   for (const c of candidates) {
@@ -197,7 +225,7 @@ export function planKnowledgeCards(candidates: readonly KnowledgeCardCandidate[]
     || b.confidence - a.confidence
     || a.source.localeCompare(b.source)
     || a.text.localeCompare(b.text));
-  return kept.slice(0, CARD_MAX_PER_PROJECT);
+  return limit === 0 ? kept : kept.slice(0, limit);
 }
 
 export interface DistillResult {
@@ -227,7 +255,11 @@ export function distillKnowledgeCards(db: WriteDb, projectId: string): DistillRe
     ).all(pid) as Array<{ kind: KnowledgeCardKind; text: string; source: string; confidence: number }>;
   } catch { pending = []; }
 
-  const planned = planKnowledgeCards([...deriveKnowledgeCardCandidates(db, pid), ...pending]);
+  // zx_20261030_1 M5：容量按**当前档位**判（`TIER_LIMITS[tier].maxKnowledgeCardsPerProject`，0=不限）。
+  //   到顶 ⇒ 计划集截到上限 ⇒ 不再落新的；旧卡的既有清理语义（不在计划集内的清掉）原样保留。
+  //   蒸馏本身已有 Pro 闸（上面 `proFeatureRefusal`），这里只补容量维度，不重复加档位闸。
+  const maxCards = capacityLimit(resolveLicenseTier(db), 'maxKnowledgeCardsPerProject');
+  const planned = planKnowledgeCards([...deriveKnowledgeCardCandidates(db, pid), ...pending], maxCards);
   const promoted = planned.filter((c) => c.kind === 'pitfall' && pending.some((p) => p.text === c.text && p.source === c.source)).length;
 
   let cards = 0;
@@ -271,7 +303,8 @@ export function recordPitfallCandidate(
   if (proFeatureRefusal(db, KNOWLEDGE_CARD_FEATURE) !== null) return false;
   const text = oneLine(`任务「${input.taskTitle || '未命名'}」验收未达：${input.failedItems || '（未列明项）'}`);
   if (text.length < 4) return false;
-  const clamped = clampCardText(text);
+  // 截断即附「详见任务验收」，不静默丢尾（见 `clampPitfallText`）。
+  const clamped = clampPitfallText(text);
   try {
     db.prepare(
       `INSERT INTO wa_knowledge_cards (id, project_id, kind, text, source, confidence, tokens, status, updated_at)
@@ -303,15 +336,91 @@ export function listActiveKnowledgeCards(db: ReadDb, projectId: string): Knowled
   } catch { return []; }
 }
 
+/** 一张卡的使用成效（zx_20261027_3 M6a）——`ref_id` 即卡 id，结局取自**任务终态**。 */
+export interface CardOutcomeStat {
+  /** 被注入过多少次（同一任务重复注入按唯一键只留一行，与写口同尺）。 */
+  injected: number;
+  completed: number;
+  failed: number;
+}
+
+/** 成效修正的样本门槛：少于 3 个终态样本不动排序（不让一两件偶发任务改写经验）。 */
+export const CARD_OUTCOME_MIN_SAMPLES = 3;
+/** 成效修正的最大加权（±3 分：能翻动同级卡序，但不压过形态亲和度的 10 分档差）。 */
+export const CARD_OUTCOME_WEIGHT = 3;
+
+/**
+ * 按卡 id 汇总注入成效（zx_20261027_3 M6a）——**只读**，不新增表。
+ * 只取 `source='knowledge_card'` 的行，按**当前**任务状态计数；`archived`/在途不记成也不记败。
+ * 旧库缺表/缺列 ⇒ 空表（不编数 ⇒ 选择照旧）。
+ */
+export function cardOutcomeStats(db: ReadDb, projectId: string): Map<string, CardOutcomeStat> {
+  const out = new Map<string, CardOutcomeStat>();
+  try {
+    const rows = db.prepare(
+      `SELECT ci.ref_id AS ref_id,
+              COUNT(*) AS injected,
+              SUM(CASE WHEN t.status = 'completed' THEN 1 ELSE 0 END) AS completed,
+              SUM(CASE WHEN t.status = 'failed' THEN 1 ELSE 0 END) AS failed
+         FROM wa_context_injections ci
+         JOIN wa_tasks t ON t.id = ci.task_id
+        WHERE ci.source = 'knowledge_card' AND t.project_id = ?
+        GROUP BY ci.ref_id`,
+    ).all(projectId || '') as Array<{ ref_id?: string; injected?: number; completed?: number | null; failed?: number | null }>;
+    for (const r of rows) {
+      const id = String(r.ref_id ?? '');
+      if (!id) continue;
+      out.set(id, {
+        injected: Number(r.injected) || 0,
+        completed: Number(r.completed) || 0,
+        failed: Number(r.failed) || 0,
+      });
+    }
+  } catch { /* 表不在（旧库）⇒ 无成效可参考，选卡照旧 */ }
+  return out;
+}
+
+/** 面板一行：卡本身 + 它的结局账（"这张卡被用过几次、成了几次"）。 */
+export interface KnowledgeCardUsage extends CardOutcomeStat {
+  id: string;
+  kind: KnowledgeCardKind;
+  /** 人话类目名（随载荷下发——渲染层不另引词表值，避免第二落点）。 */
+  kindLabel: string;
+  text: string;
+  tokens: number;
+}
+
+/** 卡 + 成效的**唯一组装处**（IPC 面板与 rr 同引，不各拼一份）。 */
+export function listKnowledgeCardsWithUsage(db: ReadDb, projectId: string): KnowledgeCardUsage[] {
+  const stats = cardOutcomeStats(db, projectId);
+  return listActiveKnowledgeCards(db, projectId).map((c) => {
+    const s = stats.get(c.id);
+    return {
+      id: c.id,
+      kind: c.kind,
+      kindLabel: KNOWLEDGE_CARD_KIND_LABEL[c.kind],
+      text: c.text,
+      tokens: c.tokens,
+      injected: s?.injected ?? 0,
+      completed: s?.completed ?? 0,
+      failed: s?.failed ?? 0,
+    };
+  });
+}
+
 /**
  * 注入前选卡：按任务形态亲和度 + 任务关键词重合打分，取 ≤5 张且总 token ≤150。
  * 装不下一张就跳过该张（不截半张卡——卡的意义是一句完整的话）。
+ *
+ * M6a（越用越准）：给 `stats` 时，样本 ≥3 的卡按「(成−败)/样本」加 ±3 分——
+ *   仍是确定性规则（零模型），只是把**用过的结果**算进来。无样本/样本不足 ⇒ 分不变。
  */
 export function selectKnowledgeCardsForInject(
   cards: readonly KnowledgeCard[],
   archetype: string | null | undefined,
   taskText: string | null | undefined,
   tokenBudget: number = CARD_INJECT_MAX_TOKENS,
+  stats?: ReadonlyMap<string, CardOutcomeStat>,
   maxItems: number = CARD_INJECT_MAX_ITEMS,
 ): KnowledgeCard[] {
   if (cards.length === 0) return [];
@@ -319,7 +428,12 @@ export function selectKnowledgeCardsForInject(
   const keywords = extractKeywords(String(taskText ?? ''));
   const scored = cards.map((c) => {
     const overlap = keywords.filter((k) => c.text.includes(k)).length;
-    const score = (affinity[c.kind] ?? DEFAULT_AFFINITY[c.kind]) * 10 + overlap * 2 + c.confidence;
+    let score = (affinity[c.kind] ?? DEFAULT_AFFINITY[c.kind]) * 10 + overlap * 2 + c.confidence;
+    const o = stats?.get(c.id);
+    const samples = o ? o.completed + o.failed : 0;
+    if (o && samples >= CARD_OUTCOME_MIN_SAMPLES) {
+      score += ((o.completed - o.failed) / Math.max(1, samples)) * CARD_OUTCOME_WEIGHT;
+    }
     return { card: c, score };
   });
   scored.sort((a, b) => b.score - a.score || a.card.tokens - b.card.tokens || a.card.id.localeCompare(b.card.id));

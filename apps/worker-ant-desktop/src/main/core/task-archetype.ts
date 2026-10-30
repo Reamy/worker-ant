@@ -173,6 +173,34 @@ export function narrowToolFace(
 }
 
 /**
+ * 子代理作用域收窄（zx_20261030_2 M2）：在形态收窄结果之上再落 allow/deny **两刀**。
+ *
+ * 病根（真标本 792d6adb）：旧装配点是「先删形态档外 → 推工具面说明书 → 再删 allow/deny」，
+ *   说明书说 63 件、模型实际拿到 8 件。本函数把两刀收成**纯计算**，让调用方按同一结果
+ *   删 key、写说明书——「说什么」与「给什么」从此同源。
+ *
+ * 优先级（与旧装配点逐字一致）：**deny 永远赢过 allow**；allow 存在时，不在名单内的一律移出。
+ * `removedByAllow`/`removedByDeny` 供日志与断言分辨「被谁删的」。
+ */
+export function applySubagentToolScope(
+  face: { kept: readonly string[]; removed: readonly string[] },
+  opts: { allowTools?: readonly string[]; denyTools?: readonly string[] },
+): { kept: string[]; removed: string[]; removedByAllow: string[]; removedByDeny: string[] } {
+  const allow = opts.allowTools ? new Set(opts.allowTools) : null;
+  const deny = new Set(opts.denyTools ?? []);
+  const kept: string[] = [];
+  const removed = [...face.removed];
+  const removedByAllow: string[] = [];
+  const removedByDeny: string[] = [];
+  for (const k of face.kept) {
+    if (deny.has(k)) { removedByDeny.push(k); removed.push(k); continue; }
+    if (allow && !allow.has(k)) { removedByAllow.push(k); removed.push(k); continue; }
+    kept.push(k);
+  }
+  return { kept, removed, removedByAllow, removedByDeny };
+}
+
+/**
  * 如实告知（正向·开工即知）：本档可用哪些工具。
  * 本档**零收窄**时不列名——此时没有"档外"可告知，列名纯属噪音（且白花 token）。
  */
@@ -222,6 +250,11 @@ const ARCHETYPE_KEYWORD_RULES: Array<{ pattern: RegExp; archetype: TaskArchetype
   //   ⇒ 判 document ⇒ `narrowToolFace` 删掉 shell ⇒ 既不能编译/自检，也提交不了（全仓脏即被拦）。
   //   本规则只认"动作 + 代码产物"同句共现，不吞「撰写技术报告」这类真文档任务。
   { pattern: /(新建|新增|增强|添加|扩展|实现|开发|改造|重构|修复|补全|接入|编写).{0,24}(端点|接口|API|控制器|controller|页面|路由|组件|模块|服务|函数|脚本|引擎)/i, archetype: 'code', reason: '动作+代码产物=编码实现（附证据文档亦然）' },
+  // zx_20261030_2 M1（「名」）：**「增加/启用/禁用…」也是写代码的动词**。
+  //   真标本：任务「增加用户禁用功能」（48 字）——旧动词表无「增加」，题面短 ⇒ 长度兜底判 `conversation`
+  //   ⇒ 100k 预算/10 步/工具面无 write ⇒ 只能派子，而子又拿不到 `edit_file`（D2）。
+  //   本规则只认「动作 + 功能/开关类产物」**同句共现**；`增加一份报告`/`支持一下这个问题` 不命中。
+  { pattern: /(增加|新增|添加|启用|禁用|移除|删除|支持|开放|提供|实现|开发|改造|接入).{0,12}(功能|开关|入口|按钮|菜单|权限|字段|选项|设置项|接口|API|端点|页面|模块|组件)/, archetype: 'code', reason: '动作+功能/开关类产物=编码实现' },
   // 文档类：**文档/报告本身是交付物**——动词与文档名词紧邻（仅容"一份/技术/API/接口"这类定语）。
   //   zx_20261022_3：去掉 `写.*(文档|报告)` 的跨句松匹配——它把"把核对表写进证据文档"读成了写文档任务。
   { pattern: /生成.{0,20}(文档|报告|方案|计划|README|总结)/, archetype: 'document', reason: '明确文档生成意图' },
@@ -285,30 +318,51 @@ function familyResemblanceScore(text: string, representative: string): number {
   return union === 0 ? 0 : intersection / union;
 }
 
-/** 兜底：基于消息长度和特征推断 */
-function fallbackArchetype(text: string): TaskArchetype {
+/** 形态判定的来源（zx_20261030_2 M1）：写进任务账，GUI 据此说「为什么判成这个」。
+ *  `node`/`manual` 由执行器侧的 `resolvePinnedArchetype` 给出；`semantic`/`calibrated` 是自动判定之后的两次修正。 */
+export type ArchetypeSource = 'keyword' | 'family' | 'fallback' | 'semantic' | 'calibrated' | 'node' | 'manual';
+
+export interface ArchetypeDecision {
+  archetype: TaskArchetype;
+  source: ArchetypeSource;
+  reason: string;
+}
+
+/** 兜底：基于消息长度和特征推断。返回判定与**具体分支**（供溯源，不靠猜）。 */
+function fallbackArchetypeDetailed(text: string): ArchetypeDecision {
   const len = text.length;
-  if (len < 30) return 'conversation';
-  if (/\b(function|const |let |import |export |class |interface |type |async |await |return |\.tsx?|\.jsx?)\b/.test(text)) return 'code';
-  if (/\.md|\.json|\.yml|\.yaml|\.csv/.test(text)) return 'document';
-  if (/(产出|交付|输出|生成|创建|写.*文件)/.test(text)) return 'document';
-  if (len > 200) return 'research';
-  return 'conversation';
+  if (len < 30) return { archetype: 'conversation', source: 'fallback', reason: `短题面（${len} 字）` };
+  if (/\b(function|const |let |import |export |class |interface |type |async |await |return |\.tsx?|\.jsx?)\b/.test(text)) {
+    return { archetype: 'code', source: 'fallback', reason: '题面含代码特征' };
+  }
+  if (/\.md|\.json|\.yml|\.yaml|\.csv/.test(text)) return { archetype: 'document', source: 'fallback', reason: '题面含文档/数据文件扩展名' };
+  if (/(产出|交付|输出|生成|创建|写.*文件)/.test(text)) return { archetype: 'document', source: 'fallback', reason: '题面含产出/交付意图' };
+  if (len > 200) return { archetype: 'research', source: 'fallback', reason: '长题面且无更具体特征' };
+  return { archetype: 'conversation', source: 'fallback', reason: '无匹配特征，按通用问答处理' };
+}
+
+function fallbackArchetype(text: string): TaskArchetype {
+  return fallbackArchetypeDetailed(text).archetype;
 }
 
 /** 关键词快速分类（零延迟） */
-export function classifyArchetypeKeyword(text: string): TaskArchetype | null {
+export function classifyArchetypeKeywordDetailed(text: string): { archetype: TaskArchetype; reason: string } | null {
   // zx_20260904_3 D3 (2026-09-04): 规划/调研 + 产出文档意图 → research（在 code 规则前判定，
   // 避免"优化规划"等含"实现…功能"的描述被 code 误吞——先走查再落方案文档而非写代码）
   if (/(功能优化规划|优化方案|排期方案|升级方案|优化规划|实施规划|改进方案|方案设计|调研方案|调研报告|完成情况核实|复核报告)/.test(text)
     && /(写入|写到|产出|生成|落盘|写出|保存到|交付|提交)/.test(text)
     && /(\.md|\.MD|文档|报告|方案文件)/.test(text)) {
-    return 'research';
+    return { archetype: 'research', reason: '规划/调研+产出文档' };
   }
   for (const rule of ARCHETYPE_KEYWORD_RULES) {
-    if (rule.pattern.test(text)) return rule.archetype;
+    if (rule.pattern.test(text)) return { archetype: rule.archetype, reason: rule.reason };
   }
   return null;
+}
+
+/** 关键词快速分类（兼容出口：只要形态） */
+export function classifyArchetypeKeyword(text: string): TaskArchetype | null {
+  return classifyArchetypeKeywordDetailed(text)?.archetype ?? null;
 }
 
 /** 家族相似性分类 */
@@ -321,22 +375,27 @@ export function classifyByFamilyResemblance(text: string): Array<{ archetype: Ta
   return scores;
 }
 
-/** 任务类型分类（关键词 → 家族相似性 → 长度兜底） */
-export function classifyArchetype(text: string): TaskArchetype {
-  const kw = classifyArchetypeKeyword(text);
+/** 任务类型分类（关键词 → 家族相似性 → 长度兜底），带来源与理由。 */
+export function classifyArchetypeDetailed(text: string): ArchetypeDecision {
+  const kw = classifyArchetypeKeywordDetailed(text);
   if (kw) {
-    logger.info({ archetype: kw, text: text.slice(0, 60) }, '任务类型(关键词)');
-    return kw;
+    logger.info({ archetype: kw.archetype, text: text.slice(0, 60) }, '任务类型(关键词)');
+    return { archetype: kw.archetype, source: 'keyword', reason: kw.reason };
   }
   const family = classifyByFamilyResemblance(text);
   const best = family[0]!;
   if (best.score >= 0.05) {
     logger.info({ archetype: best.archetype, score: best.score.toFixed(3), text: text.slice(0, 60) }, '任务类型(家族相似性)');
-    return best.archetype;
+    return { archetype: best.archetype, source: 'family', reason: `与「${best.archetype}」家族相似度 ${best.score.toFixed(3)}` };
   }
-  const fb = fallbackArchetype(text);
-  logger.info({ archetype: fb, text: text.slice(0, 60) }, '任务类型(长度兜底)');
+  const fb = fallbackArchetypeDetailed(text);
+  logger.info({ archetype: fb.archetype, text: text.slice(0, 60) }, '任务类型(长度兜底)');
   return fb;
+}
+
+/** 任务类型分类（关键词 → 家族相似性 → 长度兜底） */
+export function classifyArchetype(text: string): TaskArchetype {
+  return classifyArchetypeDetailed(text).archetype;
 }
 
 /** 获取任务原型的自适应策略 */

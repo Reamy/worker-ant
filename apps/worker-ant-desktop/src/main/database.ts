@@ -18,6 +18,14 @@ import { TRIAL_ANCHOR_FILENAME, readSeal, resolveTrialAnchor, writeSeal } from '
 import { backfillTripleSubjects } from './core/memory-kg-subjects.js';
 // zx_20261023_4: 种子管理员邮箱与「首启自动登录」判据**同一处真源**——防"写 a 认 b"。
 import { SEED_OWNER_EMAIL } from './core/local-owner.js';
+// zx_20261029_2 M6「堵空档」：种子管理员同样是一席位——插入前须过本机账号闸
+//   （与企业/邀请/自助注册同一扇门，不为"种子"另开一条绕过路径）。
+import { resolveLicenseTier } from './core/license.js';
+import { assertSeatAvailable, SeatLimitError } from './core/seat-quota.js';
+// zx_20261029_2 M1: 设备品类归一的唯一真源（零依赖纯函数；此处只用它做旧行回填）。
+import { kindClassOf } from './core/device-kind.js';
+// zx_20261029_3 M3: 后台进程登记表的 DDL 真源（rr 夹具同引，防夹具与生产建表漂移）。
+import { BACKGROUND_JOBS_DDL } from './core/background-jobs.js';
 
 export function initDatabase(dataDir: string, dbName = 'worker-ant-server.db'): Database.Database {
   // 确保数据目录存在
@@ -197,6 +205,31 @@ export function initDatabase(dataDir: string, dbName = 'worker-ant-server.db'): 
       PRIMARY KEY (task_id, path)
     );
     CREATE INDEX IF NOT EXISTS idx_wa_task_files_task ON wa_task_files(task_id);
+    -- zx_20261028_2 M1（为学日益，为道日损）：世界模型快照**原文**不与任务上下文同居。
+    --   病根（真标本 f021a2a4）：ctx 217,629 B 里 198,036 B 是一份从未被比对的 before
+    --   （收口路不经过审计，after 恒缺）；全库同类载荷 28.3 MB / 31.3 MB。
+    --   ctx 只留引用摘要（ref/timestamp/fileCount/truncated），原文按引用取。
+    CREATE TABLE IF NOT EXISTS wa_world_snapshots (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      captured_at TEXT NOT NULL,
+      file_count INTEGER NOT NULL DEFAULT 0,
+      truncated INTEGER NOT NULL DEFAULT 0,
+      payload_json TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    -- zx_20261030_1 M6（大野耐一·现地现物 / 艾宾浩斯·遗忘曲线）: 项目知识**增量水位**。
+    --   last_event_id = 本项目已吸收到 wa_event_log.id 的哪一行（缺行 ⇒ 0 ⇒ 首次从全史起读）；
+    --   只前移、不回退（语义单一真源 core/knowledge-watermark.ts 的 advanceWatermark）。
+    --   wa_event_log **没有 project_id 列**，项目归属由 knowledge-watermark.ts 的
+    --   event_projects CTE 一处推导（aggregate_type/aggregate_id → payload/metadata → 任务归属）。
+    CREATE TABLE IF NOT EXISTS wa_knowledge_watermarks (
+      project_id TEXT PRIMARY KEY,
+      last_event_id INTEGER NOT NULL DEFAULT 0,
+      last_run_at TEXT NOT NULL DEFAULT (datetime('now')),
+      last_event_at TEXT NOT NULL DEFAULT ''
+    );
   `);
 
   // ===== 索引 =====
@@ -222,6 +255,7 @@ export function initDatabase(dataDir: string, dbName = 'worker-ant-server.db'): 
     CREATE INDEX IF NOT EXISTS idx_event_type_time ON wa_event_log(event_type, occurred_at);
     CREATE INDEX IF NOT EXISTS idx_event_correlation ON wa_event_log(json_extract(metadata, '$.correlation_id'));
     CREATE INDEX IF NOT EXISTS idx_deliv_versions ON wa_deliverable_versions(deliverable_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_wa_world_snapshots_task ON wa_world_snapshots(task_id, kind);
   `);
 
   // ===== 迁移（兼容旧表无列的情况） =====
@@ -334,6 +368,10 @@ export function initDatabase(dataDir: string, dbName = 'worker-ant-server.db'): 
     //   `remote` = 终端自己敲门（入站门），`lan` = 工蚁 mDNS 浏览到后由用户在面板发起。
     //   面板与 IM 通知据此如实说明"它怎么来的"；缺列时读口按 `remote` 兜底，不影响配对。
     "ALTER TABLE wa_external_terminals ADD COLUMN source TEXT DEFAULT 'remote'",
+    // zx_20261029_2 M1（庄子·不预设）: 设备**派生类目**列——`kind` 是设备自述（原样保留），
+    //   `kind_class` 是归一后的可执行品类（唯一计算真源 `core/device-kind.ts`）。
+    //   旧行由建表之后的 `backfillDeviceKindClasses` 一次性回填；读口亦按自述兜底，空串不冒充品类。
+    "ALTER TABLE wa_devices ADD COLUMN kind_class TEXT NOT NULL DEFAULT ''",
   ];
   for (const sql of migrations) {
     try { db.exec(sql); } catch { /* 列已存在，跳过 */ }
@@ -354,6 +392,12 @@ export function initDatabase(dataDir: string, dbName = 'worker-ant-server.db'): 
   //   ⚠ 必须排在**建表之后**：放进上面 migrations 数组会在 CREATE TABLE 之前跑、被 try/catch 静默吞掉
   //   （zx_20261016_2 的教训）。幂等：改过再跑不命中任何行。
   try { backfillTripleSubjects(db); } catch { /* 老库缺表/缺列如实跳过，不阻断启动 */ }
+
+  // zx_20261029_2 M1（庄子·不预设）: 旧设备的派生类目一次性回填。
+  //   ⚠ 必须排在**建表之后**（同上一行的教训：放进 migrations 数组会在 CREATE TABLE 之前跑、被静默吞掉）。
+  //   幂等：只取 `kind_class=''` 的行，回填后再跑不命中。反推依据只有自述 kind/protocol/capabilities
+  //   （米家 model 未落库，旧米家行保持 `unknown`——如实"未识别"，不按名字猜）。
+  try { backfillDeviceKindClasses(db); } catch { /* 老库缺表/缺列如实跳过，不阻断启动 */ }
 
   // ===== 系统设置表 =====
   db.exec(`CREATE TABLE IF NOT EXISTS wa_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT DEFAULT (datetime('now')))`);
@@ -440,6 +484,11 @@ export function initDatabase(dataDir: string, dbName = 'worker-ant-server.db'): 
   )`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_wa_service_calls_project ON wa_service_calls(project_id, created_at DESC)`);
 
+  // ===== 后台进程登记表（zx_20261029_3 M3: 看得见、停得掉、退出带走）=====
+  //   DDL 真源在 `core/background-jobs.ts` 的 `BACKGROUND_JOBS_DDL`——rr 夹具同引这一份，
+  //   避免"夹具建的表比生产宽/乱序，断言只是自我印证"（见 CLAUDE.md 开发约定）。
+  db.exec(BACKGROUND_JOBS_DDL);
+
   // ===== 局域网设备台账 + 控制审计（zx_20261004 M7/M9: K-3 协议无关发现 / K-6 显式授权白名单）=====
   //   语义单一真源在 `core/device-registry.ts`（upsert 去重/控制闸/审计全在那里），此处只建表。
   //   两条硬约束：**去重键 = protocol + address**（唯一索引即是它，"同一设备"只此一判据）；
@@ -455,6 +504,8 @@ export function initDatabase(dataDir: string, dbName = 'worker-ant-server.db'): 
     alias TEXT DEFAULT '',
     room TEXT DEFAULT '',
     kind TEXT DEFAULT 'unknown',
+    -- zx_20261029_2 M1: 派生类目（core/device-kind.ts 是唯一计算真源）；旧库由 migration + 建表后回填补齐。
+    kind_class TEXT NOT NULL DEFAULT '',
     protocol TEXT NOT NULL,
     address TEXT NOT NULL,
     port INTEGER,
@@ -556,11 +607,16 @@ export function initDatabase(dataDir: string, dbName = 'worker-ant-server.db'): 
     params_json TEXT NOT NULL DEFAULT '{}',
     plan_json TEXT NOT NULL DEFAULT '{}',
     status TEXT NOT NULL DEFAULT 'planned',
+    -- zx_20261029_2 M2: 计划**来路**——'rule'＝确定性规则表，'model'＝规则排不出时请模型补的。
+    --   语义单一真源 core/intent-plans.ts；旧行按 'rule' 兜底（本轮之前只有规则路）。
+    source TEXT NOT NULL DEFAULT 'rule',
     created_at TEXT DEFAULT (datetime('now')),
     expires_at TEXT NOT NULL,
     executed_at TEXT,
     result_json TEXT NOT NULL DEFAULT '{}'
   )`);
+  // 老库补列：本表建在 migrations 数组**之后**，故 ALTER 只能跟在这里（放前面会被 try/catch 静默吞掉）。
+  try { db.exec("ALTER TABLE wa_intent_plans ADD COLUMN source TEXT NOT NULL DEFAULT 'rule'"); } catch { /* 列已存在 */ }
   db.exec(`CREATE INDEX IF NOT EXISTS idx_wa_intent_plans_status ON wa_intent_plans(status, expires_at)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_wa_intent_plans_terminal ON wa_intent_plans(terminal_id, created_at DESC)`);
 
@@ -633,6 +689,37 @@ export function initDatabase(dataDir: string, dbName = 'worker-ant-server.db'): 
     origin TEXT NOT NULL DEFAULT 'local',
     source_project_name TEXT DEFAULT ''
   )`);
+  // zx_20261027_3 M6b: 画像**旧版留痕**——自动跟随覆盖前先把上一版归档（同一 `source_hash` 只留一份），
+  //   "换了哪一版、什么时候换的"可回溯。主键 `(project_id, source_hash)`：同输入重复归档不增行。
+  db.exec(`CREATE TABLE IF NOT EXISTS wa_project_profile_history (
+    project_id TEXT NOT NULL,
+    source_hash TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    profile_json TEXT NOT NULL,
+    generated_at TEXT DEFAULT '',
+    replaced_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (project_id, source_hash)
+  )`);
+
+  // ===== 项目须知（zx_20261029_1「知」: 道德经·不出户知天下 / 毛选·没有调查没有发言权）=====
+  //   项目创建时（或详情页手动重跑）读仓一次，由模型归纳成结构化摘要，供后续任务稳定注入。
+  //   与画像（库内事实派生）/九节册（零 LLM 派生）分工不同：须知是**代码仓的只读快照**。
+  //   `brief_json` 保留最近一次**成功**的版本——一次重跑失败不清空已有认知；
+  //   `status` 仅用于界面如实展示（pending/running/ready/failed），注入侧只认 brief_json 非空。
+  //   ⚠ 建表**必须在 `CREATE TABLE` 段**、不得放进上方 migrations 数组。
+  //   语义单一真源在 `core/project-brief.ts`，此处只建表。
+  db.exec(`CREATE TABLE IF NOT EXISTS wa_project_briefs (
+    project_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'pending',
+    brief_json TEXT NOT NULL DEFAULT '',
+    source_hash TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    tokens_in INTEGER NOT NULL DEFAULT 0,
+    tokens_out INTEGER NOT NULL DEFAULT 0,
+    trigger TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
 
   // ===== 领域包（zx_20261021_3 批一: 庄子·指穷于为薪，火传也）=====
   //   `wa_domain_packs` = **可携带资产**（从某项目派生的三节 JSON）；`wa_project_domain_packs` = **启用关系**。
@@ -648,9 +735,18 @@ export function initDatabase(dataDir: string, dbName = 'worker-ant-server.db'): 
     pack_json TEXT NOT NULL,
     source_project_id TEXT,
     source_project_name TEXT DEFAULT '',
+    -- zx_20261030_1 M6（大野耐一·现地现物 / 王阳明·知行合一）: 包**来路**——
+    --   'user' = 用户主动生成/导入；'auto_candidate' = 系统按项目知识建议的候选包（**永不自动启用**）。
+    --   'dismissed_at' 非空 = 用户已忽略该候选（同一来源项目不再重复建议）。
+    --   语义单一真源 core/domain-pack.ts；本处只建列。
+    origin TEXT NOT NULL DEFAULT 'user',
+    dismissed_at TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
   )`);
+  // 老库补列：本表建在 migrations 数组**之后**，故 ALTER 只能跟在这里（放前面会被 try/catch 静默吞掉）。
+  try { db.exec("ALTER TABLE wa_domain_packs ADD COLUMN origin TEXT NOT NULL DEFAULT 'user'"); } catch { /* 列已存在 */ }
+  try { db.exec("ALTER TABLE wa_domain_packs ADD COLUMN dismissed_at TEXT"); } catch { /* 列已存在 */ }
   db.exec(`CREATE TABLE IF NOT EXISTS wa_project_domain_packs (
     project_id TEXT NOT NULL,
     pack_id TEXT NOT NULL,
@@ -794,8 +890,24 @@ export function initDatabase(dataDir: string, dbName = 'worker-ant-server.db'): 
   ensureSetting('node.external_inbound', 'false');
 
   // ===== 种子数据：默认管理员 =====
+  // zx_20261029_2 M6：种子管理员**同样要过本机账号闸**（`assertSeatAvailable`）。首次安装时
+  //   `wa_users` 为空 ⇒ 必过；只有在"种子行被删、且已有成员坐满上限"这种异常态才会被拦——
+  //   此时**不造超编账号、也不让启动崩**，如实告警后跳过（与席位闸"只拦新增"同向）。
   const seedAdmin = db.prepare('SELECT id FROM wa_users WHERE email = ?').get(SEED_OWNER_EMAIL);
+  let seedAllowed = !!seedAdmin;
   if (!seedAdmin) {
+    try {
+      assertSeatAvailable(db, resolveLicenseTier(db));
+      seedAllowed = true;
+    } catch (err) {
+      if (err instanceof SeatLimitError) {
+        console.warn(`[DB] 默认管理员未创建：${err.message}`);
+      } else {
+        throw err;
+      }
+    }
+  }
+  if (seedAllowed && !seedAdmin) {
     const salt = crypto.randomBytes(16).toString('hex');
     const hash = crypto.createHash('sha256').update(salt + 'admin123').digest('hex');
     const id = crypto.randomUUID();
@@ -826,4 +938,38 @@ export function initDatabase(dataDir: string, dbName = 'worker-ant-server.db'): 
 
   console.log('[DB] 数据库已初始化:', dbPath);
   return db;
+}
+
+/**
+ * zx_20261029_2 M1（庄子·不预设）: 把旧设备的派生类目补齐。
+ *
+ * 只处理 `kind_class=''` 的行（幂等）；依据只有已落库的**自述** `kind`/`protocol`/`capabilities_json`。
+ * 米家旧行的 model 未落库 ⇒ 保持 `unknown`（如实"未识别"，**不**按名字猜）；有 token 的新发现会补上。
+ * 返回回填行数（受控回归据此做 0→N 的正面断言）。
+ */
+export function backfillDeviceKindClasses(db: Database.Database): number {
+  const rows = db.prepare(
+    "SELECT id, kind, protocol, capabilities_json FROM wa_devices WHERE kind_class IS NULL OR TRIM(kind_class) = ''",
+  ).all() as Array<{ id: string; kind: string | null; protocol: string | null; capabilities_json: string | null }>;
+  if (rows.length === 0) return 0;
+  const upd = db.prepare('UPDATE wa_devices SET kind_class = ? WHERE id = ?');
+  let n = 0;
+  // 逐行普通写（幂等：只碰空值行）；不开事务——启动路径单次、失败可重入，且便于受控回归直跑。
+  for (const row of rows) {
+    let capabilities: string[] = [];
+    try {
+      const parsed = JSON.parse(String(row.capabilities_json ?? '[]'));
+      if (Array.isArray(parsed)) capabilities = parsed.filter((c): c is string => typeof c === 'string');
+    } catch {
+      capabilities = [];
+    }
+    const kindClass = kindClassOf({
+      kind: String(row.kind ?? 'unknown'),
+      protocol: String(row.protocol ?? ''),
+      capabilities,
+    });
+    upd.run(kindClass, row.id);
+    n += 1;
+  }
+  return n;
 }

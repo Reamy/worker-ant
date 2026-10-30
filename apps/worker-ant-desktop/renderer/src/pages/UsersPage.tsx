@@ -45,18 +45,19 @@ export default function UsersPage() {
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-3">
           <h2 className="text-xl font-bold">用户管理</h2>
-          {/* zx_20261017_1 批五: 席位用量取 `license:status.seats`（与设置页同源，不在前端数 users.length）。 */}
+          {/* zx_20261017_1 批五: 用量取 `license:status.seats`（与设置页同源，不在前端数 users.length）。
+              zx_20261029_2 M6 文案统一：一律称「本机账号」（跨机容量看协同节点，不暗示团队席位）。 */}
           <span className={`text-xs px-2 py-0.5 rounded-full ${seatsFull(seats) ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-500'}`}>{seatText(seats)}</span>
         </div>
         <div className="flex items-center gap-2">
           <button onClick={load} className="p-2 hover:bg-gray-100 rounded-lg"><RefreshCw className="w-4 h-4"/></button>
-          <button onClick={handleInvite} disabled={seatsFull(seats)} title={seatsFull(seats) ? '席位已满：邀请发出也接不进来，升级档位可增加席位' : undefined} className="flex items-center gap-1 px-3 py-1.5 bg-purple-600 text-white rounded-lg text-sm hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed"><Link className="w-3.5 h-3.5"/>邀请用户</button>
-          <button onClick={()=>setShowAdd(true)} disabled={seatsFull(seats)} title={seatsFull(seats) ? '席位已满：升级档位可增加席位' : undefined} className="flex items-center gap-1 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"><Plus className="w-3.5 h-3.5"/>添加用户</button>
+          <button onClick={handleInvite} disabled={seatsFull(seats)} title={seatsFull(seats) ? '本机账号已满：邀请发出也接不进来，升级档位可增加上限' : undefined} className="flex items-center gap-1 px-3 py-1.5 bg-purple-600 text-white rounded-lg text-sm hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed"><Link className="w-3.5 h-3.5"/>邀请用户</button>
+          <button onClick={()=>setShowAdd(true)} disabled={seatsFull(seats)} title={seatsFull(seats) ? '本机账号已满：升级档位可增加上限' : undefined} className="flex items-center gap-1 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"><Plus className="w-3.5 h-3.5"/>添加用户</button>
         </div>
       </div>
       {seatsFull(seats) && (
         <p className="mb-4 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-          席位已满：现有 {seats?.used} 位成员不受影响；新建/受邀用户须先升级档位（或移除成员）后才会被接受。
+          本机账号已满：现有 {seats?.used} 个账号不受影响；新建/受邀账号须先升级档位（或移除账号）后才会被接受。
         </p>
       )}
       {inviteLink && (

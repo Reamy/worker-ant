@@ -6,8 +6,9 @@
  *   本模块把两者接上：建单成功且**确属可外派**（无父/无依赖/无附件/无工作目录/未拆解/形态可路由）时，
  *   预查在线对端 → 提交（`require_target: true`）→ 记三键 → 由 `node-dispatcher` 留审计痕。
  *
- * ⚠ **默认关**：设置 `node.auto_dispatch_on_create` 只认显式 `'1'`；未配置/其他值一律当关——不惊扰既有行为
- *   （承 `node-orchestrate.readOrchestrateMode` 的默认关口径）。
+ * ⚠ **三态（zx_20261029_2 M7）**：设置 `node.auto_dispatch_on_create` 显式 `'1'` 开、显式 `'0'` 关；
+ *   未配置时跟 Team 许可 + 入网（团队版已解锁且已入网 ⇒ 开），近似真值一律当关。
+ *   缺省开**仅在满负荷时溢出**（`local-capacity`）——本机跑得动就先在本机跑，不替用户把活推走。
  * ⚠ **不猜**：任何一项准入不满足即**不外派**，并回**机器可读理由**（界面据此说人话）；不确定就留在本机。
  * ⚠ 失败**不阻断建单**：外派只是这一件事的分流，建单是用户的主动作——`dispatchCreatedTask` 永不抛。
  * ⚠ 本模块**不触网**：台账读取与派发 IO 皆可注入（真机＝`fetchNodes` / `makeAnsDispatchIo`；回归喂假）。
@@ -29,7 +30,12 @@ import {
 import { fetchNodes, listDispatchablePeers, type NodeLedger } from './node-list.js';
 import { NODE_ROLE_LABEL, isNodeRole, type NodeCardCategory, type NodeRole } from '@worker-ant/shared-types';
 import { type DepState, parseDepIds } from './dep-graph.js';
-import { resolveProjectConcurrency, type AccountingDb } from './task-accounting.js';
+import {
+  countMachineRunning,
+  resolveMachineConcurrencyLimit,
+  resolveProjectConcurrency,
+  type AccountingDb,
+} from './task-accounting.js';
 import { taskDepState } from './task-dep-gate.js';
 import { routeCategoryForTask } from './task-routing.js';
 import { UPSTREAM_MAX_CHARS, UPSTREAM_MAX_ITEMS, type UpstreamSummaryItem } from './exec-prelude.js';
@@ -43,9 +49,54 @@ const logger = createLogger('collab-dispatch');
  */
 export const AUTO_DISPATCH_SETTING_KEY = NODE_SETTING_KEYS.autoDispatchOnCreate;
 
-/** 设置是否开启（**只认显式 `'1'`**；未配置/`'0'`/其他值皆关）。 */
-export function isAutoDispatchOn(db: NodeSettingDb): boolean {
-  return readNodeSetting(db, AUTO_DISPATCH_SETTING_KEY) === '1';
+/**
+ * 开关的三态（zx_20261029_2 M7）：显式 `'1'` 开、显式 `'0'` 关、**未配置**时跟随许可与入网——
+ *   团队版已解锁 ∧ 本机已入网 ⇒ 默认开；社区/Pro 或未入网 ⇒ 默认关。
+ *
+ * 为何缺省不再是"关"：多机协同是 Team 档**买来**的能力，买了却要用户先去设置里找开关才生效，
+ *   等于"承诺的没兑现"。缺省开仍守"不惊扰"——**只在满负荷时溢出**（`localHasFreeSlot`），
+ *   本机跑得过来就一件都不外派。
+ *
+ * ⚠ 近似真值（`'true'`/`'on'`/空白以外的任意串）**一律按关**，不因为"看起来像开"就开——
+ *   写坏的值不该悄悄改变行为；空串视同未配置（历史写入口可能落空串）。
+ */
+export interface AutoDispatchPolicyFacts {
+  /** 设置原值（`null` = 从未配置）。 */
+  raw: string | null;
+  teamUnlocked: boolean;
+  enrolled: boolean;
+}
+
+export interface AutoDispatchPolicy {
+  enabled: boolean;
+  /** `explicit` = 用户显式设过；`default` = 缺省三态（跟随 Team + 入网）。 */
+  source: 'explicit' | 'default';
+  /** 给界面显示的一句话（说清"为什么开/关"）。 */
+  reason: string;
+}
+
+export function decideAutoDispatchPolicy(f: AutoDispatchPolicyFacts): AutoDispatchPolicy {
+  const raw = f.raw == null ? '' : f.raw.trim();
+  if (raw === '1') return { enabled: true, source: 'explicit', reason: '已手动开启' };
+  if (raw === '0') return { enabled: false, source: 'explicit', reason: '已手动关闭' };
+  if (raw !== '') return { enabled: false, source: 'explicit', reason: `设置值「${raw}」无法识别，按关闭处理` };
+  if (!f.teamUnlocked) return { enabled: false, source: 'default', reason: '团队版未解锁——不默认开启多机外派' };
+  if (!f.enrolled) return { enabled: false, source: 'default', reason: '本机尚未入网——加入协同网络后默认开启' };
+  return { enabled: true, source: 'default', reason: '团队版已解锁且本机已入网——默认开启，仅在本机满负荷时溢出' };
+}
+
+/** 从库现读三态（纯判据在 `decideAutoDispatchPolicy`；此处只取事实）。永不抛。 */
+export function autoDispatchPolicy(db: NodeSettingDb & LicenseSettingDb): AutoDispatchPolicy {
+  let teamUnlocked = false;
+  try { teamUnlocked = teamFeatureRefusal(db, 'multi_node') === null; } catch { /* 读不到许可 ⇒ 当锁定 */ }
+  let enrolled = false;
+  try { enrolled = isNodeEnrolled(db); } catch { /* 读不到设置 ⇒ 当未入网 */ }
+  return decideAutoDispatchPolicy({ raw: readNodeSetting(db, AUTO_DISPATCH_SETTING_KEY), teamUnlocked, enrolled });
+}
+
+/** 设置是否**生效**（三态合成后的唯一读口）。 */
+export function isAutoDispatchOn(db: NodeSettingDb & LicenseSettingDb): boolean {
+  return autoDispatchPolicy(db).enabled;
 }
 
 /** 一次性引导标记键——键名本体仍在 `NODE_SETTING_KEYS`（只导出语义别名）。 */
@@ -56,24 +107,32 @@ export function isAutoDispatchPrompted(db: NodeSettingDb): boolean {
   return readNodeSetting(db, AUTO_DISPATCH_PROMPTED_KEY) === 'true';
 }
 
-/** 一次性引导的准入事实——纯函数，供 GUI/IPC 一处判定"该不该问"。 */
+/** 一次性告知的准入事实——纯函数，供 GUI/IPC 一处判定"该不该说一声"。 */
 export interface AutoDispatchPromptFacts {
   /** Team `multi_node` 解锁（真源 `teamFeatureRefusal`）。 */
   teamUnlocked: boolean;
   /** 本机已入网。 */
   enrolled: boolean;
-  /** 开关当前是否已开。 */
+  /** 开关当前是否**生效**。 */
   enabled: boolean;
-  /** 是否已问过。 */
+  /** 开关来由（`autoDispatchPolicy().source`）。缺省按显式对待——旧调用方不被新语义骚扰。 */
+  source?: 'explicit' | 'default';
+  /** 是否已告知过。 */
   prompted: boolean;
 }
 
 /**
- * 是否**应当**弹出一次性引导（zx_20261018_1 R-9）：Team 已解锁 ∧ 已入网 ∧ 尚未开启 ∧ 尚未问过。
- * ⚠ 四者缺一不弹：社区/Pro **永不**弹（没有多机能力，问了也没用）；已开启的不打扰；问过的不再问。
+ * 是否**应当**说一声（zx_20261029_2 M7：从「询问」改为「告知」）：
+ *   Team 已解锁 ∧ 已入网 ∧ 此刻**确由缺省打开** ∧ 尚未告知。
+ *
+ * ⚠ 语义变了，判据也跟着变——旧口径是"还没开 ⇒ 问要不要开"，新口径是"已经替你开了 ⇒ 告诉你一声、
+ *   给你一键关闭"。所以：
+ *   - `enabled=false` 不再弹（没有"已开启"可告知，问了也是空话）；
+ *   - `source='explicit'` 不再弹（用户自己设过，不是"替你开的"）；
+ *   - 社区/Pro 永不弹（没有多机能力）；告知过的不再打扰。
  */
 export function shouldPromptAutoDispatch(f: AutoDispatchPromptFacts): boolean {
-  return f.teamUnlocked && f.enrolled && !f.enabled && !f.prompted;
+  return f.teamUnlocked && f.enrolled && f.enabled && (f.source === undefined || f.source === 'default') && !f.prompted;
 }
 
 export interface AutoDispatchOnboardingResult {
@@ -84,9 +143,12 @@ export interface AutoDispatchOnboardingResult {
 }
 
 /**
- * 落一次引导结果：Team 未解锁 ⇒ 如实拒（`team-locked`，不假装写上了）；
- * 否则写开关（`'1'`/`'0'`）并**无论应否都记"已问过"**（拒绝也是一次回答——不再打扰）。
- * ⚠ 仅写设备**设置键**，不起任何派发；开关真生效仍由 `isAutoDispatchOn` 一处读取。
+ * 落一次「告知」结果（zx_20261029_2 M7：询问 → 告知）：
+ *   - `accept=true`（"知道了，保持开启"）⇒ **只记"已告知"，不写开关**。若这里写 `'1'`，
+ *     缺省开就被钉成**显式**开，随之解除「满负荷才溢出」这道闸——恰恰是本轮要避免的"把本机跑得动的活推走"。
+ *   - `accept=false`（"一键关闭"）⇒ 写 `'0'`（显式关，此后默认三态不再替用户开）。
+ *   - Team 未解锁 ⇒ 如实拒（`team-locked`，不假装写上了）。
+ * ⚠ 仅写设备**设置键**，不起任何派发；开关真生效仍由 `autoDispatchPolicy`/`isAutoDispatchOn` 一处读取。
  */
 export function applyAutoDispatchOnboarding(
   db: NodeSettingDb & LicenseSettingDb,
@@ -95,7 +157,7 @@ export function applyAutoDispatchOnboarding(
   if (teamFeatureRefusal(db, 'multi_node')) {
     return { ok: false, reason: 'team-locked', enabled: isAutoDispatchOn(db), prompted: isAutoDispatchPrompted(db) };
   }
-  const wroteEnabled = writeNodeSetting(db, AUTO_DISPATCH_SETTING_KEY, accept ? '1' : '0');
+  const wroteEnabled = accept || writeNodeSetting(db, AUTO_DISPATCH_SETTING_KEY, '0');
   const wrotePrompted = writeNodeSetting(db, AUTO_DISPATCH_PROMPTED_KEY, 'true');
   return {
     ok: wroteEnabled && wrotePrompted,
@@ -110,8 +172,20 @@ export function applyAutoDispatchOnboarding(
  * 六类排除各自一位，**不合并成一个布尔**：合并后"为什么没派"就说不出来了。
  */
 export interface CreateDispatchFacts {
-  /** 设置开关（只认显式 `'1'`）。 */
+  /** 设置开关**生效**与否（三态合成后的结果；真源 `autoDispatchPolicy`）。 */
   settingOn: boolean;
+  /**
+   * 开关来由（`autoDispatchPolicy().source`）。**缺省按显式对待**——旧调用方不因本轮新增判据而改变行为。
+   * 只有 `'default'`（Team 缺省替用户开）才受「满负荷才溢出」约束：显式开启是用户自己的选择。
+   */
+  autoDispatchSource?: 'explicit' | 'default';
+  /**
+   * 本机此刻是否尚有余力（`countMachineRunning < resolveMachineConcurrencyLimit`，
+   * 与心跳的 `free_slots` / Peers 页同一真源）。
+   * **缺省（无此键）不改变旧行为**：不因此拦外派。含义（zx_20261029_2 M7）：
+   * 缺省开时只见「满负荷才溢出」——本机跑得动就先在本机跑。
+   */
+  localHasFreeSlot?: boolean;
   /** Team `multi_node` 是否解锁（真源 `teamFeatureRefusal`）。 */
   teamUnlocked: boolean;
   /** 本机是否已入网（真源 `isNodeEnrolled`）。 */
@@ -149,6 +223,8 @@ export type CreateDispatchReason =
   | 'has-attachments'
   | 'has-working-dir'
   | 'decomposed'
+  /** 本机尚有余力（缺省开时「满负荷才溢出」；显式开不受此限）。 */
+  | 'local-capacity'
   | 'no-category';
 
 export interface CreateDispatchDecision {
@@ -177,6 +253,9 @@ export function decideCreateDispatch(f: CreateDispatchFacts): CreateDispatchDeci
   if (f.hasAttachments) return deny('has-attachments');
   if (f.hasWorkingDir) return deny('has-working-dir');
   if (f.decomposed) return deny('decomposed');
+  // zx_20261029_2 M7：「缺省开」不等于「无条件外派」——本机还有余力就先在本机跑，满负荷才溢出。
+  //   显式开启（用户在设置里自己打的开关）不受此限：那是用户的主动选择，不是我们替他做的默认。
+  if (f.autoDispatchSource === 'default' && f.localHasFreeSlot === true) return deny('local-capacity');
   if (!f.category) return deny('no-category');
   return { eligible: true, reason: 'eligible', category: f.category };
 }
@@ -194,6 +273,7 @@ export const CREATE_DISPATCH_REASON_LABEL: Record<CreateDispatchReason, string> 
   'has-attachments': '任务带附件（附件在本机盘上）',
   'has-working-dir': '项目指定了本机工作目录',
   decomposed: '已按模板拆解（工作单元是子任务）',
+  'local-capacity': '本机尚有余力（满负荷才溢出到其他节点）',
   'no-category': '任务形态不明确（留在本机）',
 };
 
@@ -452,8 +532,16 @@ export function buildExistingTaskDispatchFacts(db: Database.Database, taskId: st
   let depState: DepState = 'met';
   try { depState = taskDepState(db, taskId); } catch { /* 读不到依赖 ⇒ 按 met（派发提交前 ANS 侧仍会把关） */ }
   const deps = parseDepIds(row?.depends_on);
+  let policy: AutoDispatchPolicy;
+  try {
+    policy = autoDispatchPolicy(db as unknown as NodeSettingDb & LicenseSettingDb);
+  } catch {
+    policy = { enabled: false, source: 'explicit', reason: '读不到开关设置，按关闭处理' };
+  }
   return {
-    settingOn: isAutoDispatchOn(db as unknown as NodeSettingDb),
+    settingOn: policy.enabled,
+    autoDispatchSource: policy.source,
+    localHasFreeSlot: localHasFreeSlot(db),
     teamUnlocked: teamFeatureRefusal(db as unknown as LicenseSettingDb, 'multi_node') === null,
     enrolled: isNodeEnrolled(db as unknown as NodeSettingDb),
     hasParent: Boolean(row?.parent_task_id),
@@ -558,7 +646,7 @@ export interface DispatchBoardPayload {
  */
 export function dispatchBoard(db: Database.Database, limit = 50): DispatchBoardPayload {
   const out: DispatchBoardPayload = {
-    enabled: isAutoDispatchOn(db as unknown as NodeSettingDb),
+    enabled: isAutoDispatchOn(db as unknown as NodeSettingDb & LicenseSettingDb),
     eligible: [],
     waiting: [],
     dead: [],
@@ -680,7 +768,7 @@ export async function dispatchReadyDependents(
  */
 export function scheduleDependentDispatch(db: Database.Database, completedTaskId: string): void {
   try {
-    if (!isAutoDispatchOn(db as unknown as NodeSettingDb)) return;
+    if (!isAutoDispatchOn(db as unknown as NodeSettingDb & LicenseSettingDb)) return;
     void dispatchReadyDependents(db, completedTaskId).catch((e: unknown) => {
       logger.warn({ completedTaskId, err: (e as Error)?.message }, '后继外派调度失败（不影响已完成任务）');
     });
@@ -728,6 +816,22 @@ export function taskHasDependencies(raw: unknown): boolean {
   if (typeof raw !== 'string') return false;
   const s = raw.trim();
   return s !== '' && s !== '[]';
+}
+
+/**
+ * 本机此刻是否尚有余力（zx_20261029_2 M7）。**与心跳/Peers 页同一真源**：
+ *   `resolveMachineConcurrencyLimit`（机器并发上限）+ `countMachineRunning`（全机运行中任务数），
+ *   不另立计数器（否则"界面上看着有余力、判据说没有"）。
+ * 读不到 ⇒ 当**有余力**（不在本机跑满就外派是更坏的结果——"不确定就留在本机"，承本模块首注）。
+ */
+export function localHasFreeSlot(db: Database.Database): boolean {
+  try {
+    const accounting = db as unknown as AccountingDb;
+    const limit = resolveMachineConcurrencyLimit(accounting, {}).limit;
+    return countMachineRunning(accounting) < limit;
+  } catch {
+    return true;
+  }
 }
 
 /** 供 IPC 组准入事实时共用：项目是否指定了本机工作目录。 */

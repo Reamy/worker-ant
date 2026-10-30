@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { createLogger } from './logger.js';
 import { eventBus } from './event-bus.js';
 import { setDeliverableStatus } from './deliverable-lifecycle.js';
-import { PAUSE_REASON_EXEC_TIMEOUT, PAUSE_REASON_PLANNING_TIMEOUT, PAUSE_REASON_STALE_TIMEOUT, PAUSE_REASON_STARTUP_SWEEP, PAUSE_REASON_ABNORMAL_END, recordedPauseReason } from './pause-reason.js';
+import { PAUSE_REASON_EXEC_TIMEOUT, PAUSE_REASON_PLANNING_TIMEOUT, PAUSE_REASON_STALE_TIMEOUT, PAUSE_REASON_STARTUP_SWEEP, PAUSE_REASON_ABNORMAL_END, PAUSE_REASON_CHILDREN_INCOMPLETE, recordedPauseReason, pauseReasonLabel } from './pause-reason.js';
 import { pauseTask } from './pause-task.js';
 // zx_20260921 M7（D4 断点④）: 前置可解性判据与如实文案取**唯一真源**（不在此另写一份"前置是不是死了"）
 import { classifyDep, depBlockInfo, depBlocksRun, hasUnrecoverableDep, parseDepIds } from './dep-graph.js';
@@ -237,6 +237,15 @@ export function runHealthScan(db: Database.Database): void {
       }
       for (const id of rec.dispatched) {
         findings.push({ anomaly: `父执行被打断的悬空子任务: ${id}`, action: '派发ai-task救起', outcome: 'healed' });
+      }
+    }
+
+    // 4.5（zx_20261028_1 M5）：父等子、子全停 ⇒ 写一次停摆说明（只说明、不动状态）。
+    //   候选与去重都在函数内；本项只汇总播报（findings 与 `logHealing` 的账口径一致：`recorded`）。
+    {
+      const stalled = noticeStalledWaitingParents(db);
+      for (const id of stalled.noticed) {
+        findings.push({ anomaly: `任务停摆无出路: ${id}`, action: '写入停摆说明', outcome: 'recorded' });
       }
     }
 
@@ -547,6 +556,134 @@ export function reconcileStalledSubtasks(db: Database.Database): StallReconcileR
       checkParentTaskAfterChildDone(db, row.id);
     } catch (err) {
       logger.warn({ err: String(err), taskId: row.id }, '[自愈] 悬挂子任务收敛失败（跳过该条）');
+    }
+  }
+  return out;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// zx_20261028_1 M5「停」（佛学·缘起）：**停住必出声**。
+//
+// 真实标本：父 `paused(children_incomplete)`、两个子 `paused(user_interrupt)`、其余 pending 子的前置
+// 全指向那两个被停的子 ⇒ 从 01:24:26 起这棵树**结构上不可能再前进**，而界面只显示「子任务尚未完成」。
+// 三条既有裁决各自都对（停 ≠ 死；`children_incomplete` 父不派发；`user_interrupt` 不自动唤醒父），
+// 合起来留下"没人管"的一格。本函数**只说明、不动状态**：写 `$.pause_note` + 一行 `[停摆]` 会话 + 自愈账。
+// 不自动恢复是刻意的（见方案 §4.1：改它会打开"暂停→唤醒→再暂停"的热环）。
+
+/** 停摆说明里逐个点名的子任务（`state` 决定句式；`why` 取各自词表的唯一真源）。 */
+export interface StalledChild {
+  id: string;
+  title: string;
+  state: 'paused' | 'blocked';
+  why: string;
+}
+
+/** 停摆说明的文案（纯函数，零 IO —— rr 直引两侧可分）。 */
+export function stallNoticeText(stops: readonly StalledChild[]): string {
+  const lines = stops.map((s) => s.state === 'paused'
+    ? `· 「${s.title}」已暂停（${s.why || '未记因由'}）`
+    : `· 「${s.title}」无法启动（${s.why}）`);
+  return `[停摆] 本任务在等子任务，但它们都不会再自动推进：\n${lines.join('\n')}\n`
+    + '本任务不会自动恢复，也不会再自动派发。请任选一条处置：\n'
+    + '① 恢复被停的子任务（逐个点「恢复」）；\n'
+    + '② 归档不可能完成的子任务；\n'
+    + '③ 直接在本任务上点「完成」或「归档」。';
+}
+
+/** 「还在动」的状态集——有任何一个就不喊停（与方案 M5 的判据同域）。 */
+const STALL_ACTIVE_STATUSES: readonly string[] = ['executing', 'preparing', 'planning', 'running', 'stabilizing'];
+const STALL_TERMINAL_STATUSES: readonly string[] = ['completed', 'failed', 'archived'];
+
+/**
+ * 对"父等子、子全停"的子树写一次停摆说明。
+ *
+ * 候选：`status='paused'` ∧ `pause_reason='children_incomplete'`。
+ * **仍能前进就跳过**：任一在途子（executing/preparing/planning/running/stabilizing），
+ * 或任一 pending 子其前置判定**不是** `dead`（`met`/`unresolved`/`waiting` 都算"还有人会动"）。
+ * 全部停住 ⇒ 写 `$.pause_note` + 一行 `[停摆]` 会话 + `logHealing` 一笔 `recorded`。
+ * 去重：`$.stall_notice_sig`（子任务 id+状态+因由的签名）不变则不再说。
+ *
+ * 导出供 rr 直引真实现（同 `reconcileStalledSubtasks` 的既有手法）。
+ */
+export function noticeStalledWaitingParents(db: Database.Database): { noticed: string[] } {
+  const out: { noticed: string[] } = { noticed: [] };
+  let parents: Array<{ id: string; title: string; project_id: string; context_json: string | null }>;
+  try {
+    parents = db.prepare("SELECT id, title, project_id, context_json FROM wa_tasks WHERE status = 'paused'")
+      .all() as Array<{ id: string; title: string; project_id: string; context_json: string | null }>;
+  } catch (err) {
+    logger.warn({ err: String(err) }, '[自愈] 停摆扫描失败（跳过本轮）');
+    return out;
+  }
+  const rowStmt = db.prepare('SELECT status, context_json, title FROM wa_tasks WHERE id = ?');
+  const cache = new Map<string, { status?: string; context?: string | null; title?: string }>();
+  const look = (id: string) => {
+    if (!cache.has(id)) {
+      const r = rowStmt.get(id) as { status?: string; context_json?: string | null; title?: string } | undefined;
+      cache.set(id, { status: r?.status, context: r?.context_json, title: r?.title });
+    }
+    return cache.get(id) as { status?: string; context?: string | null; title?: string };
+  };
+  const statusOf = (id: string) => look(id).status;
+  const contextOf = (id: string) => look(id).context;
+  const nameOf = (id: string) => look(id).title ?? id;
+
+  for (const p of parents) {
+    if (recordedPauseReason(p.context_json) !== PAUSE_REASON_CHILDREN_INCOMPLETE) continue;
+    let children: Array<{ id: string; title: string | null; status: string; depends_on: string | null; context_json: string | null }>;
+    try {
+      children = db.prepare('SELECT id, title, status, depends_on, context_json FROM wa_tasks WHERE parent_task_id = ?')
+        .all(p.id) as typeof children;
+    } catch { continue; }
+    if (children.length === 0) continue;
+    let stillMoving = false;
+    const stops: StalledChild[] = [];
+    for (const c of children) {
+      if (STALL_TERMINAL_STATUSES.includes(c.status)) continue;
+      if (STALL_ACTIVE_STATUSES.includes(c.status)) { stillMoving = true; break; }
+      if (c.status === 'pending') {
+        const depIds = parseDepIds(c.depends_on);
+        // 依赖判定取既有真源（`classifyDep`）：`dead` 才是"永远等不到"；`waiting`/`met`/`unresolved` 都还有人会动。
+        const state = classifyDep(depIds, statusOf, contextOf);
+        if (state !== 'dead') { stillMoving = true; break; }
+        stops.push({ id: c.id, title: c.title || c.id, state: 'blocked', why: depBlockInfo(depIds, statusOf, nameOf, contextOf).text });
+      } else if (c.status === 'paused') {
+        stops.push({ id: c.id, title: c.title || c.id, state: 'paused', why: pauseReasonLabel(recordedPauseReason(c.context_json)) || '未记因由' });
+      } else {
+        // 未知非终态：不喊停（宁可少说，不误报）。
+        stillMoving = true;
+        break;
+      }
+    }
+    if (stillMoving || stops.length === 0) continue;
+
+    const sig = stops
+      .slice()
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .map((s) => `${s.id}:${s.state}:${s.why}`)
+      .join('|');
+    let prevSig = '';
+    try { prevSig = String((JSON.parse(p.context_json || '{}') as { stall_notice_sig?: unknown }).stall_notice_sig || ''); } catch { /* 坏账按未写过 */ }
+    if (prevSig === sig) continue;
+
+    const text = stallNoticeText(stops);
+    try {
+      db.prepare(
+        "UPDATE wa_tasks SET context_json = json_set(COALESCE(context_json,'{}'), '$.pause_note', json_quote(?), '$.stall_notice_sig', json_quote(?)), updated_at = datetime('now') WHERE id = ? AND status = 'paused'",
+      ).run(text, sig, p.id);
+      db.prepare('INSERT INTO wa_task_conversations (id, task_id, role, content) VALUES (?, ?, ?, ?)').run(
+        randomUUID(), p.id, 'system', text,
+      );
+      logHealing(db, {
+        anomaly: `任务停摆无出路（等子但子树全停）: ${p.title}`,
+        action: '写入停摆说明',
+        outcome: 'recorded',
+        detail: `target: ${p.id} · 停住的子任务 ${stops.length} 个`,
+      });
+      out.noticed.push(p.id);
+      logger.info({ taskId: p.id, stops: stops.length }, '[自愈] 父等子但子树全停，已写入停摆说明');
+    } catch (err) {
+      logger.warn({ err: String(err), taskId: p.id }, '[自愈] 停摆说明写入失败（跳过该条）');
     }
   }
   return out;

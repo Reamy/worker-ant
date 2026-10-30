@@ -404,12 +404,35 @@ export function parseProjectProfileJson(raw: unknown): ProjectProfile | null {
 /**
  * 保存画像（**幂等 upsert**）。`enabled` 只在**首次插入**时生效——刷新不改变用户的启用选择；
  * 重新生成会把 `origin` 落回 `local`（画的是本机事实了，不再冒充外部导入）。
+ *
+ * zx_20261027_3 M6b: 覆盖**不同**输入指纹前，先把上一版归档进 `wa_project_profile_history`
+ *   （同 `source_hash` 只留一份）——"旧版保留可回溯"由这张表兑现，不是口头承诺。
  */
 export function saveProjectProfile(
   db: ProfileDb,
   profile: ProjectProfile,
   opts: { enabled?: boolean } = {},
 ): void {
+  try {
+    const prev = db.prepare(
+      'SELECT version, source_hash, profile_json, generated_at FROM wa_project_profiles WHERE project_id = ?',
+    ).get(profile.projectId) as
+      | { version?: number; source_hash?: string; profile_json?: string; generated_at?: string }
+      | undefined;
+    if (prev && String(prev.source_hash ?? '') !== profile.sourceHash) {
+      db.prepare(
+        `INSERT OR IGNORE INTO wa_project_profile_history
+           (project_id, source_hash, version, profile_json, generated_at, replaced_at)
+         VALUES (?, ?, ?, ?, ?, datetime('now'))`,
+      ).run(
+        profile.projectId,
+        String(prev.source_hash ?? ''),
+        Number(prev.version) || 1,
+        String(prev.profile_json ?? ''),
+        String(prev.generated_at ?? ''),
+      );
+    }
+  } catch { /* 旧库无历史表 ⇒ 不归档（当前版本的写入照常） */ }
   db.prepare(
     `INSERT INTO wa_project_profiles
        (project_id, version, source_hash, profile_json, generated_at, enabled, origin, source_project_name)
@@ -494,6 +517,64 @@ export function setProjectProfileEnabled(db: ProfileDb, projectId: string, enabl
     'UPDATE wa_project_profiles SET enabled = ? WHERE project_id = ?',
   ).run(enabled ? 1 : 0, String(projectId ?? ''));
   return r.changes > 0;
+}
+
+/** 画像旧版留痕（最近在前）——"换过哪几版"的读口（写口在 `saveProjectProfile`）。 */
+export interface ProfileHistoryEntry {
+  sourceHash: string;
+  version: number;
+  generatedAt: string;
+  replacedAt: string;
+}
+
+export function listProjectProfileHistory(db: ProfileDb, projectId: string, limit = 20): ProfileHistoryEntry[] {
+  try {
+    const rows = db.prepare(
+      `SELECT source_hash, version, generated_at, replaced_at
+         FROM wa_project_profile_history WHERE project_id = ?
+        ORDER BY replaced_at DESC, source_hash LIMIT ?`,
+    ).all(String(projectId ?? ''), Math.max(1, Math.floor(limit))) as Array<{
+      source_hash?: string; version?: number; generated_at?: string; replaced_at?: string;
+    }>;
+    return rows.map((r) => ({
+      sourceHash: String(r.source_hash ?? ''),
+      version: Number(r.version) || 1,
+      generatedAt: String(r.generated_at ?? ''),
+      replacedAt: String(r.replaced_at ?? ''),
+    }));
+  } catch { return []; }
+}
+
+/** 自动跟随的结局（`reason` 直接用于日志/断言——"为什么没动"必须说得出口）。 */
+export type ProfileRefreshReason = 'updated' | 'unchanged' | 'no_profile' | 'disabled' | 'imported' | 'no_facts' | 'error';
+
+/**
+ * zx_20261027_3 M6b: 画像**随项目走**——任务收口后 fire-and-forget 调一次。
+ *
+ * 只动「已有画像 ∧ 已启用 ∧ 本机生成」的；`source_hash` 未变 ⇒ 不写。
+ *   · **不新建**（首次生成仍由用户点"生成画像"）；
+ *   · **不改 `enabled`**（用户的启停选择不因自动刷新翻转）；
+ *   · **不动导入画像**（它的指纹来自来源项目，按本机输入重算会把"带过来的资产"悄悄换成本机版）。
+ * 永不抛：调用处是收尾路径，画像跟随失败不该影响任务终态。
+ */
+export function refreshProjectProfileIfEnabled(
+  db: ProfileDb,
+  projectId: string,
+  opts: { now?: string } = {},
+): { refreshed: boolean; reason: ProfileRefreshReason } {
+  try {
+    const pid = String(projectId ?? '');
+    if (!pid) return { refreshed: false, reason: 'no_profile' };
+    const stored = readProjectProfile(db, pid);
+    if (!stored) return { refreshed: false, reason: 'no_profile' };
+    if (!stored.enabled) return { refreshed: false, reason: 'disabled' };
+    if (stored.origin === 'imported') return { refreshed: false, reason: 'imported' };
+    const built = buildProjectProfile(db, pid, opts);
+    if (!built.ok) return { refreshed: false, reason: 'no_facts' };
+    if (built.profile.sourceHash === stored.sourceHash) return { refreshed: false, reason: 'unchanged' };
+    saveProjectProfile(db, built.profile);
+    return { refreshed: true, reason: 'updated' };
+  } catch { return { refreshed: false, reason: 'error' }; }
 }
 
 /** 画像的注入账（`source='project_profile'`）——有写口就必须有读口。 */

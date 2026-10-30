@@ -391,10 +391,13 @@ async function main(): Promise<void> {
 
     // `$.pause_reason` 的 SQL 写点：列举式白名单（按符号，不按数字）
     const KEY = '$.pause_reason';
-    const sqlSites = rel.filter((f) => {
-      const code = strip(path.join(MAIN, f));
-      return code.includes(KEY) && (code.includes('json_set') || code.includes('json_remove'));
-    });
+    // zx_20261028_2 M2：旧判据是"文件里同时出现键与 json_set/json_remove"——列表摘录用
+    //   `json_extract(t.context_json,'$.pause_reason')` 读该键，而同文件另有无关的 json_set/remove，
+    //   于是**读点被误判成写口**。改钉**同一行**：键须是那次 json_set/json_remove 的实参，
+    //   才算"写该键的 SQL 点"（更强：不仅要求共现，还要求二者是同一个调用）。
+    const isPauseReasonSqlWrite = (code: string): boolean => code.split('\n').some((l) =>
+      (l.includes('json_set(') || l.includes('json_remove(')) && l.includes(KEY));
+    const sqlSites = rel.filter((f) => isPauseReasonSqlWrite(strip(path.join(MAIN, f))));
     const ALLOW = [
       'core/exec-claim.ts',      // 清点（`json_remove`）：CAS 认领时把已成过去的因清掉——方向与"写点"相反。
                                  // zx_20260921 M8: 本笔随 `executeTask` 入口段整段搬离 `core/agent-executor.ts`，
@@ -404,6 +407,12 @@ async function main(): Promise<void> {
     eq(sqlSites.filter((f) => !ALLOW.includes(f)), [],
       `G-2 ★ \`${KEY}\` 的 SQL 写点 ⊆ 白名单（实测 ${sqlSites.join(', ')}；两处均为"非置停"用途，理由见方案订正⑦）`);
     eq(sqlSites.length, ALLOW.length, `G-2 白名单**逐条都用上了**（${sqlSites.length}/${ALLOW.length}，防"名单外挂僵尸条目"）`);
+    // 反证：只读该键不算写点——同一谓词喂"json_extract 读 + 另处无关 json_set"的样本须不命中，
+    //   否则新加的列表摘录会把读写面搅在一起（本判据就成了"凡提到该键皆白名单"的空转）。
+    ok(!isPauseReasonSqlWrite([
+      "db.prepare(\"SELECT json_extract(context_json, '$.pause_reason') FROM wa_tasks\")",
+      "db.prepare(\"UPDATE wa_tasks SET context_json = json_set(context_json, '$.other', 1) WHERE id = ?\")",
+    ].join('\n')), 'G-2 反证：仅 `json_extract` 读取该键（另处 json_set 改的是别的键）不算 SQL 写点');
 
     const writer = strip(path.join(MAIN, 'core/pause-task.ts'));
     ok(writer.includes('ctx.pause_reason = reason') && !writer.includes('json_set'),
@@ -531,11 +540,18 @@ async function main(): Promise<void> {
     const schedSrc = strip(path.join(MAIN, 'core/task-scheduler.ts'));
     ok(/return taskDepState\(this\.db, taskId\);/.test(schedSrc),
       '★ D-10 调度器读点确实转发到 `taskDepState`（不是另写一份读法）');
+    // zx_20261028_2 M2：列表不再递整份 `context_json`，第四参载体改为 `context_digest`（同形 JSON 文本）。
+    //   判据随之改钉**新真源**并加一跳：digest 的生产 SQL 必须真的带 `pause_reason`——
+    //   否则"按因由细分"又回到恒空，渲染层传了也白传。
+    const ipcSrc = strip(path.join(MAIN, 'ipc/project.ipc.ts'));
+    ok(/SELECT t\.id, t\.project_id,[\s\S]*?AS context_digest[\s\S]*?FROM wa_tasks t/.test(ipcSrc)
+      && ipcSrc.includes("'pause_reason', json_extract(t.context_json, '$.pause_reason')"),
+      '★ D-10 task:list 的 `context_digest` 生产 SQL 确实带 `pause_reason`（列表载体换名后因由判据仍有数据可依）');
     for (const f of ['TaskDetailPage.tsx', 'TasksPage.tsx']) {
       const src = fs.readFileSync(path.join(root, A, 'renderer/src/pages', f), 'utf-8');
       const call = src.match(/depBlockInfo\(([\s\S]*?)\)\s*;/);
-      ok(!!call && call[1]!.includes('context_json'),
-        `★ D-10 renderer ${f} 的调用点已传第四个取值函数（renderer 不在 src/main 扫描面内，须逐处点验）`);
+      ok(!!call && call[1]!.includes('context_digest'),
+        `★ D-10 renderer ${f} 的调用点已传第四个取值函数（载体=context_digest；renderer 不在 src/main 扫描面内，须逐处点验）`);
     }
   }
 

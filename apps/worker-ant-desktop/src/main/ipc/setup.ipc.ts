@@ -77,7 +77,9 @@ export function initSetupIpc(db: Database.Database, dataDir: string): void {
     try {
       return { data: installSampleProject(db, dataDir) };
     } catch (err) {
-      return { error: { code: 'INTERNAL', message: (err as Error).message } };
+      // zx_20261029_2 M6：配额不足是本轮**已知业务拒**，如实回 `PROJECT_QUOTA`（不裹成 INTERNAL）。
+      const code = (err as { code?: unknown }).code === 'PROJECT_QUOTA' ? 'PROJECT_QUOTA' : 'INTERNAL';
+      return { error: { code, message: (err as Error).message } };
     }
   });
 

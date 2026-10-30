@@ -43,7 +43,9 @@ export default function TemplatesPage() {
   const [testTitle, setTestTitle] = useState('');
   const [testDesc, setTestDesc] = useState('');
   const [testResult, setTestResult] = useState<{ id: string; name: string; category: string; priority: number; success_rate: number | null; hitKeywords: string[]; method?: string; similarity?: number | null; field?: 'title' | 'description' | ''; subtaskCount: number } | null>(null);
-  const [testSkip, setTestSkip] = useState<'explicit_subtasks' | 'planning_intent' | null>(null);
+  const [testSkip, setTestSkip] = useState<'explicit_subtasks' | 'planning_intent' | 'repair_intent' | null>(null);
+  // zx_20261028_2 M4: 语义门槛由主进程回传（`semanticMinSimilarity`），界面不再手抄数字（原写死 0.4）
+  const [testMinSim, setTestMinSim] = useState<number | null>(null);
   const [testRan, setTestRan] = useState(false);
   const [testing, setTesting] = useState(false);
 
@@ -69,7 +71,7 @@ export default function TemplatesPage() {
   async function handleTest() {
     if (!testTitle.trim() && !testDesc.trim()) return;
     setTesting(true); setTestResult(null); setTestSkip(null); setTestRan(false);
-    try { const r = await tplIpc.test(testTitle, testDesc); setTestResult(r.matched); setTestSkip(r.skip); setTestRan(true); }
+    try { const r = await tplIpc.test(testTitle, testDesc); setTestResult(r.matched); setTestSkip(r.skip); setTestMinSim(r.semanticMinSimilarity); setTestRan(true); }
     catch (e) { alert((e as Error).message); }
     setTesting(false);
   }
@@ -105,7 +107,11 @@ export default function TemplatesPage() {
             后两态此前一个字都不说（只知道"没命中"），用户没法据此改输入。 */}
         {testRan && (testSkip ? (
           <p className="mt-2 text-sm">
-            <span className="text-amber-600 font-medium">创建时不会自动拆解：{testSkip === 'planning_intent' ? '判定为规划/优化意图（标题或描述含"规划/方案/排期/优化/设计…"），交由 AI 自主规划' : '任务已含显式子任务（子任务X / 报告X）'}</span>
+            <span className="text-amber-600 font-medium">创建时不会自动拆解：{testSkip === 'explicit_subtasks'
+              ? '任务已含显式子任务（子任务X / 报告X）'
+              : testSkip === 'repair_intent'
+                ? '判定为修复/排查意图（标题或描述含"修复/排查/定位/报错…"），交由引擎按诊断步骤拆解'
+                : '判定为规划/优化意图（标题或描述含"规划/方案/排期/优化/设计…"），交由 AI 自主规划'}</span>
             {testResult && <span className="text-gray-400 ml-2">（关键词本可命中模板「{testResult.name}」{testResult.hitKeywords.length > 0 ? `：${testResult.hitKeywords.join(', ')}` : ''}）</span>}
           </p>
         ) : testResult ? (
@@ -120,7 +126,7 @@ export default function TemplatesPage() {
             {testResult.subtaskCount < 2 && <span className="text-amber-600 ml-2">该模板只声明 {testResult.subtaskCount} 个子任务（不足 2 个），创建时**不会**拆解</span>}
           </p>
         ) : (
-          <p className="mt-2 text-sm text-gray-500">未命中任何模板（关键词未达门槛：标题 ≥2 个或描述 ≥3 个；语义兜底亦无相似度 &gt; 0.4 的模板）——创建时按单任务执行，不拆解。</p>
+          <p className="mt-2 text-sm text-gray-500">未命中任何模板（关键词未达门槛：标题 ≥2 个或描述 ≥3 个；语义兜底亦无相似度 ≥ {testMinSim ?? '—'} 的模板）——创建时按单任务执行，不拆解。</p>
         ))}
       </div>
 
