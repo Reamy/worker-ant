@@ -851,9 +851,11 @@ async function main(): Promise<void> {
       + `只加 union 不加此表 ⇒ emit 走"无聚合映射"分支、事件**一行都不落库**（静默）。`);
 
     // 第二层：index.ts 两条 forwardToRenderer 转发。
+    // zx_20261101_1 M2：发现路新增推送闸后语句体改成多行——按**语句形状**放宽空白（`{\s*`），
+    //   仍钉住「该事件处理器内**第一条语句**就是转发」，不随缩进/换行漂移成假红。
     const idxSrc = strip(MAIN_INDEX_SRC);
-    crit('M10', /eventBus\.on\('device\.discovered',\s*async \(e\) => \{ forwardToRenderer\('device\.discovered'/.test(idxSrc)
-      && /eventBus\.on\('device\.status_changed',\s*async \(e\) => \{ forwardToRenderer\('device\.status_changed'/.test(idxSrc),
+    crit('M10', /eventBus\.on\('device\.discovered',\s*async \(e\) => \{\s*forwardToRenderer\('device\.discovered'/.test(idxSrc)
+      && /eventBus\.on\('device\.status_changed',\s*async \(e\) => \{\s*forwardToRenderer\('device\.status_changed'/.test(idxSrc),
       `M10-B **转发到位**：\`index.ts\` 两条 \`forwardToRenderer\`（不转发则面板收不到实时刷新）。`);
     // zx_20261029_2 M2：`initDevicesIpc` 现收第二个参数（模型兜底的取模型口）——本断言随之钉更强形状：
     //   **db 作第一实参**且**确有第二实参**（不是无参调用、不是把 getter 当第一参塞进去）。

@@ -24,7 +24,7 @@ import { parseDomainPackJson } from './domain-pack.js';
 import { insertImportedProfile, parseProjectProfileJson, readProjectProfile } from './project-profile.js';
 // zx_20261030_1 M5「限」：用户驱动的记忆导入受档位容量闸（机器写入不在此列——见 §1.4）。
 import { resolveLicenseTier } from './license.js';
-import { capacityRefusal, countTeamLibraryMemories } from './tier-capacity.js';
+import { capacityRefusal, countTaskTemplates, countTeamLibraryMemories } from './tier-capacity.js';
 
 /** 最小库接口（可脱 better-sqlite3 被 rr 直跑）。 */
 export interface TeamLibraryDb {
@@ -287,6 +287,10 @@ export function importItem(
   const id = randomUUID();
 
   if (kind === 'template') {
+    // zx_20261101_1 M4「授」：团队库导入的模板同样算**用户新增**（`source='team_library'` 计入额度），
+    //   到顶按本模块既有错误形状拒；已导入的模板一条不删（与记忆分支同形）。
+    const verdict = capacityRefusal(resolveLicenseTier(db), 'maxTaskTemplates', countTaskTemplates(db));
+    if (!verdict.ok) throw new TeamLibraryError(verdict.note);
     db.prepare(
       'INSERT INTO wa_task_templates (id, name, category, description, subtasks, keywords, status, priority, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
     ).run(

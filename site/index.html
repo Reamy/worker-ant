@@ -21,7 +21,7 @@
     <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png" />
     <link rel="icon" href="/favicon-16.png" sizes="16x16" type="image/png" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-    <link rel="stylesheet" href="/styles.css?v=0.3.0" />
+    <link rel="stylesheet" href="/styles.css?v=0.4.0" />
   </head>
   <body>
     <header class="nav">
@@ -58,7 +58,7 @@
           <div class="cta-row">
             <a
               class="btn btn-primary"
-              href="https://github.com/Reamy/worker-ant/releases/download/v0.3.0/worker-ant-0.3.0-mac-arm64.dmg"
+              href="https://github.com/Reamy/worker-ant/releases/download/v0.4.0/worker-ant-0.4.0-mac-arm64.dmg"
               rel="noopener"
               >下载 macOS 版</a
             >
@@ -68,6 +68,16 @@
           </div>
 
           <p class="trust">开源（AGPL-3.0）· 引擎跑在你本机 · BYO Key，我们不碰你的模型账单</p>
+
+          <figure class="hero-demo">
+            <img
+              src="/images/demo-wechat-task.gif"
+              width="800"
+              height="430"
+              alt="演示：在微信里发一条消息，工蚁在本机完成周报并回执"
+            />
+            <figcaption>38 秒实录（无声）：微信发消息 → 本机执行 → 周报与回执。</figcaption>
+          </figure>
         </div>
       </section>
 
@@ -116,7 +126,10 @@
             <article class="card">
               <h3>② 手机 IM 指挥 —— 发条微信就能派活</h3>
               <p>微信 / 钉钉 / 飞书 / 企业微信 / QQ——<strong>用你本来就在用的 IM</strong>。</p>
-              <p>发消息 = 派活 / 查进度 / 审批确认 / 收成果。<strong>出差、通勤、饭桌上都能盯。</strong></p>
+              <p>
+                发消息 = 派活 / 查进度 / 审批确认 / 收成果。<strong>出差、通勤、饭桌上都能盯。</strong>Team
+                档还能在私聊里审批设备、回答跨机提问——高危操作永不进手机。
+              </p>
             </article>
             <article class="card">
               <h3>③ 成果一等公民 —— 干了什么，看得见</h3>
@@ -196,26 +209,26 @@
                 与 Windows 版本暂未提供。
               </p>
               <p class="muted">
-                v0.3.0 新增局域网设备发现与远程控制（Pro / Team 档）、AI
-                终端接入、项目建时自动生成须知，任务载荷更轻；v0.2.1 / v0.2.2
-                的退出残留与首启向导问题均已包含在本版。自动更新尚未启用，已装旧版的用户请手动下载覆盖安装。
+                v0.4.0 新增 IM 授权台（私聊审批设备 / 跨机问答，Team 档），容量维度补齐至七维（增 IM
+                渠道与任务模板），授权指纹只取机器标识（换网络 / 改主机名不掉授权）；v0.3.0
+                的设备发现与控制、项目须知均包含在本版。自动更新尚未启用，已装旧版的用户请手动下载覆盖安装。
               </p>
               <p>
                 <a
                   class="link"
-                  href="https://github.com/Reamy/worker-ant/releases/download/v0.3.0/worker-ant-0.3.0-mac-arm64.dmg"
+                  href="https://github.com/Reamy/worker-ant/releases/download/v0.4.0/worker-ant-0.4.0-mac-arm64.dmg"
                   rel="noopener"
                   >下载 dmg →</a
                 >
                 &nbsp;·&nbsp;
                 <a
                   class="link"
-                  href="https://github.com/Reamy/worker-ant/releases/download/v0.3.0/worker-ant-0.3.0-mac-arm64.zip"
+                  href="https://github.com/Reamy/worker-ant/releases/download/v0.4.0/worker-ant-0.4.0-mac-arm64.zip"
                   rel="noopener"
                   >下载 zip</a
                 >
                 &nbsp;·&nbsp;
-                <a class="link" href="https://github.com/Reamy/worker-ant/releases/tag/v0.3.0" rel="noopener"
+                <a class="link" href="https://github.com/Reamy/worker-ant/releases/tag/v0.4.0" rel="noopener"
                   >校验值与发布说明</a
                 >
               </p>
@@ -317,7 +330,8 @@ cd apps/worker-ant-desktop &amp;&amp; bash run.sh    # 终端 2：桌面端</cod
                   </td>
                   <td>
                     <strong>最多 20 台协同节点（含本机）</strong>、设备发现与控制、AI
-                    终端意图接入、团队共享库、项目画像共享、<strong>审计视图</strong>与 CSV 导出；人工开通，须带到期日
+                    终端意图接入、<strong>IM 授权台（设备授权 / 跨机问答）</strong>、团队共享库、项目画像共享、<strong>审计视图</strong>与
+                    CSV 导出；人工开通，须带到期日
                   </td>
                 </tr>
                 <tr>
@@ -339,12 +353,13 @@ cd apps/worker-ant-desktop &amp;&amp; bash run.sh    # 终端 2：桌面端</cod
           <p class="note">
             主推<strong>年付</strong>；免费版给得起，但<strong>并发 / 项目数有天花板</strong>；<strong>BYO Key</strong
             >——模型账单你直接付给模型厂商，我们不抽成。<br />
-            各档另有容量上限（设备登记 / 外部终端 / 每项目知识卡）：社区 5 / 1 / 8，Pro 30 / 3 / 24，Team 200 / 20 /
-            60——<strong>只拦新增，已有记录不受影响</strong>。<br />
+            各档另有七维容量上限（设备登记 / 外部终端 / A2A 服务 / 每项目知识卡 / 团队共享记忆 / IM 渠道 / 任务模板）：社区
+            5 / 1 / 1 / 8 / 200 / 2 / 5，Pro 30 / 3 / 3 / 24 / 2000 / 5 / 30，Team 200 / 20 / 10 / 60 / 不限 / 不限 /
+            不限——<strong>只拦新增，已有记录不受影响</strong>。<br />
             <strong>授权与安装包都已就绪</strong>：Pro、早鸟终身与 Team 授权包已在
             <a class="link" href="https://mbd.pub/o/author-bW2ZlHFtZg==/work" rel="noopener">面包多店铺</a>
             开售，企业版暂不售卖；macOS 版已完成 Developer ID 签名与 Apple 公证，
-            <a class="link" href="https://github.com/Reamy/worker-ant/releases/tag/v0.3.0" rel="noopener"
+            <a class="link" href="https://github.com/Reamy/worker-ant/releases/tag/v0.4.0" rel="noopener"
               >已在 GitHub Releases 发布</a
             >。桌面端自带 <strong>14 天团队版试用</strong>。
           </p>
@@ -373,6 +388,13 @@ cd apps/worker-ant-desktop &amp;&amp; bash run.sh    # 终端 2：桌面端</cod
               <p>不。微信 / 钉钉 / 飞书 / 企业微信 / QQ 任选；也可以只在桌面端用，不接 IM。</p>
             </details>
             <details>
+              <summary>在手机上审批设备安全吗？</summary>
+              <p>
+                设备授权与跨机问答仅 Team 档开放，且只在私聊里处理；高危操作永不进入 IM
+                授权台。每条审批与回答都落库并留审计记录。
+              </p>
+            </details>
+            <details>
               <summary>能操作网页吗（点按钮、填表单）？</summary>
               <p>目前不内置浏览器自动化。当前定位是<strong>文件 / 命令 / API 类任务</strong>；浏览器能力在路线图上。</p>
             </details>
@@ -399,7 +421,7 @@ cd apps/worker-ant-desktop &amp;&amp; bash run.sh    # 终端 2：桌面端</cod
                   开售</strong
                 >；企业版暂不售卖。<strong>安装包已发布</strong>——macOS 版（Apple Silicon）已完成 Developer ID 签名与
                 Apple 公证，可从
-                <a class="link" href="https://github.com/Reamy/worker-ant/releases/tag/v0.3.0" rel="noopener"
+                <a class="link" href="https://github.com/Reamy/worker-ant/releases/tag/v0.4.0" rel="noopener"
                   >GitHub Releases</a
                 >
                 下载 dmg / zip。当前仅支持 macOS 13+ 的 Apple Silicon，Intel Mac 与 Windows 暂未提供。 桌面端自带 14 天

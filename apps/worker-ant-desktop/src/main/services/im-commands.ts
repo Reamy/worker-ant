@@ -28,6 +28,8 @@
 import { matchApprovalReply } from '../core/im/options.js';
 // zx_20261016_1 批三: 配对审批的**谓词真源**在 `external-terminals.ts`（`parsePairReply`），此处不另抄一份正则。
 import { parsePairReply } from '../core/external-terminals.js';
+// zx_20261101_1 M1「授」: IM 授权台的谓词真源在 `core/im/approval-inbox.ts`（`parseApprovalCommand`），此处不另抄正则。
+import { parseApprovalCommand } from '../core/im/approval-inbox.js';
 
 // ====== 四个内置动词的谓词（**自 `im-router.ts` 逐字迁入**，语义一字未改）======
 
@@ -154,5 +156,13 @@ export const BUILTIN_IM_COMMANDS: readonly BuiltinImCommand[] = [
     example: '「同意接入 …」；或「拒绝接入 …」（…＝核对码）',
     probe: '同意接入 123456',
     match: (s) => parsePairReply(s) !== null,
+  },
+  {
+    // zx_20261101_1 M1「授」: 设备授权与跨机问答的 IM 授权台（团队版能力；**仅 1:1 私聊**受理）。
+    //   ⚠ 生效前提：本机有**待授权设备**或**待答的跨机问题**；短码歧义时列候选、不猜。
+    name: '授权待办',
+    example: '「授权待办」；「允许设备 …」/「拒绝设备 …」/「回答 … …」',
+    probe: '授权待办',
+    match: (s) => parseApprovalCommand(s) !== null,
   },
 ];

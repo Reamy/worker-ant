@@ -77,3 +77,6 @@ dist-smoke/
 # 本机 node-gyp 生成物（含绝对路径，勿入库）
 build/config.gypi
 .gstack/
+
+# 录屏中间文件（GIF 已由 ffmpeg 产出；.mov 合计 ~84MB，勿入库）
+business-plan/materials/images/demo/*.mov

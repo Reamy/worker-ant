@@ -373,9 +373,10 @@ async function main(): Promise<void> {
   // ═══ R-7 Team 词表（批二）═══════════════════════════════════════════════════
   console.log('\n【R-7】Team 能力词表逐项枚举（含 audit_view）');
   {
-    // zx_20261029_2 M6：`device_discovery` 移出（归 Pro）⇒ 逐成员枚举 8→7。
+    // zx_20261029_2 M6：`device_discovery` 移出（归 Pro）⇒ 逐成员枚举 8→7；
+    //   zx_20261101_1 M1：新增 `approval_inbox`（IM 授权台）⇒ 7→8。
     eq([...TEAM_FEATURES],
-      ['multi_node', 'device_control', 'external_terminal', 'audit_view', 'audit_export', 'team_library', 'project_profile_share'],
+      ['multi_node', 'device_control', 'external_terminal', 'audit_view', 'audit_export', 'team_library', 'project_profile_share', 'approval_inbox'],
       'R-7a ★能力词表逐成员枚举（唯一定义处；M6 起发现归 Pro，本表只管控制面）');
     for (const f of TEAM_FEATURES) {
       ok(typeof TEAM_FEATURE_LABEL[f] === 'string' && TEAM_FEATURE_LABEL[f].length > 0,

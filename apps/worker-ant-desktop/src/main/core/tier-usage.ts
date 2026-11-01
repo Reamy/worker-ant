@@ -33,7 +33,9 @@ import { fetchNodes } from './node-list.js';
 import {
   countApprovedTerminals,
   countDevices,
+  countIMChannels,
   countMaxKnowledgeCardsInAnyProject,
+  countTaskTemplates,
   countTeamLibraryMemories,
   type CapacityDb,
 } from './tier-capacity.js';
@@ -63,6 +65,9 @@ export interface TierUsageCounts {
   a2aServers: { used: number; limit: number };
   /** 团队共享库导入的记忆总条数（`wa_memories(source='team_library')`）。 */
   teamLibraryMemories: { used: number; limit: number };
+  /** zx_20261101_1 M4「授」：IM 渠道数与用户自建任务模板数（`limit === 0` = 不限）。 */
+  imChannels: { used: number; limit: number };
+  taskTemplates: { used: number; limit: number };
   /** 知识卡按**项目**判容量 ⇒ 取所有项目中单项目最大张数，附该档上限。 */
   knowledgeCards: { maxInProject: number; limit: number };
   features: TierUsageFeature[];
@@ -153,6 +158,8 @@ export function tierUsageCounts(
     externalTerminals: { used: db ? countApprovedTerminals(db as unknown as CapacityDb) : 0, limit: limits.maxExternalTerminals },
     a2aServers: { used: listA2AServers().length, limit: limits.maxA2AServers },
     teamLibraryMemories: { used: db ? countTeamLibraryMemories(db as unknown as CapacityDb) : 0, limit: limits.maxTeamLibraryMemories },
+    imChannels: { used: db ? countIMChannels(db as unknown as CapacityDb) : 0, limit: limits.maxIMChannels },
+    taskTemplates: { used: db ? countTaskTemplates(db as unknown as CapacityDb) : 0, limit: limits.maxTaskTemplates },
     knowledgeCards: {
       maxInProject: db ? countMaxKnowledgeCardsInAnyProject(db as unknown as CapacityDb) : 0,
       limit: limits.maxKnowledgeCardsPerProject,
@@ -194,6 +201,9 @@ export function upgradeDifferences(from: LicenseTier, to?: LicenseTier | null): 
   if (a.maxA2AServers !== b.maxA2AServers) quotas.push(b.maxA2AServers === 0 ? '不限 A2A 服务' : `A2A 服务 ${b.maxA2AServers} 个`);
   if (a.maxKnowledgeCardsPerProject !== b.maxKnowledgeCardsPerProject) quotas.push(b.maxKnowledgeCardsPerProject === 0 ? '不限每项目知识卡' : `每项目知识卡 ${b.maxKnowledgeCardsPerProject} 张`);
   if (a.maxTeamLibraryMemories !== b.maxTeamLibraryMemories) quotas.push(b.maxTeamLibraryMemories === 0 ? '不限团队共享记忆' : `团队共享记忆 ${b.maxTeamLibraryMemories} 条`);
+  // zx_20261101_1 M4「授」：IM 渠道与任务模板（0 = 不限，不写成 "0 个"）。
+  if (a.maxIMChannels !== b.maxIMChannels) quotas.push(b.maxIMChannels === 0 ? '不限 IM 渠道' : `IM 渠道 ${b.maxIMChannels} 个`);
+  if (a.maxTaskTemplates !== b.maxTaskTemplates) quotas.push(b.maxTaskTemplates === 0 ? '不限任务模板' : `任务模板 ${b.maxTaskTemplates} 套`);
 
   return { toTier: target, toLabel: TIER_LABEL[target], capabilities, quotas };
 }

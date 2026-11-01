@@ -71,6 +71,9 @@ import { dependencyRefusal } from '../core/task-dep-gate.js';
 import { projectQuotaRefusal } from '../core/project-quota.js';
 // zx_20261022_3 批九: 撞配额时**在回话层**附上当前用量与升级差异（判据仍只在 `project-quota.ts`）。
 import { refusalWithContext, PROJECT_QUOTA_UNLOCK_TIER } from '../core/tier-usage.js';
+// zx_20261101_1 M4「授」：用户自建任务模板受档位容量闸（`maxTaskTemplates`，0=不限）。
+import { resolveLicenseTier } from '../core/license.js';
+import { capacityRefusal, countTaskTemplates, type CapacityDb } from '../core/tier-capacity.js';
 import { createLogger } from '../core/logger.js';
 import { boolSetting } from '../core/settings-bool.js';
 // zx_20260930 M8: 随项目/任务删除的级联落墓碑（缘由词表与写入语句形状同出该模块）。
@@ -2113,6 +2116,10 @@ export function initProjectIpc(db: Database.Database, dataDir: string, memoryGet
   ipcMain.handle('template:create', async (_event, body: { name: string; category?: string; description?: string; subtasks?: Array<{ title: string; description: string; acceptance_criteria: string }>; keywords?: string[]; priority?: number }) => {
     try {
       if (!body.name?.trim()) return { error: { code: 'BAD_REQUEST', message: '模板名称必填' } };
+      // zx_20261101_1 M4「授」：用户自建模板数受档位上限（`maxTaskTemplates`，0=不限）。
+      //   只拦**新增**（`source='user'`）；`system` 内置与 `auto` 自动学习不占用户额度（口径见 `tier-capacity.ts`）。
+      const verdict = capacityRefusal(resolveLicenseTier(db), 'maxTaskTemplates', countTaskTemplates(db as unknown as CapacityDb));
+      if (!verdict.ok) return { error: { code: 'QUOTA_EXCEEDED', message: refusalWithContext(db, verdict.note) } };
       const id = crypto.randomUUID();
       db.prepare('INSERT INTO wa_task_templates (id, name, category, description, subtasks, keywords, status, priority, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
         .run(id, body.name, body.category || 'custom', body.description || '', JSON.stringify(body.subtasks ?? []), JSON.stringify(body.keywords ?? []), 'active', body.priority ?? 0, 'user');

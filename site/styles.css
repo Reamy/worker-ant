@@ -41,6 +41,27 @@
   box-sizing: border-box;
 }
 
+.hero-demo {
+  margin: 2.5rem auto 0;
+  max-width: 800px;
+}
+
+.hero-demo img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.hero-demo figcaption {
+  margin-top: 0.6rem;
+  color: var(--text-mute);
+  font-size: 0.85rem;
+  text-align: center;
+}
+
 html {
   scroll-behavior: smooth;
   scroll-padding-top: 76px;

@@ -58,8 +58,10 @@ import path from 'node:path';
  *       漏的是"为什么这么定、哪些现在卖不了"的推理）；
  *    ② **真钥匙已漏过**——历史提交里的 iLink 文件钥匙曾随 `plans/improve/zx_20260924.md` 一同上线（见 `oss-secret-scan.sh` §7）。
  *  内容资产（工程哲学复盘）改由 `docs/engineering-log.md` 的**公开摘要**承接——留故事，不留细节。
+ *  `docs/im_run.md` / `docs/task_run.md` 出局：它们是内部实现笔记，且点名了私有下游项目（a-stock-advisor / DSA / tickflow）
+ *    与私有脚本路径；产品仓的交付面是「这系统怎么造」，不是内务运行手册。
  *  ⚠ **本行须保持单行**：`scripts/oss-secret-scan.sh` 用 sed 按 `^const EXCLUDE_PREFIXES = \[(.*)\];$` 解析它；换行即令扫面**静默塌缩**。 */
-const EXCLUDE_PREFIXES = ['apps/_archive/', 'business-plan/', 'plans/', 'data/', 'CLAUDE.md', '.gitleaksignore'];
+const EXCLUDE_PREFIXES = ['apps/_archive/', 'business-plan/', 'plans/', 'data/', 'CLAUDE.md', '.gitleaksignore', 'docs/im_run.md', 'docs/task_run.md'];
 /** 排除后**必须仍在场**的关键文件（M17/M18 交付物 + 项目入口）。 */
 const MUST_HAVE = ['LICENSE', 'README.md', 'README.en.md', 'CONTRIBUTING.md', 'COMMERCIAL_LICENSE.md'];
 /** 归档内允许存在的 `.env*`（其余 `.env` / `.env.*` 一律视为泄漏）。 */

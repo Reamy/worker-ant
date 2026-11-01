@@ -54,6 +54,18 @@ import type { ApprovalReply } from '../core/im/options.js';
 // zx_20260924_1 M1: 内置指令的**唯一真源**——四条路由谓词 + 偏好谓词 + 帮助文案，都从这一处来。
 import { BUILTIN_IM_COMMANDS, CREATE_REGEX, HELP_REGEX, QUERY_REGEX, START_REGEX, matchRememberPreference } from './im-commands.js';
 import { parsePairReply, resolvePairTarget, approveTerminal, rejectTerminal } from '../core/external-terminals.js';
+// zx_20261101_1 M1「授」: IM 授权台——命令解析/短码/待办组装/文案的**唯一一份**纯逻辑在 `core/im/approval-inbox.ts`。
+//   本文件只做"认领 + 真落库 + 回话"；不在这里另写一套正则（承"一处真源"纪律）。
+import {
+  parseApprovalCommand, resolveDeviceByCode, resolveQuestionByCode,
+  buildApprovalInbox, formatApprovalInbox, formatDeviceList, formatQuestionList,
+  formatDeviceCandidates, formatQuestionCandidates, deviceActionRefusal,
+  pendingDevices, pendingQuestions, shortCode, deviceDisplayName,
+} from '../core/im/approval-inbox.js';
+import { setDeviceAuthorized } from '../core/device-registry.js';
+import { recordAudit } from '../core/audit-log.js';
+import { answerQuestion } from '../core/node-dispatcher.js';
+import { teamFeatureRefusal } from '../core/team-gate.js';
 // zx_20261018_1 批一（维特根斯坦·意义即用法 / 罗尔斯·同一把尺）: IM 审批只回一句话，看不到勾选框 ⇒
 //   默认授予**意图控制**（本机解析、受安全闸约束），原始动作 `device_control` 仍须桌面**显式勾选**。
 import { DEFAULT_TERMINAL_CAPABILITIES } from '../core/external-calls.js';
@@ -67,6 +79,8 @@ import { attachPendingMediaToTask } from './pending-media.js';
 //   本文件两处 `slice(0, 4000)` 静默截断（命令输出 / F3 通知正文）改走 `clipWithNotice`：
 //   截断不是错，**不说**才是错（用户拿到的是一份"看起来完整"的内容，末尾少了多少全无线索）。
 import { clipWithNotice, IM_ROUTER_OUTPUT_LIMIT } from '../core/im/im-text.js';
+// zx_20261031_1 M1: 标题/描述的切分**只这一处**（中文里的空格是排版，不是句界）。
+import { splitTaskInput } from '../core/im/task-input.js';
 // zx_20260930 M5: 用户答复＝对 agent 正在做的事的**纠正**——内容装配在 `memory-write.ts` 一处，
 //   名字（`user_correction`）在 `memory-constants.ts` 一处。本文件不另拼一份、也不写字符串字面量。
 import { buildImUserCorrection } from '../core/memory-write.js';
@@ -681,6 +695,112 @@ function handleTerminalPairReply(ctx: ImContext, fromUser: string, msgText: stri
   return true;
 }
 
+/**
+ * zx_20261101_1 M1「授」（道德经·善闭无关楗而不可开 / 维特根斯坦·意义即使用）:
+ * **IM 授权台**——设备授权与跨机问答的 IM 入口。纯逻辑（解析/短码/待办/文案）在
+ * `core/im/approval-inbox.ts`，本函数只负责「认领 → 过闸 → 真落库 → 回话」。
+ *
+ * 位置纪律：与 `handleTerminalPairReply` 同理，排在**步骤 -1 之后、步骤 0 之前**——
+ *   ① 「回答 <码> …」若落进自由回复，会被 `handleAgentReply` 当对话吞掉；
+ *   ② 「允许设备 <码>」若落进 LLM 意图分类，可能被建成一个**任务**（"允许设备"像是要做事）。
+ *
+ * 四点纪律：
+ *  A. **不认得就不认领**（返回 `false`）：闲聊里出现"允许"二字不该被吞成命令。
+ *  B. **只在 1:1 私聊受理**：群里认得出形状也**不办**——无法确认发言人就是本机主人。
+ *  C. **高危设备永不放权**：判据只走 `deviceActionRefusal`（门锁/安防一处判死）。
+ *  D. **知而不行只是未知**：回「已授权」之前必须 `setDeviceAuthorized` 真落库 + 审计一行。
+ */
+async function handleApprovalInbox(
+  ctx: ImContext, fromUser: string, msgText: string, chatType: string,
+): Promise<boolean> {
+  const cmd = parseApprovalCommand(msgText);
+  if (!cmd) return false; // A. 不是授权台句子 ⇒ 交回原管线
+
+  // B. 只认 1:1 私聊（`direct`）：群里/未知会话形状一律不办——无法确认发言人就是本机主人。
+  //    fail-closed：`chatType` 不是明确的 `direct` 就拒绝，不把"认不出"当成"私聊"。
+  if (chatType !== 'direct') {
+    void ctx.sendReply(fromUser,
+      '⚠️ IM 授权台只在**与工蚁的 1:1 私聊**里受理：群聊里无法确认发言人就是本机主人，授权请求一律不办。');
+    return true;
+  }
+
+  const gateRefusal = teamFeatureRefusal(ctx.db, 'approval_inbox');
+  if (gateRefusal) {
+    void ctx.sendReply(fromUser, refusalWithContext(ctx.db, gateRefusal, { requiredTier: 'team' }));
+    return true;
+  }
+
+  if (cmd.kind === 'list_all') {
+    void ctx.sendReply(fromUser, formatApprovalInbox(buildApprovalInbox(ctx.db)));
+    return true;
+  }
+  if (cmd.kind === 'list_devices') {
+    void ctx.sendReply(fromUser, formatDeviceList(pendingDevices(ctx.db)));
+    return true;
+  }
+  if (cmd.kind === 'list_questions') {
+    void ctx.sendReply(fromUser, formatQuestionList(pendingQuestions(ctx.db)));
+    return true;
+  }
+
+  if (cmd.kind === 'allow_device' || cmd.kind === 'deny_device') {
+    const action = cmd.kind === 'allow_device' ? 'allow' : 'deny';
+    const res = resolveDeviceByCode(ctx.db, cmd.code);
+    if (res.kind === 'ambiguous') {
+      void ctx.sendReply(fromUser, formatDeviceCandidates(res.candidates));
+      return true;
+    }
+    if (res.kind === 'not_found') {
+      void ctx.sendReply(fromUser, `没有找到与码「${cmd.code}」匹配的设备。回复「待授权设备」查看清单。`);
+      return true;
+    }
+    const refusal = deviceActionRefusal(res.device, action); // C.
+    if (refusal) {
+      void ctx.sendReply(fromUser, refusal);
+      return true;
+    }
+    // D. 先真落库，再回话；设备刚被移除 ⇒ 如实说没动。
+    const updated = setDeviceAuthorized(ctx.db, res.device.id, action === 'allow');
+    if (!updated) {
+      void ctx.sendReply(fromUser, '⚠️ 这台设备的记录已不在台账里（可能刚被移除），未做改动。');
+      return true;
+    }
+    const audited = recordAudit(ctx.db, {
+      actorKind: 'local',
+      actorRef: fromUser,
+      action: action === 'allow' ? 'device.authorize' : 'device.revoke',
+      targetType: 'device',
+      targetId: updated.id,
+      detail: { via: 'im', channel: ctx.channelType, fromUser, deviceKind: updated.kind, name: deviceDisplayName(updated) },
+    });
+    console.log(`[IMRouter] IM 授权台：${action} device ${shortCode(updated.id)} audit=${audited}`);
+    void ctx.sendReply(fromUser, action === 'allow'
+      ? `✅ 已允许「${deviceDisplayName(updated)}」（码 ${shortCode(updated.id)}）执行控制。回复「拒绝设备 ${shortCode(updated.id)}」可随时收回。`
+      : `🚫 已收回「${deviceDisplayName(updated)}」（码 ${shortCode(updated.id)}）的控制权，此后它只读。`);
+    return true;
+  }
+
+  // answer：作答跨机问题。
+  const q = resolveQuestionByCode(ctx.db, cmd.code);
+  if (q.kind === 'ambiguous') {
+    void ctx.sendReply(fromUser, formatQuestionCandidates(q.candidates));
+    return true;
+  }
+  if (q.kind === 'not_found') {
+    void ctx.sendReply(fromUser, `没有找到与码「${cmd.code}」匹配的待答问题。回复「待答问题」查看清单。`);
+    return true;
+  }
+  const answered = await answerQuestion(ctx.db, { id: q.record.requestId, answer: cmd.answer });
+  if (answered.ok) {
+    void ctx.sendReply(fromUser, `✅ 已答复（码 ${shortCode(q.record.requestId)}），对端将继续执行。`);
+  } else {
+    void ctx.sendReply(fromUser, answered.note === 'not-enrolled'
+      ? '本机尚未加入节点网络，无法作答跨机问题。请先在桌面「同伴」页完成节点入网。'
+      : `⚠️ 答复未能送达（${answered.note || '未知原因'}）。`);
+  }
+  return true;
+}
+
 // ====== 主入口 ======
 
 export async function routeImMessage(
@@ -819,6 +939,12 @@ export async function routeImMessage(
   //   ⚠ 与任务审批**两把尺**：本路只认「(同意|拒绝)接入」句式（`parsePairReply` 锚定）；裸「同意」/「是」
   //     仍归步骤0 的任务审批——两路语义不混（反证标本见 rr P-2）。
   if (handleTerminalPairReply(ctx, fromUser, msgText)) return;
+
+  // ====== 步骤-0.5: IM 授权台（设备授权 / 跨机问答）======
+  // 语义与真源都不同于上面两路：配对读 `wa_external_terminals`，审批读暂停任务的回复队列；
+  //   本台读 `wa_devices`（设备授权）与 `wa_event_log` 的 `node_dispatch`（跨机问答）。
+  // 排在步骤0 之前：`回答 <码> …` 被当任务回复吃掉、`允许设备 <码>` 被建成任务，都是**同一种**次序病。
+  if (await handleApprovalInbox(ctx, fromUser, msgText, chatType)) return;
 
   // ====== 步骤0: 审批队列检查（须先于自由回复路由）======
   // zx_20260911_2 M1(罗尔斯·同一规则 / 维特根斯坦·语言游戏): 次序倒置时，「是」/选项先被
@@ -1356,18 +1482,10 @@ export function shouldAutoDecomposeIm(db: Database.Database, parentTaskId: strin
 
 async function handleCreateTask(ctx: ImContext, toUser: string, msgText: string, inboundId?: string): Promise<void> {
   try {
-    // M5 实机复核修: 标题/描述清洗——去除 @项目名 + 可选"创建任务/新建任务"命令脚手架与冒号,
-    // 不再残留 "任务:" 前缀/把整条命令当描述(用户实测标题="任务:复核Y1摘要…"、描述=整条含@的命令)。
-    const cleaned = msgText
-      .replace(/@[^\s@，。,\.！!？?：:；;、]+/g, '')
-      .replace(/^(创建|新建|做一个|帮我|帮我做|做)\s*(任务)?\s*[:：]?\s*/i, '')
-      .trim();
-    // M5 复核修(用户选定·首句拆标题): 标题=正文首句(首个空格/句读前), 描述=余下正文——避免标题=描述=整句(长段不可读/重复)
-    let title = cleaned;
-    let desc = '';
-    const firstBoundary = cleaned.search(/[\s，,。．.！!？?；;、:：]/);
-    if (firstBoundary > 0) { title = cleaned.slice(0, firstBoundary).trim(); desc = cleaned.slice(firstBoundary).trim(); }
-    title = title.slice(0, 50);
+    // zx_20261031_1 M1（名亦既有，夫亦将知止）: 标题/描述的清洗与切分**只此一处**（`core/im/task-input.ts`）——
+    // 旧内联正则把任何空白当句界，中文夹英文时标题被切在半句（真标本：`把这周本仓库的 git 提交…`
+    // 落库成了 `把这周本仓库的`）。中文句读仍为界，空格只在两侧都不是汉字时才为界。
+    const { title, description: desc } = splitTaskInput(msgText);
     if (!title) { await ctx.sendReply(toUser, '请输入任务内容。'); return; }
 
     // A8/A10: @项目名解析 + isCreateProject（@不存在的项目名则创建新项目）

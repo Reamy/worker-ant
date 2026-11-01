@@ -2854,9 +2854,10 @@ async function main(): Promise<void> {
   {
     // zx_20261018_3 批七：新增 `audit_export`（审计导出）⇒ 词表 6→7；逐成员枚举仍不放宽，
     //   新成员须同时在 `TEAM_FEATURE_LABEL` 补人话名并穷举接线（`audit:export` 第一跳）。
-    // zx_20261029_2 M6：`device_discovery` 移出（归 Pro）⇒ 8→7；逐成员枚举仍不放宽。
+    // zx_20261029_2 M6：`device_discovery` 移出（归 Pro）⇒ 8→7；
+    //   zx_20261101_1 M1：新增 `approval_inbox`（IM 授权台）⇒ 7→8；逐成员枚举仍不放宽。
     eq([...TEAM_FEATURES],
-      ['multi_node', 'device_control', 'external_terminal', 'audit_view', 'audit_export', 'team_library', 'project_profile_share'],
+      ['multi_node', 'device_control', 'external_terminal', 'audit_view', 'audit_export', 'team_library', 'project_profile_share', 'approval_inbox'],
       'R-70a ★TEAM_FEATURES 逐项枚举（M6 起发现归 Pro，本表只管控制面；不顺手加枚举）');
     const label = TEAM_FEATURE_LABEL.external_terminal;
     ok(label.startsWith('外部终端接入') && label.includes('意图接入') && label.includes('显式勾选'),

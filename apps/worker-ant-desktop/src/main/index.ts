@@ -39,7 +39,12 @@ import { pushImOwnerNotice } from './core/im/im-notify.js';
 import { createExternalCapabilityPort } from './core/external-calls.js';
 // zx_20261018_2 批六「见新」：门态/门内调用**发生即上屏**（瞬态事件；面板轮询降为兜底）。
 import { emitExternalCallRecorded, emitExternalStatusChanged } from './core/refresh-events.js';
-import { listDevices, listRooms, resolveDeviceByName, type DeviceControlOutcome } from './core/device-registry.js';
+import { listDevices, listRooms, resolveDeviceByName, type AnsDevice, type DeviceControlOutcome } from './core/device-registry.js';
+// zx_20261101_1 M2「授」: 发现即问——新设备的 IM 询问由小模块去抖聚合，判据（Team 闸）仍取一处真源。
+import { createDeviceAuthPusher } from './core/im/device-auth-push.js';
+// zx_20261101_1 M3「授」: 跨机问答的 IM 文案与 M1 的受理端同源（`approval-inbox.ts` 一处出）。
+import { buildRemoteQuestionNotice } from './core/im/approval-inbox.js';
+import { teamFeatureRefusal } from './core/team-gate.js';
 import { deviceCallName } from './core/device-name.js';
 import { runDeviceControl, defaultDeviceControl } from './core/tools/device.js';
 // zx_20261018_1 批五 / zx_20261029_2 M2: 意图解析链——规则优先，规则排不出且开关允许时才请模型补。
@@ -1190,7 +1195,20 @@ app.whenReady().then(async () => {
   eventBus.on('node.presence_changed', async (e) => { forwardToRenderer('node.presence_changed', e.data as Record<string, unknown>); });
   eventBus.on('node.heartbeat', async (e) => { forwardToRenderer('node.heartbeat', e.data as Record<string, unknown>); });
   // zx_20261004 M10: 设备面板实时——发现（持久化）与状态流转（持久化）各走一条转发。
-  eventBus.on('device.discovered', async (e) => { forwardToRenderer('device.discovered', e.data as Record<string, unknown>); });
+  // zx_20261101_1 M2「授」: 发现即问——新设备一进门，在 IM 私聊里问一声「允不允许用」。
+  //   双闸：`device_control`（能不能动）+ `approval_inbox`（能不能远程授）；任一锁档都不推。
+  //   1.5 秒窗口聚合（一次发现多台只发一条；文案由 `buildDeviceAuthNotice` 一处出）。
+  const deviceAuthPusher = createDeviceAuthPusher({
+    push: (message, kind) => pushImOwnerNotice(db!, message, kind),
+  });
+  eventBus.on('device.discovered', async (e) => {
+    forwardToRenderer('device.discovered', e.data as Record<string, unknown>);
+    const data = e.data as { device?: AnsDevice; isNew?: boolean };
+    if (!data.device || data.isNew !== true) return;
+    if (teamFeatureRefusal(db!, 'device_control') !== null) return;
+    if (teamFeatureRefusal(db!, 'approval_inbox') !== null) return;
+    deviceAuthPusher.onDiscovered(data.device, true);
+  });
   eventBus.on('device.status_changed', async (e) => { forwardToRenderer('device.status_changed', e.data as Record<string, unknown>); });
   // zx_20261004 M13: 调用记录实时——到场/收口各一条（持久化，面板 `nodes:requests` 订阅即刷）。
   eventBus.on('node.request_received', async (e) => { forwardToRenderer('node.request_received', e.data as Record<string, unknown>); });
@@ -1203,7 +1221,27 @@ app.whenReady().then(async () => {
   //   但此前**主进程没转发这两类**（清单里只有上四条）⇒ 台账两个孔有插头、墙上没线：
   //   B 发问 / 本机作答**落了库却到不了面板** ⇒ 「待作答」块不即时上屏，只能手动刷新才见（实机照出）。
   //   ⇒ 四类事件**一律**转发（枚举同 `liveTypes`，一一对应）。
-  eventBus.on('node.request_question', async (e) => { forwardToRenderer('node.request_question', e.data as Record<string, unknown>); });
+  // zx_20261101_1 M3「授」: 跨机问答闭环——B 端一发问，**同时在 IM 私聊里问本机主人**，
+  //   人不在电脑前也能把「回答 <码> <答案>」回掉（受理端见 `im-router.ts` 步骤-0.5）。
+  //   去抖 0：问题低频（一单至多一两轮），逐条发才不会把两个不同问题压成一条。
+  //   幂等由**发端**保证（`node-dispatcher.ts` 的 `eventAlreadyRecorded` 只 emit 一次），此处不另设去重。
+  //   闸：`approval_inbox`（远程放权属团队协作面）；锁档时仍照常送渲染层，只是私聊里不问。
+  eventBus.on('node.request_question', async (e) => {
+    forwardToRenderer('node.request_question', e.data as Record<string, unknown>);
+    const d = e.data as { requestId?: unknown; category?: unknown; targetNodeId?: unknown; question?: unknown; options?: unknown };
+    if (typeof d.requestId !== 'string' || d.requestId.length === 0) return;
+    if (typeof d.question !== 'string' || d.question.length === 0) return;
+    if (teamFeatureRefusal(db!, 'approval_inbox') !== null) return;
+    const options = Array.isArray(d.options)
+      ? d.options.filter((o): o is string => typeof o === 'string')
+      : [];
+    void pushImOwnerNotice(db!, buildRemoteQuestionNotice({
+      requestId: d.requestId,
+      category: typeof d.category === 'string' ? d.category : '',
+      targetNodeId: typeof d.targetNodeId === 'string' ? d.targetNodeId : '',
+      question: { question: d.question, ...(options.length > 0 ? { options } : {}) },
+    }), 'remote_question');
+  });
   eventBus.on('node.request_answered', async (e) => { forwardToRenderer('node.request_answered', e.data as Record<string, unknown>); });
   // zx_20261018_2 批六「见新」：三类**瞬态**事件（不进 `EVENT_AGGREGATE_MAP`）——交付物运行态、
   //   门态、门内一次调用。交付物页/协同页据此即时刷新；轮询只作崩溃兜底（`lib/refresh.ts`）。

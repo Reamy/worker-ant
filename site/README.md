@@ -10,6 +10,7 @@ site/
 ├── index.html      # 单页全部内容（九节：Hero / 痛点 / 三根矛 / 原理 / 用例 / 快速开始 / 竞品 / 定价 / FAQ）
 ├── styles.css      # 全部样式（含 prefers-color-scheme 深色模式与响应式）
 ├── 404.html        # Cloudflare Pages 的兜底页
+├── images/demo-wechat-task.gif  # 首屏演示 GIF（38 秒实录，取自 business-plan/materials/images/demo/gif1-wechat-task.gif）
 ├── brand-icon.png  # 品牌标 128px（取自 apps/worker-ant-desktop/assets/icon.png）
 ├── favicon-32.png / favicon-16.png / apple-touch-icon.png  # 同源派生
 ├── robots.txt / sitemap.xml
@@ -32,7 +33,7 @@ npx wrangler pages deploy site --project-name worker-ant
 → 产出 `https://worker-ant.pages.dev`。随后在 Cloudflare 控制台把 `workerant.cn`
 绑为该项目的自定义域；`worker-ant.cn` 配 301 永久重定向到 `workerant.cn`。
 
-> 改了 `styles.css` 就同步改 `index.html` 里 `styles.css?v=` 的版本号（当前 `0.3.0`）。
+> 改了 `styles.css` 就同步改 `index.html` 里 `styles.css?v=` 的版本号（当前 `0.4.0`）。
 > 原因：自定义域上 Cloudflare 的区域级 Browser Cache TTL 会把 CSS 的浏览器缓存抬到 4 小时，
 > `_headers` 里的 1 小时会被覆盖——不换 URL，老访客最长 4 小时仍用旧样式配新 HTML。
 
@@ -40,7 +41,7 @@ npx wrangler pages deploy site --project-name worker-ant
 
 落地页**不许承诺产品还没做到的事**（承 `landing-page.md` 首条纪律）：
 
-- 「下载 macOS 版」按钮指向 **GitHub Releases v0.3.0 的真实 dmg**（Apple Silicon，macOS 13+），Release 页附 SHA-256 校验值；zip 作为备用入口。**不放假的下载链接**——页面上的每个下载入口都必须真能下载到已发布的安装包。
+- 「下载 macOS 版」按钮指向 **GitHub Releases v0.4.0 的真实 dmg**（Apple Silicon，macOS 13+），Release 页附 SHA-256 校验值；zip 作为备用入口。**不放假的下载链接**——页面上的每个下载入口都必须真能下载到已发布的安装包。
 - 付费档位：**Pro 与早鸟终身标「已开售」**，链接指向面包多店铺（与桌面端 `core/pricing.ts` 的 `PURCHASE_URL` 同一落点）；**Team 授权包标「已开售」**（¥599/月 · ¥5990/年，每包 ≤20 节点，人工开通）；**企业私有化标「路线图」**。
 - **两件事分开说**：授权已开售，安装包**已发布**（macOS 已完成 Developer ID 签名与 Apple 公证，仅 arm64、macOS 13+；Intel Mac 与 Windows 暂未提供）。桌面端自带 14 天团队版试用。
 - 主 CTA 是下载安装包；次 CTA 指向 GitHub 源码仓库，「方式二：从源码运行」仍然保留，两条路都可以走。

@@ -638,7 +638,10 @@ export function deviceControlVerdict(dev: AnsDevice | null): DeviceControlVerdic
     return { ok: false, reason: 'not_controllable', how: `「${dev.name}」自述不具备可控能力（只读设备），无法下发控制命令。` };
   }
   if (!dev.authorized) {
-    return { ok: false, reason: 'not_authorized', how: `「${dev.name}」尚未授权控制——请在「设备」面板打开它的「允许控制」开关，再重试。` };
+    // zx_20261101_1 M2「授」: 教人**两条路**——在电脑前用面板，不在电脑前用 IM 授权台（团队版）。
+    //   短码不在这里算（`shortCode` 的唯一实现在 `im/approval-inbox.ts`；本模块不反向依赖它）：
+    //   先让用户回「待授权设备」拿短码，再回「允许设备 <短码>」。
+    return { ok: false, reason: 'not_authorized', how: `「${dev.name}」尚未授权控制——请在「设备」面板打开它的「允许控制」开关；也可在 IM 私聊回复「待授权设备」取得短码后回复「允许设备 <短码>」（团队版），再重试。` };
   }
   return { ok: true };
 }

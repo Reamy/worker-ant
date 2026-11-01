@@ -2044,8 +2044,9 @@ function groupI(): void {
     ...Object.values(PRO_FEATURE_LABEL),
     ...Object.values(TEAM_FEATURE_LABEL),
   ]);
-  // zx_20261030_1 M4（改旧断言＝钉更强的真源）: 上限口径已扩到**九维**（M5 增设备/外部终端/A2A/知识卡/
-  //   团队共享记忆）——期望文案仍逐维由 `TIER_LIMITS` 派生（不写死数值，也不写死"只有四维"）。
+  // zx_20261030_1 M4（改旧断言＝钉更强的真源）: 上限口径已扩到**十一维**（M5 增设备/外部终端/A2A/知识卡/
+  //   团队共享记忆；zx_20261101_1 M4 再增 IM 渠道 / 任务模板）——期望文案仍逐维由 `TIER_LIMITS` 派生
+  //   （不写死数值，也不写死维度数）。
   const quotaOf = (l: (typeof TIER_LIMITS)[keyof typeof TIER_LIMITS]): string[] => [
     l.maxProjects === 0 ? '不限项目' : `${l.maxProjects} 个项目`,
     `并发 ${l.maxProjectConcurrency}`,
@@ -2059,6 +2060,9 @@ function groupI(): void {
     l.maxA2AServers === 0 ? '不限 A2A 服务' : `A2A 服务 ${l.maxA2AServers} 个`,
     l.maxKnowledgeCardsPerProject === 0 ? '不限每项目知识卡' : `每项目知识卡 ${l.maxKnowledgeCardsPerProject} 张`,
     l.maxTeamLibraryMemories === 0 ? '不限团队共享记忆' : `团队共享记忆 ${l.maxTeamLibraryMemories} 条`,
+    // zx_20261101_1 M4「授」: IM 渠道 / 任务模板（0 = 不限，不写成 "0 个"/"0 套"）。
+    l.maxIMChannels === 0 ? '不限 IM 渠道' : `IM 渠道 ${l.maxIMChannels} 个`,
+    l.maxTaskTemplates === 0 ? '不限任务模板' : `任务模板 ${l.maxTaskTemplates} 套`,
   ];
   const quotaShapes = LICENSE_TIERS.flatMap((t) => quotaOf(TIER_LIMITS[t]));
   /** 两档之间**确实变化**的上限（与上述同一套形状逐维对齐）。 */
@@ -2126,7 +2130,7 @@ function groupI(): void {
     eq([up.toTier, up.toLabel], ['pro', TIER_LABEL.pro],
       'I-3a 缺省目标＝下一档（由 LICENSE_TIERS 派生）');
     eq(up.quotas, diffQuotas(TIER_LIMITS.community, TIER_LIMITS.pro),
-      'I-3b 上限差异只列确实变化项（九维逐枚举；不变维不列）');
+      'I-3b 上限差异只列确实变化项（十一维逐枚举；不变维不列）');
     const proIncluded = tierCatalog().tiers.find((r) => r.tier === 'pro')!.capabilities
       .filter((c) => c.included).map((c) => c.label);
     const teamIncluded = tierCatalog().tiers.find((r) => r.tier === 'team')!.capabilities
@@ -2135,11 +2139,11 @@ function groupI(): void {
       'I-3c ★能力差异 = 目标档新增的已注册能力（不多不少）');
 
     const up2 = upgradeDifferences('pro');
-    // 四维逐枚举、期望文案由 TIER_LIMITS 派生（zx_20261027_3 M3：本机账号也是档位实差，须列）。
+    // 十一维逐枚举、期望文案由 TIER_LIMITS 派生（zx_20261027_3 M3：本机账号也是档位实差，须列）。
     const proL = TIER_LIMITS.pro;
     const teamL = TIER_LIMITS.team;
     eq(up2.quotas, diffQuotas(proL, teamL),
-      'I-3d 逐档派生：Pro→Team 只列**确实变化**的上限（九维逐枚举）');
+      'I-3d 逐档派生：Pro→Team 只列**确实变化**的上限（十一维逐枚举）');
     eq(up2.capabilities, teamIncluded.filter((l) => !proIncluded.includes(l)),
       'I-3e Pro→Team 只列 Team 新增那几项（Pro 已有的不重复卖）');
 

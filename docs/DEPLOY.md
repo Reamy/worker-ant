@@ -46,7 +46,7 @@ cp data/backups/ans-20260624-1200.db data/ans-server.db
 cp data/backups/wa-20260624-1200.db data/worker-ant-server.db
 ```
 
-> 跨仓库契约（勿破坏）：`NOTIFICATION_PAYLOAD_DIR=data/notification_payloads`（推送 `.txt` 落盘）；
+> 目录约定：`NOTIFICATION_PAYLOAD_DIR=data/notification_payloads`（推送 `.txt` 落盘）；
 > `data/cron_heartbeat.json`（cron 存活心跳，30 分钟阈值）。
 
 ## 桌面端打包
@@ -62,7 +62,7 @@ pnpm --filter @worker-ant/desktop pack
 # 3. 生成 macOS 安装包（走签名 + 公证）
 cd apps/worker-ant-desktop && pnpm dist:mac
 # 输出: release/工蚁-<version>-mac-arm64.dmg / .zip
-# 上传前复制为 ASCII 文件名（如 worker-ant-0.3.0-mac-arm64.dmg）
+# 上传前复制为 ASCII 文件名（如 worker-ant-0.4.0-mac-arm64.dmg）
 ```
 
 打包后**必须还原 Node ABI**（否则 `pnpm dev:ans` 无法加载原生模块）：
@@ -91,11 +91,11 @@ bash scripts/rebuild-ans-native.sh
 
 ```bash
 # 产物文件名用 ASCII（避免上传/下载链路的编码问题）
-gh release create v0.3.0 \
-  release/worker-ant-0.3.0-mac-arm64.dmg \
-  release/worker-ant-0.3.0-mac-arm64.zip \
+gh release create v0.4.0 \
+  release/worker-ant-0.4.0-mac-arm64.dmg \
+  release/worker-ant-0.4.0-mac-arm64.zip \
   --repo Reamy/worker-ant \
-  --title "工蚁 v0.3.0 — 设备与终端协作、项目须知、更轻更快" \
+  --title "工蚁 v0.4.0 — IM 授权台、七维容量、授权指纹更稳" \
   --notes-file <发布说明.md>
 ```
 

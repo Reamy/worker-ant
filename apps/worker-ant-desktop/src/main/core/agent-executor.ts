@@ -2002,9 +2002,11 @@ export async function executeTask(
       // zx_20261029_2 「通」——发现→品类归一→意图→安全闸→真控制→留痕一条链 / 卡片同一套能力词汇 / Pro 看·Team 控·插件按档。**只改这一处**。
       // zx_20261029_3 「辨」——可修/待人分判 / 配置按自身语法判 / 后台进程登记与带走 / 列表四账 / 多段逐段校验。**只改这一处**。
       // zx_20261030_1 「协」——择其能（可靠性排序）/ 尽其用（进度上屏·容量真闸）/ 止其可止（真停·回执核对·集群视图·知识增量与卖点兑现）。**只改这一处**。
-      // zx_20261030_2 「器」——名正（形态判定补词与来源落账·手动覆盖）/ 器利（子代理工具面说做同源·edit_file）/ 止有时（await_subagents）/ 验收理由入账 / 收口去重 / 简报与审计同源。**只改这一处**。
+      // zx_20261030_3 「常」——设备指纹只取机器硬件标识，旧算法保留为验签候选（换网络/改机器名不再掉授权）。**只改这一处**。
+      // zx_20261031_1 「名器」——中文空格不作标题句界 / git 聚合类题面判 analysis（自带 shell，不再手算时间戳）。**只改这一处**。
+      // zx_20261101_1 「授」——远程放权：IM 授权台（设备授权/跨机问答，仅 1:1）/ 发现即问 / 问题即上屏 / 容量再两维（IM 渠道·任务模板）。**只改这一处**。
       const prefixFp = fingerprintMessages(messages, stablePrefixEnd);
-      const feats ={ requirementCard: true, contextWatermark: true, historySummaryOnly: true, readListOnResume: true, goalRestartCap: true, build: 'zx_20261030_2',
+      const feats ={ requirementCard: true, contextWatermark: true, historySummaryOnly: true, readListOnResume: true, goalRestartCap: true, build: 'zx_20261101_1',
         archetype_source: decision.source,
         ctx_prefix_hash: prefixFp.hash, ctx_prefix_chars: prefixFp.chars, ctx_prefix_end: prefixFp.end };
       // zx_20260916_1 M5 (#6): 读**恢复账总数**（用户介入 + 系统自动），不再单读 `resume_count`——

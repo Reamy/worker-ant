@@ -26,6 +26,10 @@ import { resolveImagePreview } from '../core/image-preview.js';
 import { resolveAttachmentRead } from '../services/im-media.js';
 // zx_20260930 M5: 只作类型用（取实例走 `_getMemoryForIm` 惰性取用，本模块不持有它、也不构造它）。
 import type { MemoryManager } from '../core/memory-manager.js';
+// zx_20261101_1 M4「授」：新建渠道受档位容量闸（`maxIMChannels`，0=不限）；拒因另附用量与升级差异。
+import { resolveLicenseTier } from '../core/license.js';
+import { capacityRefusal, countIMChannels, type CapacityDb } from '../core/tier-capacity.js';
+import { refusalWithContext } from '../core/tier-usage.js';
 
 // 活跃的 IM 适配器实例
 const activeAdapters = new Map<string, ImAdapter>();
@@ -164,6 +168,10 @@ export function initImIpc(db: Database.Database, dataDir: string, getMemory?: ()
     channel_type: string; name?: string; config?: Record<string, string>
   }) => {
     try {
+      // zx_20261101_1 M4「授」：新建渠道数受档位上限（`maxIMChannels`，0=不限）。只拦**新增**——
+      //   已有渠道的改配置/启停走 `im:updateChannel`/`im:startChannel`，不受影响。
+      const verdict = capacityRefusal(resolveLicenseTier(db), 'maxIMChannels', countIMChannels(db as unknown as CapacityDb));
+      if (!verdict.ok) return { error: { code: 'QUOTA_EXCEEDED', message: refusalWithContext(db, verdict.note) } };
       const id = crypto.randomUUID();
       db.prepare('INSERT INTO wa_im_channels (id, channel_type, name, config, status) VALUES (?, ?, ?, ?, ?)').run(
         id, channel_type, name || channel_type, JSON.stringify(config || {}), 'inactive'

@@ -43,7 +43,7 @@ import {
 } from '../apps/worker-ant-desktop/src/main/core/feature-limits.js';
 import {
   LICENSE_PREFIX, MAX_LICENSE_DEVICES, licenseDeviceCap, TRIAL_DAYS, LICENSE_PUBLIC_KEY_PEM, LICENSE_SETTING_KEYS,
-  formatFingerprint, collectFingerprintInputs, deviceFingerprint,
+  formatFingerprint, stableFingerprint, collectFingerprintInputs, deviceFingerprint, deviceFingerprints, fingerprintDiagnostics,
   encodeLicense, verifyLicense, resolveLicenseState, resolveLicenseTier, activateLicense,
   type LicensePayload, type LicenseSettingDb,
 } from '../apps/worker-ant-desktop/src/main/core/license.js';
@@ -183,27 +183,66 @@ async function main(): Promise<void> {
       'M6-2 内嵌的是**公钥**（SPKI PEM），且不含私钥字样');
 
     // ── 指纹（纯函数，喂固定输入 ⇒ 不碰真机，G-4） ──
+    // zx_20261030_3「常」重定向（**改旧断言＝改钉更强的新真源，不是放宽**）：
+    //   M6-3/4/5 钉的是 `formatFingerprint`——它现在是**兼容算法**（存量许可的判定尺），
+    //   五路输入全参与的语义**一字未改**，只是名实归位；主指纹的稳定性由新增 M6-4a…M6-5c 钉住。
     const fpIn = { platform: 'darwin', arch: 'arm64', hostname: 'h1', machineId: 'MID-1', mac: 'aa:bb:cc:dd:ee:ff' };
     const fp1 = formatFingerprint(fpIn);
-    eq(fp1, formatFingerprint({ ...fpIn }), 'M6-3 指纹**确定性**：同输入同结果（幂等，非随机）');
+    eq(fp1, formatFingerprint({ ...fpIn }), 'M6-3 兼容指纹**确定性**：同输入同结果（幂等，非随机）');
     ok(
       fp1 !== formatFingerprint({ ...fpIn, platform: 'linux' })
       && fp1 !== formatFingerprint({ ...fpIn, arch: 'x64' }),
-      'M6-4 指纹**取合成**：平台/架构也参与哈希（与 M6-5 的机器标识/主机名/MAC 合起来＝五路输入全参与，非单点绑定）',
+      'M6-4 兼容指纹（旧算法）**取合成**：平台/架构也参与哈希（与 M6-5 的机器标识/主机名/MAC 合起来＝五路输入全参与）',
       fp1,
     );
     ok(
       fp1 !== formatFingerprint({ ...fpIn, machineId: 'MID-2' })
       && fp1 !== formatFingerprint({ ...fpIn, hostname: 'h2' })
       && fp1 !== formatFingerprint({ ...fpIn, mac: 'aa:bb:cc:dd:ee:00' }),
-      'M6-5 ★两侧标本：改**机器标识/主机名/MAC 任一**都改变指纹（不是"只看某一项"的单点绑定）',
+      'M6-5 ★兼容指纹两侧标本：改**机器标识/主机名/MAC 任一**都改变它（存量许可按这把尺判定，字节语义不得动）',
       fp1,
     );
-    ok(/^[0-9A-F]{4}(-[0-9A-F]{4}){3}$/.test(fp1),
-      'M6-6 指纹形状 `XXXX-XXXX-XXXX-XXXX`（16 位十六进制分四组——用户要把它发给签发方，须整齐好念）', fp1);
-    eq(typeof deviceFingerprint(), typeof deviceFingerprint(), 'M6-7 本机指纹**进程内幂等**（M7 记忆化：热路径不重复 execFileSync）');
+
+    // ── zx_20261030_3 主指纹：只认机器标识，易变项一律不掺 ──
+    const s0 = stableFingerprint(fpIn);
+    eq(s0, stableFingerprint({ ...fpIn }), 'M6-4a 主指纹**确定性**：同输入同结果（幂等）');
+    ok(
+      s0 === stableFingerprint({ ...fpIn, hostname: 'Reamy-MacBook-Pro-1637.local' })
+      && s0 === stableFingerprint({ ...fpIn, mac: '02:00:00:00:00:00' })
+      && s0 === stableFingerprint({ ...fpIn, platform: 'linux' })
+      && s0 === stableFingerprint({ ...fpIn, arch: 'x64' }),
+      'M6-4b ★★主指纹**不随主机名/网卡/平台/架构变**（本轮病因：Bonjour 改名、换坞站/热点、Rosetta 换架构）',
+      s0,
+    );
+    ok(s0 !== stableFingerprint({ ...fpIn, machineId: 'MID-2' }),
+      'M6-4c ★另一端标本：**机器标识变 ⇒ 主指纹变**（换机器仍然掉绑定，不是"谁都算本机"）');
+    const sNoMid = stableFingerprint({ ...fpIn, machineId: null });
+    ok(
+      sNoMid !== s0
+      && sNoMid !== stableFingerprint({ ...fpIn, machineId: null, hostname: 'h2' })
+      && sNoMid !== stableFingerprint({ ...fpIn, machineId: null, mac: null }),
+      'M6-4d 读不到机器标识 ⇒ 如实降级为合成指纹（与正常态不同、仍随主机名/MAC 变，**不退成常量**）',
+    );
+    ok(s0 !== fp1 && sNoMid !== s0,
+      'M6-4e 主指纹与兼容指纹是**两个不同的串**（同机必须同时产出两个候选，否则存量件无处可认）');
+    ok(/^[0-9A-F]{4}(-[0-9A-F]{4}){3}$/.test(s0) && /^[0-9A-F]{4}(-[0-9A-F]{4}){3}$/.test(fp1),
+      'M6-6 两个算法的指纹形状均为 `XXXX-XXXX-XXXX-XXXX`（用户要把它发给签发方，须整齐好念）', s0);
+
+    const pairAll = deviceFingerprints();
+    ok(
+      pairAll.length >= 1 && pairAll.length <= 2
+      && new Set(pairAll).size === pairAll.length
+      && pairAll.includes(deviceFingerprint()),
+      'M6-7 ★本机候选指纹 = [主指纹, 兼容指纹]（去重、必含主指纹；进程内记忆化＝热路径不重复 execFileSync）',
+      pairAll.join(' / '),
+    );
     ok(collectFingerprintInputs() && typeof collectFingerprintInputs().platform === 'string',
       'M6-8 `collectFingerprintInputs` 不 throw（读不到机器标识也退 null 参与哈希，不炸）');
+    ok(typeof fingerprintDiagnostics(collectFingerprintInputs()) === 'string'
+      && /机器标识=/.test(fingerprintDiagnostics({ ...fpIn, mac: 'aa:bb:cc:dd:ee:ff' }))
+      && !/dd:ee:ff/.test(fingerprintDiagnostics({ ...fpIn, mac: 'aa:bb:cc:dd:ee:ff' })),
+      'M6-8a 诊断串在册且**脱敏**：MAC 只报前三段（自助排查不必暴露整串网卡地址）',
+      fingerprintDiagnostics({ ...fpIn, mac: 'aa:bb:cc:dd:ee:ff' }));
 
     // ── 验签三态 + 两侧标本 ──
     const good = sign(payload());
@@ -240,6 +279,20 @@ async function main(): Promise<void> {
       'M6-15 ★★两侧标本：本机不在设备列表 ⇒ `device_mismatch`（同一段许可，换个指纹即红）');
     ok(verifyLicense(sign(payload({ devices: [] })), { publicKeyPem: TEST_PUBLIC_PEM, now: NOW, fingerprint: FP }).ok,
       'M6-16 空设备列表 = 不绑设备 ⇒ 任何机器都通过（空列表与"绑了别人"分得开）');
+
+    // ── zx_20261030_3 存量兼容：候选集放宽「哪些串算本机」，**不**放宽签名/绑定判定 ──
+    const legacyOf = formatFingerprint(fpIn);
+    const stableOf = stableFingerprint(fpIn);
+    const legacyLic = sign(payload({ devices: [legacyOf] }));
+    ok(verifyLicense(legacyLic, { publicKeyPem: TEST_PUBLIC_PEM, now: NOW, fingerprints: [stableOf, legacyOf] }).ok,
+      'M6-16a ★★存量兼容（正）：`devices` 里是**旧算法指纹**的许可，在候选集下**仍通过** —— 改算法不让任何存量用户掉档');
+    ok(!verifyLicense(legacyLic, { publicKeyPem: TEST_PUBLIC_PEM, now: NOW, fingerprint: stableOf }).ok,
+      'M6-16b ★反证：只给主指纹则同一份许可 `device_mismatch`（救它的是候选集，不是把比对放松了）');
+    const stranger = verifyLicense(bound, { publicKeyPem: TEST_PUBLIC_PEM, now: NOW, fingerprints: [stableOf, legacyOf] });
+    ok(!stranger.ok && stranger.status === 'device_mismatch',
+      'M6-16c ★★另一端标本：给**完整候选集**，陌生指纹许可仍 `device_mismatch`（候选集只放宽"哪些串算本机"）', stranger.detail);
+    ok(!stranger.ok && stranger.status === 'device_mismatch' && stranger.detail.includes(stableOf) && /机器标识=/.test(stranger.detail),
+      'M6-16d `device_mismatch` 说明带**当前指纹**与脱敏诊断（掉档时用户能自查是哪一项，不必整串瞎猜）', stranger.detail);
 
     const vTooMany = verifyLicense(sign(payload({ devices: ['a', 'b', 'c', 'd'] })), { publicKeyPem: TEST_PUBLIC_PEM, now: NOW, fingerprint: 'a' });
     ok(!vTooMany.ok && vTooMany.status === 'too_many_devices',

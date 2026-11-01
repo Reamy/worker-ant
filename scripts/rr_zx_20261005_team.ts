@@ -138,7 +138,8 @@ function main(): void {
     //   `TEAM_FEATURE_LABEL` 补人话名、穷举其接线与面板落点（承 feedback_retarget_assertions_to_stronger_source；
     //   G-5 读**原文**）。原来是"恰三项"的幻数计数——换成逐成员枚举后，加/删任一员都红。
     // zx_20261029_2 M6：`device_discovery` **移出** Team 词表（归 Pro）；此处逐成员核对 8→7。
-    const TEAM_MEMBERS = ['multi_node', 'device_control', 'external_terminal', 'audit_view', 'audit_export', 'team_library', 'project_profile_share'] as const;
+    // zx_20261101_1 M1：新增 `approval_inbox`（IM 授权台）⇒ 逐成员核对 7→8。
+    const TEAM_MEMBERS = ['multi_node', 'device_control', 'external_terminal', 'audit_view', 'audit_export', 'team_library', 'project_profile_share', 'approval_inbox'] as const;
     eq([...TEAM_FEATURES], [...TEAM_MEMBERS],
       'M22-9 ★能力词表**逐成员枚举**（唯一定义处；新增一员须补人话名 + 穷举接线/面板落点）');
     for (const f of TEAM_MEMBERS) {

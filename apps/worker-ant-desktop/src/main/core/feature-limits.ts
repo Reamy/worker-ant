@@ -47,6 +47,15 @@ export interface TierLimits {
   maxKnowledgeCardsPerProject: number;
   /** 从团队共享库**导入**并落 `wa_memories(source='team_library')` 的记忆总条数上限；**0 = 不限**。 */
   maxTeamLibraryMemories: number;
+  /**
+   * zx_20261101_1 M4「授」: 本机 IM 渠道数上限；**0 = 不限**。只拦 `im:createChannel` 这一次新增。
+   */
+  maxIMChannels: number;
+  /**
+   * zx_20261101_1 M4「授」: 用户自建任务模板数上限；**0 = 不限**。
+   * 计数口径只含 `source ∈ {'user','team_library'}`——`system` 内置与 `auto` 自动学习的模板不占用户额度。
+   */
+  maxTaskTemplates: number;
 }
 
 /**
@@ -57,14 +66,17 @@ export const TIER_LIMITS: Record<LicenseTier, TierLimits> = {
   community: {
     maxProjectConcurrency: 3, maxProjects: 1, maxMembers: 1, maxNodes: 1,
     maxDevices: 5, maxExternalTerminals: 1, maxA2AServers: 1, maxKnowledgeCardsPerProject: 8, maxTeamLibraryMemories: 200,
+    maxIMChannels: 2, maxTaskTemplates: 5,
   },
   pro: {
     maxProjectConcurrency: 8, maxProjects: 0, maxMembers: 1, maxNodes: 1,
     maxDevices: 30, maxExternalTerminals: 3, maxA2AServers: 3, maxKnowledgeCardsPerProject: 24, maxTeamLibraryMemories: 2000,
+    maxIMChannels: 5, maxTaskTemplates: 30,
   },
   team: {
     maxProjectConcurrency: 16, maxProjects: 0, maxMembers: 20, maxNodes: 20,
     maxDevices: 200, maxExternalTerminals: 20, maxA2AServers: 10, maxKnowledgeCardsPerProject: 60, maxTeamLibraryMemories: 0,
+    maxIMChannels: 0, maxTaskTemplates: 0,
   },
 };
 

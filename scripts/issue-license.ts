@@ -33,6 +33,9 @@
  *   # 3) 复核一份许可（用当前内嵌公钥验；**不碰私钥**，可对收到的文件反向查）
  *   npx tsx scripts/issue-license.ts --verify data/licenses/zhangsan.txt
  *
+ *   # 4) 只读：打印**本机**指纹（主指纹 + 兼容指纹，脱敏诊断同屏）——不开 GUI 也能取件
+ *   npx tsx scripts/issue-license.ts --print-fingerprint
+ *
  * ⚠ `--gen-keys` 会改动 `core/license.ts` ⇒ 之后须重新 `tsup` 构建桌面端；且**用旧私钥签发的许可全部失效**
  *   （公钥已换）。生产首启时执行一次即可。
  */
@@ -42,7 +45,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   LICENSE_PREFIX, LICENSE_PUBLIC_KEY_PEM, licenseDeviceCap,
-  encodeLicense, verifyLicense, type LicensePayload,
+  encodeLicense, verifyLicense, deviceFingerprint, deviceFingerprints, fingerprintDiagnostics,
+  type LicensePayload,
 } from '../apps/worker-ant-desktop/src/main/core/license.js';
 
 import { LICENSE_TIERS, isLicenseTier, TIER_LABEL, type LicenseTier } from '../apps/worker-ant-desktop/src/main/core/feature-limits.js';
@@ -287,12 +291,25 @@ function verifyFile(p: string): void {
   console.log(`  载荷：${JSON.stringify(v.payload)}`);
 }
 
+/* ── 子命令：--print-fingerprint ─────────────────────────────────────────── */
+/** 只读打印本机指纹（不碰私钥、不产出文件）。主指纹是签发时要写进 `--devices` 的那个。 */
+function printFingerprint(): void {
+  const all = deviceFingerprints();
+  const primary = deviceFingerprint();
+  console.log(`本机主指纹（签发请用这一个）：${primary}`);
+  const legacy = all.find((f) => f !== primary);
+  if (legacy) console.log(`兼容指纹（旧算法，存量许可按它判定）：${legacy}`);
+  console.log(`诊断（脱敏）：${fingerprintDiagnostics()}`);
+  console.log(`\n--devices ${primary}`);
+}
+
 /* ── main ────────────────────────────────────────────────────────────────── */
 function main(): void {
   const { flags, opts } = parseArgs(process.argv.slice(2));
   const keyPath = opts.get('key') ? path.resolve(ROOT, opts.get('key')!) : DEFAULT_KEY_PATH;
 
   if (flags.has('gen-keys')) { genKeys(); return; }
+  if (flags.has('print-fingerprint')) { printFingerprint(); return; }
   // `--verify <path>` 带值 ⇒ 落在 opts（不是 flags）；两种写法都认。
   const verifyTarget = opts.get('verify') ?? opts.get('file');
   if (verifyTarget !== undefined || flags.has('verify')) {

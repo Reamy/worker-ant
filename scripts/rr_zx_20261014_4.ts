@@ -781,10 +781,11 @@ async function main(): Promise<void> {
     //   批六再增 `team_library` ⇒ 恰六项；zx_20261018_3 批七再增 `audit_export` ⇒ 恰七项；
     //   zx_20261022_3 批八再增 `project_profile_share` ⇒ 恰八项
     //   （逐成员枚举，不放宽成 >=；新增一员即须补人话名与接线）。
-    // zx_20261029_2 M6：`device_discovery` 移往 Pro 闸 ⇒ 八项→七项（逐成员枚举，不放宽成 >=）。
+    // zx_20261029_2 M6：`device_discovery` 移往 Pro 闸 ⇒ 八项→七项；
+    //   zx_20261101_1 M1：新增 `approval_inbox`（IM 授权台）⇒ 七项→八项（逐成员枚举，不放宽成 >=）。
     eq([...TEAM_FEATURES],
-      ['multi_node', 'device_control', 'external_terminal', 'audit_view', 'audit_export', 'team_library', 'project_profile_share'],
-      'C-4a ★能力词表**恰七项**（唯一定处 `team-gate.ts`；M6 起发现归 Pro，本表只管控制面）');
+      ['multi_node', 'device_control', 'external_terminal', 'audit_view', 'audit_export', 'team_library', 'project_profile_share', 'approval_inbox'],
+      'C-4a ★能力词表**恰八项**（唯一定处 `team-gate.ts`；M6 起发现归 Pro，本表只管控制面）');
     for (const f of TEAM_FEATURES) {
       ok(typeof TEAM_FEATURE_LABEL[f] === 'string' && TEAM_FEATURE_LABEL[f].length > 0,
         `C-4b 人话名非空：${f} ⇒ 「${TEAM_FEATURE_LABEL[f]}」`);

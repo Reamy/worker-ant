@@ -18,13 +18,19 @@
  */
 import { TIER_LABEL, TIER_LIMITS, type LicenseTier } from './feature-limits.js';
 
-/** 五个容量维度（键即 `TierLimits` 的字段名——改名是编译期错）。 */
+/**
+ * 七个容量维度（键即 `TierLimits` 的字段名——改名是编译期错）。
+ * zx_20261101_1 M4「授」: 增 `maxIMChannels` / `maxTaskTemplates`——0.3.0 里"能接几个机器人、
+ *   能攒几套任务模板"同样被用户摸得到，此前却与档位无关。
+ */
 export type TierCapacityField =
   | 'maxDevices'
   | 'maxExternalTerminals'
   | 'maxA2AServers'
   | 'maxKnowledgeCardsPerProject'
-  | 'maxTeamLibraryMemories';
+  | 'maxTeamLibraryMemories'
+  | 'maxIMChannels'
+  | 'maxTaskTemplates';
 
 /** 各维度的人话名（拒因文案唯一词表，不散在调用点）。 */
 export const CAPACITY_LABEL: Record<TierCapacityField, string> = {
@@ -33,6 +39,8 @@ export const CAPACITY_LABEL: Record<TierCapacityField, string> = {
   maxA2AServers: 'A2A 服务',
   maxKnowledgeCardsPerProject: '每项目知识卡',
   maxTeamLibraryMemories: '团队共享记忆',
+  maxIMChannels: 'IM 渠道',
+  maxTaskTemplates: '任务模板',
 };
 
 /** 读容量用的最小库接口（同 `SeatDb` 形：可脱 better-sqlite3 被 rr 直跑）。 */
@@ -101,4 +109,24 @@ export function countMaxKnowledgeCardsInAnyProject(db: CapacityDb): number {
 /** 从团队共享库导入落地的记忆总条数（`source='team_library'`）。 */
 export function countTeamLibraryMemories(db: CapacityDb): number {
   return countOf(db, "SELECT COUNT(*) AS c FROM wa_memories WHERE source = 'team_library'");
+}
+
+/**
+ * zx_20261101_1 M4：IM 渠道行数（`wa_im_channels` 全量，含未启动的）。
+ * 口径：渠道是"接了几个入口"的容量，启没启用都占接入口；与设备台账"登记即占额"一致。
+ */
+export function countIMChannels(db: CapacityDb): number {
+  return countOf(db, 'SELECT COUNT(*) AS c FROM wa_im_channels');
+}
+
+/**
+ * zx_20261101_1 M4：**用户自己的**任务模板数。
+ * ⚠ 只数 `source ∈ {'user','team_library'}`：`system` 是随包预置、`auto` 是系统自动学习的，
+ *   二者都不由用户"新增"出来，计入等于把内置资产算成用户的额度消耗。
+ */
+export function countTaskTemplates(db: CapacityDb): number {
+  return countOf(
+    db,
+    "SELECT COUNT(*) AS c FROM wa_task_templates WHERE COALESCE(source, '') IN ('user', 'team_library')",
+  );
 }

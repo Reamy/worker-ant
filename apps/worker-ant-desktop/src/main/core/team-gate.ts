@@ -28,7 +28,7 @@ import { resolveLicenseState, type LicenseSettingDb, type LicenseState, type Res
  * `audit_export`（zx_20261018_3 批七）一处接线：`ipc/audit.ipc.ts` 的 `audit:export` 第一跳
  *   （`core/audit-log.ts` 的 `exportAuditCsvGated` 先闸后读）；面板：`renderer/src/pages/AuditPage.tsx`。
  */
-export const TEAM_FEATURES = ['multi_node', 'device_control', 'external_terminal', 'audit_view', 'audit_export', 'team_library', 'project_profile_share'] as const;
+export const TEAM_FEATURES = ['multi_node', 'device_control', 'external_terminal', 'audit_view', 'audit_export', 'team_library', 'project_profile_share', 'approval_inbox'] as const;
 export type TeamFeature = (typeof TEAM_FEATURES)[number];
 
 /** 人话能力名（界面/拒因直接上屏用；键类型取 `TeamFeature` ⇒ 漏一项是编译期错）。 */
@@ -50,6 +50,9 @@ export const TEAM_FEATURE_LABEL: Record<TeamFeature, string> = {
   // zx_20261022_3 批八: **只闸"搬运"**（分享/从共享库取画像），不闸本机生成与执行期注入——
   //   社区档照常生成、照常注入自己的画像；"把画像带到别的节点"才是团队能力。
   project_profile_share: '项目画像共享',
+  // zx_20261101_1 M1「授」: 把**设备授权**与**跨机问答**从桌面搬到 IM 私聊的授权台。
+  //   与 `external_terminal` 同一位阶：能不能"远程放权"属于团队协作面，社区/专业档只在桌面里办。
+  approval_inbox: 'IM 授权台（设备授权 / 跨机问答）',
 };
 
 /** 软闸裁定（界面直接上屏 `detail`；`unlocked` 供动作层放手/拦下）。 */

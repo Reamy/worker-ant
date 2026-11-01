@@ -85,6 +85,10 @@ export const PRICING: Record<LicenseTier, TierPricing> = {
       '项目知识卡（开工前注入最用得上的几张蒸馏卡）',
       // zx_20261030_1 M5「限」：每项目知识卡张数由档位设闸（`knowledge-cards.ts` 蒸馏落卡），数值派生自 `TIER_LIMITS`。
       `每项目知识卡（最多 ${TIER_LIMITS.pro.maxKnowledgeCardsPerProject} 张）`,
+      // zx_20261101_1 M4「授」：IM 渠道与任务模板也有真闸（`im:createChannel` / `template:create` /
+      //   团队库导入三处）。句式由 `capacityBenefit` 一处出——`BENEFIT_COVERAGE` 引同一函数，改口径不漂。
+      capacityBenefit('IM 渠道', TIER_LIMITS.pro.maxIMChannels, '个'),
+      capacityBenefit('任务模板', TIER_LIMITS.pro.maxTaskTemplates, '套'),
       // zx_20261029_2 M6：只卖「安装」这一跳（`plugin_install` 真闸在 `ansCall`）；浏览市场不限档位。
       '市场插件安装（浏览不限）',
       '优先支持',
@@ -115,6 +119,9 @@ export const PRICING: Record<LicenseTier, TierPricing> = {
       '项目画像共享（跨节点带项目画像）',
       // zx_20261030_1 M5「限」：团队档每项目知识卡上限更高（数值派生自 `TIER_LIMITS`，不另抄）。
       `每项目知识卡（最多 ${TIER_LIMITS.team.maxKnowledgeCardsPerProject} 张）`,
+      // zx_20261101_1 M4「授」：团队档两维均为 0（不限）——句式仍由 `capacityBenefit` 派生，不写死"不限"。
+      capacityBenefit('IM 渠道', TIER_LIMITS.team.maxIMChannels, '个'),
+      capacityBenefit('任务模板', TIER_LIMITS.team.maxTaskTemplates, '套'),
     ],
   },
 };
@@ -162,10 +169,18 @@ export function capabilityLine(tier: LicenseTier): string {
 }
 
 /**
+ * zx_20261101_1 M4「授」: 一条容量卖点的**句式唯一出处**——`0 = 不限`，不写成 "0 个"。
+ * `PRICING[t].benefits` 与 `BENEFIT_COVERAGE` 同引它，改口径时两边不可能漂（rr 逐字比对两处）。
+ */
+export function capacityBenefit(name: string, value: number, unit: string): string {
+  return value === 0 ? `${name}（不限）` : `${name}（最多 ${value} ${unit}）`;
+}
+
+/**
  * 容量行——同样**由 `TIER_LIMITS` 派生**（zx_20261030_1 M5「限」）。
- * 五项容量维度（设备登记 / 外部终端 / A2A 服务 / 每项目知识卡 / 团队共享记忆）在价目表上
- * 此前没有任何落点：用户看不到"这一档能挂多少东西"，升级差异也就无物可兑。
- * `0 = 不限`（与 `TIER_LIMITS` 同义），不写成 "0 台"。
+ * 容量维度（设备登记 / 外部终端 / A2A 服务 / 每项目知识卡 / 团队共享记忆，zx_20261101_1 M4 再增
+ * IM 渠道 / 任务模板）在价目表上此前没有任何落点：用户看不到"这一档能挂多少东西"，
+ * 升级差异也就无物可兑。`0 = 不限`（与 `TIER_LIMITS` 同义），不写成 "0 台"。
  */
 export function capacityLine(tier: LicenseTier): string {
   const l = TIER_LIMITS[tier];
@@ -177,6 +192,8 @@ export function capacityLine(tier: LicenseTier): string {
     seg('A2A 服务', l.maxA2AServers, '个'),
     seg('每项目知识卡', l.maxKnowledgeCardsPerProject, '张'),
     seg('团队共享记忆', l.maxTeamLibraryMemories, '条'),
+    seg('IM 渠道', l.maxIMChannels, '个'),
+    seg('任务模板', l.maxTaskTemplates, '套'),
   ].join(' · ');
 }
 

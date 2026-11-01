@@ -1897,10 +1897,11 @@ CREATE TABLE wa_audit_events (
 
     // ── G-2 Team 词表 + 三档对照（audit_export）──
     // zx_20261022_3 批八：`project_profile_share` 入册（7→8）；zx_20261029_2 M6：`device_discovery`
-    //   移出（8→7，归 Pro）——发现/只读台账是专业版能力，本表只管「动」。
+    //   移出（8→7，归 Pro）——发现/只读台账是专业版能力，本表只管「动」；
+    //   zx_20261101_1 M1：`approval_inbox`（IM 授权台）入册（7→8）。
     eq([...TEAM_FEATURES],
-      ['multi_node', 'device_control', 'external_terminal', 'audit_view', 'audit_export', 'team_library', 'project_profile_share'],
-      'G-2a `TEAM_FEATURES` 逐成员枚举（批七 `audit_export` / zx_20261022_3 批八 `project_profile_share` 入册；M6 发现移出）');
+      ['multi_node', 'device_control', 'external_terminal', 'audit_view', 'audit_export', 'team_library', 'project_profile_share', 'approval_inbox'],
+      'G-2a `TEAM_FEATURES` 逐成员枚举（批七 `audit_export` / zx_20261022_3 批八 `project_profile_share` / zx_20261101_1 M1 `approval_inbox` 入册；M6 发现移出）');
     eq(TEAM_FEATURE_LABEL.audit_export, '审计导出（CSV）', 'G-2b 人话名如实');
     const comTeamRef = teamFeatureRefusal(comLic, 'audit_export', LIC_OPTS);
     ok(!!comTeamRef && comTeamRef.includes('审计导出') && comTeamRef.includes('社区版'),

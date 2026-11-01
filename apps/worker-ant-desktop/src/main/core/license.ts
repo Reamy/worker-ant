@@ -72,9 +72,18 @@ export interface LicensePayload {
 }
 
 /* ── 设备指纹 ───────────────────────────────────────────────────────────────
- * ⚠ 承 zx_20261005 方案 M6 细节："**非 MAC 单点**"——网卡是会换的（换坞站、开虚拟机桥接都会变），
- *   单靠 MAC 会让同一台机器"今天激活、明天失效"。故取 `机器稳定标识 + 主机名 + 平台 + 架构 + MAC`
- *   的**合成**，任一读不到都不致命（退空串参与哈希）。
+ * zx_20261030_3「常」：**机器稳定标识单源**。
+ *
+ * 原算法（zx_20261005 M6 的「非 MAC 单点」）把 `机器标识 + 主机名 + 平台 + 架构 + MAC` 全部掺进哈希。
+ * 它的本意是防「换一张网卡就掉授权」，实际效果反了：**任何一项日常变动都掉授权**——
+ * 实测同一台开发机 6 天内四个指纹（`data/licenses/` 留档）：hostname 被 Bonjour 追加 `-1637`
+ * 冲突后缀、坞站/热点换掉了排在最前的网卡、Rosetta 下 arch 由 arm64 变 x64，任一条都足以改变整串。
+ *
+ * 离线许可真正要防的只是「把许可文件随手传给另一台机器」——`IOPlatformUUID` 已足够；
+ * 多掺的项**只增加掉档概率，不增加防护**。故主指纹只取机器标识，读不到时才如实降级为合成指纹。
+ *
+ * 旧算法原样保留为 `formatFingerprint`（兼容指纹），并在验签期**并行作为候选**（见 `deviceFingerprints`）：
+ * 改算法不让任何存量许可失效。`formatFingerprint` 的输入拼接方式**一字不改**——它是存量件的判定尺。
  */
 
 export interface FingerprintInputs {
@@ -87,11 +96,27 @@ export interface FingerprintInputs {
   mac: string | null;
 }
 
-/** 纯函数：由给定输入算指纹（rr 直接喂固定输入 ⇒ 不碰真实机器，G-1/G-4）。 */
-export function formatFingerprint(inputs: FingerprintInputs): string {
-  const material = [inputs.machineId ?? '', inputs.hostname, inputs.platform, inputs.arch, inputs.mac ?? ''].join('|');
+function toFingerprintShape(material: string): string {
   const hex = createHash('sha256').update(material).digest('hex').slice(0, 16).toUpperCase();
   return (hex.match(/.{4}/g) ?? []).join('-');
+}
+
+/**
+ * 主指纹（纯函数）：**只取机器稳定标识**。读不到机器标识时降级为
+ * `noid|主机名|平台|架构|MAC` 合成——此时稳定性无从谈起，如实退回旧式的弱标识，
+ * 但**不**退成常量（否则所有读不到标识的机器共用一个指纹，绑定形同虚设）。
+ */
+export function stableFingerprint(inputs: FingerprintInputs): string {
+  const material = inputs.machineId
+    ? `mid|${inputs.machineId}`
+    : `noid|${inputs.hostname}|${inputs.platform}|${inputs.arch}|${inputs.mac ?? ''}`;
+  return toFingerprintShape(material);
+}
+
+/** 兼容指纹（旧算法，**字节语义不得改动**）：五路输入的合成。存量许可的 `devices` 里躺的就是它。 */
+export function formatFingerprint(inputs: FingerprintInputs): string {
+  const material = [inputs.machineId ?? '', inputs.hostname, inputs.platform, inputs.arch, inputs.mac ?? ''].join('|');
+  return toFingerprintShape(material);
 }
 
 /** 采集本机输入。**任何一步失败都退 null**，绝不 throw（许可校验宁缺勿炸）。 */
@@ -133,13 +158,37 @@ function readMachineId(): string | null {
   return null;
 }
 
-/** 本机指纹（生产用）。**进程内记忆一次**——软闸（M7）在调度热路径上每次都要读档位，
+/** 本机指纹对（生产用）。**进程内记忆一次**——软闸（M7）在调度热路径上每次都要读档位，
  *  而采指纹要 `execFileSync ioreg`（~20ms/次）；不记忆＝每个调度 tick 都去开一次子进程。
- *  指纹是"这台机器"的标识，进程生命周期内不变；按一次算一次即可。 */
-let cachedFingerprint: string | null = null;
+ *  两个指纹由**同一份输入**派生（一次采集、两条哈希），进程生命周期内不变。 */
+let cachedPair: { primary: string; all: string[] } | null = null;
+function fingerprintPair(): { primary: string; all: string[] } {
+  if (cachedPair === null) {
+    const inputs = collectFingerprintInputs();
+    const primary = stableFingerprint(inputs);
+    const legacy = formatFingerprint(inputs);
+    cachedPair = { primary, all: primary === legacy ? [primary] : [primary, legacy] };
+  }
+  return cachedPair;
+}
+
+/** 本机**主指纹**（界面显示 / 签发工具输出 —— 只此一个，用户抄它去签发）。 */
 export function deviceFingerprint(): string {
-  if (cachedFingerprint === null) cachedFingerprint = formatFingerprint(collectFingerprintInputs());
-  return cachedFingerprint;
+  return fingerprintPair().primary;
+}
+
+/**
+ * 本机**候选指纹**：主指纹在前，兼容指纹（旧算法）在后，去重。
+ * 验签时**任一命中即算这台机器**——这是存量许可在算法变更后仍有效的唯一依据。
+ */
+export function deviceFingerprints(): string[] {
+  return fingerprintPair().all;
+}
+
+/** 设备不匹配时的**自助诊断**串（脱敏：机器标识只报"有/无"，MAC 只报前三段）。 */
+export function fingerprintDiagnostics(inputs: FingerprintInputs = collectFingerprintInputs()): string {
+  const mac = inputs.mac ? `${inputs.mac.split(':').slice(0, 3).join(':')}:**:**` : '读不到';
+  return `机器标识=${inputs.machineId ? '已读到' : '读不到（已退合成指纹）'}｜主机名=${inputs.hostname || '读不到'}｜平台=${inputs.platform}/${inputs.arch}｜网卡=${mac}`;
 }
 
 /* ── 编解码 + 验签 ──────────────────────────────────────────────────────── */
@@ -190,8 +239,10 @@ export interface VerifyResult {
 export interface VerifyOpts {
   publicKeyPem?: string;
   now?: Date;
-  /** 本机指纹；不传则现采（rr 一律传，免得判据依赖真实机器） */
+  /** 本机指纹（单个）；不传则现采全部候选（rr 一律传，免得判据依赖真实机器） */
   fingerprint?: string;
+  /** 本机指纹候选（多值）。生产不传 ⇒ `deviceFingerprints()`（主指纹 + 兼容指纹） */
+  fingerprints?: string[];
 }
 
 /** 验签 + 到期 + 设备绑定 + K-5 结构上限。**不 throw**——任何异常都落到某个 status。 */
@@ -243,9 +294,16 @@ export function verifyLicense(licenseText: string, opts: VerifyOpts = {}): Verif
     }
   }
   if (payload.devices.length > 0) {
-    const fp = opts.fingerprint ?? deviceFingerprint();
-    if (!payload.devices.includes(fp)) {
-      return { ok: false, status: 'device_mismatch', detail: '本机不在该许可的设备列表中（激活时须把本机指纹一并发给签发方）' };
+    // 候选来源**只此一处**：显式多值 > 显式单值 > 本机采集（主 + 兼容）。
+    // 这里放宽的是「哪些串算作这台机器」，**不是**签名/到期/上限——陌生指纹照旧一律拒绝。
+    const cands = opts.fingerprints
+      ?? (opts.fingerprint !== undefined ? [opts.fingerprint] : deviceFingerprints());
+    if (!payload.devices.some((d) => cands.includes(d))) {
+      return {
+        ok: false,
+        status: 'device_mismatch',
+        detail: `本机不在该许可的设备列表中（当前指纹 ${cands[0] ?? '(未提供)'}；${fingerprintDiagnostics()}）。激活时须把本机指纹一并发给签发方`,
+      };
     }
   }
   return { ok: true, status: 'valid', detail: `已激活：${TIER_LABEL[payload.tier]}`, payload };
@@ -284,6 +342,8 @@ export interface LicenseSettingWriteDb {
 export interface ResolveLicenseOpts {
   now?: Date;
   fingerprint?: string;
+  /** 本机指纹候选（多值）；生产不传 ⇒ `deviceFingerprints()`。传给验签的是同一组 */
+  fingerprints?: string[];
   publicKeyPem?: string;
 }
 
@@ -323,12 +383,13 @@ function resolveLocalLicenseState(
   opts: ResolveLicenseOpts,
   now: Date,
 ): LicenseState {
-  const fingerprint = opts.fingerprint ?? deviceFingerprint();
+  // 显示用指纹与验签用候选**同源**：注入了候选就取第一候选（主指纹在前），否则现采主指纹。
+  const fingerprint = opts.fingerprints?.[0] ?? opts.fingerprint ?? deviceFingerprint();
   const base = { fingerprint, expiresAt: null as string | null, devices: [] as string[], subject: null as string | null, trialDaysLeft: null as number | null };
 
   const licenseText = readSetting(db, LICENSE_SETTING_KEYS.key);
   if (licenseText) {
-    const v = verifyLicense(licenseText, { now, fingerprint, publicKeyPem: opts.publicKeyPem });
+    const v = verifyLicense(licenseText, { now, fingerprint: opts.fingerprint, fingerprints: opts.fingerprints, publicKeyPem: opts.publicKeyPem });
     if (v.ok && v.payload) {
       return {
         tier: v.payload.tier, kind: 'licensed', tierLabel: TIER_LABEL[v.payload.tier], detail: v.detail,
@@ -385,7 +446,7 @@ export function activateLicense(
   opts: ResolveLicenseOpts = {},
 ): { ok: boolean; detail: string; state: LicenseState } {
   const now = opts.now ?? new Date();
-  const v = verifyLicense(licenseText, { now, fingerprint: opts.fingerprint, publicKeyPem: opts.publicKeyPem });
+  const v = verifyLicense(licenseText, { now, fingerprint: opts.fingerprint, fingerprints: opts.fingerprints, publicKeyPem: opts.publicKeyPem });
   if (!v.ok) return { ok: false, detail: v.detail, state: resolveLicenseState(db, opts) };
   try {
     db.prepare("INSERT OR REPLACE INTO wa_settings (key,value,updated_at) VALUES (?,?,datetime('now'))").run(LICENSE_SETTING_KEYS.key, licenseText.trim());

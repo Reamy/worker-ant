@@ -26,7 +26,7 @@ import {
   type LicenseTier,
   type TierLimits,
 } from './feature-limits.js';
-import { PRICING, EARLY_BIRD, PURCHASE_URL, capabilityLine, capacityLine, type EarlyBird } from './pricing.js';
+import { PRICING, EARLY_BIRD, PURCHASE_URL, capabilityLine, capacityBenefit, capacityLine, type EarlyBird } from './pricing.js';
 import { PRO_FEATURES, PRO_FEATURE_LABEL, proUnlocked } from './pro-gate.js';
 import { TEAM_FEATURES, TEAM_FEATURE_LABEL, teamUnlocked } from './team-gate.js';
 import { TRIAL_DAYS, type LicenseKind } from './license.js';
@@ -67,6 +67,9 @@ export interface TierCatalogRow {
   maxA2AServers: number;
   maxKnowledgeCardsPerProject: number;
   maxTeamLibraryMemories: number;
+  /** zx_20261101_1 M4「授」：IM 渠道 / 用户自建任务模板上限（`0 = 不限`）。 */
+  maxIMChannels: number;
+  maxTaskTemplates: number;
   /** 逐项能力：`PRO_FEATURES` + `TEAM_FEATURES` 全量，**每档都全列**（一处对照，锁项不藏）。 */
   capabilities: TierCapability[];
 }
@@ -166,6 +169,10 @@ export const BENEFIT_COVERAGE: Record<LicenseTier, BenefitCoverageEntry[]> = {
     { benefit: '项目知识卡（开工前注入最用得上的几张蒸馏卡）', target: { kind: 'capability', keys: ['knowledge_cards'] } },
     // zx_20261030_1 M5「限」：每项目知识卡张数上限（`knowledge-cards.ts` 蒸馏落卡）。
     { benefit: `每项目知识卡（最多 ${TIER_LIMITS.pro.maxKnowledgeCardsPerProject} 张）`, target: { kind: 'quota', field: 'maxKnowledgeCardsPerProject', rule: 'positive' } },
+    // zx_20261101_1 M4「授」：两维有真闸（`im:createChannel` / `template:create` / 团队库导入），
+    //   句式与 `PRICING` 同引 `capacityBenefit`（改文案只改一处，登记不会腐化）。
+    { benefit: capacityBenefit('IM 渠道', TIER_LIMITS.pro.maxIMChannels, '个'), target: { kind: 'quota', field: 'maxIMChannels', rule: 'positive' } },
+    { benefit: capacityBenefit('任务模板', TIER_LIMITS.pro.maxTaskTemplates, '套'), target: { kind: 'quota', field: 'maxTaskTemplates', rule: 'positive' } },
     // zx_20261029_2 M6：安装动作口有真闸；「浏览不限」是同一句里的边界说明，不另登记一条。
     { benefit: '市场插件安装（浏览不限）', target: { kind: 'capability', keys: ['plugin_install'] } },
     { benefit: '优先支持', target: { kind: 'service', reason: '支持优先级是交付承诺，不在代码中设闸' } },
@@ -182,8 +189,11 @@ export const BENEFIT_COVERAGE: Record<LicenseTier, BenefitCoverageEntry[]> = {
     { benefit: '团队共享库（模板 / 记忆 / 成果 / 领域包 / 项目画像）', target: { kind: 'capability', keys: ['team_library'] } },
     // zx_20261022_3 批八：画像**搬运**另立一项能力（本机生成/注入常开，不在此闸）。
     { benefit: '项目画像共享（跨节点带项目画像）', target: { kind: 'capability', keys: ['project_profile_share'] } },
-    // zx_20261030_1 M5「限」：容量维度有真闸（`tier-capacity.ts` + 五处动作点），卖点指回派生上限。
+    // zx_20261030_1 M5「限」：容量维度有真闸（`tier-capacity.ts` + 动作点），卖点指回派生上限。
     { benefit: `每项目知识卡（最多 ${TIER_LIMITS.team.maxKnowledgeCardsPerProject} 张）`, target: { kind: 'quota', field: 'maxKnowledgeCardsPerProject', rule: 'positive' } },
+    // zx_20261101_1 M4「授」：团队档两维为 0（不限）——`rule: 'unlimited'` 与 `TIER_LIMITS` 双向校验。
+    { benefit: capacityBenefit('IM 渠道', TIER_LIMITS.team.maxIMChannels, '个'), target: { kind: 'quota', field: 'maxIMChannels', rule: 'unlimited' } },
+    { benefit: capacityBenefit('任务模板', TIER_LIMITS.team.maxTaskTemplates, '套'), target: { kind: 'quota', field: 'maxTaskTemplates', rule: 'unlimited' } },
   ],
 };
 
@@ -243,6 +253,8 @@ export function tierCatalog(): TierCatalogPayload {
       maxA2AServers: l.maxA2AServers,
       maxKnowledgeCardsPerProject: l.maxKnowledgeCardsPerProject,
       maxTeamLibraryMemories: l.maxTeamLibraryMemories,
+      maxIMChannels: l.maxIMChannels,
+      maxTaskTemplates: l.maxTaskTemplates,
       capabilities: capabilitiesFor(tier),
     };
   });

@@ -873,6 +873,8 @@ export default function SettingsPage() {
             </div>
             {/* zx_20261024_1：绑定上限按档位显示（个人档 3、团队授权包 20，由 main `licenseDeviceCap` 派生）。 */}
             <p className="text-xs text-gray-400">购买/续期时把「本机指纹」发给签发方（每台机器一个{lic?.deviceCap != null ? `，当前档位一份许可最多绑 ${lic.deviceCap} 台` : ''}）。</p>
+            {/* zx_20261030_3「常」：指纹只取本机硬件标识——换网络/改机器名不再改变它（此前把主机名与网卡 MAC 也掺进了哈希）。 */}
+            <p className="text-xs text-gray-400/80">指纹取自本机硬件标识，换网络、改机器名不会变；仅在本机读不到硬件标识时才退回合成指纹。</p>
             <div className="flex justify-between"><span className="text-gray-500">购买 / 升级</span>
               {pricing?.purchaseUrl
                 ? <a href={pricing.purchaseUrl} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">前往购买</a>
@@ -888,6 +890,15 @@ export default function SettingsPage() {
                 <p className="text-xs text-gray-400">当前用量</p>
                 <UsageBar label="项目" used={usage.projects.used} limit={usage.projects.limit} />
                 <UsageBar label="本机账号" used={usage.seats.used} limit={usage.seats.limit} />
+                {/* zx_20261101_1 M4「授」: 容量维度与动作面同一把尺——`limit===0` 显示「不限」，
+                    数字全来自 main `core/tier-usage.ts`（本页不重算）。知识卡按**项目**判容量，故取单项目最大张数。 */}
+                <UsageBar label="设备登记" used={usage.devices.used} limit={usage.devices.limit} />
+                <UsageBar label="外部终端" used={usage.externalTerminals.used} limit={usage.externalTerminals.limit} />
+                <UsageBar label="A2A 服务" used={usage.a2aServers.used} limit={usage.a2aServers.limit} />
+                <UsageBar label="IM 渠道" used={usage.imChannels.used} limit={usage.imChannels.limit} />
+                <UsageBar label="任务模板" used={usage.taskTemplates.used} limit={usage.taskTemplates.limit} />
+                <UsageBar label="每项目知识卡（单项目最多）" used={usage.knowledgeCards.maxInProject} limit={usage.knowledgeCards.limit} />
+                <UsageBar label="团队共享记忆" used={usage.teamLibraryMemories.used} limit={usage.teamLibraryMemories.limit} />
                 <div className="flex justify-between text-xs">
                   <span className="text-gray-500">并发上限</span>
                   <span className="text-gray-700">单项目 {usage.concurrency.perProjectMax} · 整机 {usage.concurrency.machineLimit}</span>
