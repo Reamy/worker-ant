@@ -1,0 +1,113 @@
+{
+ "_provenance": {
+  "source": "data/worker-ant-server.db · wa_tasks(id=df334d91…) + wa_deliverables(task_id=df334d91…)",
+  "taskId": "df334d91-1b23-4b39-b39b-e2a4bb55d16b",
+  "taskTitle": "20260911-1 方案实施",
+  "taskStatus": "completed",
+  "snapshotAt": "2026-09-11",
+  "ctxKeysCopied": [
+   "deliverable_unfulfilled",
+   "acceptance_check"
+  ],
+  "note": "zx_20260911_4 M4 rr 的真库入参快照；两个 ctx 键与 8 条 doc 草稿逐字取自真库，未改写。其余 ctx 键与判据无关，略。"
+ },
+ "context": {
+  "deliverable_unfulfilled": {
+   "paths": [
+    "/Users/devuser/works/my/ANS_V2/projects/a-stock-advisor/data/m0/baseline_a20260911.json"
+   ],
+   "note": "产出内容不充分(充分性校验)",
+   "retries": 2
+  },
+  "acceptance_check": {
+   "checked_at": "2026-09-11T03:37:51.440Z",
+   "verified": true,
+   "criteria_total": 7,
+   "passed_total": 7,
+   "passed": [
+    "规划方案 plans/project/A_20260911_1.md 中的所有功能是否都实际完成",
+    "所有功能是否落地生效",
+    "功能是否都已对齐",
+    "功能端到端是否都落地生效",
+    "是否存在完成了功能但是没有实际运用",
+    "是否存在功能有了但是接口调用参数不一致问题",
+    "是否存在头大脚轻的问题（规划的很高大上，落地很一般；规划很丰满，落地很骨感还有光说不练的问题）"
+   ],
+   "failed": []
+  }
+ },
+ "deliverables": [
+  {
+   "id": "41942ecf-b039-4558-9e88-f30121560c1d",
+   "name": "data/m0/baseline_a20260911",
+   "type": "doc",
+   "status": "draft",
+   "file_path": "/Users/devuser/works/my/ANS_V2/projects/a-stock-advisor/data/m0/baseline_a20260911.json",
+   "is_primary": 0,
+   "acceptance_verified": 0
+  },
+  {
+   "id": "4cf72efc-3844-43ee-9d9b-e94229a0c273",
+   "name": "scripts/test_a20260911_1",
+   "type": "doc",
+   "status": "draft",
+   "file_path": "/Users/devuser/works/my/ANS_V2/projects/a-stock-advisor/scripts/test_a20260911_1.py",
+   "is_primary": 0,
+   "acceptance_verified": 0
+  },
+  {
+   "id": "89b9f274-a7c0-4c7c-826f-3d5cd037fbec",
+   "name": "scripts/_f20_probe",
+   "type": "doc",
+   "status": "draft",
+   "file_path": "/Users/devuser/works/my/ANS_V2/projects/a-stock-advisor/scripts/_f20_probe.py",
+   "is_primary": 0,
+   "acceptance_verified": 0
+  },
+  {
+   "id": "a18e10c8-8245-4c71-beaa-a260c89515b9",
+   "name": "/Users/devuser/works/my/ANS_V2/projects/a-stock-advisor/A股智能投资顾问_A_20260911_1_方案实施报告",
+   "type": "doc",
+   "status": "draft",
+   "file_path": "/Users/devuser/works/my/ANS_V2/projects/a-stock-advisor/A股智能投资顾问_A_20260911_1_方案实施报告.md",
+   "is_primary": 0,
+   "acceptance_verified": 0
+  },
+  {
+   "id": "1c37ccea-bac0-4b97-bc0b-69c71075cace",
+   "name": "A_20260911_1 规划方案（已回填实施标注）",
+   "type": "doc",
+   "status": "draft",
+   "file_path": "/Users/devuser/works/my/ANS_V2/projects/a-stock-advisor/plans/project/A_20260911_1.md",
+   "is_primary": 0,
+   "acceptance_verified": 0
+  },
+  {
+   "id": "3813bd7d-a180-425d-9725-e4f63259b509",
+   "name": "data/m0/baseline_a20260911",
+   "type": "doc",
+   "status": "draft",
+   "file_path": "/Users/devuser/works/my/ANS_V2/projects/a-stock-advisor/data/m0/baseline_a20260911.md",
+   "is_primary": 0,
+   "acceptance_verified": 0
+  },
+  {
+   "id": "9f2905d7-0f1e-45c4-9c96-71fcd6be987b",
+   "name": "A股智能投资顾问_A_20260911_1_最终验收报告",
+   "type": "doc",
+   "status": "draft",
+   "file_path": "/Users/devuser/works/my/ANS_V2/projects/a-stock-advisor/A股智能投资顾问_A_20260911_1_最终验收报告.md",
+   "is_primary": 1,
+   "acceptance_verified": 0
+  },
+  {
+   "id": "64aed0fa-15e2-4b78-8f49-0c9b7f0b22f3",
+   "name": "A股智能投资顾问_A_20260911_1_整合最终报告",
+   "type": "doc",
+   "status": "draft",
+   "file_path": "/Users/devuser/works/my/ANS_V2/projects/a-stock-advisor/A股智能投资顾问_A_20260911_1_整合最终报告.md",
+   "is_primary": 0,
+   "acceptance_verified": 0
+  }
+ ]
+}

@@ -1,0 +1,121 @@
+name: Build installers
+
+# 三平台各在**原生 runner** 上打包（zx_20261104_2）：
+#   - 原生模块（better-sqlite3 的 ABI 预编译件、bcrypt 的 N-API prebuilds）只在对应平台
+#     才能被正确加载/校验；跨平台能力保留在本地脚本里，但发布件以本矩阵为准。
+#   - Windows / Linux **不签名**（本仓没有 Windows Authenticode / Linux 签名凭据，如实标注）。
+#   - macOS 有签名凭据则签名 + 公证（复用 `dist:mac` 的既有链路），没有则**显式**未签名
+#     （`identity=null / notarize=false`），绝不产出"看起来已签名"的假发布件。
+#   - 只上传 Actions artifacts，**不**自动创建 GitHub Release。
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.artifact }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            platform: darwin
+            arch: arm64
+            artifact: worker-ant-macos-arm64
+          - os: ubuntu-latest
+            platform: linux
+            arch: x64
+            artifact: worker-ant-linux-x64
+          - os: windows-latest
+            platform: win32
+            arch: x64
+            artifact: worker-ant-windows-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      # ⚠ 不要加 `with: version`：根 package.json 的 packageManager 已是 pnpm@9.15.4，
+      #   再显式指定版本会抛 "Multiple versions of pnpm specified"（ci.yml 已踩过）。
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'pnpm'
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm build
+
+      # secrets 不能直接出现在 `if:` 里，故先落到 job 环境变量再判断。
+      - name: Detect macOS signing secrets
+        if: matrix.platform == 'darwin'
+        env:
+          MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+        shell: bash
+        run: |
+          if [ -n "$MAC_CSC_LINK" ]; then
+            echo "MAC_SIGNING=1" >> "$GITHUB_ENV"
+          else
+            echo "MAC_SIGNING=0" >> "$GITHUB_ENV"
+          fi
+
+      - name: Package (macOS, signed + notarized)
+        if: matrix.platform == 'darwin' && env.MAC_SIGNING == '1'
+        env:
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: pnpm --filter @worker-ant/desktop dist:mac
+
+      - name: Package (macOS, unsigned — no signing secrets)
+        if: matrix.platform == 'darwin' && env.MAC_SIGNING != '1'
+        run: pnpm --filter @worker-ant/desktop dist:mac:unsigned
+
+      - name: Package (Linux, unsigned)
+        if: matrix.platform == 'linux'
+        run: pnpm --filter @worker-ant/desktop dist:linux
+
+      - name: Package (Windows, unsigned)
+        if: matrix.platform == 'win32'
+        run: pnpm --filter @worker-ant/desktop dist:win
+
+      - name: Upload macOS artifacts
+        if: matrix.platform == 'darwin'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          if-no-files-found: error
+          path: |
+            apps/worker-ant-desktop/release/*.dmg
+            apps/worker-ant-desktop/release/*.zip
+
+      - name: Upload Linux artifacts
+        if: matrix.platform == 'linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          if-no-files-found: error
+          path: |
+            apps/worker-ant-desktop/release/*.AppImage
+            apps/worker-ant-desktop/release/*.deb
+
+      - name: Upload Windows artifacts
+        if: matrix.platform == 'win32'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          if-no-files-found: error
+          path: apps/worker-ant-desktop/release/*.exe

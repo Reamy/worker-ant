@@ -1,0 +1,82 @@
+{
+  "version": "1.1.0",
+  "updated_at": "2026-07-01",
+  "marketplaces": [
+    {
+      "name": "claude-plugins-official",
+      "source_type": "github",
+      "source_url": "https://github.com/anthropics/claude-plugins-official",
+      "display_name": "Claude Code 官方插件市场",
+      "description": "Anthropic官方Claude Code插件市场——提供官方维护的技能、MCP服务器和Agent插件",
+      "category": "bundle",
+      "language": "en",
+      "auth": "none",
+      "auto_refresh": 1
+    },
+    {
+      "name": "superpowers",
+      "source_type": "github",
+      "source_url": "https://github.com/obra/superpowers",
+      "display_name": "Superpowers",
+      "description": "Superpowers技能包——13个实用开发技能(脑暴/计划/调试/TDD/代码审查/并行Agent等)",
+      "category": "skill",
+      "language": "en",
+      "auth": "none",
+      "auto_refresh": 1
+    },
+    {
+      "name": "skillsmp",
+      "source_type": "url",
+      "source_url": "https://skillsmp.com/api/v1/skills/search",
+      "display_name": "SkillsMP",
+      "description": "全球AI技能市场——REST API接口，匿名每天50次，Bearer Token认证",
+      "category": "skill",
+      "language": "en",
+      "auth": "optional",
+      "auth_env": "SKILLSMP_API_KEY"
+    },
+    {
+      "name": "smithery",
+      "source_type": "url",
+      "source_url": "https://registry.smithery.ai",
+      "display_name": "Smithery",
+      "description": "MCP服务器注册中心——支持SSE和stdio服务器，社区活跃",
+      "category": "mcp",
+      "language": "en",
+      "auth": "optional",
+      "auth_env": "SMITHERY_API_KEY"
+    },
+    {
+      "name": "mcp-registry",
+      "source_type": "github",
+      "source_url": "https://github.com/modelcontextprotocol/servers",
+      "display_name": "MCP Registry（官方）",
+      "description": "Anthropic官方MCP服务器仓库——文件系统/数据库/搜索等官方参考实现",
+      "category": "mcp",
+      "language": "en",
+      "auth": "none",
+      "auto_refresh": 1
+    },
+    {
+      "name": "github-mcp-topic",
+      "source_type": "github-topics",
+      "source_url": "https://api.github.com/search/repositories?q=topic:mcp-server+fork:true+stars:>15&sort=stars&per_page=50",
+      "display_name": "GitHub MCP话题",
+      "description": "GitHub上标有mcp-server话题的热门仓库(19,000+)，按stars排序取前50",
+      "category": "mcp",
+      "language": "en",
+      "auth": "optional",
+      "auth_env": "GITHUB_TOKEN"
+    },
+    {
+      "name": "a2aregistry",
+      "source_type": "url",
+      "source_url": "https://a2aregistry.org",
+      "display_name": "A2A Registry",
+      "description": "A2A Agent注册中心——REST API查询和详情",
+      "category": "a2a",
+      "language": "en",
+      "auth": "none"
+    }
+  ]
+}

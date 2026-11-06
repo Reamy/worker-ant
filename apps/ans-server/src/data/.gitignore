@@ -1,0 +1,4 @@
+# Only track recommended-models.json; ignore everything else in this dir
+/*
+!/recommended-models.json
+!.gitignore

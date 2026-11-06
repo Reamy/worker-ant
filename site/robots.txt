@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://workerant.cn/sitemap.xml
