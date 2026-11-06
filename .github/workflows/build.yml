@@ -26,7 +26,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          # 勿钉 macos-14：2026-11 实测该标签已无 runner（`macos-14-arm64-us-default` 不被支持），
+          # 任务零步骤即 cancelled。用 macos-latest 跟随 GitHub 当前 Apple Silicon 默认镜像。
+          - os: macos-latest
             platform: darwin
             arch: arm64
             artifact: worker-ant-macos-arm64
