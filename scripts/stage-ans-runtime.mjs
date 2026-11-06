@@ -10,8 +10,9 @@
  *   ⇒ 闭包里的 better-sqlite3 必须编成 **Electron ABI**，否则一加载即 `NODE_MODULE_VERSION` 不符。
  *   （dev 的 ABI 互斥在包内因此消失——**全包只有一个 better-sqlite3**，同源。）
  *
- * 为何在**闭包内**就地 rebuild 是安全的：`pnpm deploy` 产出的 `better_sqlite3.node` link count = 1
- *   （非硬链到全局 store），故就地重编不会污染 store 或别的包。判据由脚本自身复核（见 assertLinkCount）。
+ * 为何在**闭包内**就地 rebuild 是安全的：重编前先把原生产物与 pnpm store 的硬链断开
+ *   （CI 的 store 与工作区同盘，pnpm 默认用硬链；就地重编会写穿到 store）。断开后 link count = 1，
+ *   判据由脚本自身复核（见 detachFromStore / assertLinkCount）。
  *
  * 为何必须补 `dist/data/*.json`：`src/index.ts` 以 `dirname(import.meta.url)/data/*.json` 取推荐资源；
  *   dev 跑 `tsx src/index.ts` ⇒ 命中 `src/data/`；打包跑 `dist/index.js` ⇒ 须命中 `dist/data/`。
@@ -32,7 +33,18 @@ import {
   rebuildNativeForTarget,
   runPnpm,
 } from './lib/native-target.mjs';
-import { cpSync, existsSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync } from 'node:fs';
+import {
+  copyFileSync,
+  cpSync,
+  existsSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+} from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -58,6 +70,16 @@ function electronVersion() {
   const p = path.join(desktopDir, 'node_modules/electron/package.json');
   if (!existsSync(p)) die(`找不到 electron（${p}）——请先在 apps/worker-ant-desktop 下 pnpm install`);
   return JSON.parse(readFileSync(p, 'utf-8')).version;
+}
+
+/** 断开与 pnpm store 的硬链：复制到新 inode 再覆盖，使就地重编不写穿到全局 store。 */
+function detachFromStore(file) {
+  if (statSync(file).nlink === 1) return false;
+  const tmp = `${file}.detach-${process.pid}`;
+  copyFileSync(file, tmp);
+  rmSync(file, { force: true });
+  renameSync(tmp, file);
+  return true;
 }
 
 /** 复核"就地重建安全"的前提：闭包里的原生产物不是硬链（link count === 1）。 */
@@ -139,8 +161,13 @@ for (const f of readdirSync(STAGING)) {
 // ── 步骤 6：闭包内原生模块重编为**目标平台**的 Electron ABI ─────────
 const natives = findNativeFiles(path.join(STAGING, 'node_modules/.pnpm'));
 if (natives.length === 0) die('闭包内未找到任何 .node —— 依赖闭包不完整');
-for (const n of natives) assertLinkCount(n);
+let detached = 0;
+for (const n of natives) {
+  if (detachFromStore(n)) detached++;
+  assertLinkCount(n);
+}
 log(`闭包内原生产物 ${natives.length} 个，全部 link count=1（就地重编安全）`);
+if (detached > 0) log(`已断开硬链 ${detached} 个（pnpm store → 本地副本），重编不会污染 store`);
 
 const ev = electronVersion();
 log(`electron-rebuild better-sqlite3 → ${target.platform}/${target.arch}（Electron ABI，electron ${ev}）`);
