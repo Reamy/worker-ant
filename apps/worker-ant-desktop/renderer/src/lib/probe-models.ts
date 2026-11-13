@@ -21,6 +21,16 @@ export type { ModelsRead };
 /** 探针形状 = main 的 `ModelProbe`（`read` + `note` + 四数），此处只换名以便渲染层沿用旧称。 */
 export type ModelsProbe = ModelProbe;
 
+/**
+ * zx_20261112_1 B4「诊」：模型/端点**连通性测试**的一句话结果（成功带延迟，失败带原因）。
+ *   此前失败恒写成「不可用」——"为什么不可用"（超时/401/无端点）全丢了，用户只能猜。
+ */
+export function endpointTestLine(r: { success: boolean; latency_ms: number; error: string | null }): { ok: boolean; text: string } {
+  if (r.success) return { ok: true, text: `连接正常（${r.latency_ms}ms）` };
+  const why = (r.error || '').trim();
+  return { ok: false, text: why ? `连接失败：${why}` : '连接失败（服务端未给原因）' };
+}
+
 export function probeModelsLine(p: ModelsProbe): { ok: boolean; text: string } {
   if (p.read === 'auth') {
     return { ok: false, text: '服务可达，但本机 ANS 未认此凭据（401 未认证）。dev：请先 cp .env.example .env 再重启 ANS；生产：在 ANS 中登记该 API Key 与 Secret。' };

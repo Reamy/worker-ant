@@ -15,6 +15,8 @@ import { resolveTaskMilestoneLink, writeMilestoneDone, backfillBoardRemainderToS
 import { resolveAnsCreds, ansSignedRequest, ansFailureNote } from '../ans-signed-request.js';
 // zx_20261002 M11: 项目调用记账——MCP 调用的**唯一写点**（连接池无 db/项目上下文，故记在调用方）。
 import { recordServiceCall } from '../service-call-ledger.js';
+// zx_20261113_3 B2: MCP 存在性前置——占位名 / known-set；拒绝不写调用账。
+import { precheckMcpServer, resolveKnownMcpServers, type KnownMcpServers, type McpRegistryServer } from '../mcp-server-registry.js';
 // zx_20261030_2 M3（孙子·知彼知己）: 「等」的暂停因直接取词表常量，不在工具里手抄字符串。
 import { PAUSE_REASON_CHILDREN_INCOMPLETE } from '../pause-reason.js';
 // zx_20261105_1 M4：子代理结构化结论的唯一读点（与父侧简报同源）。
@@ -48,6 +50,30 @@ export function normalizeSubagentTitle(raw: string | null | undefined): string {
 
 export function resourceTools(deps: ToolDeps) {
   const { ctx, db, taskId, projectId, workingDir, ensureSkillsLoaded } = deps;
+
+  // zx_20261113_3 B2：MCP known-set 的**同一份**取数（find/call 共用；60s 缓存；失败不缓存）。
+  const readAnsMcpRegistry = async (): Promise<{ ok: true; servers: McpRegistryServer[] } | { ok: false; reason: string }> => {
+    const r = await ansSignedRequest(resolveAnsCreds(db), '/api/v1/mcp/', { timeoutMs: 5000 });
+    if (!r.ok) return { ok: false, reason: ansFailureNote(r) };
+    const data = await r.response!.json() as { data?: Array<{ name?: string; status?: string; endpoint?: string }> };
+    return {
+      ok: true,
+      servers: (data.data || [])
+        .filter((s) => s.name)
+        .map((s) => ({ name: String(s.name), status: s.status, endpoint: s.endpoint })),
+    };
+  };
+  const projectMcpNames = (): string[] => {
+    try {
+      return (db.prepare("SELECT name FROM wa_deliverables WHERE project_id = ? AND type = 'mcp'").all(projectId) as Array<{ name?: string }>)
+        .map((r) => String(r.name ?? '')).filter(Boolean);
+    } catch { return []; }
+  };
+  const knownMcpFor = (projectNames: string[]) => resolveKnownMcpServers({
+    projectNames,
+    readAns: readAnsMcpRegistry,
+    cacheKey: `${projectId}|${resolveAnsCreds(db).baseUrl}`,
+  });
   return {
     find_best_model: {
       description: '查找最优模型。',
@@ -362,19 +388,17 @@ export function resourceTools(deps: ToolDeps) {
         //   这不是"多看见几个名字"，而是把它们从**看不见**变成**用得上**——`call_mcp_tool` 一直是经 ANS 网关
         //   按**名字**调的（`${ansUrl}/mcp/<name>`），可此前 `find_mcp_service` 只列本项目 `type='mcp'`
         //   交付物 ⇒ "ANS 里注册了、但没落成本项目交付物"的服务**既列不出、也无从想到**，而它本来调得动。
-        const ansByName = new Map<string, { status?: string; endpoint?: string }>();
         // 查失败**绝不静默当"没有"**：`ansNote` 如实带出去（ANS 未启动 / 401 / 超时都会走到这里，
         //   而"没查成"与"确实没有"是两件事——混成一个空列表就等于替 ANS 说了句我们并不知道的话）。
+        // zx_20261113_3 B2：ANS 名单与 `call_mcp_tool` 前置共用 `resolveKnownMcpServers`（同一份、60s 缓存）。
+        const known = await knownMcpFor(mcps.map((m) => m.name));
+        const ansByName = new Map<string, { status?: string; endpoint?: string }>(
+          (known.ansServers || []).map((s) => [s.name, { status: s.status, endpoint: s.endpoint }]),
+        );
         let ansNote: string | undefined;
-        {
-          const r = await ansSignedRequest(resolveAnsCreds(db), '/api/v1/mcp/', { timeoutMs: 5000 });
-          if (!r.ok) {
-            ansNote = `ANS 注册表查询失败（${ansFailureNote(r)}）——下面只列本项目交付物，**不代表 ANS 里没有别的 MCP**`;
-            logger.warn(`[find_mcp_service] ${ansNote}`);
-          } else {
-            const data = await r.response!.json() as { data?: Array<{ name?: string; status?: string; endpoint?: string }> };
-            for (const s of data.data || []) if (s.name) ansByName.set(s.name, { status: s.status, endpoint: s.endpoint });
-          }
+        if (!known.ok) {
+          ansNote = `ANS 注册表查询失败（${known.reason}）——下面只列本项目交付物，**不代表 ANS 里没有别的 MCP**`;
+          logger.warn(`[find_mcp_service] ${ansNote}`);
         }
 
         let unknownTools = 0;
@@ -425,10 +449,18 @@ export function resourceTools(deps: ToolDeps) {
           const hint = ansNote
             ? '本项目暂无MCP服务产出物；ANS 注册表**没查成**（见 ansNote），故无法断定 ANS 里有没有可用的 MCP。'
             : '本项目暂无MCP服务产出物，ANS 注册表也确无已注册的 MCP。可用 create_deliverable(type="mcp") 创建。';
-          return JSON.stringify({ services: [], hint, ...(ansNote ? { ansNote } : {}) });
+          return JSON.stringify({
+            services: [],
+            hint,
+            knownServers: known.names.slice(0, 50),
+            ...(known.names.length > 50 ? { knownServersTotal: known.names.length } : {}),
+            ...(ansNote ? { ansNote } : {}),
+          });
         }
         return JSON.stringify({
           services,
+          knownServers: known.names.slice(0, 50),
+          ...(known.names.length > 50 ? { knownServersTotal: known.names.length } : {}),
           ...(ansRegistered.length > 0 ? { ansRegistered } : {}),
           ...(unknownTools > 0 ? { note: `${unknownTools} 个服务的工具列表**未知**（服务未运行或未就绪），不代表该服务没有工具` } : {}),
           ...(ansNote ? { ansNote } : {}),
@@ -436,7 +468,7 @@ export function resourceTools(deps: ToolDeps) {
       },
     },
     call_mcp_tool: {
-      description: '调用MCP服务的指定工具（通过ANS网关代理）。先用find_mcp_service了解可用服务。',
+      description: '调用MCP服务的指定工具（通过ANS网关代理）。先用find_mcp_service了解可用服务；serverName 必须在返回的 knownServers 中，占位名/未知名会被本地拒绝（不产生调用账）。',
       parameters: jsonSchema({
         type: 'object' as const,
         properties: {
@@ -449,8 +481,15 @@ export function resourceTools(deps: ToolDeps) {
       execute: async (args: { serverName: string; toolName: string; args?: string }) => {
         // zx_20261002 M11: 调用账在**本处**记（`call_mcp_tool` 是全仓唯一调用 `callMcpTool` 的地方）。
         //   连接池自己没有 db/项目上下文，故成绩只能由调用方落；成败两路都要落（失败只是内存计数的病根在此除）。
+        // zx_20261113_3 B2：先验名——占位名/known-set 外直接拒，**不写调用账**（拒绝不是一次外部调用）。
+        const serverName = String(args.serverName || '').trim();
+        let known: KnownMcpServers;
+        try { known = await knownMcpFor(projectMcpNames()); }
+        catch (e) { known = { ok: false, reason: (e as Error)?.message || String(e), names: projectMcpNames(), ansServers: [] }; }
+        const pre = precheckMcpServer(serverName, known);
+        if (!pre.ok) return JSON.stringify({ error: pre.error, hint: pre.hint, knownServers: pre.knownServers });
         const startedAt = Date.now();
-        const target = `${args.serverName}/${args.toolName}`;
+        const target = `${serverName}/${args.toolName}`;
         try {
           // 通过 MCP 连接池调用（工具缓存 + 断线重连 + 健康跟踪）
           // zx_20260929 M2: 端点解析器**按调用传参**（此前是进程级全局 `setEndpointResolver`，并发任务间互相覆盖）。
@@ -458,7 +497,7 @@ export function resourceTools(deps: ToolDeps) {
           const ansUrl = resolveAnsCreds(db).baseUrl;
           let parsedArgs: Record<string, unknown> = {};
           if (args.args) { try { parsedArgs = JSON.parse(args.args); } catch { parsedArgs = {}; } }
-          const mcpResult = await callMcpTool(args.serverName, args.toolName, parsedArgs, {
+          const mcpResult = await callMcpTool(serverName, args.toolName, parsedArgs, {
             endpointResolver: async (serverName: string) => ({ name: serverName, endpoint: `${ansUrl}/mcp/${encodeURIComponent(serverName)}` }),
           }) as { content?: Array<{ type: string; text?: string }> };
           recordServiceCall(db, { projectId, taskId, kind: 'mcp', target, operation: 'call', ok: true, durationMs: Date.now() - startedAt });

@@ -27,6 +27,20 @@ import { listDevices, type DeviceDb } from './device-registry.js';
 import type { NodeIdentity } from './node-identity.js';
 // zx_20261029_2 M3：能力摘要（意图 + 设备类目）取**能力词汇唯一来源**——与门牌/A2A 卡同一份映射。
 import { peerCapabilitySummary } from './capability-vocabulary.js';
+// zx_20261112_1 B5「衡」：跨机公示岗位——只列已启用者，且只带 id/名称/版本。
+import { listPositions, type PositionDb } from './positions.js';
+
+/** 节点卡最多公示的岗位条数（有界：卡随心跳走，不能无限长）。 */
+export const NODE_CARD_POSITIONS_MAX = 50;
+
+/** 本机已启用岗位 → 卡上的三字段（名称升序、最多 50 条）。 */
+export function deriveCardPositions(db: PositionDb): Array<{ id: string; name: string; version: number }> {
+  return listPositions(db)
+    .filter((p) => p.enabled)
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .slice(0, NODE_CARD_POSITIONS_MAX)
+    .map((p) => ({ id: p.id, name: p.name, version: p.version }));
+}
 
 /**
  * 本机**做不做得了**某一类目——逐类目的**唯一判据**。
@@ -71,5 +85,14 @@ export function buildNodeCard(identity: NodeIdentity, db: DeviceDb, platform: st
     // zx_20261029_2 M3：远端调度据此知道"这台节点能接舒适意图、屋里有灯/窗帘/空调"，
     //   但仍看不到实例（房间/地址/授权态一律不上卡）。`unknown` 不列（不算一类能力）。
     ...peerCapabilitySummary(devices),
+    // zx_20261112_1 B5「衡」：岗位只公示 id/名称/版本——说明、知识、经验不出本机。
+    positions: (() => {
+      try {
+        return deriveCardPositions(db as unknown as PositionDb);
+      } catch {
+        // 读不到岗位表（旧库/异常）⇒ 不写该键（旧卡语义=未上报），不假装"没有岗位"。
+        return undefined;
+      }
+    })(),
   };
 }

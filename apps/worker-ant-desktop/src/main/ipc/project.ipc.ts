@@ -10,12 +10,24 @@ import { emitDeliverableRuntimeChanged } from '../core/refresh-events.js';
 import { isDuplicatePauseResponse, settlePause, grantGoalDeviationQuota } from '../core/pause-settlement.js';
 // zx_20260917 M1: 「置暂停」的唯一写入口——状态/因/事件一次写全（本文件两处暂停点均经它）
 import { PAUSE_REASON_USER_INTERRUPT } from '../core/pause-reason.js';
+// zx_20261110_2 B3「恒」: 「此刻到底在不在跑」的取数口（判据在 `core/exec-state.ts` 纯函数一处）。
+//   GUI 显示与引擎裁决共用这一把尺——否则同一个 `running` 在界面上是"在跑"、在引擎里是"空词"。
+import { readExecState } from '../core/exec-state-read.js';
+import { readProgressAt } from '../core/task-progress.js';
+import { abortTaskRun, hasTaskRun } from '../core/task-run-registry.js';
 import { pauseTask } from '../core/pause-task.js';
 import { setDeliverableStatus, retireTaskDeliverables, countDeliverables, countDeliverablesByType, deliverableScopeSql, applyPrimary, emitDeliverableEvent, loadDeliverableRow, otherWriters, isAcceptanceType, annotateAcceptance, verifiedAcceptanceMap, markDeliverableAcceptanceVerified, findDeliverableByPath, createDeliverable, type AcceptanceMeta } from '../core/deliverable-lifecycle.js';
 // zx_20260914 M2-2: 内联图片的白名单与上限取**真源**（零依赖模块，rr 断言读同一份）
 // zx_20260914 M2-2: 图片预览的判定/读取抽在 core（纯函数 + 注入 io），handler 只取行、转壳
 import { resolveImagePreview } from '../core/image-preview.js';
 import { resolvePage } from '../core/pagination.js';
+// zx_20261108_1 B6: 产出物取数/筛选/排序/分页收进 core（rr 可直跑）；导出 CSV 与列表同一次装配。
+import { queryDeliverables, type DeliverableListParams } from '../core/deliverable-query.js';
+// zx_20261111_3「显」：产出物第一行的计数——判据在纯模块，取数与列表同一 scope。
+import { countUnverified } from '../core/deliverable-attention.js';
+import { resolveDeliverableFsPath } from '../core/deliverable-path.js';
+import { csvFileName, writeDeliverableCsv } from '../core/deliverable-export.js';
+import { proFeatureRefusal } from '../core/pro-gate.js';
 // zx_20260914 M2-3③: 验收判据本身已不必在此 import——三个读点的**解析**整体收敛到
 //   `core/deliverable-lifecycle`（`verifiedAcceptanceMap` 是 `isAcceptanceVerified` 的唯一消费处），
 //   本文件只用它的派生结果。判据不变，只是不再需要自己判。
@@ -30,12 +42,14 @@ import { finalizeTaskByHuman } from '../core/finalize-by-human.js';
 // zx_20261011_4 M4: 子任务行的"已外派"投影取 core **一处真源**（`remoteTaskView`）——
 //   面板上屏的"外派给谁/回传了什么"与驱动收口写的键**同源**，不在此手抄键名。
 import { remoteTaskView } from '../core/node-orchestrate.js';
+// zx_20261112_1 B4「诊」: 族卡要成树——按父指针收集整棵子树（有界深度 + 防环），不再只取直系子。
+import { collectDescendants } from '../core/task-family.js';
 // zx_20261105_1 M4: 子代理结构化结论与「是否子代理」同取 core 一处真源，详情页不再解析 context_json。
 import { readSubagentResult, isSubagentTaskContext } from '../core/subagent-result.js';
 // zx_20261017_1 批三（孙子·知彼知己 / 王阳明·知行合一）: **建单即派**——建单成功且确属可外派时，当场交给他机。
 //   判据/预查/提交/记三键全在 `core/collab-dispatch.ts` 一处；本文件只**组准入事实**并接一跳。
 //   失败永不阻断建单（`dispatchCreatedTask` 永不抛），结局如实附在回执 `dispatch` 键上。
-import { autoDispatchPolicy, dispatchCreatedTask, dispatchReasonForTask, localHasFreeSlot, parentDispatchFacts, projectHasWorkingDir, taskHasDependencies } from '../core/collab-dispatch.js';
+import { CREATE_DISPATCH_REASON_LABEL, buildCreatedTaskDispatchFacts, dispatchCreatedTask, dispatchReasonForTask, persistDispatchDecision } from '../core/collab-dispatch.js';
 import { isNodeEnrolled } from '../core/node-heartbeat.js';
 // zx_20261101_2 M3: 项目级节点分工——读/写口经**同一份**纯计算模块（`core/project-node-policy.ts`），
 //   界面只渲染、不手抄词表；Team 闸与 `nodes:list` 同源（`resolveTeamGate`）。
@@ -61,6 +75,11 @@ import {
   writeProjectDispatchMode,
 } from '../core/project-dispatch-mode.js';
 import { DEFAULT_NODE_ROLE, isNodeOnline, isNodeRole } from '@worker-ant/shared-types';
+// zx_20261107_1 B6「信」：任务详情「为什么选它」——存档的 `model_selection` 由 core 一处洗形后回传，
+//   渲染层不解析 `context_json`、不手抄字段契约。
+import { sanitizeModelSelection } from '../core/model-selection.js';
+// 项目级模型覆盖与全局默认——读/写同一份键（`model-preference.ts`），三处落点优先级也在那里裁定。
+import { readDefaultModel, readProjectModelOverride, resolvePinnedModel, writeProjectModelOverride } from '../core/model-preference.js';
 // zx_20261022_2 批二: 「近 N 天」类统计须对两种时刻写法用同一把尺（ISO 行此前恒被排除）。
 import { utcSql } from '../core/sql-time.js';
 // zx_20261029_1「知」：项目创建后按目录是否非空自动排队生成「项目须知」；作业与落库在 core 一处。
@@ -70,6 +89,8 @@ import type { NodeSettingDb } from '../core/node-identity.js';
 import { teamFeatureRefusal } from '../core/team-gate.js';
 import { resolveLicenseTier, type LicenseSettingDb } from '../core/license.js';
 import { routeCategoryForTask } from '../core/task-routing.js';
+// zx_20261112_1 B2「任」: 人工收口也沉淀候选经验（与引擎两出口同一判据）。
+import { generatePositionLessonCandidate, resolveTaskPosition } from '../core/positions.js';
 // zx_20260921 M7（D4 断点①）: GUI 置子任务终态后**放行父**——复用引擎那四处**同一个**判定（不写第二把尺）。
 //   ⚠ 实现**不内联在本文件**：本文件顶层 import electron，node（受控回归）里 import 不进来 ⇒
 //     内联的薄函数 rr 够不着，只能靠"复刻一份等价物"来测（那正是自我印证）。故抽到 core，两边引同一份。
@@ -138,6 +159,15 @@ type TaskRunEnqueuer = (taskId: string, projectId: string, source?: string) => P
 let _taskRunEnqueuer: TaskRunEnqueuer | null = null;
 export function setTaskRunEnqueuer(fn: TaskRunEnqueuer): void { _taskRunEnqueuer = fn; }
 
+// zx_20261110_2 B3「恒」: 「释放该任务的在途键与残留执行作业」的注入回调（`index.ts` 接
+//   `scheduler.releaseTaskRun`）。**为什么需要从 GUI 这一侧调**：幽灵态的定义是"状态词写着在跑、实则
+//   无执行体"——而残留的 `pending/running` 作业行仍会挡住 `hasPendingExecutionJob`，于是用户点「执行」
+//   只会看到一条永远不跑的旧作业。释放须由**持有内存在途表的那一方**执行（内存键 + 库行一起清）。
+//   与 `_taskRunEnqueuer` 同一注入形制；未注入时如实返回空数组（不动库，不假装清过）。
+type TaskRunReleaser = (taskId: string, reason: string) => string[];
+let _taskRunReleaser: TaskRunReleaser | null = null;
+export function setTaskRunReleaser(fn: TaskRunReleaser): void { _taskRunReleaser = fn; }
+
 // zx_20260908 实机复核修: resume/respond/inject 恢复作业同 fa1cd34 家族——运行时仅裸插 DB 作业、内存队列不消费，
 // 恢复永不执行（DB 状态被置 executing 但无 worker 干活、作业永 pending，UI 见"已暂停/不执行"）。
 // 引入 resume-ai-task enqueuer 由 index.ts 注入 scheduler.enqueue（写 DB+入内存队列，~1s 执行）。
@@ -163,22 +193,8 @@ function enqueueResumeJob(
   );
 }
 
-/**
- * zx_20260924_1 M5-b(维特根斯坦·语言游戏 / 一处真源): 产出物**盘上真实字节数**——列表"大小"列的唯一取数者。
- *
- * 为什么必须在 main 侧算：`wa_deliverables` **没有 size 列**（DB 里的 size 只存在于
- * `wa_deliverable_versions.size`，且那是**字符数**，见 database.ts 该列的 DDL 注记），renderer 又没有 fs。
- * 故只能按 `file_path` 现场 stat。**失败一律 `null`（界面 `—`），绝不抛**——
- * 一个件的路径失效不该把整页列表打红；"不知道大小"与"大小为零"是两回事，故不返回 0。
- */
-function statSizeBytes(filePath: unknown): number | null {
-  const p = typeof filePath === 'string' ? filePath.trim() : '';
-  if (!p) return null;
-  try {
-    const st = fs.statSync(p);
-    return st.isFile() ? st.size : null;
-  } catch { return null; }
-}
+// zx_20261108_1 B6: `statSizeBytes` 已上提到 `core/deliverable-size.ts`——列表查询与 CSV 导出
+//   都在 core 里取同一个值，本文件不再保留第二份 stat。
 
 
 // zx_20261012_3 批一: 收 `dataDir`（与 `initImIpc(db, dataDir, …)` / `initSetupIpc(db, dataDir)` **同形**）——
@@ -260,9 +276,19 @@ export function initProjectIpc(db: Database.Database, dataDir: string, memoryGet
       } catch {}
       // zx_20261029_1「知」：目录非空则排队读仓生成须知。**不等待模型**——作业化后创建即时返回；
       //   目录为空/不存在则如实回 skipped 原因（存量项目不自动补跑，由详情页按钮触发）。
+      // zx_20261111_2「述」：项目描述非空也排队——描述是用户亲手写的优先事实源，不必依赖工作目录。
       const auto = decideAutoInit(typeof result.working_dir === 'string' ? result.working_dir : '');
-      if (auto.run) enqueueJob(db, 'project-init-brief', { projectId: pid, trigger: 'create' });
-      return { data: { ...result, initBrief: auto.run ? { state: 'queued' } : { state: 'skipped', reason: auto.reason } } };
+      const hasDescription = typeof base.description === 'string' && base.description.trim().length > 0;
+      const shouldInit = auto.run || hasDescription;
+      if (shouldInit) enqueueJob(db, 'project-init-brief', { projectId: pid, trigger: 'create' });
+      return {
+        data: {
+          ...result,
+          initBrief: shouldInit
+            ? { state: 'queued' }
+            : { state: 'skipped', reason: auto.reason },
+        },
+      };
     } catch (err) {
       return { error: { code: 'INTERNAL', message: (err as Error).message } };
     }
@@ -276,7 +302,9 @@ export function initProjectIpc(db: Database.Database, dataDir: string, memoryGet
       if (!proj) return { error: { code: 'NOT_FOUND', message: '项目不存在' } };
       const stored = loadProjectBrief(db, id);
       const workingDir = String(proj.working_dir ?? '');
-      const stale = stored?.sourceHash ? await isBriefStale(workingDir, stored.sourceHash) : null;
+      // zx_20261111_2：描述也是来源之一——描述改过同样应提示"须知可能过期"。
+      const description = String(proj.description ?? '');
+      const stale = stored?.sourceHash ? await isBriefStale(workingDir, stored.sourceHash, description) : null;
       return { data: { brief: stored, stale, workingDir } };
     } catch (err) {
       return { error: { code: 'INTERNAL', message: (err as Error).message } };
@@ -540,6 +568,47 @@ export function initProjectIpc(db: Database.Database, dataDir: string, memoryGet
     }
   });
 
+  // ===== 项目级模型覆盖（zx_20261107_1 B6）=====
+  //   读：项目覆盖 + 全局默认 + **合成后的生效项**（优先级 resume > project > default 的裁定居里，界面只显示）。
+  //   写：只 `json_set`/`json_remove` 一个键（`context_json.model_override`）——兄弟键原地保留。
+  //   不设档位闸：核心选型全档可用；"池外"如何回落由执行器如实记录（`applied=false`），不在此假装生效。
+  ipcMain.handle('project:model_override_get', async (_event, { projectId }: { projectId: string }) => {
+    try {
+      const id = String(projectId ?? '');
+      if (!id) return { error: { code: 'BAD_REQUEST', message: '缺少项目 id' } };
+      const exists = db.prepare('SELECT 1 FROM wa_projects WHERE id = ?').get(id);
+      if (!exists) return { error: { code: 'NOT_FOUND', message: '项目不存在' } };
+      const projectOverride = readProjectModelOverride(db, id);
+      const defaultModel = readDefaultModel(db);
+      const pinned = resolvePinnedModel(db, id, null);
+      return {
+        data: {
+          project_override: projectOverride,
+          default_model: defaultModel,
+          /** 生效项：`source` 同执行器（`project`/`default`）；都未指定 ⇒ `null`（自动选型）。 */
+          effective: pinned,
+        },
+      };
+    } catch (err) {
+      return { error: { code: 'INTERNAL', message: (err as Error).message } };
+    }
+  });
+
+  ipcMain.handle('project:model_override_set', async (_event, { projectId, model }: { projectId: string; model?: string | null }) => {
+    try {
+      const id = String(projectId ?? '');
+      if (!id) return { error: { code: 'BAD_REQUEST', message: '缺少项目 id' } };
+      const exists = db.prepare('SELECT 1 FROM wa_projects WHERE id = ?').get(id);
+      if (!exists) return { error: { code: 'NOT_FOUND', message: '项目不存在' } };
+      const next = typeof model === 'string' && model.trim() ? model.trim() : null;
+      const wrote = writeProjectModelOverride(db, id, next);
+      if (!wrote) return { error: { code: 'NOT_FOUND', message: '项目不存在' } };
+      return { data: { ok: true, project_override: next } };
+    } catch (err) {
+      return { error: { code: 'INTERNAL', message: (err as Error).message } };
+    }
+  });
+
   // ===== 任务 CRUD =====
   ipcMain.handle('task:list', async (_event, { projectId, limit, offset }: { projectId: string; limit?: number; offset?: number }) => {
     try {
@@ -561,9 +630,12 @@ export function initProjectIpc(db: Database.Database, dataDir: string, memoryGet
       //   数百 KB（世界快照曾占 91%），一次 100 行的列表把整串文本递过 IPC 再让渲染层逐行 JSON.parse，
       //   只为了取七八个标量。改为显式白名单 + `context_digest`（列表实际读到的键，JSON 文本）。
       //   详情页本来就走 `task:get`（整行），故不再新增"取上下文"端点。
+      // zx_20261112_1 B2「任」: 列表行说得出「指派给哪个岗位」（只存 id，名字读时 JOIN 现取）。
+      //   ⚠ 注释写在 SQL 之外：SQL 里的 `--` 注释会被「列名 vs schema」静态扫描当成列名。
       const rows = db.prepare(`SELECT t.id, t.project_id, t.title, t.description, t.status, t.priority,
         t.depends_on, t.parent_task_id, t.source, t.acceptance_criteria, t.created_at, t.updated_at,
         t.aggregate_version, t.quality_score,
+        t.position_id, p.name AS position_name,
         json_extract(t.context_json, '$.acceptance_check.criteria_total') AS acc_total,
         json_extract(t.context_json, '$.acceptance_check.passed_total') AS acc_passed,
         json_object(
@@ -591,7 +663,8 @@ export function initProjectIpc(db: Database.Database, dataDir: string, memoryGet
           'remote_attempts', json_extract(t.context_json, '$.remote_attempts'),
           'remote_category', json_extract(t.context_json, '$.remote_category')
         ) AS context_digest
-        FROM wa_tasks t WHERE t.project_id = ? ORDER BY t.created_at DESC, t.priority DESC, t.rowid DESC${page.sql}`).all(projectId, ...page.params) as Array<Record<string, unknown>>;
+        FROM wa_tasks t LEFT JOIN wa_positions p ON p.id = t.position_id
+        WHERE t.project_id = ? ORDER BY t.created_at DESC, t.priority DESC, t.rowid DESC${page.sql}`).all(projectId, ...page.params) as Array<Record<string, unknown>>;
       // zx_20260913 M2-1(管子·度量衡·同一把尺): 计数改**子树口径**——此前只数本任务 ⇒ 列表说"0 项"、
       // 详情说"N 项"(同一事实两个说法)。一次 GROUP BY 取本项目各任务计数(**同尺套 docNotProbe**，
       // 此前列表不滤探针、详情滤 ⇒ 又是一处两说法)，再沿 parent_task_id 上卷(带环防护)。
@@ -695,24 +768,133 @@ export function initProjectIpc(db: Database.Database, dataDir: string, memoryGet
       //   未采纳候选不改变 `no_user_criteria` 的未核验语义（候选≠许诺）。
       const taskRow = task as Record<string, unknown>;
       const proposedAcceptance = readProposedAcceptance(ctxJson);
+      // zx_20261107_1 B6：本次执行的选型记录（`[选型]` 行由它派生并同轮落库）。
+      //   旧任务无此键 ⇒ `null`（"当时没记"不等于"没选过"）；坏形状由 `sanitizeModelSelection` 如实作废。
+      let rawModelSelection: unknown = null;
+      try {
+        const parsedCtx = ctxJson ? JSON.parse(ctxJson) as Record<string, unknown> : null;
+        rawModelSelection = parsedCtx && typeof parsedCtx === 'object' ? parsedCtx.model_selection ?? null : null;
+      } catch { rawModelSelection = null; }
+      // zx_20261112_2 B1 M4：派发结局由 main 解析回传（渲染层不手抄 ctx 键名）；旧任务无此键 ⇒ null。
+      let dispatchDecision: { attempted: boolean; ok: boolean; reason: string; label: string; nodeId?: string; at: string } | null = null;
+      try {
+        const parsed = ctxJson ? JSON.parse(ctxJson) as Record<string, unknown> : null;
+        const dd = parsed && typeof parsed === 'object' ? parsed.dispatch_decision : null;
+        if (dd && typeof dd === 'object' && !Array.isArray(dd)) {
+          const o = dd as Record<string, unknown>;
+          const reason = String(o.reason ?? '');
+          dispatchDecision = {
+            attempted: o.attempted === true,
+            ok: o.ok === true,
+            reason,
+            // 已知机器码给人话；`no-peer`/`dispatch-threw: …` 这类非枚举码原样透出（不编）。
+            label: (CREATE_DISPATCH_REASON_LABEL as Record<string, string>)[reason] ?? reason,
+            ...(typeof o.nodeId === 'string' && o.nodeId ? { nodeId: o.nodeId } : {}),
+            at: String(o.at ?? ''),
+          };
+        }
+      } catch { dispatchDecision = null; }
       const suggestedCriteria = String(taskRow.acceptance_criteria ?? '').trim()
         ? []
         : [...new Set([
             ...proposedAcceptance,
             ...suggestCriteriaFromText(String(taskRow.title ?? ''), String(taskRow.description ?? '')),
           ])].slice(0, CRITERIA_SUGGESTION_LIMIT);
+      // zx_20261110_2 B3: 执行态**派生量**随详情一起回传（`live/queued/ghost/idle/terminal`）。
+      //   界面此前只读 `task.status` 词 ⇒ `executing` 一律画成"在跑"——即使早已无人在跑（事故 339ef167：
+      //   55 分钟里界面在动、引擎没动）。派生量自然消退：下次读就变了，不落库、不进 `context_json`。
+      //   读不到（缺表/坏库）时如实给 `null`，由渲染层按"未知"处置，不编一个态出来。
+      let execState: { state: string; reason: string } | null = null;
+      // zx_20261110_2 B7「见」：最后进展与"已卡多久"——派生量，不入库（一秒就变）。
+      //   三本账同一次读（事件/对话/作业）；读不到即 null，界面显示"未知"，不编一个时刻出来。
+      let progress: { lastProgressAt: string | null; stuckMs: number | null; pendingJobAgeMs: number | null } =
+        { lastProgressAt: null, stuckMs: null, pendingJobAgeMs: null };
+      try {
+        const es = readExecState(db as never, id);
+        execState = { state: es.state, reason: es.reason };
+        progress = readProgressAt(db as never, id, { state: es.state, pendingJobAgeMs: es.pendingJobAgeMs });
+      } catch { execState = null; }
+      // zx_20261112_1 B2「任」: 指派岗位**读时一处派生**（id/name/enabled）。三种面孔各自如实：
+      //   null＝从没指派；有名字＝指派的岗位还在；`missing:true`＝指派过但岗位已被删（不是"没指派"）。
+      let positionInfo: { id: string; name: string; enabled: boolean; missing?: boolean } | null = null;
+      try {
+        const pid = String((task as Record<string, unknown>).position_id ?? '').trim();
+        if (pid) {
+          const prow = db.prepare('SELECT id, name, enabled FROM wa_positions WHERE id = ?').get(pid) as
+            | { id: string; name: string; enabled: number }
+            | undefined;
+          positionInfo = prow
+            ? { id: prow.id, name: prow.name, enabled: Number(prow.enabled) === 1 }
+            : { id: pid, name: '', enabled: false, missing: true };
+        }
+      } catch { positionInfo = null; }
       return { data: {
         task, conversations, conversationsTotal, deliverables, deliverablesTotal, retrospective, retiredCount,
+        position: positionInfo,
+        dispatchDecision,
+        execState,
+        lastProgressAt: progress.lastProgressAt,
+        stuckMs: progress.stuckMs,
+        pendingJobAgeMs: progress.pendingJobAgeMs,
         archivedSnapshot: archivedSnap,
         archiveReason: archivedReasonOf(ctxJson) || null,
         // zx_20261105_1 M9: 归档时间同出快照一处读点——无快照如实 null（旧归档行不编造时刻）。
         archivedAt: archivedSnap?.archived_at ?? null,
         suggestedCriteria,
         proposedAcceptance,
+        modelSelection: sanitizeModelSelection(rawModelSelection),
         // zx_20261105_1 M6: 被守卫拒绝/失败的命令与判卷引用的是**同一本账**；上限 50 条，
         //   只读回传，不在 IPC 层另做过滤或改写（脱敏已在写口完成）。
         runtimeEvidence: listRuntimeEvidence(db, id, 50),
       } };
+    } catch (err) {
+      return { error: { code: 'INTERNAL', message: (err as Error).message } };
+    }
+  });
+
+  // ═══ zx_20261110_2 B7「见」：幽灵态「释放并重排」 ═════════════════════════════════════
+  // 病根（事故 339ef167）：状态词写着 `executing`、实则无执行体；用户点「恢复」被 `resume-ai-task`
+  //   的"已在执行"挡回，界面一直在动 —— 一条死路，没有任何出口。本 handler 是**唯一出口**：
+  //   只对幽灵态开放，一次动作 = 真断（若有句柄）→ 作废残留作业 → 落回 `pending` → 重新入队 → 回执新态。
+  //   服务端二次校验 `execState`（renderer 的按钮只是提示，闸在这里）；非幽灵一律 `INVALID_STATE` 并附当前态。
+  ipcMain.handle('task:releaseAndRequeue', async (_event, { id }: { id: string }) => {
+    try {
+      const row = db.prepare('SELECT id, project_id, title, status FROM wa_tasks WHERE id = ?').get(id) as
+        { id: string; project_id: string; title?: string; status?: string } | undefined;
+      if (!row) return { error: { code: 'NOT_FOUND', message: '任务不存在' } };
+      const before = readExecState(db as never, id);
+      if (before.state !== 'ghost') {
+        return { error: {
+          code: 'INVALID_STATE',
+          message: `当前执行态是 ${before.state}（${before.reason}）——只有「幽灵」态（状态写着在跑、实则无执行体）才可以释放并重排`,
+          state: before.state, reason: before.reason,
+        } };
+      }
+      // 二次校验：真在跑的不放（判据与 `exec-state.ts` 同一把尺；这里再问一次是因为裁决与动作之间隔着 await）。
+      if (hasTaskRun(id)) {
+        return { error: { code: 'INVALID_STATE', message: '该任务此刻仍有在途执行体，不能按幽灵态释放', state: 'live', reason: 'live_run' } };
+      }
+      const aborted = abortTaskRun(id, 'released_by_user');
+      const released = _taskRunReleaser ? _taskRunReleaser(id, 'released_by_user') : [];
+      db.prepare("UPDATE wa_tasks SET status = 'pending', updated_at = datetime('now') WHERE id = ? AND status NOT IN ('completed','failed','archived')").run(id);
+      // 留痕：为什么放、放了什么。用户下次翻这条任务，看得见这一步是谁做的、依据是什么。
+      try {
+        db.prepare("INSERT INTO wa_task_conversations (id, task_id, role, content, token_count, created_at) VALUES (?, ?, 'system', ?, 0, datetime('now'))")
+          .run(crypto.randomUUID(), id, `[人工释放并重排] 检测到执行态为「幽灵」（${before.reason}）——状态写着在跑、实则无执行体。已作废 ${released.length} 条残留执行作业${aborted ? '、中止了在途句柄' : ''}，任务已退回队列并重新派发。`);
+      } catch { /* 留痕失败不阻断重排 */ }
+      eventBus.emit('task.released_by_user', {
+        taskId: id, task_id: id, projectId: row.project_id, reason: before.reason, released: released.length,
+      }).catch(() => {});
+      // 重新入队：与「执行」按钮同一通道（`ai-task` + source 可追溯），不再走 `resume-ai-task`
+      //   （那一路会被"已在执行"的旧判据挡回，正是本病根）。
+      if (_taskRunEnqueuer) await _taskRunEnqueuer(id, row.project_id, 'released_by_user');
+      else db.prepare("INSERT INTO wa_jobs (id, type, payload, status) VALUES (?, 'ai-task', ?, 'pending')").run(
+        crypto.randomUUID(), JSON.stringify({ taskId: id, projectId: row.project_id, source: 'released_by_user' }),
+      );
+      let after: { state: string; reason: string } | null = null;
+      try { const es = readExecState(db as never, id); after = { state: es.state, reason: es.reason }; } catch { after = null; }
+      logger.info({ taskId: id.slice(0, 8), released: released.length, aborted, state: after?.state }, '幽灵态：用户释放并重排');
+      return { data: { id, status: 'pending', released: released.length, aborted, execState: after } };
     } catch (err) {
       return { error: { code: 'INTERNAL', message: (err as Error).message } };
     }
@@ -750,8 +932,8 @@ export function initProjectIpc(db: Database.Database, dataDir: string, memoryGet
     }
   });
 
-  ipcMain.handle('task:create', async (_event, { projectId, title, description, priority, acceptance_criteria, parent_task_id, plan_task_id, client_request_id, attachment_paths }: {
-    projectId: string; title: string; description?: string; priority?: number; acceptance_criteria?: string; parent_task_id?: string; plan_task_id?: string; client_request_id?: string; attachment_paths?: string[]
+  ipcMain.handle('task:create', async (_event, { projectId, title, description, priority, acceptance_criteria, parent_task_id, plan_task_id, client_request_id, attachment_paths, positionId }: {
+    projectId: string; title: string; description?: string; priority?: number; acceptance_criteria?: string; parent_task_id?: string; plan_task_id?: string; client_request_id?: string; attachment_paths?: string[]; positionId?: string
   }) => {
     try {
       // zx_20260914 M0.6(老子·为之于未有 / 康德·范畴穷尽): **一次点击只该建一个任务**。
@@ -777,9 +959,15 @@ export function initProjectIpc(db: Database.Database, dataDir: string, memoryGet
         const attachRefusal = childBreadthRefusal(db, parent_task_id);
         if (attachRefusal) return { error: { code: 'BAD_REQUEST', message: `父任务${attachRefusal}` } };
       }
+      // zx_20261112_1 B2「任」: 指派岗位须**先验再插**（与父任务校验同一纪律）——
+      //   岗位停用 / 项目未绑定 / 岗位已删一律拒绝，绝不"插了再说"落一条名不副实的指派。
+      const wantedPositionId = String(positionId ?? '').trim();
+      if (wantedPositionId && !resolveTaskPosition(db, projectId, wantedPositionId)) {
+        return { error: { code: 'BAD_REQUEST', message: '该岗位未在本项目启用（或已停用/删除），不能指派' } };
+      }
       const id = crypto.randomUUID();
-      db.prepare(`INSERT INTO wa_tasks (id, project_id, title, description, priority, status, acceptance_criteria, context_json)
-        VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)`).run(id, projectId, title, description || '', priority || 0, acceptance_criteria || '', reqId ? JSON.stringify({ client_request_id: reqId }) : '{}');
+      db.prepare(`INSERT INTO wa_tasks (id, project_id, title, description, priority, status, acceptance_criteria, position_id, context_json)
+        VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)`).run(id, projectId, title, description || '', priority || 0, acceptance_criteria || '', wantedPositionId, reqId ? JSON.stringify({ client_request_id: reqId }) : '{}');
       if (parent_task_id) {
         db.prepare('UPDATE wa_tasks SET parent_task_id = ? WHERE id = ?').run(parent_task_id, id);
       }
@@ -925,30 +1113,24 @@ export function initProjectIpc(db: Database.Database, dataDir: string, memoryGet
       // zx_20261017_1 批三（孙子·知彼知己）: 建单即派——**只在真新建这条路**上（`client_request_id` 重放已提前返回，
       //   重放不再派一次）。准入事实逐项从真实行/设置读取；`dispatchCreatedTask` 永不抛、失败不写三键
       //   ⇒ 建单这件主动作不受任何影响。放在重取任务行**之前**：成功写入的三键随之出现在回执里。
-      const createdRow = db.prepare('SELECT depends_on FROM wa_tasks WHERE id = ?').get(id) as { depends_on?: unknown } | undefined;
-      // zx_20261029_2 M7：开关与来由取自**同一处** `autoDispatchPolicy`（三态：显式/缺省），
-      //   余力取自与心跳/Peers 同一真源；缺省开时只在满负荷才溢出，显式开不受此限。
-      const autoPolicy = autoDispatchPolicy(db as unknown as NodeSettingDb & LicenseSettingDb);
+      // zx_20261112_2 B1：准入事实收成**一处具名组装**（`buildCreatedTaskDispatchFacts`）——
+      //   IPC 与 E2E 共用，不在调用点手拼（手拼两份即两把尺）。
+      const dispatchHasAttachments = attachmentsImported > 0 || attachmentsFailed.length > 0;
       const dispatchOutcome = await dispatchCreatedTask(
         db,
         { id, title: String(title ?? ''), description, acceptanceCriteria: acceptance_criteria },
-        {
-          settingOn: autoPolicy.enabled,
-          autoDispatchSource: autoPolicy.source,
-          localHasFreeSlot: localHasFreeSlot(db),
-          teamUnlocked: teamFeatureRefusal(db as unknown as LicenseSettingDb, 'multi_node') === null,
-          enrolled: isNodeEnrolled(db as unknown as NodeSettingDb),
-          // zx_20261104_3 M1：父任务能否接住结果，由父行状态现读（暂停等待态照常可派）。
-          ...parentDispatchFacts(db, parent_task_id),
-          hasDependencies: taskHasDependencies(createdRow?.depends_on),
-          hasAttachments: attachmentsImported > 0 || attachmentsFailed.length > 0,
-          hasWorkingDir: projectHasWorkingDir(db, projectId),
+        buildCreatedTaskDispatchFacts(db, {
+          taskId: id,
+          title,
+          description,
+          parentTaskId: parent_task_id,
+          hasAttachments: dispatchHasAttachments,
           decomposed,
-          category: routeCategoryForTask(title, description),
-          // zx_20261101_2 M3：本项目登记了节点分工 ⇒ 用户点名了"交给谁"，不再受「本机闲着就别派」约束。
-          projectTargeted: projectHasNodePolicy(db as unknown as ProjectNodePolicyDb, projectId),
-        },
+          projectId,
+        }),
       );
+      // zx_20261112_2 B1 M4：结局落 `context_json.dispatch_decision`（只 merge 一个键），任务详情据此说清。
+      persistDispatchDecision(db, id, dispatchOutcome);
       const task = db.prepare('SELECT * FROM wa_tasks WHERE id = ?').get(id) as Record<string, unknown> | undefined;
       // zx_20261105_1 M7：建单回执附**判据候选**（只读，不写库）——人点「采用」后才走 `task:update` 入列。
       const suggestedCriteria = String(acceptance_criteria || '').trim() ? [] : suggestCriteriaFromText(title, description);
@@ -990,6 +1172,12 @@ export function initProjectIpc(db: Database.Database, dataDir: string, memoryGet
     try {
       const task = db.prepare('SELECT id, status, project_id FROM wa_tasks WHERE id = ?').get(id) as { id: string; status: string; project_id: string } | undefined;
       if (!task) return { error: { code: 'NOT_FOUND', message: '任务不存在' } };
+      // zx_20261110_2 B3「恒」: 动之前先看清**此刻到底在不在跑**（派生量，非状态词）。
+      //   这条读的用处只在 `status === 'running'`（GUI「执行」）：若判出来是 `ghost`，说明状态词写着在跑、
+      //   实则无执行体 ⇒ 必须先把残留作业/在途键如实清掉，否则 `hasPendingExecutionJob` 会挡掉新作业的入队，
+      //   用户点「执行」又变成一次什么都没发生的假动作。读失败照旧放行（判不了不拦——与既有纪律一致）。
+      let preExec: { state: string; reason: string } | null = null;
+      try { const es = readExecState(db as never, id); preExec = { state: es.state, reason: es.reason }; } catch { preExec = null; }
       // zx_20261018_3 批二「序」: 人工「执行」也是一条开跑入口——前置未满足时**与调度器同拒**。
       //   必须在任何状态写入/作业入队之前：拒时状态零变、作业零新增（闸才是闸）。
       if (status === 'running') {
@@ -1004,15 +1192,20 @@ export function initProjectIpc(db: Database.Database, dataDir: string, memoryGet
       //   在途态经 `interruptTask` 进去（其内亦调 `pauseTask`）；**非在途态**（排队/待执行等）此前落一条
       //   `status = ?` 的**变量驱动**裸 UPDATE——字面扫描看不见它，故未列入"24 处直写点"，
       //   但确是暂停决策点：在那里因由落不下、事件也无。调用方**一律不再补发** `status_changed`。
+      // zx_20261110_2 B4「恒」: `interruptTask` 的 `aborted` 此前**被丢弃**——GUI 一律以为"断了"，
+      //   而真值可能是"库里已暂停、进程里没有可断的句柄"。回执须把这笔账如实带出去（渲染层据此说人话）。
+      let pauseAborted: boolean | null = null;
       if (status === 'paused') {
         if (['running', 'executing', 'preparing', 'planning'].includes(task.status)) {
-          interruptTask(db, id);
+          const ir = interruptTask(db, id);
+          pauseAborted = typeof ir.aborted === 'boolean' ? ir.aborted : null;
         } else {
           // `reason` 形参（现状只有 `failed` 携带 `abandoned_by_user`）若带了就照旧落 `ctx.reason`——
           // 逐字保住既有行为，不因收口写入口而丢一笔账。
           pauseTask(db, { taskId: id, reason: PAUSE_REASON_USER_INTERRUPT, extraContext: reason ? { reason } : undefined });
         }
-        return { data: { id, status: 'paused' } };
+        // `aborted` 三态：true＝真断了 / false＝置了暂停但没有可断的执行体 / null＝该状态词本就不是"在跑"（未走中断路）
+        return { data: { id, status: 'paused', aborted: pauseAborted } };
       }
       // zx_20261012_2 批二: 「归档」走**唯一写手** `archiveTask`（状态 + 因 `archive_reason` + 翻账页 + 发事件
       //   一次写全）；此前这里对 `archived` 也走下面那条裸 UPDATE——因不落、账页不翻（与 `pauseTask` 收口前的旧病同形）。
@@ -1069,6 +1262,9 @@ export function initProjectIpc(db: Database.Database, dataDir: string, memoryGet
           // zx_20260905 批5 收尾对齐：双写 quality_score 列（与 agent update_task_status 一致，避免项目质量聚合漏计）。
           //   分取自**收口后**的账（本函数不搬 `syncQualityColumn`——那会把整条引擎依赖链拖进 core 模块）。
           if (typeof fin.score === 'number') db.prepare('UPDATE wa_tasks SET quality_score = ? WHERE id = ?').run(fin.score, id);
+          // zx_20261112_1 B2「任」：人工收口是第三条完成出口，同样沉淀候选经验
+          //   （准入判据在 positions.ts：验收通过 + 有摘要 + 非外派；不满足则如实不写）。
+          generatePositionLessonCandidate(db, id);
         } catch (err) { logger.warn({ err: (err as Error).message, taskId: id }, '人工收口清算失败(不阻断状态转移)'); }
       }
       // zx_20260915 P0-3(a)(失败必带因): 调用方未附 reason 时**如实说明"未附原因"**——发一条系统会话行，
@@ -1087,14 +1283,28 @@ export function initProjectIpc(db: Database.Database, dataDir: string, memoryGet
       if (!archivedViaHand) {
         eventBus.emit('task.status_changed', { taskId: id, task_id: id, newStatus: status, new_status: status, projectId: task.project_id, ...(status === 'failed' ? { error: reason || '' } : {}), ...(status === 'completed' ? buildTaskOutcome(db, id) : {}) }).catch(() => {});
       }
-      if (status === 'running' && !hasPendingExecutionJob(db, id)) {
-        if (_taskRunEnqueuer) {
-          // zx_20260907 M5 修(2026-09-08): 入调度器内存队列即时执行(不再等重启恢复)；executeTask CAS 已认领 running
-          await _taskRunEnqueuer(id, task.project_id, 'gui_start');
-        } else {
-          // 兜底：enqueuer 未注入时退化为原裸插(依赖调度器重启恢复)，避免执行请求完全丢失
-          db.prepare("INSERT INTO wa_jobs (id, type, payload, status) VALUES (?, 'ai-task', ?, 'pending')").run(crypto.randomUUID(), JSON.stringify({ taskId: id, projectId: task.project_id, source: 'gui_start' }));
+      if (status === 'running') {
+        // zx_20261110_2 B3「恒」: 幽灵态先**如实释放**再入队。
+        //   释放的是内存在途键 + 库内残留 `pending/running` 执行作业（由 `scheduler.releaseTaskRun` 一并做，
+        //   它握着内存在途表）；理由与 `task:resume` 既有注释同源：真在跑的 executeTask 早把任务置 executing
+        //   且 `hasTaskRun` 为真，故此处判成 `ghost` 时那些残留作业必为过期幽灵，作废不误伤。
+        if (preExec?.state === 'ghost') {
+          const released = _taskRunReleaser ? _taskRunReleaser(id, 'released_by_ghost_start') : [];
+          logger.info({ taskId: id.slice(0, 8), reason: preExec.reason, released: released.length }, '幽灵执行态：已释放残留作业后在途键，重新入队');
         }
+        if (!hasPendingExecutionJob(db, id)) {
+          if (_taskRunEnqueuer) {
+            // zx_20260907 M5 修(2026-09-08): 入调度器内存队列即时执行(不再等重启恢复)；executeTask CAS 已认领 running
+            await _taskRunEnqueuer(id, task.project_id, 'gui_start');
+          } else {
+            // 兜底：enqueuer 未注入时退化为原裸插(依赖调度器重启恢复)，避免执行请求完全丢失
+            db.prepare("INSERT INTO wa_jobs (id, type, payload, status) VALUES (?, 'ai-task', ?, 'pending')").run(crypto.randomUUID(), JSON.stringify({ taskId: id, projectId: task.project_id, source: 'gui_start' }));
+          }
+        }
+        // 回执给渲染层的是**入队之后**的派生态（`queued` 才算真的排上了；仍 `ghost` 就如实说没排上）。
+        let after: { state: string; reason: string } | null = null;
+        try { const es = readExecState(db as never, id); after = { state: es.state, reason: es.reason }; } catch { after = null; }
+        return { data: { id, status, execState: after } };
       }
       return { data: { id, status } };
     } catch (err) {
@@ -1110,11 +1320,21 @@ export function initProjectIpc(db: Database.Database, dataDir: string, memoryGet
       // zx_20261106_1 M7: 族验收卡要能回答「这条子任务的判据是哪来的」——`acceptance_source`
       //   由 M3 落库（model/model_repaired/derived_parent/derived_generic/missing/intentional_empty），
       //   此处只读投影，不在渲染层解析 context_json。
-      const rows = db.prepare(`SELECT t.id, t.title, t.status, t.updated_at, t.context_json,
+      // zx_20261112_1 B2「任」: 子任务卡也说得出指派岗位（与 task:list 同一读法：只存 id，名字 JOIN 现取）。
+      //   ⚠ 注释写在 SQL 之外：SQL 里的 `--` 会被「列名 vs schema」静态扫描当成列名。
+      // zx_20261112_1 B4「诊」: 带上 `parent_task_id` 供渲染层成树；按父逐层取行，由 `collectDescendants`
+      //   收齐整棵子树（此前只取直系子 ⇒ 孙任务不上屏，族验收在孙任务未终态时就可能成立）。
+      const childStmt = db.prepare(`SELECT t.id, t.title, t.status, t.updated_at, t.context_json,
+        t.parent_task_id, t.position_id, p.name AS position_name,
         json_extract(t.context_json, '$.completion_quality.score') AS score,
         json_extract(t.context_json, '$.acceptance_source') AS acceptance_source,
         COALESCE((SELECT SUM(c.token_count) FROM wa_task_conversations c WHERE c.task_id = t.id), 0) AS tokens
-        FROM wa_tasks t WHERE t.parent_task_id = ? ORDER BY t.created_at ASC`).all(id) as Array<Record<string, unknown>>;
+        FROM wa_tasks t LEFT JOIN wa_positions p ON p.id = t.position_id
+        WHERE t.parent_task_id = ? ORDER BY t.created_at ASC`);
+      const rows = collectDescendants(
+        (pid) => childStmt.all(pid) as Array<{ id: string } & Record<string, unknown>>,
+        id,
+      );
       const children = rows.map((r) => {
         const ctxJson = r.context_json as string | null;
         const remote = remoteTaskView(ctxJson);
@@ -1258,8 +1478,15 @@ export function initProjectIpc(db: Database.Database, dataDir: string, memoryGet
     try {
       const task = db.prepare('SELECT id, project_id, status, context_json FROM wa_tasks WHERE id = ?').get(id) as { id: string; project_id: string; status: string; context_json: string } | undefined;
       if (!task) return { error: { code: 'NOT_FOUND', message: '任务不存在' } };
-      if (!['paused', 'failed', 'completed'].includes(task.status)) {
-        return { error: { code: 'INVALID_STATUS', message: `任务状态为 ${task.status}，无法恢复。只有暂停/失败/已完成的任务可以恢复。` } };
+      // zx_20261110_2 B3「恒」: **幽灵态也接受恢复**。
+      //   病根（事故 339ef167）：任务卡在 `executing`（状态词写着在跑、实则无执行体）时，此处按
+      //   "只有暂停/失败/已完成可恢复"直接拒 ⇒ 用户点「恢复」得到一句 `INVALID_STATUS`，任务永远出不来。
+      //   判据用**派生执行态**而不是状态词：`live` 仍拒（真在跑，恢复会造成双跑），`ghost` 放行。
+      let resumeExec: { state: string; reason: string } | null = null;
+      try { const es = readExecState(db as never, id); resumeExec = { state: es.state, reason: es.reason }; } catch { resumeExec = null; }
+      const ghostResumable = resumeExec?.state === 'ghost';
+      if (!['paused', 'failed', 'completed'].includes(task.status) && !ghostResumable) {
+        return { error: { code: 'INVALID_STATUS', message: `任务状态为 ${task.status}，无法恢复。只有暂停/失败/已完成（或状态显示在运行、实则无执行体）的任务可以恢复。` } };
       }
       const fromCompleted = task.status === 'completed';
       // zx_20261018_3 批二「序」: 恢复 = 开跑（入 resume 作业）——前置未满足则拒。
@@ -1284,6 +1511,13 @@ export function initProjectIpc(db: Database.Database, dataDir: string, memoryGet
       // 任务永远停在 paused 的死锁根源：旧逻辑命中即返回，不置 pending 也不入队)，再置 pending + 入队新作业。
       // 安全性：resume 仅允许 paused/failed/completed 进入；真在跑的 executeTask 早已把任务置 executing，故此处残留
       // 作业必为过期幽灵，作废不误伤。防重入由 executeTask 的 CAS(pending/paused/preparing/running→executing)兜底。
+      // zx_20261110_2 B3: 幽灵恢复还要清**内存里的**在途键——`supersedeExecutionJobs` 只动库行，
+      //   键若仍占着，调度器那条"键在但无真实 run 且未超宽限"的让位判据会把它再挡一段时间。
+      //   真在跑的（`live`）进不到这里（上面已拒），故此处释放不误伤。
+      if (ghostResumable && _taskRunReleaser) {
+        const released = _taskRunReleaser(id, 'released_by_ghost_resume');
+        logger.info({ taskId: id.slice(0, 8), reason: resumeExec?.reason, released: released.length }, '幽灵执行态：恢复前已释放残留作业与在途键');
+      }
       supersedeExecutionJobs(db, id, 'superseded_by_resume');
       db.prepare("UPDATE wa_tasks SET status = 'pending', updated_at = datetime('now') WHERE id = ?").run(id);
       // zx_20260910_3 M2d-a: 人工恢复 → 返还目标偏离额度（搭 settlePause 的同一次 ctxJson 写，不新增 UPDATE）
@@ -1295,7 +1529,9 @@ export function initProjectIpc(db: Database.Database, dataDir: string, memoryGet
       enqueueResumeJob(db, id, task.project_id, reply, fromCompleted);
       // zx_20260908 D2: 恢复即广播(处置即已读·防陈旧铃/角标)
       eventBus.emit('task.status_changed', { taskId: id, task_id: id, projectId: task.project_id, newStatus: 'pending', new_status: 'pending' }).catch(() => {});
-      return { data: { id, status: 'pending', resumed: true } };
+      // zx_20261110_2 B3: 回执带上**动之前**看到的执行态（`state='ghost'` 时界面可如实说"接管的是一次空转"）；
+      //   `resumed` 仍表示"已受理"，与执行态是两件事（受理了但排不上，`execState` 会如实是 ghost）。
+      return { data: { id, status: 'pending', resumed: true, execState: resumeExec, resumedFromGhost: ghostResumable } };
     } catch (err) {
       return { error: { code: 'INTERNAL', message: (err as Error).message } };
     }
@@ -1434,62 +1670,75 @@ export function initProjectIpc(db: Database.Database, dataDir: string, memoryGet
   });
 
   // ===== 产出物 =====
-  ipcMain.handle('deliverable:list', async (_event, { projectId, type, status, keyword, limit, offset }: { projectId?: string; type?: string; status?: string; keyword?: string; limit?: number; offset?: number }) => {
+  // zx_20261108_1 B6: 取数/筛选/排序/分页整条链收进 `core/deliverable-query.ts`（一处真源）。
+  //   新增 `taskId/since/until/primary/showRetired/sort/order`；`total`/`retiredCount` 与明细同 WHERE。
+  //   返回形状不变 `{ rows, total, retiredCount, limit, offset }`（旧调用方零改动）。
+  ipcMain.handle('deliverable:list', async (_event, input: DeliverableListParams = {}) => {
     try {
-      const conditions: string[] = [];
-      const params: unknown[] = [];
-      if (projectId) { conditions.push('d.project_id = ?'); params.push(projectId); }
-      if (type) { conditions.push('d.type = ?'); params.push(type); }
-      if (status) { conditions.push('d.status = ?'); params.push(status); }
-      // zx_20260906_2 批3 (2026-09-06): 成果关键词检索——名称/描述/类型/路径/registry_id LIKE；projectId 空即跨项目全局
-      const kw = (keyword || '').trim();
-      if (kw) { conditions.push("(d.name LIKE ? OR d.description LIKE ? OR d.type LIKE ? OR d.file_path LIKE ? OR COALESCE(d.registry_id, '') LIKE ?)"); const like = `%${kw}%`; params.push(like, like, like, like, like); }
-      // zx_20260913 M2-3(康德·范畴穷尽): 补上**唯一漏网读点**——此前本处无探针滤除(同谓词已在详情/全景/交付单收敛)，
-      // 产出物管理页会比别处多出临时探针 doc。**刻意保留「已退休可见」**(档案视图有意为之，不动)。
-      // zx_20260930 M4-1: 这次差异从"顺手少写一行"升格为**显式声明**——`includeRetired: true` 写在这里，
-      //   谁想改成一致都会先读到这行；附加筛选（关键词/type/status）仍接在本函数自己的 conditions 里。
-      conditions.push(deliverableScopeSql({ alias: 'd', includeRetired: true }).sql);
-      const whereSql = conditions.join(' AND ');
-      const where = whereSql ? `WHERE ${whereSql}` : '';
-      // zx_20260930 M4-2: **真分页** + 总数。`total` 与明细用**同一段 FROM/JOIN/WHERE 与同一组 params**
-      //   （同一句装配出来的，不是两处手抄）——故"共 M 条"必与这页的行来自同一个集合。
-      //   JOIN 一并留在 COUNT 里：`JOIN wa_projects` 是内连接，项目行缺失的成果**两边都不算**，
-      //   否则 total 会把明细永远取不到的孤儿件也数进去。
-      //   ORDER BY 补 `d.rowid DESC` 兜同秒行次序（`created_at` 只到秒 ⇒ 不补则翻页可行重复/遗漏）。
-      const from = `FROM wa_deliverables d
-        JOIN wa_projects p ON d.project_id = p.id
-        LEFT JOIN wa_tasks t ON t.id = d.task_id ${where}`;
-      const total = (db.prepare(`SELECT COUNT(*) AS c ${from}`).get(...params) as { c: number }).c;
-      // zx_20260930 M4-2: 已退休件计数改由**服务端**按**同一组筛选条件**算——原先由渲染层数 `items`
-      //   （已加载的那一页）⇒ 分页后会把"已退休 N 项"变成"这一页里有 N 项"，而它给的是一条**归档提示**，
-      //   提示里的数必须与它所指的全量集合同尺。
-      const retiredCount = (db.prepare(`SELECT COUNT(*) AS c FROM wa_deliverables d
-        JOIN wa_projects p ON d.project_id = p.id
-        LEFT JOIN wa_tasks t ON t.id = d.task_id ${whereSql ? `WHERE ${whereSql} AND` : 'WHERE'} d.status = 'retired'`).get(...params) as { c: number }).c;
-      const page = resolvePage(limit, offset);
-      // zx_20260906 批3 (3b): JOIN 补产出任务标题，产出物↔任务可溯源跳转
-      // zx_20260906_1 3a: JOIN 补任务质量分(task_quality_score)——列表质量列/排序
-      // zx_20260913 M2-6: 补派生列 version_count——版本历史钮的**事实依据**(有版本才亮，不再凭 type 猜)
-      const data = db.prepare(`SELECT d.*, p.name as project_name, t.title as task_title, t.status as task_status, t.quality_score as task_quality_score,
-        (SELECT COUNT(*) FROM wa_deliverable_versions v WHERE v.deliverable_id = d.id) AS version_count
-        ${from} ORDER BY d.created_at DESC, d.rowid DESC${page.sql}`).all(...params, ...page.params) as Array<Record<string, unknown>>;
-      // zx_20260913 M2-2(巴特莱特·重构): 归属不被夺，但"还有谁写过"如实透出(派生自版本快照 changed_by，不新增列)
-      const writers = otherWriters(db, data as Array<{ id: string; task_id?: string | null }>);
-      for (const r of data) r.other_writers = writers.get(String(r.id)) || [];
-      // zx_20260907 M2(B2): 成果侧"验收证据"透出——补 DeliverablesPage doc 徽标数据位"是否已验证成果"；纯派生不改判。
-      // zx_20260914 M2-3③(罗尔斯·同一把尺): 派生逻辑**已收敛到 `annotateAcceptance`**——
-      //   此处原是与 `deliverable:preview`、即将新增的 `task:get` 并列的第二/第三份手抄。
-      annotateAcceptance(db, data);
-      // zx_20260924_1 M5-b(维特根斯坦·语言游戏 / 一处真源): 列表侧"大小"列的**唯一取数处**。
-      //   `wa_deliverables` **没有 size 列**——真实字节只能在 main 侧按 `file_path` 现场 stat（renderer 无 fs，故必须在此补）。
-      //   逐行 try/catch：文件不在/无权限/路径为空 ⇒ `null`（界面显示 `—`），**绝不因一个件把整页列表打红**。
-      for (const r of data) r.size_bytes = statSizeBytes(r.file_path);
-      // zx_20260930 M4-2: 返回体由**裸数组**改为 `{ rows, total, limit, offset }`——
-      //   裸数组装不下"共多少条"，而"只给前 N 条且不说还剩多少"正是本轮所治的病（同 M4-3 补发账）。
-      //   调用方须读 `.rows`；总数取服务端口径（projectId/type/status/keyword），**不含**渲染层自己的筛选项。
-      return { data: { rows: data, total, retiredCount, limit: page.limit, offset: page.offset } };
+      return { data: queryDeliverables(db, input ?? {}) };
+    } catch (err) {
+      const message = (err as Error).message;
+      const code = /^时间格式无效|^不支持的排序/.test(message) ? 'INVALID_PARAM' : 'INTERNAL';
+      return { error: { code, message } };
+    }
+  });
+
+  // zx_20261108_1 B6: 打开 / 在文件夹中显示——**按成果 id** 取库内路径，不信任渲染层递来的任意路径。
+  //   白名单：`dataDir` 与**该件所属项目工作目录**；`..` 与符号链接越界一律拒（`core/deliverable-path.ts`）。
+  //   `shell.openPath` 以"返回非空字符串"表示失败（Electron 契约），故不以 try/catch 代替判空。
+  ipcMain.handle('deliverable:open', async (_event, { id, mode }: { id?: string; mode?: 'open' | 'reveal' } = {}) => {
+    try {
+      const rid = String(id ?? '').trim();
+      if (!rid) return { error: { code: 'INVALID_PARAM', message: '缺少成果 id' } };
+      const m = mode === undefined ? 'open' : mode;
+      if (m !== 'open' && m !== 'reveal') return { error: { code: 'INVALID_PARAM', message: `未知的打开方式：${String(mode)}` } };
+      const row = db.prepare(`SELECT d.file_path AS file_path, p.working_dir AS working_dir
+        FROM wa_deliverables d LEFT JOIN wa_projects p ON d.project_id = p.id WHERE d.id = ?`).get(rid) as
+        { file_path?: string | null; working_dir?: string | null } | undefined;
+      if (!row) return { error: { code: 'NOT_FOUND', message: '产出物不存在' } };
+      const fence = resolveDeliverableFsPath(row.file_path, [dataDir, row.working_dir]);
+      if (!fence.ok) return { error: { code: 'PATH_REFUSED', message: fence.error, reason: fence.reason } };
+      const { shell } = await import('electron');
+      if (m === 'reveal') {
+        shell.showItemInFolder(fence.path);
+        return { data: { path: fence.path, revealed: true } };
+      }
+      const openErr = await shell.openPath(fence.path);
+      if (openErr) return { error: { code: 'OPEN_FAILED', message: openErr } };
+      return { data: { path: fence.path, opened: true } };
     } catch (err) {
       return { error: { code: 'INTERNAL', message: (err as Error).message } };
+    }
+  });
+
+  // zx_20261108_1 B6: 按当前筛选导出 CSV（Pro 闸 `deliverable_export`）。落点由系统保存对话框选，
+  //   缺省落 `data/exports/`——渲染层不递任意写路径。取消不是错误（如实回 `cancelled`）。
+  ipcMain.handle('deliverable:exportCsv', async (_event, input: DeliverableListParams = {}) => {
+    try {
+      const refusal = proFeatureRefusal(db, 'deliverable_export');
+      if (refusal) return { error: { code: 'PRO_REQUIRED', message: refusal } };
+      const result = queryDeliverables(db, input ?? {}, { all: true });
+      if (result.rows.length === 0) {
+        return { error: { code: 'EMPTY', message: '当前筛选条件下没有可导出的产出物' } };
+      }
+      const { dialog, BrowserWindow } = await import('electron');
+      const defaultDir = path.join(dataDir, 'exports');
+      fs.mkdirSync(defaultDir, { recursive: true });
+      const options = {
+        defaultPath: path.join(defaultDir, csvFileName()),
+        title: '导出产出物清单（CSV）',
+        filters: [{ name: 'CSV', extensions: ['csv'] }],
+      };
+      const win = BrowserWindow.getAllWindows()[0];
+      const picked = win ? await dialog.showSaveDialog(win, options) : await dialog.showSaveDialog(options);
+      if (picked.canceled || !picked.filePath) return { data: { cancelled: true } };
+      const written = writeDeliverableCsv(result.rows, picked.filePath);
+      if (!written.ok) return { error: { code: 'WRITE_FAILED', message: written.error } };
+      return { data: { path: written.path, count: written.count, cancelled: false } };
+    } catch (err) {
+      const message = (err as Error).message;
+      const code = /^时间格式无效|^不支持的排序/.test(message) ? 'INVALID_PARAM' : 'INTERNAL';
+      return { error: { code, message } };
     }
   });
 
@@ -1532,6 +1781,28 @@ export function initProjectIpc(db: Database.Database, dataDir: string, memoryGet
       // 「项目级（无任务）」计数——附加条件（`task_id IS NULL`）是**本视图自己的问题**，按真源头注释的约定留在调用方。
       const noTaskCount = (db.prepare(`SELECT COUNT(*) AS c FROM wa_deliverables d WHERE ${scope.sql} AND d.task_id IS NULL`).get(...scope.params) as { c: number }).c;
       return { data: { projects, tasks, noTaskCount } };
+    } catch (err) {
+      return { error: { code: 'INTERNAL', message: (err as Error).message } };
+    }
+  });
+
+  // zx_20261111_3「显」：产出物页第一行要的三个数——总数、未验收数、验收展示是否开着。
+  //   口径纪律：总数走 `countDeliverables`（与其它计数同一真源）；未验收先由 `annotateAcceptance`
+  //   按 `show_acceptance`/`per_doc_acceptance` 标好再数（列表徽标读的是同一份 `acceptance`），
+  //   **不在渲染层数已加载行**（分页下必然少数）。
+  ipcMain.handle('deliverable:attention', async () => {
+    try {
+      const accCfg = db.prepare("SELECT value FROM wa_settings WHERE key = 'deliverable.show_acceptance'").get() as { value?: string } | undefined;
+      const acceptanceEnabled = boolSetting(accCfg?.value);
+      const total = countDeliverables(db, { includeRetired: false });
+      let unverified = 0;
+      if (acceptanceEnabled && total > 0) {
+        const scope = deliverableScopeSql({ alias: 'd', includeRetired: false });
+        const rows = db.prepare(`SELECT d.id, d.type, d.status, d.task_id, d.acceptance_verified FROM wa_deliverables d WHERE ${scope.sql}`).all(...scope.params) as Array<Record<string, unknown>>;
+        annotateAcceptance(db, rows);
+        unverified = countUnverified(rows);
+      }
+      return { data: { total, unverified, acceptanceEnabled } };
     } catch (err) {
       return { error: { code: 'INTERNAL', message: (err as Error).message } };
     }

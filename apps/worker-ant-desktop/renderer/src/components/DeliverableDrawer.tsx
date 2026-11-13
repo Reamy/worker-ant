@@ -11,7 +11,7 @@ import MarkdownSubset from '../lib/markdown-subset';
 // zx_20260914 M2-4: 验收类型判据引**同一份代码**（renderer 是词表的第二个落点，不手抄）
 import { isAcceptanceType } from '../../../src/main/core/deliverable-types.js';
 // 类型/状态词表、库内时间、版本大小换算——四处渲染点共此一份真源（源在本行所示模块）
-import { DELIVERABLE_TYPE_LABEL, DELIVERABLE_STATUS_LABEL, formatDbTime, versionSizeText } from '../lib/deliverable-view';
+import { DELIVERABLE_TYPE_LABEL, DELIVERABLE_STATUS_LABEL, formatDbTime, versionSizeText, isLocalAbsolutePath as isLocalPath } from '../lib/deliverable-view';
 
 /**
  * zx_20260909 X1(就地成果详情抽屉 · 黑格尔"部分在整体中成其自身"/维特根斯坦"可判定"):
@@ -46,6 +46,7 @@ export function DeliverableDrawer({ id, onClose }: { id: string | null; onClose:
   const [diffView, setDiffView] = useState<DiffLine[] | null>(null);
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [revealMsg, setRevealMsg] = useState<string | null>(null);
   // zx_20260914 M2-4: 打标结果**就地如实说明**（失败原因写在抽屉里，不弹一个笼统的"操作失败"）
   const [accMsg, setAccMsg] = useState<{ text: string; ok: boolean } | null>(null);
   // zx_20260914 M2-2: 图片成果的内联预览载荷（三种失败各自的 reason 一并留住，供如实告知）
@@ -79,13 +80,18 @@ export function DeliverableDrawer({ id, onClose }: { id: string | null; onClose:
     try { await navigator.clipboard.writeText(data.file_path); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* ignore */ }
   };
 
-  // zx_20260911_5 M3-3(上手状态): 抽屉内本地直达——仅本地绝对路径出此按钮（与 main handler 同一判据）
-  const isLocalPath = (p?: string | null): boolean => !!p && p.startsWith('/');
+  // zx_20260911_5 M3-3(上手状态): 抽屉内本地直达——仅本地绝对路径出此按钮（展示判据，授权在 main）
+  //   zx_20261110_1：判据与列表页同源（`lib/deliverable-view.ts`），盘符/UNC/POSIX 三形一致。
+  // zx_20261108_1 B6: 与列表页同一跳——只递成果 id，路径由 main 从库内取并过围栏；
+  //   失败按成因上屏（不再静默吞掉，也不再由渲染层把 file_path 当授权凭据）。
   const showInFolder = async () => {
-    if (!data?.file_path) return;
-    const api = window.electronAPI;
-    if (!api?.showItemInFolder) return;
-    try { await api.showItemInFolder(data.file_path); } catch { /* 失败不阻断抽屉 */ }
+    if (!data?.id) return;
+    setRevealMsg(null);
+    try {
+      await deliverables.open(data.id, 'reveal');
+    } catch (e) {
+      setRevealMsg(`无法定位：${(e as Error).message}`);
+    }
   };
 
   // zx_20260914 M2-4(王阳明·知行合一): 「标为已验收」——总门控与列表页同源(boolSetting 同一份)，
@@ -190,6 +196,13 @@ export function DeliverableDrawer({ id, onClose }: { id: string | null; onClose:
           <div className={`px-5 py-2 text-xs border-b ${accMsg.ok ? 'bg-green-50 text-green-700 border-green-100' : 'bg-amber-50 text-amber-700 border-amber-100'}`}>
             {accMsg.text}
             <button type="button" onClick={() => setAccMsg(null)} className="ml-2 underline opacity-70">知道了</button>
+          </div>
+        )}
+
+        {revealMsg && (
+          <div className="px-5 py-2 text-xs border-b bg-amber-50 text-amber-700 border-amber-100">
+            {revealMsg}
+            <button type="button" onClick={() => setRevealMsg(null)} className="ml-2 underline opacity-70">知道了</button>
           </div>
         )}
 

@@ -12,6 +12,9 @@
  */
 import { normalizeOrchestrateMode, type OrchestrateMode, type ResolvedOrchestrateMode } from './node-orchestrate.js';
 import type { LicenseTier } from './feature-limits.js';
+import type { LicenseKind } from './license.js';
+// zx_20261112_1 B5「衡」：团队能力判据只有一把尺（`team-gate.teamUnlocked`），不在此手写 `tier === 'team'`。
+import { teamUnlocked } from './team-gate.js';
 
 /** `wa_projects.context_json.dispatch_mode` 的键名（读写同引）。 */
 export const PROJECT_DISPATCH_MODE_KEY = 'dispatch_mode';
@@ -89,8 +92,16 @@ export function capabilityPrereqRefusal(input: {
   tier: LicenseTier;
   enrolled: boolean;
   onlinePeers: number;
+  /**
+   * zx_20261112_1 B5：许可类型（试用按团队能力放行）。缺省 ⇒ 只按档位尺判
+   *   （试用态 tier 本就落 `team`，行为与旧版一致）。
+   */
+  kind?: LicenseKind;
 }): string {
-  if (input.tier !== 'team') return `需要团队版（当前：${input.tier}）`;
+  // 档位尺与 `team-gate` **同引一处**：能纳入多台节点即解锁；不在此另写 `tier === 'team'`。
+  if (!teamUnlocked({ tier: input.tier, kind: input.kind ?? 'none' })) {
+    return `需要团队版（当前：${input.tier}）`;
+  }
   if (!input.enrolled) return '本机尚未加入 ANS 网络';
   if (input.onlinePeers < 1) return '当前没有在线可派对端';
   return '';

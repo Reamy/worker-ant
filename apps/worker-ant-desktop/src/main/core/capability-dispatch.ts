@@ -16,8 +16,9 @@
 import { isNodeCardCategory, isNodeOnline, type AnsNode, type NodeCardCategory } from '@worker-ant/shared-types';
 import { DEVICE_KIND_CLASSES, type DeviceKindClass } from './device-kind.js';
 import { normalizeOrchestrateMode, type OrchestrateMode } from './node-orchestrate.js';
-import { beatsLocal, matchNode, type NodeMatchProfile, type NodeReliability } from './node-match.js';
+import { beatsLocal, matchNode, type NodeMatchProfile, type NodeReliability, type NodeResources } from './node-match.js';
 import type { DispatchRequirements } from './task-capability.js';
+import { sanitizeClassRunning, type ClassRunning } from './node-class-load.js';
 
 /** 对端须比本机高出这么多分才值得把活交出去（与 `beatsLocal` 缺省同一把尺）。 */
 export const CAPABILITY_MARGIN = 0.12;
@@ -149,6 +150,26 @@ export function cardDeviceClassesOf(card: Record<string, unknown> | null | undef
     .filter((c): c is DeviceKindClass => typeof c === 'string' && allowed.has(c));
 }
 
+/** B5：卡上公示的岗位 id（`card.positions` 为 `{id,name,version}[]`；缺/坏 ⇒ `[]`＝未上报或没有）。 */
+export function cardPositionIdsOf(card: Record<string, unknown> | null | undefined): string[] {
+  const raw = asRecord(card).positions;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((p) => asRecord(p).id)
+    .filter((id): id is string => typeof id === 'string' && id !== '');
+}
+
+/** B5：心跳快照里的六类目在跑数；未上报/坏形 ⇒ `null`（未知，不按全 0 读）。 */
+export function classRunningOfStatus(status: Record<string, unknown> | null | undefined): ClassRunning | null {
+  return sanitizeClassRunning(asRecord(status).class_running);
+}
+
+/** B5：心跳快照里的机器并发上限；取不到/≤0 ⇒ `null`（未知）。 */
+export function machineLimitOfStatus(status: Record<string, unknown> | null | undefined): number | null {
+  const limit = num(asRecord(status).machine_limit);
+  return limit != null && limit > 0 ? limit : null;
+}
+
 /** 心跳快照里的余力占比（0..1；取不到 ⇒ `null`——"不知道"不拿 0 冒充满载）。 */
 export function freeRatioOfStatus(status: Record<string, unknown> | null | undefined): number | null {
   const s = asRecord(status);
@@ -159,6 +180,34 @@ export function freeRatioOfStatus(status: Record<string, unknown> | null | undef
   if (freeSlots != null) return Math.max(0, Math.min(1, freeSlots / limit));
   if (running != null) return Math.max(0, Math.min(1, (limit - running) / limit));
   return null;
+}
+
+/**
+ * zx_20261107_1 B10a：心跳快照 → 资源面（CPU 余量 / 内存余量 / 每核负载）。
+ * zx_20261108_1 B1：补磁盘余量——优先读 `disk_spare`（心跳已派生），旧客户端只有
+ *   `disk_free/disk_total` 时在同处派生；都取不到 ⇒ `null`（未知不补零）。
+ * 本机与对端**同引本函数**（同一把"机器扛不扛得住"的尺）。
+ */
+export function resourceProfileOfStatus(status: Record<string, unknown> | null | undefined): NodeResources {
+  const s = asRecord(status);
+  const cpuUsage = num(s.cpu_usage_percent);
+  const cpuSpare = cpuUsage == null ? null : Math.max(0, Math.min(1, (100 - cpuUsage) / 100));
+  const totalMem = num(s.total_mem);
+  const freeMem = num(s.free_mem);
+  const memSpare = totalMem != null && totalMem > 0 && freeMem != null
+    ? Math.max(0, Math.min(1, freeMem / totalMem))
+    : null;
+  const load = num(s.load_avg1);
+  const cpus = num(s.cpu_count);
+  const loadPerCore = load != null && load >= 0 && cpus != null && cpus > 0 ? load / cpus : null;
+  const diskSpare = (() => {
+    const raw = num(s.disk_spare);
+    if (raw != null) return Math.max(0, Math.min(1, raw));
+    const free = num(s.disk_free);
+    const total = num(s.disk_total);
+    return free != null && total != null && total > 0 ? Math.max(0, Math.min(1, free / total)) : null;
+  })();
+  return { cpuSpare, memSpare, loadPerCore, diskSpare };
 }
 
 /** 台账节点 → 匹配画像（`reliability` 由调用方按出站台账算好传入；未知给 `null`）。 */
@@ -178,5 +227,11 @@ export function peerProfileOf(
     freeRatio: freeRatioOfStatus(node.status),
     weight: typeof node.weight === 'number' && Number.isFinite(node.weight) ? node.weight : 5,
     reliability,
+    // B10a：资源面取自**最近一次心跳快照**；从未心跳/缺字段 ⇒ 各项 null（未知，不补零）。
+    resources: resourceProfileOfStatus(node.status),
+    // B5：岗位公示取卡、类目忙闲与机器上限取心跳快照；缺哪样就哪样未知（不加不减）。
+    positions: cardPositionIdsOf(card),
+    classRunning: classRunningOfStatus(node.status),
+    machineLimit: machineLimitOfStatus(node.status),
   };
 }

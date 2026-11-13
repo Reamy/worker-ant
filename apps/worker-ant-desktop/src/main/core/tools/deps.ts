@@ -10,6 +10,8 @@
  */
 import type Database from 'better-sqlite3';
 import type * as AE from '../agent-executor.js';
+import type { CommandWriteQueue } from '../command-write-queue.js';
+import type { SufficiencyBreaker } from '../output-validator.js';
 import type { DeviceControlTransport } from './device.js';
 
 export interface ToolDeps {
@@ -75,7 +77,17 @@ export interface ToolDeps {
   checkAcceptanceCriteria: typeof AE.checkAcceptanceCriteria;
   mergePlanModeContext: typeof AE.mergePlanModeContext;
   syncQualityColumn: typeof AE.syncQualityColumn;
-  registerFilesWrittenByCommand: typeof AE.registerFilesWrittenByCommand;
+  /**
+   * zx_20261109_1 B2：命令窗口写入的 run 级合并队列（同步入队，run 结束前统一盘点）。
+   * 由 `buildTools` 每 run 新建一份；受控回归可直接构造 `new CommandWriteQueue()` 注入。
+   */
+  commandWriteQueue: CommandWriteQueue;
+  /**
+   * zx_20261109_1 B3：内容充分性旁路 LLM 的 **run 级熔断器**——`finalize_task` 门与 run_close 门
+   * 共用同一份（`executeTask` 每 run 新建后经此处注入），首条超时即熔断，后续文件不再各等一次。
+   * 受控回归可直接注入 `{ tripped:false }` 观察调用形状。
+   */
+  sufficiencyBreaker: SufficiencyBreaker;
   interruptTask: typeof AE.interruptTask;
   logger: typeof AE.logger;
   archetypeForFile: typeof AE.archetypeForFile;

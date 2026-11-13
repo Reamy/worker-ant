@@ -44,6 +44,29 @@ function getLogDir(): string {
 const isDev = process.env.NODE_ENV !== 'production';
 
 /**
+ * zx_20261110_2 B8: 日志文件名前缀（模块求值期定案，与 `getLogDir` 同一条"import 阶段就要定"的理由）。
+ *
+ * 病根：rr 全量与桌面生产共用 `data/logs/worker-ant.<date>.log`——一场回归会把几百套件的噪声灌进
+ * 用户当天的生产日志，"排查线上问题"与"看回归日志"抢同一个文件，谁也不好读。
+ * 缺省不变（`worker-ant`）；`scripts/run-rr-all.mjs` 给子进程注入 `WA_LOG_FILE_PREFIX=rr`，
+ * 于是回归写 `rr.<date>.log`、桌面仍写 `worker-ant.<date>.log`——`getLogDir` 不动，目录还是同一个。
+ *
+ * 取值只留文件名安全字符：这是文件名片段，放 `/` 或空串会把日志写到意料之外的地方；
+ * 清洗后为空 ⇒ 回落缺省（不造出 `.2026-11-11.log` 这种隐身文件）。
+ *
+ * ⚠ 抽成**纯函数**（可传参、可被 rr 直接 import 断言）：清洗规则只能有这一份。此前是就地 IIFE，
+ *   判据只能靠"源码里有没有那段字符串"，改一个字符就报成"清洗没了"、而真错（如漏了 `\\` 清洗）反而照绿。
+ */
+export function logFilePrefix(raw: string | undefined): string {
+  const cleaned = String(raw ?? '').trim().replace(/[^A-Za-z0-9._-]/g, '');
+  return cleaned || 'worker-ant';
+}
+
+// ⚠ 环境变量由**调用方**取，不由本函数在缺参时自己读：`logFilePrefix(undefined)` 必须恒等于"未设"，
+//   否则在注入了 `WA_LOG_FILE_PREFIX=rr` 的回归进程里，"未设 ⇒ 缺省"这条判据会**读到自己**而成假绿/假红。
+const LOG_FILE_PREFIX = logFilePrefix(process.env.WA_LOG_FILE_PREFIX);
+
+/**
  * 解析子进程 stderr 输出的日志级别。
  * Python 生态中 stderr 是默认日志通道，大量 INFO 级别日志不应被误报为 WARN。
  *
@@ -85,7 +108,7 @@ export function createLogger(module: string) {
     stream: pino.transport({
       target: 'pino-roll',
       options: {
-        file: path.join(getLogDir(), 'worker-ant'),
+        file: path.join(getLogDir(), LOG_FILE_PREFIX),
         frequency: 'daily',
         mkdir: true,
         dateFormat: 'yyyy-MM-dd',

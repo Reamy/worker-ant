@@ -110,6 +110,9 @@ function crit(b: Batch, cond: boolean, label: string, detail?: string): void {
 const A = 'apps/worker-ant-desktop';
 const root = path.join(__dirname, '..');
 const EXEC_SRC = path.join(root, A, 'src/main/core/agent-executor.ts');
+// zx_20261109_1 B6：验收判卷（含其 provider 调用点）原样搬至 `core/exec-acceptance.ts`。
+//   "四处内联全部收编"的本意是**整条执行体侧都经那座工厂**，落点搬家不改语义 ⇒ 两文件合看。
+const ACCEPT_SRC = path.join(root, A, 'src/main/core/exec-acceptance.ts');
 const AITASK_SRC = path.join(root, A, 'src/main/core/jobs/ai-task.ts');
 const INCIDENT_SRC = path.join(root, A, 'src/main/core/sdk-incident.ts');
 const VALIDATOR_SRC = path.join(root, A, 'src/main/core/output-validator.ts');
@@ -213,6 +216,7 @@ const SPECIMEN_SECOND_AT = '2026-09-23T03:34:42.000Z';
 
 async function main(): Promise<void> {
   const execCode = strip(EXEC_SRC);
+  const acceptCode = strip(ACCEPT_SRC);
   const aiTaskCode = strip(AITASK_SRC);
   const incidentCode = strip(INCIDENT_SRC);
   // 扫描面规模（**行数**）——「零处 / 恰好一处」类断言的**自证**（承 `zx_20260920_1 §G-1`）。
@@ -734,16 +738,21 @@ async function main(): Promise<void> {
         `盘点 ${relB.length} 项：${relB.join(' · ')}`);
       crit('M5', !relB.some((r) => r.startsWith('target/')),
         'M5-B′ ★ **该不命中（靶心）**：窗口内写出的 `target/**`（`classes/*.class`、`surefire-reports/*.txt`）'
-        + '**一项都不在盘点结果里** ⇒ 不再经 `registerFilesWrittenByCommand` 被补登记为 `doc` 交付物（G10 的来路）',
+        + '**一项都不在盘点结果里** ⇒ 不再经命令窗口补登记（`command-write-queue` 的 `flush`）成为 `doc` 交付物（G10 的来路）',
         `target/ 命中 ${relB.filter((r) => r.startsWith('target/')).length} 项`);
     }
 
     // ── M5-C 链路在场：抽样面 → 命令窗口盘点 → 补登记（三处各 1 处，不各写一份）──
-    crit('M5', countOcc(exec5, 'await listFilesWrittenSince(') === 1
+    //    zx_20261109_1 B2：取数口从 `agent-executor.ts` **原位搬进** `command-write-queue.ts`（run 级合并队列），
+    //    链路末端 `flushTaskCommandWrites` 仍调 `ensureDocDeliverable`。断言因此改为**跨界钉死**：
+    //    全仓该取数口恰 1 处、且执行体里 0 处（避免"搬走后旧口还留着"或"两边各写一份"）。
+    const wq5 = strip(path.join(root, A, 'src/main/core/command-write-queue.ts'));
+    crit('M5', countOcc(wq5, 'await listFilesWrittenSince(') === 1
+      && countOcc(exec5, 'await listFilesWrittenSince(') === 0
       && countOcc(exec5, 'ensureDocDeliverable(db, {') >= 1,
-      'M5-C 链路在场：`registerFilesWrittenByCommand` 是**唯一**取数口（`await listFilesWrittenSince(` 恰 1 处）'
-      + '⇒ 采样面收窄**确实**传到了"补登记"这一端，而不是只改了快照那一路',
-      `取数口 ${countOcc(exec5, 'await listFilesWrittenSince(')} 处 · 登记调用 ${countOcc(exec5, 'ensureDocDeliverable(db, {')} 处`);
+      'M5-C 链路在场：命令窗口盘点的取数口**唯一**（`command-write-queue.ts` 恰 1 处、执行体 0 处）'
+      + '且末端仍调 `ensureDocDeliverable` ⇒ 采样面收窄**确实**传到了"补登记"这一端，而不是只改了快照那一路',
+      `队列取数口 ${countOcc(wq5, 'await listFilesWrittenSince(')} 处 · 执行体 ${countOcc(exec5, 'await listFilesWrittenSince(')} 处 · 登记调用 ${countOcc(exec5, 'ensureDocDeliverable(db, {')} 处`);
   }
 
   // ═════════════════════════════════════════════════════════════════════════
@@ -1014,9 +1023,12 @@ async function main(): Promise<void> {
     crit('M7', /\} else \{[\s\S]*?预算强制收尾放行：产出内容充分性校验未执行/.test(secondGuard),
       'M7-B 该说明**落在 `!forcedByBudget` 的 `else` 支**内（与它描述的那段跳过严格同源），不是写在别处的一句摆设'
       + '（判据取**第二处** `if (!forcedByBudget) {` 之后的花括号配对，不按行号）');
-    crit('M7', countOcc(control7m, 'ctxJson.finalize_checks = checks;') === 1,
-      'M7-B **用户可见**：`checks` 仍落 `finalize_checks`（renderer 逐条着色、并数 WARN/FAIL）——'
-      + '留痕若不下屏，与不留痕等价');
+    // ⚑ zx_20261109_1 B5 **按符号重定向（改钉更强的新真源，非放宽）**：写口由裸覆写改为
+    //   `mergeFinalizeChecks(旧账, checks, runId)`——既仍落 `checks`（上屏），又保旧账不丢、新行带 run 前缀。
+    crit('M7', countOcc(control7m, 'ctxJson.finalize_checks = mergeFinalizeChecks(ctxJson.finalize_checks, checks, ctx.runId)') === 1
+      && countOcc(control7m, 'ctxJson.finalize_checks = checks;') === 0,
+      'M7-B **用户可见**：`checks` 仍落 `finalize_checks`（renderer 逐条着色、并数 WARN/FAIL），且经合并写口'
+      + '（旧账保留 + 本轮 run 前缀），不再裸覆写——留痕若不下屏，与不留痕等价');
     crit('M7', countOcc(control7m, 'if (finScore < 60) {') === 1
       && countOcc(control7m, 'finalize 质量门未通过') === 0,
       'M7-B `prematureEnd × score` 耦合**刻意不动**（裁定理据在 `control-finalize.ts` 就地注释里，M8 就地改钉）：'
@@ -1048,7 +1060,9 @@ async function main(): Promise<void> {
       && /function handleResumeWithNote[\s\S]{0,160}?tasks\.resume\(taskId, text\)/.test(detail7m)
       && /if \(status === 'completed'\)[\s\S]{0,160}?tasks\.resume\(taskId, text\)/.test(detail7m),
       'M7-C 四成员逐一在场（无附言 / 模态框附言 / 横幅附言 / 已完成续跑）——数对上还不够，得每个都叫得出名字');
-    crit('M7', /\{task\.status==='paused' && !awaitingInput && [\s\S]{0,1500}?bannerReply/.test(detail7m),
+    // zx_20261113_2 M14：暂停横幅新增分型标题 +「查看验收块」按钮，条件块到 `bannerReply` 的距离变长。
+    //   仍用「同一条件块」的判据，只把字符窗按新布局放宽到 3000（不换成"全文出现即算"）。
+    crit('M7', /\{task\.status==='paused' && !awaitingInput && [\s\S]{0,3000}?bannerReply/.test(detail7m),
       'M7-C 输入框**确在暂停横幅内**（同一个 `status===\'paused\' && !awaitingInput` 条件块），不是另起一处孤岛');
 
     try { fs.rmSync(tree, { recursive: true, force: true }); } catch { /* 清理 best-effort */ }
@@ -1132,9 +1146,15 @@ async function main(): Promise<void> {
     crit('M2', countOcc(execCode, 'createOpenAI(') === 0 && countOcc(execCode, 'createReasoningAwareFetch(') === 0,
       'M2-c ★ 主聊天路的**内联兼容已退场**：`agent-executor.ts`（去注释面）里 `createOpenAI(` 与 `createReasoningAwareFetch(` **各 0 处**'
       + '——它现在只能经那座工厂拿 provider，"哪条路复用了哪一半"不再有第二种可能');
-    crit('M2', countOcc(execCode, 'createSafeProvider(') === 5,
-      'M2-c 四处内联（主聊天路/验收/目标偏离/压缩）+ 原先那一处（需求卡）**全部收编**：`agent-executor.ts` 里恰 5 处调用',
-      `createSafeProvider( ${countOcc(execCode, 'createSafeProvider(')} 处`);
+    // zx_20261110_2 B5：压缩那一处的**落点**从执行体搬进 `core/context-compaction-run.ts`（仍在执行体侧扫描面内）。
+    //   判据随之订到**扫描面**（`engineExecSideFiles()`：执行体 ∪ `exec-*.ts` ∪ 迁出模块）——
+    //   数量不降（仍 5 处），且额外钉住"执行体本身 3 处"这一搬出事实：搬出去不是搬没了。
+    crit('M2', countOcc(execSideCode, 'createSafeProvider(') === 5
+      && countOcc(acceptCode, 'createSafeProvider(') === 1
+      && countOcc(execCode, 'createSafeProvider(') === 3,
+      'M2-c 四处内联（主聊天路/验收/目标偏离/压缩）+ 原先那一处（需求卡）**全部收编**：执行体侧扫描面（执行体 ∪ `exec-*.ts` ∪ 迁出模块）恰 5 处调用，'
+      + '其中验收那处在 `exec-acceptance.ts` 且恰 1 处、执行体本身 3 处（压缩那一处随 B5 搬进 `context-compaction-run.ts`，仍在同一扫描面内）',
+      `createSafeProvider( 执行体侧 ${countOcc(execSideCode, 'createSafeProvider(')} 处（执行体 ${countOcc(execCode, 'createSafeProvider(')} + 验收 ${countOcc(acceptCode, 'createSafeProvider(')}）`);
     crit('M2', /probe:\s*\{ dir: path\.join\(ctx\.dataDir, 'reasoning-probe'\), tag: taskId \}/.test(execCode),
       'M2-a 接线：主聊天路把探针挂上，落 `data/reasoning-probe/<taskId>.jsonl`（`dir` 由调用方注入，模块自己不解析 dataDir）');
     crit('M2', /onReasoningDelta:\s*pushReason/.test(execCode),

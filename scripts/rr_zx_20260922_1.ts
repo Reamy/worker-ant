@@ -1107,10 +1107,17 @@ CREATE INDEX idx_order_payment_trade_no ON t_order_payment (trade_no);
     // zx_20261104_1 M7: 新增**第二证据通道**（本任务命令窗口写入清单）一条 info 落点。
     //   仍按"每类各恰 1、总数恰等于类别数"判——防重复、防漏派、防旁路。
     const wsSecondChannel = wsPushLines.filter((l) => l.includes('[INFO] 世界模型审计第二通道')).length;
-    crit('M5', wsWarnDispatch === 1 && wsInfoDispatch === 1 && wsFixedInfo === 1 && wsSecondChannel === 1 && wsPushLines.length === 4,
-      'M5-S2 **两级各一处落点 + 两处固定整句**：warn/info 分派行各恰 1（按插值形状判，合并即破）；'
-      + '不可读旁支与第二通道各恰 1（固定句，不接 issues/infos）；此类 push 行总数恰 4（不重复、不漏、无旁路）',
-      `分派 WARN ${wsWarnDispatch} · INFO ${wsInfoDispatch} · 旁支 ${wsFixedInfo} · 第二通道 ${wsSecondChannel} · 总数 ${wsPushLines.length}`);
+    // zx_20261109_1 B2：第二通道按结果分三支（扫描不可用 / 大仓上限截断 / 正常）——
+    //   前两支是**固定或半固定整句**，各自恰 1；正常支仍带 `第二通道` 前缀。类别数由 4 → 6，
+    //   判法不变（每类恰 1 + 总数恰等于类别数）：新增两支都得点名，任一支重复或旁路仍会破。
+    const wsScanUnavailable = wsPushLines.filter((l) => l.includes("'[INFO] 世界模型审计：工作目录扫描不可用，本轮未做命令窗口盘点'")).length;
+    const wsScanTruncated = wsPushLines.filter((l) => l.includes('[INFO] 世界模型审计：工作目录过大')).length;
+    crit('M5', wsWarnDispatch === 1 && wsInfoDispatch === 1 && wsFixedInfo === 1 && wsSecondChannel === 1
+      && wsScanUnavailable === 1 && wsScanTruncated === 1 && wsPushLines.length === 6,
+      'M5-S2 **两级各一处落点 + 四类如实说明各一处**：warn/info 分派行各恰 1（按插值形状判，合并即破）；'
+      + '不可读旁支、第二通道、扫描不可用、大仓截断各恰 1（固定/半固定句，不接 issues/infos）；此类 push 行总数恰 6（不重复、不漏、无旁路）',
+      `分派 WARN ${wsWarnDispatch} · INFO ${wsInfoDispatch} · 旁支 ${wsFixedInfo} · 第二通道 ${wsSecondChannel}`
+      + ` · 扫描不可用 ${wsScanUnavailable} · 大仓截断 ${wsScanTruncated} · 总数 ${wsPushLines.length}`);
     crit('M5', countOcc(wsCode, 'if (warns.length > 0)') === 2 && wsCode.includes('{ taskId, issues: warns }'),
       'M5-S3 **分派真接上**：入 checks 与写会话两条路各由 `warns.length > 0` 把门，且日志记的是 `warns` 不是全量',
       `守卫 ${countOcc(wsCode, 'if (warns.length > 0)')} 处`);

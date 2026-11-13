@@ -221,9 +221,13 @@ async function main(): Promise<void> {
     ok(allReasons.length >= 6, `前置：成因词表共 ${allReasons.length} 码（六码为 zx_20260916 在册值）`);
     // zx_20261105_1 M1：`empty_checks`（模型回了数组但零条目）亦属「有题没判成」——
     //   空数组不是"全部通过"，补进此支；清单仍逐码钉死，多一个（误伤"无人许诺判据"）即红。
-    eq(allReasons.filter(isUnjudgedReason).sort(), ['empty_checks', 'error', 'no_json', 'no_model'],
-      '★ M2 正面断言：「有题未判成」恰这四码（从真源派生，多一个即误伤"无人许诺判据"的规划类任务）');
-    eq([...UNJUDGED_REASONS].slice().sort(), ['empty_checks', 'error', 'no_json', 'no_model'],
+    // zx_20261109_1 B4/B5 就地补码（逐码钉死，仍不多不少）：`criteria_path_missing`（判据点名的路径
+    //   在仓里不存在 ⇒ 没法判）与 `criteria_echo_missing`（模型回话对不上输入判据 ⇒ 没法判成）。
+    eq(allReasons.filter(isUnjudgedReason).sort(),
+      ['criteria_echo_missing', 'criteria_path_missing', 'empty_checks', 'error', 'no_json', 'no_model'],
+      '★ M2 正面断言：「有题未判成」恰这六码（从真源派生，多一个即误伤"无人许诺判据"的规划类任务）');
+    eq([...UNJUDGED_REASONS].slice().sort(),
+      ['criteria_echo_missing', 'criteria_path_missing', 'empty_checks', 'error', 'no_json', 'no_model'],
       '★ 且词表常量 `UNJUDGED_REASONS` 与判定函数**同物**（一处真源，非两处手抄）');
     const notJudged = allReasons.filter((r) => !isUnjudgedReason(r));
     ok(notJudged.includes('no_criteria') && notJudged.includes('no_user_criteria') && notJudged.includes('output_insufficient'),
@@ -293,7 +297,10 @@ async function main(): Promise<void> {
       '★ **不写第二版账**（承 zx_20260916_3 M4：一份 `context_json` 内只许一版账，该分支只置暂停与如实告知）');
     ok(!blk.includes('capScoreByAcceptanceVerdict') && !/Math\.min\([^)]*45/.test(blk),
       '★ **不压分**（压降只对 `failed` 动作——评分层与终态层各司其职，不是两本账）');
-    ok(blk.includes('UNVERIFIED_REASON_LABEL'),
+    // zx_20261109_1 按符号重定向（改钉更强真源）：B4 起成因转写改走 `unverifiedReasonText`
+    //   （它内部读 `UNVERIFIED_REASON_LABEL` 并统一给出计数/列表，比直接用表更完整）。
+    const acSrcS3 = strip(RD(`${A}/src/main/core/acceptance-check.ts`));
+    ok(blk.includes('unverifiedReasonText(') && acSrcS3.includes('UNVERIFIED_REASON_LABEL['),
       '★ 如实告知**点名成因**（"没判成"要说出为什么没判成，用户才知道做什么）');
     ok(blk.includes('wa_task_conversations'),
       '★ 且落一条会话行（详情页/IM 可见，不只在日志里）');
@@ -320,11 +327,17 @@ async function main(): Promise<void> {
   // ═════════════════════════════════════════════════════════════════════════
   console.log('\n【S4b】M3 默认折叠（真接线）+ 产出物上移至事件时间线之前');
   {
-    ok(/const \[showDelivs, setShowDelivs\] = useState\(false\)/.test(tdpSrc), '★ 「产出物」默认折叠（`useState(false)`）');
+    // zx_20261107_1 B9：产出物块整体抽进 `TaskArtifacts`（折叠状态是块内私有）。
+    //   「默认折叠 / 真接线 / 条数 / 五处标注 / 共用行渲染器」按符号重定向到该组件；
+    //   「移位成立（产出物在事件时间线之前）」改按**页面挂载位**（`<TaskArtifacts`）判——移动的是位置，
+    //   位置判据仍必须落在页面这一层（组件里判不出它在页面的哪儿）。
+    const artSrc = RD(`${A}/renderer/src/components/task/TaskArtifacts.tsx`);
+    const artClean = strip(artSrc);
+    ok(/const \[open, setOpen\] = useState\(false\)/.test(artClean), '★ 「产出物」默认折叠（`useState(false)`，TaskArtifacts）');
     ok(/const \[showConvs, setShowConvs\] = useState\(false\)/.test(tdpSrc), '★ 「对话历史」默认折叠（`useState(false)`）');
-    ok(/onClick=\{\(\) => setShowDelivs\(\(v\) => !v\)\}/.test(tdpSrc) && /onClick=\{\(\) => setShowConvs\(\(v\) => !v\)\}/.test(tdpSrc),
+    ok(/onClick=\{\(\) => setOpen\(\(v\) => !v\)\}/.test(artClean) && /onClick=\{\(\) => setShowConvs\(\(v\) => !v\)\}/.test(tdpSrc),
       '★ 折叠**真接线**：两块各有点击切换（默认折叠 ≠ 折叠不起来）');
-    ok(/showDelivs && <div/.test(tdpSrc) && /showConvs && <div/.test(tdpSrc),
+    ok(/\{open && <div/.test(artClean) && /showConvs && <div/.test(tdpSrc),
       '★ 且内容按状态条件渲染（有开关无消费＝假折叠）');
     // zx_20260929 M7 **就地订正（钉更强真源，非放宽）**：文案由「（本任务及子任务 · N 条）」改为
     //   「本任务（含子任务）N 条」——与项目页「产出物（项目合计）」取名言清，消「同名不同分母」
@@ -334,19 +347,18 @@ async function main(): Promise<void> {
     //   **已加载的那一页**，拿它的 length 当"共几条"是假账；`delivTotal` 直取 `task:get` 的
     //   `deliverablesTotal`（子树聚合），才是折叠头该报的那个数。钉住的仍是**那个真源表达式**，
     //   （文案换了却漏掉条数，一样红）。
-    ok(tdpSrc.includes('本任务（含子任务）{delivTotal} 条'),
+    ok(artClean.includes('本任务（含子任务）{total} 条'),
       '★ 折叠头报**条数**（折叠态下若连有几条都看不见，那叫"默认消失"不叫"默认折叠"）；'
       + '且取名言明分母（与项目页「产出物（项目合计）」不是同一把尺）');
 
-    const blkIdx = tdpSrc.indexOf('const delivsBlock = delivs.length > 0 && (');
-    const useIdx = tdpSrc.indexOf('{delivsBlock}');
+    const useIdx = tdpSrc.indexOf('<TaskArtifacts');
     // ⚠ zx_20260924 §2c UI-2 **就地订正**：时间线由 `<h4>事件时间线</h4>` 改为**可折叠标题钮**
     //   （用户 2026-09-24 点名"事件时间线增加折叠"），旧锚点（`事件时间线</h4>`）已随之下线。
     //   改锚在**折叠开关的函数身份**上（`setShowEvents` 接线）——它比文案稳：文案会改，接线不会。
     const tlIdx = tdpSrc.indexOf('setShowEvents((v) => !v)');
-    ok(blkIdx > 0 && useIdx > blkIdx, '前置：产出物块**抽成变量**后再引用（移动的是位置，不是内容）');
+    ok(useIdx > 0, '前置：产出物块经 `<TaskArtifacts` **挂载**于页面（移动的是位置，不是内容）');
     ok(useIdx > 0 && tlIdx > 0 && useIdx < tlIdx && tdpSrc.includes('事件时间线 ('),
-      '★ 移位成立：`{delivsBlock}` 渲染在「事件时间线」**之前**（用户 2026-09-23 点名；锚点=折叠开关接线 + 标题仍在场，防锚点空转）',
+      '★ 移位成立：产出物块（`<TaskArtifacts`）渲染在「事件时间线」**之前**（用户 2026-09-23 点名；锚点=折叠开关接线 + 标题仍在场，防锚点空转）',
       `delivs@${useIdx} < timeline@${tlIdx}`);
     // 只搬「产出物」一块：整体次序为 **产出物验证 → 产出物 → 事件时间线**（前者一步未动）
     const ovIdx = tdpSrc.indexOf('产出物验证 (');
@@ -355,15 +367,15 @@ async function main(): Promise<void> {
       `验证@${ovIdx} < 产出物@${useIdx} < 时间线@${tlIdx}`);
     // 清单内部五处标注一字未丢（搬的是"位置"，不是"内容"）
     // ⚠ zx_20260924 §2c UI-3 **就地订正**：产出物由"一维平铺"改为"按盘上路径分目录层级"，
-    //   五行标注随之**抽到共用行渲染器 `delivRow`**（目录树叶子与「无盘上路径」桶共用同一行——
-    //   两处各写一份标注正是本仓 G8 老病）。故扫描面由 `[blkIdx, useIdx)` 前移到 `[delivRow 定义, useIdx)`：
-    //   钉的仍是"一字未丢"，只是把落点跟着代码走（不是放宽——下方另加钉"两处确实共用同一个渲染器"）。
-    const rowIdx = tdpSrc.indexOf('const delivRow = (d: DelivItem, depth: number) => (');
-    const blkText = (rowIdx > 0 && useIdx > rowIdx) ? tdpSrc.slice(rowIdx, useIdx) : '';
+    //   五行标注随之**抽到共用行渲染器 `row`**（目录树叶子与「无盘上路径」桶共用同一行——
+    //   两处各写一份标注正是本仓 G8 老病）。zx_20261107_1 B9 起该渲染器随组件进 `TaskArtifacts`，
+    //   扫描面随之落到组件内 `[row 定义, 组件尾]`（钉的仍是"一字未丢"，落点跟着代码走，不是放宽）。
+    const rowIdx = artClean.indexOf('const row = (d: TaskArtifactItem, depth: number) => (');
+    const blkText = rowIdx > 0 ? artClean.slice(rowIdx) : '';
     ok(['主要成果', '✓已验收', '另有 ', 'owner_task_id', '子任务 '].every((s) => blkText.includes(s)),
       '★ 清单五处标注（类型/主要成果/归属/已验收/另有写过）随块整体搬移，一字未丢',
       ['主要成果', '✓已验收', '另有 ', 'owner_task_id', '子任务 '].filter((s) => !blkText.includes(s)).join(',') || '全在');
-    ok(/delivRow\(c\.item, depth\)/.test(tdpSrc) && /delivRow\(d, 0\)/.test(tdpSrc),
+    ok(/row\(c\.item, depth\)/.test(artClean) && /row\(d, 0\)/.test(artClean),
       '★ 且 目录树叶子与「无盘上路径」桶**共用同一个行渲染器**（各自手写一份行标注＝分叉之源）');
   }
 

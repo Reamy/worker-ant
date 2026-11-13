@@ -1,6 +1,6 @@
 {
   "name": "@worker-ant/desktop",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "工蚁 Worker Ant — 跑在你机器上、用手机就能指挥的私有 AI 打工队",
   "homepage": "https://github.com/Reamy/worker-ant",
   "author": {
@@ -12,7 +12,7 @@
   "type": "module",
   "main": "dist/main/index.js",
   "scripts": {
-    "dev": "pnpm --filter @worker-ant/desktop-renderer build && pnpm rebuild:native && tsup && bash ../../scripts/resign-native-macos.sh --probe && electron . --dev ; bash ../../scripts/rebuild-ans-native.sh",
+    "dev": "bash ../../scripts/preflight-terminal.sh && pnpm --filter @worker-ant/desktop-renderer build && pnpm rebuild:native && tsup && bash ../../scripts/resign-native-macos.sh --probe && electron . --dev ; bash ../../scripts/rebuild-ans-native.sh",
     "dev:renderer": "pnpm --filter @worker-ant/desktop-renderer dev",
     "build": "tsup",
     "start": "electron .",

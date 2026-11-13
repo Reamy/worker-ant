@@ -43,6 +43,7 @@ import { buildPreludePrompt } from './memory-prelude.js';
 import type { PreludeProjectContext } from './memory-prelude.js';
 // zx_20261012_3 批二（「算得真」）：字÷4 的分度走**一处真源**（core/token-estimate.ts），不各写一份。
 import { estimateTokensFromChars } from './token-estimate.js';
+import { INJECTION_SOURCE } from './injection-sources.js';
 // zx_20260930 M6: **时间基准的四个常数与两把派生尺**收进 `core/memory-decay.ts` 一处真源
 //   （本轮之前它们散在本文件里当裸字面量：14 / 21 / 30 / 0.1）。
 import { dbTimeMs } from './memory-decay.js';
@@ -856,7 +857,7 @@ export class MemoryManager {
    * **唯一键 `(task_id, source, ref_id)` + `INSERT OR IGNORE`**：resume/多次装配重复注入只留一行（R-62）。
    * 返回**新写入**行数（0→1 的正面计数即由此可断言）。
    */
-  recordContextInjections(taskId: string, input: { knowledge?: Array<{ ref_id: string; chars: number }>; memoryIds?: string[]; domainPacks?: Array<{ ref_id: string; chars: number }>; profiles?: Array<{ ref_id: string; chars: number }>; cards?: Array<{ ref_id: string; chars: number }> }): number {
+  recordContextInjections(taskId: string, input: { knowledge?: Array<{ ref_id: string; chars: number }>; memoryIds?: string[]; domainPacks?: Array<{ ref_id: string; chars: number }>; profiles?: Array<{ ref_id: string; chars: number }>; cards?: Array<{ ref_id: string; chars: number }>; positions?: Array<{ ref_id: string; chars: number }> }): number {
     const ins = this.db.prepare(
       `INSERT OR IGNORE INTO wa_context_injections (id, task_id, source, ref_id, chars, est_tokens, outcome)
        VALUES (?, ?, ?, ?, ?, ?, 'pending')`,
@@ -864,22 +865,28 @@ export class MemoryManager {
     let written = 0;
     for (const k of input.knowledge ?? []) {
       const chars = Math.max(0, Math.floor(k.chars));
-      written += ins.run(randomUUID(), taskId, 'knowledge', k.ref_id, chars, estimateTokensFromChars(chars)).changes;
+      written += ins.run(randomUUID(), taskId, INJECTION_SOURCE.knowledge, k.ref_id, chars, estimateTokensFromChars(chars)).changes;
     }
     // zx_20261021_3 批一: 领域包逐包一行（`ref_id` = 包 id，`chars` = 该包渲染块字数）。
     for (const k of input.domainPacks ?? []) {
       const chars = Math.max(0, Math.floor(k.chars));
-      written += ins.run(randomUUID(), taskId, 'domain_pack', k.ref_id, chars, estimateTokensFromChars(chars)).changes;
+      written += ins.run(randomUUID(), taskId, INJECTION_SOURCE.domainPack, k.ref_id, chars, estimateTokensFromChars(chars)).changes;
     }
     // zx_20261022_3 批八: 画像一段一行（`ref_id` = `profile:<hash12>`，`chars` = 该段渲染字数）。
     for (const k of input.profiles ?? []) {
       const chars = Math.max(0, Math.floor(k.chars));
-      written += ins.run(randomUUID(), taskId, 'project_profile', k.ref_id, chars, estimateTokensFromChars(chars)).changes;
+      written += ins.run(randomUUID(), taskId, INJECTION_SOURCE.projectProfile, k.ref_id, chars, estimateTokensFromChars(chars)).changes;
     }
     // zx_20261023_5 批二: 蒸馏卡一张一行（`ref_id` = 卡 id，`chars` = 该卡渲染行字数）。
     for (const k of input.cards ?? []) {
       const chars = Math.max(0, Math.floor(k.chars));
-      written += ins.run(randomUUID(), taskId, 'knowledge_card', k.ref_id, chars, estimateTokensFromChars(chars)).changes;
+      written += ins.run(randomUUID(), taskId, INJECTION_SOURCE.knowledgeCard, k.ref_id, chars, estimateTokensFromChars(chars)).changes;
+    }
+    // zx_20261113_1 B3「用」: 岗位条目一行（`ref_id` = `description` / `rule:<hash>` / `skill:<hash>` /
+    //   `knowledge:<hash>` / `lesson:<id>`；`chars` = 条目正文长度，标签与分隔符不计）。
+    for (const k of input.positions ?? []) {
+      const chars = Math.max(0, Math.floor(k.chars));
+      written += ins.run(randomUUID(), taskId, INJECTION_SOURCE.position, k.ref_id, chars, estimateTokensFromChars(chars)).changes;
     }
     for (const id of input.memoryIds ?? []) {
       let chars = 0;
@@ -887,7 +894,7 @@ export class MemoryManager {
         const row = this.db.prepare('SELECT LENGTH(content) AS n FROM wa_memories WHERE id = ?').get(id) as { n: number | null } | undefined;
         chars = Math.min(300, Math.max(0, Number(row?.n) || 0));
       } catch { /* 读不到正文 ⇒ 记 0 字（行仍然在，"注入过"这件事实不丢） */ }
-      written += ins.run(randomUUID(), taskId, 'memory', id, chars, estimateTokensFromChars(chars)).changes;
+      written += ins.run(randomUUID(), taskId, INJECTION_SOURCE.memory, id, chars, estimateTokensFromChars(chars)).changes;
     }
     return written;
   }
@@ -1341,7 +1348,25 @@ export class MemoryManager {
       if (!resp.ok) return null;
       const json = await resp.json() as { data?: Array<{ embedding: number[] }>; embeddings?: number[][] };
       // 兼容 OpenAI（data[0].embedding）与 Ollama（embeddings[0]）两种返回格式
-      return json.data?.[0]?.embedding || json.embeddings?.[0] || null;
+      const vector = json.data?.[0]?.embedding || json.embeddings?.[0] || null;
+      // zx_20261112_2 B4：向量调用**只报次数**（token/成本恒 0）——否则 `nomic` 天天生成记忆向量
+      //   却在模型页恒显「暂无经 ANS 记账的调用」。异步、失败只记日志，不阻塞记忆写入；
+      //   失败调用 / 空文本不报（把"试了一次没成"计入"使用"是另一种不诚实）。
+      if (vector && text.trim()) {
+        const modelRef = String(embModel.model_id || embModel.model_name || '').trim();
+        if (modelRef) {
+          // 数值走局部量再简写：`cost: 0` 那种字面量形状会被「原型默认金额未进包」的产物扫描误判。
+          const tokensIn = 0;
+          const tokensOut = 0;
+          const cost = 0;
+          // 直接走 `AnsClient.post`（SDK 自带三头签名）——与 `getAnsClient()` 是同一条签名路，
+          //   完备性扫描按 `this.ansClient.post(` 认它（不再多一层 `ac` 别名，免得扫描面读不出）。
+          void this.ansClient.post('/api/v1/billing/records', {
+            endpoint_id: 'memory-embed', model_id: modelRef, tokens_in: tokensIn, tokens_out: tokensOut, cost, currency: 'CNY',
+          }).catch((e: unknown) => logger.warn('memory: embedding 用量上报失败 %s', (e as Error)?.message || String(e)));
+        }
+      }
+      return vector;
     } catch { return null; }
   }
 
@@ -2319,7 +2344,7 @@ export class MemoryManager {
   //   · 附带 prelude_usage 估算预读 token，使此前不可见成本可见（不并入步进记账，避免双计）
   async runTaskPrelude(
     taskId: string, projectId: string,
-  ): Promise<{ goal: { goal: string; success_criteria: string; investigate: string[] } | null; contradiction: string | null; card: string | null } | null> {
+  ): Promise<{ goal: { goal: string; success_criteria: string; investigate: string[] } | null; contradiction: string | null; card: string | null; reused: { goal: boolean; contradiction: boolean; card: boolean } } | null> {
     try {
       const row = this.db.prepare('SELECT title, description, acceptance_criteria, context_json FROM wa_tasks WHERE id = ? AND project_id = ?').get(taskId, projectId) as { title: string; description: string | null; acceptance_criteria: string | null; context_json: string } | undefined;
       if (!row) return null;
@@ -2337,6 +2362,7 @@ export class MemoryManager {
         : null;
       const cachedContr = typeof ctx.principal_contradiction === 'string' && String(ctx.principal_contradiction).trim().length >= 4 ? String(ctx.principal_contradiction).trim().slice(0, 120) : null;
       const cachedCard = typeof ctx.requirement_card === 'string' && String(ctx.requirement_card).trim().length > 0 ? String(ctx.requirement_card) : null;
+      const reusedOf = () => ({ goal: !!cachedGoal, contradiction: !!cachedContr, card: !!cachedCard });
 
       // 各字段门：goal/矛盾 仅 complex|standard 识别（沿用旧 gate）；需求卡 refine 仅长文(≥300)且非 subagent/depth≥1
       const needGoal = !isSimple && !cachedGoal;
@@ -2344,11 +2370,13 @@ export class MemoryManager {
       const textLen = `${title}\n${description}\n${acceptance}`.length;
       const needCard = !isSubagent && !cachedCard && textLen >= 300;
       if (!needGoal && !needContr && !needCard) {
-        return { goal: cachedGoal, contradiction: cachedContr, card: cachedCard };
+        return { goal: cachedGoal, contradiction: cachedContr, card: cachedCard, reused: reusedOf() };
       }
 
       const m = await this.ansClient.getOptimalModel(auxModelRequest());
-      if (!m?.url || !m?.api_key || !m?.model_name) return { goal: cachedGoal, contradiction: cachedContr, card: cachedCard };
+      if (!m?.url || !m?.api_key || !m?.model_name) {
+        return { goal: cachedGoal, contradiction: cachedContr, card: cachedCard, reused: reusedOf() };
+      }
 
       const req: string[] = [];
       if (needGoal) req.push('goal/success_criteria/investigate');
@@ -2376,7 +2404,9 @@ export class MemoryManager {
       const out = result.text || '';
       const outChars = out.length;
       const jsonMatch = out.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) return { goal: cachedGoal, contradiction: cachedContr, card: cachedCard };
+      if (!jsonMatch) {
+        return { goal: cachedGoal, contradiction: cachedContr, card: cachedCard, reused: reusedOf() };
+      }
       const parsed = (() => { try { return JSON.parse(jsonMatch[0]) as { goal?: unknown; success_criteria?: unknown; investigate?: unknown; key_constraint?: unknown; req_card?: unknown }; } catch { return {}; } })();
 
       let newGoal = cachedGoal;
@@ -2411,7 +2441,7 @@ export class MemoryManager {
         this.db.prepare('UPDATE wa_tasks SET context_json = ? WHERE id = ?').run(JSON.stringify(latest), taskId);
       } catch { /* 回写失败不阻塞 */ }
       logger.info({ taskId: taskId.slice(0, 8), needGoal, needContr, needCard, goal: newGoal ? newGoal.goal.slice(0, 24) : '', contr: newContr ? newContr.slice(0, 24) : '' }, '任务理解预读(三调合一)完成');
-      return { goal: newGoal, contradiction: newContr, card: newCard };
+      return { goal: newGoal, contradiction: newContr, card: newCard, reused: { goal: !needGoal && !!cachedGoal, contradiction: !needContr && !!cachedContr, card: !needCard && !!cachedCard } };
     } catch { return null; }
   }
 

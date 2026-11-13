@@ -17,7 +17,7 @@
  *   判据仍**特判 `kind === 'trial'`**，不只依赖 `tier === 'team'`——试用语义的裁决留在这一处，不随档位字样漂移。
  * ⚠ 零 electron 依赖（只用一个最小 db 接口）——rr 直跑真判据；`now`/`fingerprint` 可注入（G-4 不依赖墙钟）。
  */
-import { type LicenseTier } from './feature-limits.js';
+import { TIER_LIMITS, type LicenseTier } from './feature-limits.js';
 import { resolveLicenseState, type LicenseSettingDb, type LicenseState, type ResolveLicenseOpts } from './license.js';
 
 /**
@@ -72,7 +72,12 @@ export interface TeamGate {
  *   `resolveTeamGate` 真闸与 `tier-catalog.ts` 的对照表**同引这一处**——不各写一份 `||`。
  */
 export function teamUnlocked(state: Pick<LicenseState, 'tier' | 'kind'>): boolean {
-  return state.tier === 'team' || state.kind === 'trial';
+  // zx_20261112_1 B5「衡」：**档位一把尺**——能同时纳入多台节点（`maxNodes > 1`）即解锁团队能力，
+  //   不再在手写 `tier === 'team'`（那是把档位名当判据；改名/加档就会两处打架）。
+  //   试用语义仍在此一处特判（`kind === 'trial'`）；社区/专业档 `maxNodes=1` ⇒ 锁定。
+  if (state.kind === 'trial') return true;
+  const maxNodes = TIER_LIMITS[state.tier]?.maxNodes;
+  return typeof maxNodes === 'number' && maxNodes > 1;
 }
 
 /**

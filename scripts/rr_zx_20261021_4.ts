@@ -162,12 +162,13 @@ function groupC(): void {
   ok(!isSupersededDocBody(lateMarker), 'C-10 只在开头 40 行找失效声明（防正文长文误伤）');
 
   // zx_20261022_3 批十一：证据面实现已移至 `exec-evidence.ts`——C-11/C-13 改钉到**实现本尊**
-  // （比原先扫消费者文件更强：消费者只留调用，实现才是行为所在）。C-12 的提示词仍属执行器。
+  // （比原先扫消费者文件更强：消费者只留调用，实现才是行为所在）。
+  // zx_20261109_1 B6：判卷整块（含其提示词）搬至 `exec-acceptance.ts` ⇒ C-12 随实现走。
   const evidenceSrc = CODE(`${A}/src/main/core/exec-evidence.ts`);
-  const execSrc = CODE(`${A}/src/main/core/agent-executor.ts`);
+  const acceptSrc = CODE(`${A}/src/main/core/exec-acceptance.ts`);
   ok(/for \(const fp of bundle\.docFiles\)/.test(evidenceSrc) && /isSupersededDocBody\(body\)/.test(evidenceSrc),
     'C-11 接线：逐份读过、跳过失效件，再计入上限');
-  ok(/只按下所列文件与记录判卷；未列出的旧版本不是本轮交付/.test(execSrc),
+  ok(/只按下所列文件与记录判卷；未列出的旧版本不是本轮交付/.test(acceptSrc),
     'C-12 判卷提示词声明证据范围（未列出的旧版不是本轮交付）');
   ok(/rankEvidenceDocFiles\(\{/.test(evidenceSrc) && /mtimeMs/.test(evidenceSrc),
     'C-13 接线：`collectEvidence` 按排名取文件，不按行序');
@@ -250,7 +251,9 @@ function groupE(): void {
     'E-8 分组按相对首段：`src` 的两层共用一组，与 `docs` 轮转');
 
   const src = CODE(`${A}/src/main/core/world-snapshot.ts`);
-  ok(/sampleSnapshotCandidates\(candidates\.map\(\(c\) => c\.path\), SNAPSHOT_FILE_LIMIT/.test(src),
+  // zx_20261109_1 B1 重定向：扫描结果改由 `WorkingDirScan.files`（`.abs`）供给（同一份盘点两用）；
+  //   判据不变（采样仍走轮转函数、仍钉同一个上限、全仓唯一一处），按符号钉新载体。
+  ok(/sampleSnapshotCandidates\(\s*scanned\.map\(\(f\) => f\.abs\),\s*SNAPSHOT_FILE_LIMIT/.test(src),
     'E-9 接线：采样走轮转函数（唯一一处口径）');
   // zx_20261104_1 M7 重定向：判据升级为覆盖率 N/M + 抽样口径 + "样本外未审计"（更强，且由纯函数一处派生）。
   ok(src.includes('样本覆盖 ${sampled}/${total} 个路径（按顶层目录轮转），样本外未审计'),

@@ -1041,17 +1041,18 @@ async function main(): Promise<void> {
       '静态：该 emit 与 UPDATE 在**同一个** cron 恢复分支内（不在别处另起一处"看起来像"的 emit）',
       cronBody ? 'cron 分支已定位' : '未定位 cron 分支');
 
-    // ── (f) 静态：四处 `task.awaiting_input` 同形 + 缺省方向 + 入队点标注 ──
+    // ── (f) 静态：五处 `task.awaiting_input` 同形 + 缺省方向 + 入队点标注 ──
+    // zx_20261113_2 M4：新增「用户侧动作请求」收口路径（`exec-finalize.ts`，同为引擎侧）⇒ 2→3、4→5。
     const awAe = [...aeSrc.matchAll(/eventBus\.emit\('task\.awaiting_input',\s*\{([\s\S]*?)\}\)/g)].map((m) => m[1]!);
     const awAi = [...aitSrc.matchAll(/eventBus\.emit\('task\.awaiting_input',\s*\{([\s\S]*?)\}\)/g)].map((m) => m[1]!);
-    eq(awAe.length, 2, `静态：agent-executor 内 awaiting_input emit 恰 2 处（扫到 ${awAe.length} 处）`);
+    eq(awAe.length, 3, `静态：引擎侧 awaiting_input emit 恰 3 处（含收口用户侧动作 1 处；扫到 ${awAe.length} 处）`);
     eq(awAi.length, 2, `静态：ai-task 内 awaiting_input emit 恰 2 处（扫到 ${awAi.length} 处）`);
     eq([...awAe, ...awAi].filter((p) => !p.includes('asked_at')).length, 0,
-      '★ 静态：**四处** payload 均含 `asked_at`（提问有时刻，答复才可能与之同源）');
+      '★ 静态：**五处** payload 均含 `asked_at`（提问有时刻，答复才可能与之同源）');
     eq(((aeSrc + aitSrc).match(/asked_at:\s*['"`]/g) || []).length, 0,
       '★ 静态：**手写 `asked_at` 字面量计数为 0**（取值一律来自 `persistAwaitingInput` 返回值；自造时间戳会让"同源"判据形同虚设）');
-    eq(((aeSrc + aitSrc).match(/persistAwaitingInput\(db, taskId, \{/g) || []).length, 4,
-      `静态：persist 写点恰 4 处，与 4 处 emit 一一对应（扫到 ${((aeSrc + aitSrc).match(/persistAwaitingInput\(db, taskId, \{/g) || []).length} 处）`);
+    eq(((aeSrc + aitSrc).match(/persistAwaitingInput\(db, taskId, \{/g) || []).length, 5,
+      `静态：persist 写点恰 5 处，与 5 处 emit 一一对应（含收口用户侧动作 1 处；扫到 ${((aeSrc + aitSrc).match(/persistAwaitingInput\(db, taskId, \{/g) || []).length} 处）`);
 
     ok(psSrc.includes("initiator ?? 'system'") && aitSrc.includes('buildUnansweredBanner(g, payload.initiator'),
       "★ 静态（**缺省方向**）：`initiator` 的缺省在守卫本体一处取 `?? 'system'`，处理器**原样透传**（缺省值即契约，六条非用户路一条都不传）");
@@ -1060,9 +1061,18 @@ async function main(): Promise<void> {
     const iniUser = [aitSrc, aeSrc, schSrc, imSrc, ipcSrc, idxSrc].flatMap((s) => [...s.matchAll(/initiator:\s*'([^']+)'/g)].map((m) => m[1]!));
     eq([...new Set(iniUser)], ['user'],
       "★ 静态：载荷里 `initiator` **只出现 `'user'` 一种取值**——系统侧一律不传、由缺省兜底（若有人补 `'system'`，语义就从「人不人发起」退化成「两处都要记得写」）");
-    ok(iniUser.length >= 5, `静态：显式标注 initiator:'user' 的入队点 ${iniUser.length} 处（下界 5 = IM 4 处 + GUI 载荷构造 1 处；新增用户路径须一并标注，系统路径**不得**标注）`);
+    ok(iniUser.length >= 6, `静态：显式标注 initiator:'user' 的入队点 ${iniUser.length} 处（下界 6 = IM 5 处 + GUI 载荷构造 1 处；新增用户路径须一并标注，系统路径**不得**标注）`);
     const imIni = (imSrc.match(/initiator:\s*'user'/g) || []).length;
-    eq(imIni, 4, `静态：IM 四条用户路（审批确认/选项批准/编号启动/直接回复）各自标注（扫到 ${imIni} 处）`);
+    // zx_20261112_1 B3 增第 5 条用户路（IM「继续」）——逐成员在册，不是放宽计数。
+    const imUserRoutes = [
+      `{ taskId, source: 'im', channel: ctx.channelType, externalUser: toUser, initiator: 'user' }`, // B3：继续
+      `{ taskId: task.id, projectId: approval.projectId, message: confirmMsg, initiator: 'user' }`,  // 审批确认
+      `{ taskId: r.taskId, projectId: r.projectId, message: marker, initiator: 'user' }`,           // 选项批准
+      `{ taskId: task.id, source: 'im', channel: ctx.channelType, externalUser: fromUser, initiator: 'user' }`, // 编号启动
+    ];
+    for (const s of imUserRoutes) ok(imSrc.includes(s), `IM 用户路在册（含 initiator:'user'）：${s.slice(0, 44)}…`);
+    ok(/\[用户回复\][^`]*`[^;]*initiator:\s*'user'/.test(imSrc), 'IM 直接回复路在册（载荷含 [用户回复] 且标 initiator:user）');
+    eq(imIni, 5, `静态：IM 五条用户路（四旧 + B3「继续」）各自标注（扫到 ${imIni} 处）`);
     const eRJ = ipcSrc.slice(ipcSrc.indexOf('function enqueueResumeJob('), ipcSrc.indexOf('// D1: 退避重启配置'));
     ok(eRJ.includes("initiator: 'user'") && (eRJ.match(/initiator:/g) || []).length === 1,
       '★ 静态：GUI 三个提交点共用的 `enqueueResumeJob` 内标一次——载荷整体交注入方，两条出口不可能各写一份而分家');

@@ -11,8 +11,10 @@ import type { TaskScheduler } from '../task-scheduler.js';
 import type { MemoryManager } from '../memory-manager.js';
 import { createLogger } from '../logger.js';
 import { markTemplateInvalid, loadTemplatePool, autoCreateTemplatesFromSuccesses, describeAutoTemplateGates } from '../task-templates.js';
-import { boolSetting } from '../settings-bool.js';
+import { boolSetting, readBoolSetting } from '../settings-bool.js';
 import { auxModelRequest } from '../model-request.js';
+// zx_20261113_2 M8：本机 Ollama 端点不需要 Key——不再把"Key 为空"当"不可用"。
+import { embeddingEndpointNeedsKey } from '../embedding-endpoint.js';
 // zx_20260930 M5: 复盘的问法按**终态**分叉——判据取自 `task-terminal.ts` 一处（三处调度守卫同一个值）。
 import { reviewFocus, isReviewableStatus } from '../task-terminal.js';
 // zx_20260930 M8: 记忆读取谓词取**一处真源**（本文件两处曾各手抄一份 `!= 'archived'`）。
@@ -23,8 +25,16 @@ import { distillKnowledgeCards } from '../knowledge-cards.js';
 // zx_20261030_1 M6「荐」: 派生改由**水位驱动**的增量吸收（只处理有未吸收事件的项目），
 //   重跑成本从 O(全史) 降到 O(增量)；水位只在前移处推进（`knowledge-watermark.ts` 一处真源）。
 import { ABSORB_MAX_PROJECTS_PER_RUN, absorbProjectIncrement, projectsWithUnabsorbedEvents } from '../knowledge-watermark.js';
+// zx_20261113_4 B1「成」（道德经·自知者明）：项目画像**首次自动成型**——只建不改，有界补跑。
+import {
+  PROFILE_BOOTSTRAP_MAX_PER_RUN,
+  ensureProjectProfileBootstrapped,
+  projectsMissingProfile,
+} from '../project-profile.js';
 // zx_20261029_1「知」：项目须知生成作业（LLM 只在 `project-brief-job.ts` 一处）。
-import { runProjectBriefInit } from '../project-brief-job.js';
+import { BRIEF_GENERATE_TIMEOUT_MS, runProjectBriefInit } from '../project-brief-job.js';
+// zx_20261113_1 B2「积」: 复盘落库后精炼岗位 pending 候选（只动 pending，人工结论不改写）。
+import { refinePositionLessonFromRetrospective } from '../positions.js';
 
 interface JobDeps {
   db: Database.Database;
@@ -47,8 +57,9 @@ export function registerAllJobs(deps: JobDeps): void {
       const unembedded = memory.getUnembedded(20);
       if (unembedded.length === 0) return;
       const embModel = await ansClient.getOptimalModel({ capabilities: ['embedding'] });
-      if (!embModel?.url || !embModel?.api_key) {
-        logger.warn('embed-memory: 无可用 embedding 模型或缺失 api_key，跳过本轮');
+      // zx_20261113_2 M8：本机回环端点（Ollama）不需要 Key；远端缺 Key 仍如实跳过。
+      if (!embModel?.url || (embeddingEndpointNeedsKey(embModel.url) && !embModel?.api_key)) {
+        logger.warn('embed-memory: 无可用 embedding 模型，或远端端点缺失 api_key，跳过本轮');
         return;
       }
 
@@ -61,7 +72,10 @@ export function registerAllJobs(deps: JobDeps): void {
             ? baseUrl : `${baseUrl}/embeddings`;
           const resp = await fetch(embUrl, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${embModel.api_key}` },
+            headers: {
+              'Content-Type': 'application/json',
+              ...(embModel.api_key ? { Authorization: `Bearer ${embModel.api_key}` } : {}),
+            },
             body: JSON.stringify({ model: embModel.model_name ?? 'text-embedding-3-small', input: mem.content.slice(0, 8000) }),
             signal: AbortSignal.timeout(30_000),
           });
@@ -187,6 +201,12 @@ export function registerAllJobs(deps: JobDeps): void {
       // Phase A (2026-08-26): 任务复盘（实践论「再认识」——对比计划 vs 实际产出教训）
       try { await memory.generateTaskRetrospective(taskId, projectId); } catch (err) {
         logger.warn({ taskId: taskId.slice(0, 8), errMsg: (err as Error).message }, 'background-review: 任务复盘生成失败');
+      }
+
+      // zx_20261113_1 B2「积」: 复盘写完再精炼岗位候选——顺序不能反（反了只能拿到收口摘要）。
+      //   失败不阻断后续（岗位候选是旁账；收口时已落摘要候选，最坏退回摘要）。
+      try { refinePositionLessonFromRetrospective(db, taskId); } catch (err) {
+        logger.warn({ taskId: taskId.slice(0, 8), errMsg: (err as Error).message }, 'background-review: 岗位经验精炼失败');
       }
 
       // Phase B (2026-08-27): 记忆行动转化（王阳明知行合一——判定注入记忆是否真正被应用）
@@ -404,6 +424,32 @@ export function registerAllJobs(deps: JobDeps): void {
         logger.info({ projects: knowledgeProjects, sections: totalKnowledge, cards: totalCards, candidates: totalCandidates }, '项目知识增量吸收完成');
       }
 
+      // zx_20261113_4 B1「成」（道德经·自知者明）：项目画像**首次自动成型**。
+      //   病根：生成/注入/跟随都写好了，但首次生成只在 IPC 手点 ⇒ 真库 0 份。
+      //   两条来路：① 本轮吸收过的项目；② 存量「有事实、无画像」项目的**有界**补跑
+      //   （不能只跟事件走——存量项目可能早已无新事件，真库 9 个项目就是这样）。
+      //   ⚠ 只建「本项目自身事实压缩成的画像」；**外来领域包仍永不自动启用**（另一条纪律）。
+      if (readBoolSetting(db, 'profile_auto_bootstrap')) {
+        let profiles = 0;
+        const touched = new Set(backlog.map((b) => b.projectId));
+        for (const pid of touched) {
+          try {
+            if (ensureProjectProfileBootstrapped(db, pid, { autoEnabled: true }).created) profiles++;
+          } catch (err) {
+            logger.warn({ projectId: pid.slice(0, 8), errMsg: (err as Error).message }, 'consolidate: 项目画像自动成型失败');
+          }
+        }
+        for (const pid of projectsMissingProfile(db, PROFILE_BOOTSTRAP_MAX_PER_RUN)) {
+          if (touched.has(pid)) continue;
+          try {
+            if (ensureProjectProfileBootstrapped(db, pid, { autoEnabled: true }).created) profiles++;
+          } catch (err) {
+            logger.warn({ projectId: pid.slice(0, 8), errMsg: (err as Error).message }, 'consolidate: 项目画像自动成型失败（补跑）');
+          }
+        }
+        if (profiles > 0) logger.info({ profiles }, '项目画像自动成型完成');
+      }
+
       // Phase A (2026-08-27): 记忆缘起条件（空性·缘起性空——高价值记忆提取适用条件+稳定性分级）
       let totalApplicability = 0;
       for (const { project_id } of recentProjects) {
@@ -574,10 +620,12 @@ export function registerAllJobs(deps: JobDeps): void {
   // ===== project-init-brief: 项目创建/手动重跑时读仓生成「项目须知」 =====
   //   zx_20261029_1「知」：不在创建 IPC 里等模型——作业化后创建即时返回，失败可重试且如实落账。
   //   单飞锁在 `runProjectBriefInit` 内；这里只负责把作业载荷接上。
+  //   zx_20261111_1 B3：该作业自身 170s 内必然收口（`BRIEF_GENERATE_TIMEOUT_MS`），调度器
+  //   不得在 60s 凭"没有 taskId、像没人跑"提前重排它——声明运行上界 + 30s 余量。
   scheduler.register('project-init-brief', async (payload) => {
     const projectId = typeof payload.projectId === 'string' ? payload.projectId : '';
     const trigger = typeof payload.trigger === 'string' ? payload.trigger : 'manual';
     if (!projectId) return;
     await runProjectBriefInit({ db, ansClient, projectId, trigger });
-  });
+  }, { orphanGraceMs: BRIEF_GENERATE_TIMEOUT_MS + 30_000 });
 }

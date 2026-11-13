@@ -460,7 +460,9 @@ async function main(): Promise<void> {
     //   判据从"数量 ≥2"改为"**数得出几处，且每一处都是父任务那条**"——数量换了形状，但"扫描面非空"
     //   这一自证目的仍成立且更精确（原形只说"至少两处"，说不出那些是什么；现在"是父任务 INSERT"这件事
     //   逐处被断言，M5-c 若只删了正本而漏删副本，这里就会报出对不上的那一处）。
-    const parentInserts = (routerSrc.match(/INSERT INTO wa_tasks \(id, project_id, title, description, priority, status, context_json\)/g) || []).length;
+    // zx_20261112_2 B2：父任务建行多了 `position_id`（IM 可预绑岗位）⇒ 形状钉随真源更新；
+    //   「每一处 INSERT 都是父任务那条」这条自证目的不变。
+    const parentInserts = (routerSrc.match(/INSERT INTO wa_tasks \(id, project_id, title, description, priority, status, position_id, context_json\)/g) || []).length;
     ok(inserts.length > 0 && parentInserts === inserts.length,
       'M0-1 扫描面自证：`im-router.ts` 里每处 `INSERT INTO wa_tasks` **都是父任务建行那条**'
       + '（子任务落行已归唯一实现，M5-c）',
@@ -745,6 +747,8 @@ CREATE TABLE wa_tasks (
   status TEXT DEFAULT 'pending', context_json TEXT DEFAULT '{}', workflow_config TEXT DEFAULT '{}',
   priority INTEGER DEFAULT 0, depends_on TEXT DEFAULT '', parent_task_id TEXT DEFAULT '',
   source TEXT DEFAULT 'user', acceptance_criteria TEXT DEFAULT '', aggregate_version INTEGER DEFAULT 0,
+  -- zx_20261112_2: 生产迁移列（IM 建单会写它）；夹具不许比生产窄。
+  position_id TEXT NOT NULL DEFAULT '',
   created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now'))
 );
 CREATE TABLE wa_task_conversations (
@@ -797,7 +801,9 @@ CREATE TABLE wa_task_conversations (
     //   承两条既有纪律：① **正面**断言（"值从 false 变 true"，不是"不抛"）；
     //   ② 判"挂上了没有"用**生产那份** `taskHasMedia`（`core/model-request.ts`），**不自抄一份谓词**（C6）。
     const replies2: string[] = [];
-    await routeImMessage(mkCtx(db1, replies2) as never, 'u-m1-c1', '分析这张图', 'direct', '', undefined);
+    // zx_20261110_1 B1：软研究词（分析…）单独出现不再建单；此处的脚手架要的是"真路由建出任务"，
+    //   故用显式建单词——判据（件是否挂上）不放松，只是换成新的生产语义能到达的输入。
+    await routeImMessage(mkCtx(db1, replies2) as never, 'u-m1-c1', '创建任务分析这张图', 'direct', '', undefined);
     const ctx2 = taskCtxOf(db1);
     const atts2 = Array.isArray(ctx2?.attachments) ? ctx2!.attachments as Array<{ path?: string }> : [];
     crit('M1', atts2.length === 1 && atts2[0]!.path === realPath && taskHasMedia(ctx2) === true,
@@ -820,7 +826,8 @@ CREATE TABLE wa_task_conversations (
     //   "没有"与"空数组"在 `taskHasMedia` 眼里同义，但**排查时不同义**——故钉的是"键不在场"。
     const db5 = newDb();
     const replies5: string[] = [];
-    await routeImMessage(mkCtx(db5, replies5) as never, 'u-m1-c5', '分析这段文字', 'direct', '', undefined);
+    // zx_20261110_1 B1：同上，脚手架改用显式建单词。
+    await routeImMessage(mkCtx(db5, replies5) as never, 'u-m1-c5', '创建任务分析这段文字', 'direct', '', undefined);
     const ctx5 = taskCtxOf(db5);
     crit('M1', ctx5 !== undefined && !('attachments' in ctx5) && taskHasMedia(ctx5) === false,
       'C5 无件的普通文字 ⇒ 建出的任务 `context_json` **不含 `attachments` 键**（不是空数组）',
@@ -1713,6 +1720,7 @@ CREATE TABLE wa_tasks (
   priority INTEGER DEFAULT 0, depends_on TEXT DEFAULT '', parent_task_id TEXT DEFAULT '',
   source TEXT DEFAULT 'user', acceptance_criteria TEXT DEFAULT '',
   aggregate_version INTEGER DEFAULT 0,
+  position_id TEXT NOT NULL DEFAULT '',
   created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now'))
 );
 CREATE TABLE wa_task_conversations (
@@ -2077,6 +2085,7 @@ CREATE TABLE wa_tasks (
   priority INTEGER DEFAULT 0, depends_on TEXT DEFAULT '', parent_task_id TEXT DEFAULT '',
   source TEXT DEFAULT 'user', acceptance_criteria TEXT DEFAULT '',
   aggregate_version INTEGER DEFAULT 0,
+  position_id TEXT NOT NULL DEFAULT '',
   created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now'))
 );
 CREATE TABLE wa_task_conversations (

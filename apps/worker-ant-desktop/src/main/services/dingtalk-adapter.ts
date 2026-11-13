@@ -264,15 +264,26 @@ export class DingtalkAdapter implements ImAdapter {
     const senderId = (payload.senderStaffId as string) || (payload.senderId as string) || 'unknown';
     const conversationType = payload.conversationType as string;
     const chatType = conversationType === '1' ? 'direct' : 'group';
-    // 只随非文本带 meta：文本路径字节不变（`messageId` 也不给文本——不挪既有去重语义）。
+    // zx_20261108_1 B3: 文本也带 `messageId` 与 @ 证据——跨重启去重与群聊 @ 闸都依赖它们。
+    //   平台未给 `isInAtList` 时 `mentionsBot` 保持 `undefined`（按未 @ 处理，fail-closed）。
+    const messageId = (payload.msgId as string) || undefined;
+    const isInAtList = payload.isInAtList;
+    const atUsers = Array.isArray(payload.atUsers) ? payload.atUsers as Array<Record<string, unknown>> : [];
+    const mentions = atUsers
+      .map((u) => (u && typeof u === 'object' ? String((u.name as string) ?? (u.staffId as string) ?? '') : ''))
+      .filter((s): s is string => s.length > 0);
     let meta: ImMessageMeta | undefined;
+    if (messageId) meta = { messageId };
+    if (typeof isInAtList === 'boolean' || mentions.length > 0) {
+      meta = meta ?? {};
+      if (typeof isInAtList === 'boolean') meta.mentionsBot = isInAtList;
+      if (mentions.length > 0) meta.mentions = mentions;
+    }
     if (isNonText) {
       const content = (payload.content && typeof payload.content === 'object')
         ? payload.content as Record<string, unknown> : {};
       const fileName = (content.fileName as string) || undefined;
-      meta = { kind: msgType, ...(fileName ? { fileName } : {}) };
-      const messageId = (payload.msgId as string) || undefined;
-      if (messageId) meta.messageId = messageId;
+      meta = { kind: msgType, ...(fileName ? { fileName } : {}), ...(meta ?? {}) };
       // 媒体标识：**单类型消息**是 `content.downloadCode`（picture/file/audio/video 同一位置）；
       //   **富文本**里每个图片件在 `content.richText[]`（`{type:'picture', downloadCode, pictureDownloadCode}`）。
       //   件类型与消息类型**不是一回事**：richText 消息里取出的那张图，件类型是 `picture`（决定落盘后缀），

@@ -185,6 +185,37 @@ const DEFAULT_RULES: ArchetypeValidationRule = {
   forbiddenPatterns: [],
 };
 
+/**
+ * zx_20261109_1 B3：辅助模型「未核」的**原因码**——三因分开（`no_model` / `timeout` / `http_error`），
+ * 外加内容不可解码这一既有支（`undecodable`）。此前一律折成"不可用"⇒ 汇总账说不清到底哪种。
+ */
+export type SufficiencyUnavailableReason = 'no_model' | 'timeout' | 'http_error' | 'undecodable' | 'skipped_large_doc' | 'budget_short';
+
+/**
+ * zx_20261110_2 B5「损」：**大文档不逐条问**——超过此字符数即止步于规则/快速检查。
+ *
+ * 病根（本方案 §2 基线 16:24:00）：一份长文档照样送进辅助模型，等的却是一个**结论不可能更细**的
+ * 「是不是言之有物」；真正会变的只有"等多久"。判据（`ARCHETYPE_VALIDATION` + 覆盖式窗口）仍照跑，
+ * 只是不再向模型发问，原因如实记 `skipped_large_doc`——**"没问"不是"不足"**，不判失败。
+ */
+export const LARGE_DOC_SKIP_CHARS = 40_000;
+
+/**
+ * zx_20261110_2 B5「损」：**预算将尽就别再问**——剩余等待不足此值即立即降级（记 `budget_short`）。
+ *
+ * 病根：整批预算 12s，剩余 1s 时起问＝必然等满再记"超时"，白等 1s 且归因含糊（"超时"而非"预算用尽"）。
+ * 与 `LLM_VALIDATION_BUDGET_MS` 同族：阈值是"问了也来不及问完"的**下界**，不是新的判定标准——
+ * 未核仍是未核，一字未放宽。
+ */
+export const LLM_VALIDATION_MIN_ASK_MS = 4_000;
+
+/**
+ * zx_20261109_1 B3：**run 级**熔断器——由调用方（`executeTask`）持有并传入 `validateOutputs`，
+ * **绝不用模块级可变全局**（并发任务会串味：A 任务的超时会让 B 任务提前放弃）。
+ * 语义：本轮首条旁路校验超时后置 `tripped=true`，其余未问的文件立即记"未核"不再等待。
+ */
+export interface SufficiencyBreaker { tripped: boolean }
+
 /** 充分性验证结果 */
 export interface ValidationResult {
   /** 是否放行（快检通过 且 非明确不充分）；LLM 不可用时足够但不代表内容达标 */
@@ -193,7 +224,7 @@ export interface ValidationResult {
   status: 'ok' | 'insufficient' | 'unknown';
   confidence: number;
   quickCheck: QuickCheck;
-  llmCheck?: { sufficient: boolean; reason: string; suggestion: string; missingAspects: string[]; unavailable?: boolean };
+  llmCheck?: { sufficient: boolean; reason: string; suggestion: string; missingAspects: string[]; unavailable?: boolean; reasonCode?: SufficiencyUnavailableReason };
   /** 省耗账实(2026-09-06 zx_1 1a): 本次 LLM 校验实际消耗的估算 token（取不到 usage 时按字÷4 估算；0/缺省=未发生 LLM） */
   usage?: number;
   /**
@@ -319,7 +350,22 @@ export const SUFFICIENCY_WINDOW_DEFAULTS = { headChars: 6000, tailChars: 4000, o
  * 超时后又把"未核"写成"充分"。改法：成批有界并发 + 12s 上限 + 三态如实（见 `validateOutputs`）。
  */
 export const LLM_VALIDATION_TIMEOUT_MS = 12_000;
+/**
+ * zx_20261109_1 B3：一次**成批**内容校验的**总预算**（ms）。
+ *
+ * 病根：有界并发 3 + 每份 12s 只能保证"单份不超"，六份文件在模型恒慢时仍可能要 24s（两批串起来）。
+ * 现在整批共用一个截止时刻：到点后未开始的条目立刻记"未核"，不再等第二批。
+ * 与单份上限等值（12s）是刻意的——最坏等待从 N/3×12s 收敛到 12s，且不放宽任何判定。
+ */
+export const LLM_VALIDATION_BUDGET_MS = 12_000;
 export const VALIDATION_CONCURRENCY = 3;
+
+/** zx_20261109_1 B3：run 级校验预算 + 熔断器（调用方持有；**不放在模块级可变全局**）。 */
+export interface SufficiencyBudget {
+  breaker?: SufficiencyBreaker;
+  /** 本批绝对截止时刻（ms epoch）；缺省由 `validateOutputs` 按 `budgetMs` 算出。 */
+  deadlineAt?: number;
+}
 
 export function buildSufficiencyWindow(
   content: string,
@@ -476,19 +522,54 @@ async function llmSufficiencyCheck(
   ansClient: AnsClient,
   filePath: string,
   archetype: string,
-): Promise<{ sufficient: boolean; reason: string; suggestion: string; missingAspects: string[]; unavailable?: boolean; usage?: number }> {
+  budget?: SufficiencyBudget,
+): Promise<{ sufficient: boolean; reason: string; suggestion: string; missingAspects: string[]; unavailable?: boolean; reasonCode?: SufficiencyUnavailableReason; usage?: number }> {
+  // zx_20261109_1 B3：本轮已熔断 ⇒ 立即记"未核"，不再为后续文件各等一次。
+  if (budget?.breaker?.tripped) {
+    return { sufficient: true, reason: '本轮辅助模型已超时，未再等待', suggestion: '', missingAspects: [], unavailable: true, reasonCode: 'timeout' };
+  }
+  // 单文件实际可用等待 = min(单份上限, 本批剩余预算)——两者都由调用方/常量派生，不另写数字。
+  const startedAt = Date.now();
+  const remainingMs = budget?.deadlineAt != null ? budget.deadlineAt - Date.now() : LLM_VALIDATION_TIMEOUT_MS;
+  const waitMs = Math.max(1, Math.min(LLM_VALIDATION_TIMEOUT_MS, remainingMs));
+  const budgetLimited = waitMs < LLM_VALIDATION_TIMEOUT_MS;
+  // zx_20261110_2 B5「损」：预算将尽（剩余 < `LLM_VALIDATION_MIN_ASK_MS`）⇒ 立即降级，不再起问。
+  //   取的是 `deadlineAt` 的**真实剩余**（`remainingMs`），不是 `waitMs` 的下界——下界把负数夹成 1ms，
+  //   会把"预算早已用尽"伪装成"刚问了一下"。原因码单列 `budget_short`，与"等满超时"分得开。
+  if (budget?.deadlineAt != null && remainingMs < LLM_VALIDATION_MIN_ASK_MS) {
+    const left = Math.max(0, remainingMs) / 1000;
+    return {
+      sufficient: true,
+      reason: `本轮内容校验预算将尽（剩余 ${left.toFixed(1)}s < ${LLM_VALIDATION_MIN_ASK_MS / 1000}s），未再问辅助模型；规则与快速检查结论照常有效`,
+      suggestion: '',
+      missingAspects: [],
+      unavailable: true,
+      reasonCode: 'budget_short',
+    };
+  }
   try {
     const modelResult = await ansClient.getOptimalModel(auxModelRequest({ strategy: 'balanced' }));
-    if (!modelResult?.url || !modelResult?.api_key || !modelResult?.model_name) return { sufficient: true, reason: '无可用模型', suggestion: '', missingAspects: [], unavailable: true };
+    if (!modelResult?.url || !modelResult?.api_key || !modelResult?.model_name) return { sufficient: true, reason: '无可用模型', suggestion: '', missingAspects: [], unavailable: true, reasonCode: 'no_model' };
 
     // zx_20261002 M17-②: 与 `read_file` 同一道编码闸；解不出 ⇒ 走"校验不可用"一路（**不冒充**内容充分，
     //   也不把读错说成内容缺陷）。
     const r = readTextThroughGate(filePath);
     if (!r.ok) {
       logger.info({ filePath: filePath.replace(/.*\//, '') }, 'LLM验证跳过：成果非 UTF-8/BOM 可解码文本');
-      return { sufficient: true, reason: `无法按 UTF-8/BOM 解码，内容校验跳过`, suggestion: '请将成果转存为 UTF-8', missingAspects: [], unavailable: true };
+      return { sufficient: true, reason: `无法按 UTF-8/BOM 解码，内容校验跳过`, suggestion: '请将成果转存为 UTF-8', missingAspects: [], unavailable: true, reasonCode: 'undecodable' };
     }
     const content = r.content;
+    // zx_20261110_2 B5：大文档止步于规则/快速检查（不记失败、不冒充"问过"）。
+    if (content.length > LARGE_DOC_SKIP_CHARS) {
+      return {
+        sufficient: true,
+        reason: `文档较大（${content.length} 字符 > ${LARGE_DOC_SKIP_CHARS}），未逐条问辅助模型；规则与快速检查结论照常有效`,
+        suggestion: '',
+        missingAspects: [],
+        unavailable: true,
+        reasonCode: 'skipped_large_doc',
+      };
+    }
     const { system, prompt, window: win } = buildSufficiencyPrompt(filePath, archetype, content);
     const provider = createSafeProvider({ baseURL: modelResult.url, apiKey: modelResult.api_key });
     const result = await generateText({
@@ -497,7 +578,7 @@ async function llmSufficiencyCheck(
       prompt,
       temperature: 0,
       maxTokens: 2000,
-      abortSignal: AbortSignal.timeout(LLM_VALIDATION_TIMEOUT_MS),
+      abortSignal: AbortSignal.timeout(waitMs),
     });
 
     const text = result.text.trim().replace(/^```json\s*/, '').replace(/```\s*$/, '');
@@ -519,13 +600,24 @@ async function llmSufficiencyCheck(
     // zx_20260904_3 批4 (2026-09-04): LLM 校验不可用 → 标记 unavailable，不再冒充"内容充分"
     //（fail-open 修复：unknown 态计入 status，避免把"未校验"当"校验通过"）
     // zx_20261028_2 M3：超时与"不可用"分开说——用户看到的"未核"须能区分是"等不到"还是"没有可用模型"。
+    // zx_20261109_1 B3：原因**码**一并返回（no_model/timeout/http_error/undecodable），且首条超时即熔断——
+    //   本轮后续文件不再各付一次等待；熔断只改"要不要继续等"，**不改任何判定**（未核仍是未核）。
     const errName = (err as Error)?.name;
     const timedOut = errName === 'TimeoutError' || errName === 'AbortError';
+    if (timedOut && budget?.breaker) budget.breaker.tripped = true;
+    // zx_20261109_1 B6：先分"是不是等满了我们自己给的上限"——`deadlineAt` 恒被传入时
+    //   `budgetLimited` 几乎恒为真，若只按它分类，**0ms 就失败的上游超时**也会被说成"预算用尽"。
+    //   实际等满（elapsed ≥ waitMs）才算我们用尽了这笔预算；未等满 ⇒ 如实说上游提前超时。
+    const waitedOut = Date.now() - startedAt >= waitMs;
     const reason = timedOut
-      ? `辅助模型 ${Math.round(LLM_VALIDATION_TIMEOUT_MS / 1000)}s 内无结论（超时）`
+      ? waitedOut && budgetLimited
+        ? `本轮内容校验总预算（${Math.round(LLM_VALIDATION_BUDGET_MS / 1000)}s）已用尽，未问完`
+        : waitedOut
+          ? `辅助模型 ${Math.round(LLM_VALIDATION_TIMEOUT_MS / 1000)}s 内无结论（超时）`
+          : `辅助模型调用提前超时（未到 ${Math.round(LLM_VALIDATION_TIMEOUT_MS / 1000)}s 的等待上限）`
       : 'LLM校验不可用(仅快速检查通过)';
     logger.info({ filePath: filePath.replace(/.*\//, ''), reason: (err as Error).message?.slice(0, 60) }, 'LLM验证不可用，降级为仅快速检查');
-    return { sufficient: true, reason, suggestion: '', missingAspects: [], unavailable: true };
+    return { sufficient: true, reason, suggestion: '', missingAspects: [], unavailable: true, reasonCode: timedOut ? 'timeout' : 'http_error' };
   }
 }
 
@@ -541,6 +633,7 @@ export async function validateOutput(
   ansClient: AnsClient,
   filePath: string,
   archetype: string = 'document',
+  budget?: SufficiencyBudget,
 ): Promise<ValidationResult> {
   const quick = quickFileCheckAdaptive(filePath, archetype);
   // zx_20261003 M1: **判不出内容 ≠ 判成不足**——PDF 抽不出正文 / 音视频无文本层，一律判"未校验"
@@ -571,7 +664,7 @@ export async function validateOutput(
   // 问句与"该类型应有的结构"由 `buildSufficiencyPrompt` 一处构造（纯函数，rr 直跑真实现）；
   // 旧断言 `rr_zx_20260911_1` S3 那条"LLM 校验照旧（刻意不改）"已就地改钉——它钉的是**旧问句的形状**，
   // 而那个形状正是本批要拆的（改钉后更强：钉"任务题面已不在输入里"，不是改成"存在即通过"）。
-  const llm = await llmSufficiencyCheck(ansClient, filePath, archetype);
+  const llm = await llmSufficiencyCheck(ansClient, filePath, archetype, budget);
   const status: ValidationResult['status'] = llm.unavailable ? 'unknown' : llm.sufficient ? 'ok' : 'insufficient';
   return {
     sufficient: llm.sufficient,
@@ -596,17 +689,39 @@ export async function validateOutput(
 export async function validateOutputs(
   ansClient: AnsClient,
   targets: ReadonlyArray<{ file: string; archetype: string }>,
+  opts?: { budgetMs?: number; breaker?: SufficiencyBreaker },
 ): Promise<Array<ValidationResult & { file: string; archetype: string }>> {
   if (targets.length === 0) return [];
+  // zx_20261109_1 B3：整批一个截止时刻——到点后未开始的条目立即记"未核"，不再等第二批。
+  const budgetMs = opts?.budgetMs ?? LLM_VALIDATION_BUDGET_MS;
+  const deadlineAt = Date.now() + budgetMs;
+  const breaker = opts?.breaker;
   const out = new Array<ValidationResult & { file: string; archetype: string }>(targets.length);
+  const skipAsUnknown = (i: number, reason: string): void => {
+    const t = targets[i]!;
+    out[i] = {
+      sufficient: true,
+      status: 'unknown',
+      confidence: 0.5,
+      quickCheck: { passed: false, issues: [], fileSize: 0, hasHeader: false, hasBody: false, hasConclusion: false },
+      llmCheck: { sufficient: true, reason, suggestion: '', missingAspects: [], unavailable: true, reasonCode: 'timeout' },
+      reason,
+      file: t.file,
+      archetype: t.archetype,
+    };
+  };
   let cursor = 0;
   const runWorker = async (): Promise<void> => {
     for (;;) {
       const i = cursor++;
       if (i >= targets.length) return;
       const t = targets[i]!;
+      // 熔断：本轮首条超时后其余文件**立即**记未核（不再各付一次等待）。
+      if (breaker?.tripped) { skipAsUnknown(i, '本轮辅助模型已超时，未再等待'); continue; }
+      // 总预算已用尽：未开始的条目记未核，原因与"单份超时"分开说。
+      if (Date.now() >= deadlineAt) { skipAsUnknown(i, `本轮内容校验总预算（${Math.round(budgetMs / 1000)}s）已用尽，未再等待`); continue; }
       try {
-        out[i] = { ...(await validateOutput(ansClient, t.file, t.archetype)), file: t.file, archetype: t.archetype };
+        out[i] = { ...(await validateOutput(ansClient, t.file, t.archetype, { breaker, deadlineAt })), file: t.file, archetype: t.archetype };
       } catch (err) {
         // 单文件抛错（读盘/快检异常）⇒ 只判它"未核"，其它文件照跑——不让一条坏件中断整批。
         const msg = (err as Error)?.message?.slice(0, 120) || '未知错误';
@@ -624,5 +739,31 @@ export async function validateOutputs(
   };
   await Promise.all(Array.from({ length: Math.min(VALIDATION_CONCURRENCY, targets.length) }, runWorker));
   return out;
+}
+
+/**
+ * zx_20261109_1 B3：**未核汇总**的唯一构造处（finalize 门与收口门共用一份文案）。
+ * 写明「几个未核 / 成因分布 / 是否熔断」，并**不含**失败字形（承 rr 汇总器按失败字形计数）。
+ */
+export function summarizeUnverified(
+  results: ReadonlyArray<{ status: string; file: string; llmCheck?: { reasonCode?: SufficiencyUnavailableReason } }>,
+  breaker?: SufficiencyBreaker,
+): string | null {
+  const un = results.filter((r) => r.status === 'unknown');
+  if (un.length === 0) return null;
+  const labels: Record<SufficiencyUnavailableReason, string> = {
+    timeout: '超时/预算用尽', no_model: '无可用模型', http_error: '调用出错', undecodable: '内容不可解码',
+    // zx_20261110_2 B5：两种"主动不问"各有其名——不是失败，也不是等出来的。
+    skipped_large_doc: '文档过大未逐条问', budget_short: '预算将尽未再问',
+  };
+  const cnt = new Map<SufficiencyUnavailableReason, number>();
+  for (const r of un) {
+    const c = r.llmCheck?.reasonCode;
+    if (c) cnt.set(c, (cnt.get(c) ?? 0) + 1);
+  }
+  const causes = [...cnt.entries()].map(([k, n]) => `${labels[k]} ${n}`).join('、');
+  const causeText = causes ? `；成因：${causes}` : '';
+  const tripText = breaker?.tripped ? '；本轮因首条超时已熔断，后续未再等待' : '';
+  return `[INFO] 内容充分性未核 ${un.length} 个${causeText}${tripText}：${un.map((r) => path.basename(r.file)).join('、')}——不阻断收口，可人工复核`;
 }
 

@@ -334,8 +334,20 @@ ok(gStart >= 0 && guardSeg.includes("controller.abort(new Error('goal_deviation_
   '★abort 在守卫之外恒发（上顶也可暂停）', `守卫段长 ${guardSeg.length}`);
 // GUI 两处：搭 settlePause 的同一次写
 ok((pip.match(/grantGoalDeviationQuota\(ctx\)/g) || []).length === 2, '★GUI 两处恢复入口均返还额度（搭 settlePause 同一次 ctxJson 写）');
-// IM 六处：统一走 resumeWithQuota，且仓内再无裸置 pending 的恢复写法
-ok((imr.match(/resumeWithQuota\(/g) || []).length === 6, '★IM 六处恢复入口均返还额度（统一写法）', `命中 ${(imr.match(/resumeWithQuota\(/g) || []).length} 处`);
+// IM 恢复入口：统一走 resumeWithQuota，且仓内再无裸置 pending 的恢复写法。
+// zx_20261112_1 B3 增第 7 个入口（IM「继续/恢复」）——逐成员在册，不是把计数放宽。
+const imQuotaSites: Array<[string, string]> = [
+  ['resumeWithQuota(ctx.db, taskId);', 'IM「暂停/继续」（B3 新增）'],
+  ["resumeWithQuota(db, task.id, { answer: { source: 'im', decision: 'confirm' } });", '审批确认'],
+  ['resumeWithQuota(ctx.db, r.taskId, { answer:', '回退路径选项/确认'],
+  ['resumeWithQuota(db, task.id);', '编号启动'],
+  ["resumeWithQuota(db, task.id, { answer: { source: 'im', decision: 'reply' } });", '直接回复'],
+  ['resumeWithQuota(ctx.db, task.id);', '启动指令·指定任务'],
+  ['resumeWithQuota(ctx.db, t.id);', '启动指令·唯一任务自动'],
+];
+const imQuotaCount = (imr.match(/resumeWithQuota\(/g) || []).length;
+ok(imQuotaCount === imQuotaSites.length, `★IM ${imQuotaSites.length} 处恢复入口均返还额度（统一写法）`, `命中 ${imQuotaCount} 处`);
+for (const [needle, label] of imQuotaSites) ok(imr.includes(needle), `IM 恢复入口在册：${label}`);
 ok(!stripComments(imr).includes("SET status = 'pending'"), 'IM 侧不再有裸 `UPDATE ... status=pending`（恢复必返还）');
 ok(pst.includes('export function grantGoalDeviationQuota') && pst.includes('export function resumeWithQuota'), '返还规则落 pause-settlement（脱 electron、可回归）');
 // 去注释后断言：上文注释里正解释"为什么不用 json_set"，那是叙述不是代码

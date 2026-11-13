@@ -1,14 +1,16 @@
 import type Database from 'better-sqlite3';
 import { Elysia, t } from 'elysia';
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { encryptApiKey, decryptApiKey, hmacAuth } from '../utils/security.js';
 import { notFound, AppError, ErrorCode } from '../utils/errors.js';
 import { AuditService } from '../services/audit.js';
 import { validateCapabilities } from '../services/model-capabilities.js';
+import { getRecommendedConfig, providerCurrencyOf } from '../services/recommended-config.js';
 import { parsePagination, paginationClause, paginationArgs, pageMeta } from '../utils/pagination.js';
+// zx_20261113_2 M6：端点测试的协议自适应（Ollama 原生 /api/embed 不再 GET .../models）。
+import { buildEndpointTestRequest } from '../services/endpoint-test.js';
+// zx_20261112_2 B4：调用数按两本账（计费 + 质量）——算法一处。
+import { callCountOf } from '../services/model-ref.js';
 
 /**
  * M15-⑦: `capabilities` 的**形状**（非空数组）由 schema 挡；**取值域**由 handler 里
@@ -16,37 +18,6 @@ import { parsePagination, paginationClause, paginationArgs, pageMeta } from '../
  *   元素不写成 `t.Union` 一大堆字面量：那会把词表在 schema 里再抄一份（正是本项要消掉的病）。
  */
 const capabilitiesShape = t.Array(t.String(), { minItems: 1 });
-
-// 加载推荐模型配置（缓存）
-let _recommendedConfigCache: {
-  providers: Array<{
-    id: string;
-    name: string;
-    base_url: string;
-    website: string;
-    protocol: string;
-    api_key_guide: unknown;
-  }>;
-  models: Array<{
-    id: string;
-    provider_id: string;
-    name: string;
-    capabilities: string[];
-    context_window: number;
-    max_output_tokens: number;
-    input_price_per_1k: number;
-    output_price_per_1k: number;
-    description: string;
-  }>;
-  use_cases: unknown[];
-} | null = null;
-function getRecommendedConfig() {
-  if (!_recommendedConfigCache) {
-    const configPath = resolve(dirname(fileURLToPath(import.meta.url)), '../data/recommended-models.json');
-    _recommendedConfigCache = JSON.parse(readFileSync(configPath, 'utf-8'));
-  }
-  return _recommendedConfigCache!;
-}
 
 export function modelsRoutes(db: Database.Database) {
   const audit = new AuditService(db);
@@ -63,7 +34,8 @@ export function modelsRoutes(db: Database.Database) {
         SELECT p.*,
           (SELECT COUNT(*) FROM ans_ai_models m JOIN ans_model_endpoints e ON e.model_id = m.id
             WHERE m.provider_id = p.id AND m.status = 'active' AND m.enabled = 1 AND e.status = 'active') as available_models,
-          (SELECT COUNT(*) FROM ans_model_quality_logs q JOIN ans_ai_models mq ON q.model_id = mq.id WHERE mq.provider_id = p.id) as _call_count,
+          (SELECT COUNT(*) FROM ans_model_quality_logs q JOIN ans_ai_models mq ON q.model_id = mq.id WHERE mq.provider_id = p.id) as _quality_count,
+          (SELECT COUNT(*) FROM ans_billing_records b JOIN ans_ai_models mb ON b.model_id = mb.id WHERE mb.provider_id = p.id) as _billing_count,
           (SELECT ROUND(1.0 * SUM(q2.success) / NULLIF(COUNT(*), 0), 4) FROM ans_model_quality_logs q2 JOIN ans_ai_models mq2 ON q2.model_id = mq2.id WHERE mq2.provider_id = p.id AND q2.success IS NOT NULL) as _success_rate,
           (SELECT COALESCE(SUM(b.cost), 0) FROM ans_billing_records b JOIN ans_ai_models mb ON b.model_id = mb.id WHERE mb.provider_id = p.id) as _cost,
           (SELECT COALESCE(SUM(b2.tokens_in + b2.tokens_out), 0) FROM ans_billing_records b2 JOIN ans_ai_models mb2 ON b2.model_id = mb2.id WHERE mb2.provider_id = p.id) as _tokens
@@ -73,10 +45,13 @@ export function modelsRoutes(db: Database.Database) {
       `,
           )
           .all() as Array<Record<string, unknown>>;
+        const config = getRecommendedConfig();
         return {
           data: rows.map((r) => {
-            const { _call_count, _success_rate, _cost, _tokens, ...rest } = r;
-            const callCount = (_call_count as number) || 0;
+            // zx_20261112_2 B4：调用数按**两本账取较大者**——同一批调用可能两处都写（归档前服务即如此），
+            //   相加会双计；取 max 在「只计费 / 两份都写 / 只质量」三种形态下都对。
+            const { _quality_count, _billing_count, _success_rate, _cost, _tokens, ...rest } = r;
+            const callCount = callCountOf(_quality_count as number, _billing_count as number);
             const stats = {
               call_count: callCount,
               success_rate: (_success_rate as number | null) ?? null,
@@ -85,6 +60,8 @@ export function modelsRoutes(db: Database.Database) {
             };
             return {
               ...rest,
+              // zx_20261107_1 B6：币种随行回传；目录里没有该 id（用户自建 UUID）⇒ null，不臆造。
+              currency: providerCurrencyOf(config, typeof r.id === 'string' ? r.id : null),
               available: r.status === 'active' && (r.enabled ?? 1) !== 0 && (r.available_models as number) > 0,
               stats,
             };
@@ -186,7 +163,8 @@ export function modelsRoutes(db: Database.Database) {
             `
         SELECT m.*,
           (SELECT COUNT(*) FROM ans_model_endpoints e WHERE e.model_id = m.id AND e.status = 'active') as endpoint_count,
-          (SELECT COUNT(*) FROM ans_model_quality_logs q WHERE q.model_id = m.id) as _call_count,
+          (SELECT COUNT(*) FROM ans_model_quality_logs q WHERE q.model_id = m.id) as _quality_count,
+          (SELECT COUNT(*) FROM ans_billing_records b WHERE b.model_id = m.id) as _billing_count,
           (SELECT ROUND(1.0 * SUM(q.success) / NULLIF(COUNT(*), 0), 4) FROM ans_model_quality_logs q WHERE q.model_id = m.id AND q.success IS NOT NULL) as _success_rate,
           (SELECT ROUND(AVG(q.latency_ms), 0) FROM ans_model_quality_logs q WHERE q.model_id = m.id AND q.latency_ms IS NOT NULL AND q.latency_ms > 0) as _avg_latency,
           (SELECT ROUND(AVG(q.token_efficiency), 4) FROM ans_model_quality_logs q WHERE q.model_id = m.id AND q.token_efficiency IS NOT NULL) as _token_eff,
@@ -199,8 +177,10 @@ export function modelsRoutes(db: Database.Database) {
           )
           .all(...paginationArgs(page)) as Array<Record<string, unknown>>;
         const data = rows.map((r) => {
-          const { _call_count, _success_rate, _avg_latency, _token_eff, _cost, _tokens, ...rest } = r;
-          const callCount = (_call_count as number) || 0;
+          // zx_20261112_2 B4：调用数 = 计费行与质量行**取较大者**（同一批调用不双计，同 `GET /providers`）。
+          const { _quality_count, _billing_count, _success_rate, _avg_latency, _token_eff, _cost, _tokens, ...rest } = r;
+          const qualityCount = (_quality_count as number) || 0;
+          const callCount = callCountOf(qualityCount, _billing_count as number);
           const stats = {
             call_count: callCount,
             success_rate: (_success_rate as number | null) ?? null,
@@ -210,7 +190,9 @@ export function modelsRoutes(db: Database.Database) {
           };
           // C2: 质量评分（成功率0.5 + 延迟0.3 + token效率0.2 加权归一，0-100）；无使用数据 → null（resource-matcher 行为不变）
           let quality_score: number | null = null;
-          if (callCount > 0) {
+          // zx_20261112_2 B4：质量分只在**有质量行**时算——只有计费行时成功率是 null，
+          //   拿 0 冒充会把"没评过"算成 0 分（比不显示更坏）。
+          if (qualityCount > 0) {
             const succ = (_success_rate as number | null) ?? 0;
             const latScore = Math.max(0, 1 - ((_avg_latency as number) || 0) / 10_000);
             const effScore = Math.min(1, Math.max(0, (_token_eff as number) ?? 0));
@@ -416,11 +398,14 @@ export function modelsRoutes(db: Database.Database) {
         return { data: { id, status: 'disabled' } };
       })
       .post('/endpoints/:id/test', async ({ params: { id } }) => {
-        // C4 (2026-09-01): 端点连通性测试——GET {url}/models 探测，持久化健康状态
+        // C4 (2026-09-01): 端点连通性测试，持久化健康状态
+        // zx_20261113_2 M6：请求由 `buildEndpointTestRequest` 按端点协议自适应——
+        //   Ollama 原生 /api/embed 走 POST，OpenAI 兼容基址仍走 GET {base}/models。
         const ep = db.prepare("SELECT * FROM ans_model_endpoints WHERE id = ? AND status = 'active'").get(id) as
-          | { id: string; url: string; api_key_ref: string }
+          | { id: string; model_id: string; url: string; api_key_ref: string }
           | undefined;
         if (!ep) throw notFound('Endpoint', id);
+        const modelName = (db.prepare('SELECT name FROM ans_ai_models WHERE id = ?').get(ep.model_id) as { name?: string } | undefined)?.name || '';
         let apiKey: string;
         try {
           apiKey = decryptApiKey(ep.api_key_ref);
@@ -439,8 +424,13 @@ export function modelsRoutes(db: Database.Database) {
         let success = false;
         let errorMsg = '';
         try {
-          const r = await fetch(ep.url.replace(/\/$/, '') + '/models', {
-            headers: { Authorization: `Bearer ${apiKey}` },
+          const testReq = buildEndpointTestRequest(ep.url, modelName);
+          const r = await fetch(testReq.url, {
+            method: testReq.method,
+            headers: testReq.body === undefined
+              ? { Authorization: `Bearer ${apiKey}` }
+              : { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+            body: testReq.body === undefined ? undefined : JSON.stringify(testReq.body),
             signal: AbortSignal.timeout(5_000),
           });
           success = r.ok;
@@ -506,9 +496,15 @@ export function modelsRoutes(db: Database.Database) {
             provider_website: providerConfig?.website || '',
             api_key_guide: providerConfig?.api_key_guide || null,
             has_endpoint: (m.endpoint_count as number) > 0,
+            // zx_20261107_1 B6：逐行币种 + 顶层映射同源于目录 JSON（界面不再自抄一份）。
+            currency: providerCurrencyOf(config, typeof m.provider_id === 'string' ? m.provider_id : null),
           };
         });
-        return { data: enriched, use_cases: config.use_cases };
+        return {
+          data: enriched,
+          use_cases: config.use_cases,
+          provider_currency: config.provider_currency ?? {},
+        };
       })
   );
   // zx_20260924 M6-b: 此处原有一个 `.post('/optimal')`，**已删**——它是 `/api/v1/models/optimal`

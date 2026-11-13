@@ -35,6 +35,23 @@ export interface BuildPin {
 export const ROUND_RE = /^zx_\d{8}(_\d+)?$/;
 
 /**
+ * 方向性比较：`tag` **不早于** `round`。
+ *
+ * 旧轮次的复跑脚本用它表达"当前 build 快照不倒退"——若写成 `tag === SELF_ROUND`，
+ * 那是一条**只对下一轮引爆**的哑雷（本轮一开新轮即必红）。日期先比、同日按 `_x` 后缀。
+ */
+export function buildNotOlderThan(tag: string, round: string): boolean {
+  const parse = (t: string): { date: number; seq: number } | null => {
+    const m = /^zx_(\d{8})(?:_(\d+))?$/.exec(t);
+    return m ? { date: Number(m[1]), seq: m[2] ? Number(m[2]) : 0 } : null;
+  };
+  const a = parse(tag);
+  const b = parse(round);
+  if (!a || !b) return false;
+  return a.date > b.date || (a.date === b.date && a.seq >= b.seq);
+}
+
+/**
  * 行保持式去注释：逐行推进块注释状态，**行号不移位**。
  * 既有脚本的 `stripComments` 用 `/\*[\s\S]*?\*\//` 整体替换会吞掉块注释内的换行，
  * 令其后所有行号前移（本轮实测：11_5 的 `540` 被扫成 `500`），故本模块不复用它。

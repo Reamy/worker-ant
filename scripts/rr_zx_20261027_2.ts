@@ -124,8 +124,12 @@ function main(): void {
     const detail = CODE(`${A}/renderer/src/pages/TaskDetailPage.tsx`);
     ok(list.includes("(t.status==='completed'||t.status==='failed'||t.status==='archived')&&<button onClick={()=>handleDelete(t.id)}"),
       'A-1 ★列表删除钮闸门含 archived');
-    ok(detail.includes("(task.status==='completed'||task.status==='failed'||task.status==='archived') && <button onClick={() => handleDelete(task.id)}"),
-      'A-2 ★详情删除钮闸门含 archived');
+    // zx_20261112_1 B4：详情动作栏改由 `taskActionLayout` 唯一派生；判据随真源前移，
+    //   仍钉「completed/failed/archived 三态可删」这一同一道闸门（不收窄、不放宽）。
+    const actions = CODE(`${A}/renderer/src/lib/task-actions.ts`);
+    ok(/if \(\['completed', 'failed', 'archived'\]\.includes\(s\)\) danger\.push\('delete'\)/.test(actions)
+      && detail.includes('taskActionLayout(task.status)'),
+      'A-2 ★详情删除钮闸门含 archived（真源：task-actions 的 danger 映射，页面只用该布局）');
     ok(list.includes('其全部子任务') && detail.includes('其全部子任务'),
       'A-3 两处确认文案先说明"子任务一并清除"');
   }

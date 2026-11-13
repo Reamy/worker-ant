@@ -103,3 +103,84 @@ export function normalizeSnippet(text: string, max = 150): string {
   const single = (text || '').replace(/\s+/g, ' ').trim();
   return single.length > max ? `${single.slice(0, max)}…` : single;
 }
+
+/**
+ * zx_20261110_1 B6（维特根斯坦·意义即使用）: 推送正文的**净化**——只留人能读的字。
+ *
+ * 病根（`data/baseline_zx_20261110_1_im_push.md`）：完成推送把产出文件前若干字原样搬上手机屏，
+ *   于是 `# ERP…` 标题、`| 项 | 值 |` 表格、``` 围栏、`#!/usr/bin/env python3`、SQL `-- ====`
+ *   与 JSON 键值行都成了"消息正文"。`normalizeSnippet` 只压空白/截长，格式净 ≠ 内容可读。
+ *
+ * 边界：**净化的只是展示形态**，不改事实——不在这里判断"有没有产出/达没达成"。
+ * 无字可读时返回空串（调用方如实说"未附摘要"，不编一句）。
+ */
+export function plainTextSnippet(text: string, max = 180): string {
+  let s = (text || '').replace(/\r\n?/g, '\n');
+  // 围栏代码块（含内容）整段丢弃——代码不是摘要。
+  s = s.replace(/```[\s\S]*?(```|$)/g, '');
+  // zx_20261110_1 B6-反证：只丢"明显是代码/语法"的行，正常中文句子必须原样留下。
+  const codeLine = /^\s*(?:"""|'''|#!|#\s*-\*-|-\*-|--\s|\/\*|\*\/|\}|\{|\[{1,2}"|"[^"]*"\s*:|import\s+\S|from\s+\S+\s+import\s|def\s+\w+\s*\(|class\s+\w+|public\s|private\s|protected\s|func\s+\w+\s*\(|function\s+\w+\s*\(|(?:const|let|var)\s+\w+\s*=|SELECT\b|INSERT\b|UPDATE\b|DELETE\b|CREATE\b|ALTER\b|DROP\b|PRAGMA\b|\w+\s*\([^)]*\)\s*[;{]?\s*$)/i;
+  s = s
+    .split('\n')
+    .filter((line) => {
+      const t = line.trim();
+      if (!t) return false;
+      if (/^[=\-_*~]{3,}$/.test(t)) return false; // 分隔线 / setext 下划线
+      if (/^\|.*\|\s*$/.test(t)) return false; // 表格行
+      if (/^\|?[\s:|-]+\|?$/.test(t) && t.includes('-')) return false; // 表格分隔行
+      if (codeLine.test(t)) return false; // shebang / SQL / JSON / 代码
+      return true;
+    })
+    .join('\n');
+  s = s
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, '') // 图片
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1') // 链接 → 文字
+    .replace(/^\s{0,3}#{1,6}\s*/gm, '') // 标题符
+    .replace(/^\s{0,3}>\s?/gm, '') // 引用
+    .replace(/^\s{0,3}(?:[-*+•]|\d{1,2}[.、)])\s+/gm, '') // 列表符
+    .replace(/`{1,3}/g, '') // 反引号
+    .replace(/\*\*(?=\S)([\s\S]*?\S)\*\*/g, '$1') // 成对强调符；单/双下划线可能属文件名，不盲剥
+    .replace(/(^|[\s(（])__(?=\S)(.*?\S)__(?=$|[\s)），。])/g, '$1$2')
+    .replace(/~~(?=\S)([\s\S]*?\S)~~/g, '$1')
+    .replace(/https?:\/\/\S+/g, '') // 裸 URL
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{2,}/g, '\n')
+    .trim();
+  if (s.length > max) s = `${s.slice(0, max).trimEnd()}…`;
+  return s;
+}
+
+/**
+ * zx_20261110_1 B6: 从完成摘要里抽 ≤ `max` 条"做了什么"要点。
+ *
+ * 优先取列表项（`-`/`*`/`•`/`1.`）；没有列表项才按句号/分号切句。
+ * 每条都过一遍 `plainTextSnippet` 并去重——同一句既在摘要行又在正文里时只播一次。
+ */
+export function extractKeyPoints(text: string, max = 3): string[] {
+  const raw = (text || '').replace(/\r\n?/g, '\n');
+  // 列表项在**原文**上认（plainTextSnippet 会把列表符一并剥掉）。
+  const bullets = raw
+    .split('\n')
+    .filter((l) => /^\s*(?:[-*+•]|\d{1,2}[.、)])\s+/.test(l))
+    .map((l) => l.replace(/^\s*(?:[-*+•]|\d{1,2}[.、)])\s+/, '').trim());
+  let candidates = bullets;
+  if (candidates.length === 0) {
+    const clean = plainTextSnippet(raw, 800);
+    if (!clean) return [];
+    candidates = [];
+    for (const line of clean.split('\n')) {
+      for (const seg of line.split(/(?<=[。！？!?；;])\s*/)) {
+        const t = seg.trim();
+        if (t) candidates.push(t);
+      }
+    }
+  }
+  const out: string[] = [];
+  for (const c of candidates) {
+    const one = plainTextSnippet(c, 90);
+    if (!one || out.includes(one)) continue;
+    out.push(one);
+    if (out.length >= max) break;
+  }
+  return out;
+}

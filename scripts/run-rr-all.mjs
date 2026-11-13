@@ -25,8 +25,10 @@
  *   node scripts/run-rr-all.mjs --jobs 12      # 换并发
  *   node scripts/run-rr-all.mjs 2026091        # 只跑名字含该子串的（可给多个）
  *   node scripts/run-rr-all.mjs --keep         # 保留日志目录并在结束时报出路径
+ *   node scripts/run-rr-all.mjs --fail-fast    # 首次失败后不再调度新脚本（在跑者跑完）
  *
- * 输出：每个脚本一份完整日志落在系统临时目录；失败脚本就地打印尾部。
+ * 输出：每个脚本一份完整日志落在系统临时目录；失败脚本就地打印
+ *   `✗` 断言行（最多 20 行）→ 汇总账上下文 → 尾部 30 行（补充）。
  */
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -42,12 +44,14 @@ const ROOT = path.join(HERE, '..');
 // 变成"过滤词含 2 ⇒ 几乎全跑"（实测踩到：`--jobs 2` 跑了 56 个而不是子集）。
 const filters = [];
 let keep = false;
+let failFast = false;
 let jobs = 8;
 {
   const argv = process.argv.slice(2);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--keep') keep = true;
+    else if (a === '--fail-fast') failFast = true;
     else if (a === '--jobs') {
       const n = Number(argv[++i]);
       if (!Number.isInteger(n) || n < 1) {
@@ -93,6 +97,8 @@ const TALLY_RES = [
   /(\d+)\s*PASS\s*\/\s*(\d+)\s*FAIL/gi, // 结果：348 PASS / 0 FAIL
   /pass\s*=\s*(\d+)\s+FAIL\s*=\s*(\d+)/gi, // 结果: pass=100 fail=0
   /PASS\s*=\s*(\d+)\s+FAIL\s*=\s*(\d+)/gi, // PASS=12 FAIL=0
+  // zx_20261107_1 起新套件的统一收尾行：`[rr_zx_…] 18 passed, 0 failed`
+  /(\d+)\s+passed,\s*(\d+)\s+failed/gi,
 ];
 /** 取日志中**最靠后**出现的那个汇总（前面的可能是夹具复述）。 */
 function parseTally(text) {
@@ -119,6 +125,24 @@ function countFailMarks(text) {
   return (text.match(/✗/g) || []).length;
 }
 
+/**
+ * 失败时第一眼该看的东西：`✗` 断言行（最多 20）+ 汇总账上下文。
+ * 尾部 30 行仍保留作补充——有些脚本的失败原因写在收摊栈里，不在断言行上。
+ */
+function failureExcerpt(text) {
+  const lines = text.split('\n');
+  const markLines = lines.filter((l) => l.includes('✗'));
+  const tallyCtx = lines
+    .filter((l) =>
+      TALLY_RES.some((re) => {
+        re.lastIndex = 0; // 这些正则是 /g，test 会推进 lastIndex
+        return re.test(l);
+      }),
+    )
+    .slice(-3);
+  return { lines, markLines, tallyCtx };
+}
+
 // ── 编排 ──────────────────────────────────────────────────────────────
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 const logDir = fs.mkdtempSync(path.join(os.tmpdir(), `rr-all-${stamp}-`));
@@ -133,6 +157,9 @@ function runOne(name) {
     const child = spawn(TSX, [path.join('scripts', name)], {
       cwd: ROOT,
       stdio: ['ignore', 'pipe', 'pipe'],
+      // zx_20261110_2 B8: 回归日志与桌面生产日志分文件（`rr.<date>.log` vs `worker-ant.<date>.log`）。
+      //   同一个 `data/logs/` 目录下各写各的——上一轮回归把当天生产日志灌满，排查线上问题时谁也读不了。
+      env: { ...process.env, WA_LOG_FILE_PREFIX: 'rr' },
     });
     child.stdout.pipe(out);
     child.stderr.pipe(out);
@@ -170,6 +197,8 @@ const tty = process.stdout.isTTY === true;
 await Promise.all(
   Array.from({ length: Math.min(jobs, scripts.length) }, async () => {
     while (cursor < scripts.length) {
+      // --fail-fast：一有失败就不再调度新脚本；已在跑的由各自 worker 收尾记账。
+      if (failFast && results.some((r) => r.failed)) break;
       const name = scripts[cursor++];
       const r = await runOne(name);
       results.push(r);
@@ -203,13 +232,30 @@ if (noTally.length) {
   for (const r of noTally) console.log(`  ${r.base}  exit=${r.code}  ${r.logPath}`);
 }
 
+const skipped = scripts.length - results.length;
+if (skipped > 0) {
+  console.log(`\n⚠ --fail-fast 提前终止：已跑 ${results.length} 个，未调度 ${skipped} 个。`);
+}
+
 if (failed.length) {
   console.log(`\n✗ ${failed.length} 个脚本未通过：`);
   for (const r of failed) {
     console.log(
       `\n──── ${r.base}  exit=${r.code}  账=${r.tally ? `${r.tally.pass}/${r.tally.fail}` : '未解析'}  失败记号=${r.marks}  ${r.logPath}`,
     );
-    const lines = fs.readFileSync(r.logPath, 'utf-8').trimEnd().split('\n');
+    const { lines, markLines, tallyCtx } = failureExcerpt(fs.readFileSync(r.logPath, 'utf-8'));
+    if (markLines.length) {
+      const shown = markLines.slice(0, 20);
+      console.log(`    ── 失败断言（${markLines.length} 行，显示前 ${shown.length}）──`);
+      for (const l of shown) console.log(`    ${l}`);
+    } else {
+      console.log('    ── 无 ✗ 记号（失败来自退出码或汇总账）──');
+    }
+    if (tallyCtx.length) {
+      console.log('    ── 汇总账上下文 ──');
+      for (const l of tallyCtx) console.log(`    ${l}`);
+    }
+    console.log('    ── 日志尾部 30 行（补充）──');
     for (const l of lines.slice(-30)) console.log(`    ${l}`);
   }
   console.log(

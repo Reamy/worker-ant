@@ -20,7 +20,10 @@ import { MEM_DELETE_REASONS, MEM_LIVE_SQL, tombstoneMemory } from '../core/memor
 // zx_20261012_1 批一（M29）: 记忆子系统失败计数快照上屏（如实排障口径；**不新增 GUI 卡片**）。
 import { memoryFailureSnapshot } from '../core/memory-failure.js';
 // zx_20261018_3 批一: 记忆注入账的读者（`source='memory'` 的明细行 + 主动引用分账）。
-import { memoryInjectionStats } from '../core/memory-injection-stats.js';
+import { injectionRoi, memoryInjectionStats } from '../core/memory-injection-stats.js';
+// zx_20261108_1 B4「忆」: 记忆列表服务端筛选 / 单条详情 / 人工写口 / 容量，**实现全在 core**
+//   （本文件顶层 import electron ⇒ 受控回归跑不起来；此处只转发，且回归与面板同引那一份）。
+import { listMemories, memoryCapacity, memoryDetail, mutateMemory, type MemoryListFilter, type MemoryMutation } from '../core/memory-admin.js';
 // zx_20260924_1 M6（F7）: 自省两本账的读取面——审查报表与自愈日志此前只写不读，现由诊断页消费。
 import { readLatestSimplificationReport } from '../core/simplification-audit.js';
 import { readRecentHealingLogs, logHealthTransitions, logInvariantTransitions } from '../core/self-healing-monitor.js';
@@ -166,26 +169,47 @@ export function initAdminIpc(db: Database.Database, healthDeps: AdminHealthDeps 
     }
   });
 
-  ipcMain.handle('admin:memories', async (_event, { projectId, type, offset, limit }: { projectId?: string; type?: string; offset?: number; limit?: number }) => {
+  // zx_20261108_1 B4: 服务端筛选（关键词/来源/时刻/项目/类型）+ 分页，**实现全在 `core/memory-admin.ts`**。
+  //   此前关键词只在渲染层过滤「当前页 50 条」⇒ 全库第 51 条起永远搜不到；
+  //   且 `total` 与列表虽已同源（zx_20260930 M8），新筛选维度不得再各自手拼 WHERE。
+  //   兼容旧调用：返回仍含 `list`/`counts`/`total`，另给 `items` 别名与 `keywordMode`（fts/like/none）。
+  ipcMain.handle('admin:memories', async (_event, input?: Partial<MemoryListFilter>) => {
     try {
-      // zx_20260930 M8: 两句收口。
-      // ① **不点名类型 ⇒ 常规列表，不含墓碑**；点名 `type='deleted'` 即**审计面**（墓碑清单）。
-      //    这正是"墓碑只在审计面可查"的落点：列表默认看不见它，但要查时点名就能查到。
-      // ② `total` 改为**与列表同一套 WHERE**——此前它是全库计数、与筛选无关，
-      //    于是带筛选的翻页总数恒错（M4-2 加了真翻页后这会直接把页数算错）。
-      const where: string[] = [];
-      const params: unknown[] = [];
-      if (projectId) { where.push('m.project_id = ?'); params.push(projectId); }
-      if (type) { where.push('m.memory_type = ?'); params.push(type); }
-      else { where.push(`m.${MEM_LIVE_SQL}`); }
-      const whereSql = ` WHERE ${where.join(' AND ')}`;
-      const list = db.prepare(
-        `SELECT m.*, p.name as project_name FROM wa_memories m LEFT JOIN wa_projects p ON m.project_id = p.id${whereSql} ORDER BY m.created_at DESC LIMIT ? OFFSET ?`,
-      ).all(...params, limit || 50, offset || 0);
-      const total = (db.prepare(`SELECT COUNT(*) as c FROM wa_memories m${whereSql}`).get(...params) as { c: number }).c;
-      // 类型卡**保留全部取值**（含 `deleted`）——它同时是筛选条的取值来源，墓碑那一格必须点得到。
-      const counts = db.prepare('SELECT memory_type, COUNT(*) as cnt FROM wa_memories GROUP BY memory_type').all();
-      return { data: { list, counts, total } };
+      // zx_20260930 M8 纪律保留：**不点名类型 ⇒ 常规列表，不含墓碑**；点名 `type='deleted'` 即墓碑审计面。
+      const result = listMemories(db, input ?? {});
+      // B4 方案要求的兼容别名 `rows`（既有页面读 `list`，两处同源同一数组，不做第二份取数）。
+      return { data: { ...result, rows: result.list } };
+    } catch (err) {
+      return { error: { code: 'INTERNAL', message: (err as Error).message } };
+    }
+  });
+
+  // zx_20261108_1 B4: 单条详情——来源人话名 / 项目归属 / 注入历史与 ROI / 人工改账历史。
+  ipcMain.handle('admin:memoryDetail', async (_event, id: string) => {
+    try {
+      const detail = memoryDetail(db, String(id ?? ''));
+      if (!detail) return { error: { code: 'NOT_FOUND', message: '记忆不存在' } };
+      return { data: detail };
+    } catch (err) {
+      return { error: { code: 'INTERNAL', message: (err as Error).message } };
+    }
+  });
+
+  // zx_20261108_1 B4: 人工写口（新增/修订/遗忘）——一律写审计；失败用 `{ok:false,error}` 交流。
+  ipcMain.handle('admin:memoryMutate', async (_event, input: MemoryMutation) => {
+    try {
+      const result = mutateMemory(db, input);
+      if (!result.ok) return { error: { code: 'MUTATE_REJECTED', message: result.error } };
+      return { data: result };
+    } catch (err) {
+      return { error: { code: 'INTERNAL', message: (err as Error).message } };
+    }
+  });
+
+  // zx_20261108_1 B4: 容量与索引健康（只读；按类型/来源/项目 + FTS 健康 + 重复候选）。
+  ipcMain.handle('admin:memoryCapacity', async () => {
+    try {
+      return { data: memoryCapacity(db) };
     } catch (err) {
       return { error: { code: 'INTERNAL', message: (err as Error).message } };
     }
@@ -710,8 +734,10 @@ export function initAdminIpc(db: Database.Database, healthDeps: AdminHealthDeps 
       // zx_20260930 M8: 落墓碑（原为物理删）——留 id / 时刻 / 缘由 / 内容指纹，清正文与向量。
       //   由此机器（`background-review` 的 LLM 提取、工作笔记沉淀）**再也提不回同一段内容**：
       //   `storeText` 按指纹拦在本项目内（见 `MemoryManager.storeText`）。
-      const ok = tombstoneMemory(db, id, MEM_DELETE_REASONS.userMemory);
-      return { data: { id, deleted: ok } };
+      // zx_20261108_1 B4: 改走人工写口——墓碑之外**补一条审计**（谁删的/何时/缘由），
+      //   旧调用方拿到的 `{id, deleted}` 形状不变。
+      const r = mutateMemory(db, { op: 'forget', id, reason: MEM_DELETE_REASONS.userMemory });
+      return { data: { id, deleted: r.ok } };
     } catch (err) { return { error: { code: 'INTERNAL', message: (err as Error).message } }; }
   });
 
@@ -972,6 +998,16 @@ export function initMemoryIpc(db: Database.Database, memory: MemoryManager): voi
     try {
       const projectId = typeof input?.projectId === 'string' && input.projectId ? input.projectId : undefined;
       return { data: memoryInjectionStats(db, projectId) };
+    } catch (err) { return { error: { code: 'INTERNAL', message: (err as Error).message } }; }
+  });
+
+  // zx_20261107_1 B4: 注入 ROI——来源合计全档可看；每任务明细先过 Team「审计视图」闸再查库。
+  //   只读：不改写任何注入行、不降权、不删记忆。
+  ipcMain.handle('memory:injectionRoi', async (_event, input?: { projectId?: unknown; limit?: unknown }) => {
+    try {
+      const projectId = typeof input?.projectId === 'string' && input.projectId ? input.projectId : undefined;
+      const limit = typeof input?.limit === 'number' ? input.limit : undefined;
+      return { data: injectionRoi(db, db, projectId, { limit }) };
     } catch (err) { return { error: { code: 'INTERNAL', message: (err as Error).message } }; }
   });
 

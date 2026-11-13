@@ -220,7 +220,7 @@ export function evaluateMultiSegment(command: string, tool: ShellTool, cwd: stri
       const advice = '系统管理命令被沙箱拦截（sudo/apt/docker 等）。请用 ask_user→run_privileged 请求批准。';
       return fail(seg, i, { error: advice }, advice);
     }
-    const ch = firstRejectedCharInSegment(seg, tool);
+    const ch = firstRejectedCharInSegment(stripSafeRedirections(seg), tool);
     if (ch) {
       const advice = shellRejectAdvice(ch, tool, cwd);
       return fail(seg, i, shellRejectPayloadForChar(ch, tool, cwd), advice, ch);
@@ -229,10 +229,18 @@ export function evaluateMultiSegment(command: string, tool: ShellTool, cwd: stri
   return { ok: true, segments };
 }
 
+/**
+ * zx_20261113_2 M9：去掉**安全的 fd 重定向**（`2>&1` / `1>&2`），仅供**校验**使用；
+ * 执行仍用原命令。它们只是合并 stderr/stdout，不引入第二条命令，不该被 `&` 字符闸误伤。
+ */
+export function stripSafeRedirections(command: string): string {
+  return (command || '').replace(/(^|\s)(?:2>&1|1>&2)(?=\s|$)/g, ' ');
+}
+
 /** 该工具**按字符**拒绝的第一个字符（按命令中的出现顺序）；无则 `null`。 */
 export function firstRejectedShellChar(command: string, tool: ShellTool): string | null {
   const set = new Set(SHELL_REJECT_CHARS[tool]);
-  for (const ch of command) if (set.has(ch)) return ch;
+  for (const ch of stripSafeRedirections(command)) if (set.has(ch)) return ch;
   return null;
 }
 
@@ -259,13 +267,20 @@ function displayChar(ch: string): string {
  */
 export function shellRejectAdvice(char: string, tool: ShellTool, cwd: string): string {
   const d = displayChar(char);
-  const how = tool === 'execute_command' && char === '|'
-    ? '本工具不支持管道，需要管道请改用 `bash` 工具（它支持 `|`）。'
-    : char === '|'
-      ? '不支持管道。'
-      : char === '`' || char === '$'
-        ? '不支持命令替换，请直接写命令、不要用替换结果。'
-        : '请拆成多次单独调用（一次一条命令）。';
+  let how: string;
+  if (tool === 'execute_command' && char === '|') {
+    how = '本工具不支持管道，需要管道请改用 `bash` 工具（它支持 `|`）。';
+  } else if (char === '|') {
+    how = '不支持管道。';
+  } else if (char === '`' || char === '$') {
+    how = '不支持命令替换，请直接写命令、不要用替换结果。';
+  } else if (tool === 'bash' && (char === ';' || char === '&' || char === '\n')) {
+    // zx_20261113_2 M9：旧文案只说「拆成多次」，模型会继续用 bash 试——
+    //   点名正确工具（execute_command 支持多段），把"猜规矩"变成"读规矩"。
+    how = '要串联多步请改用 `execute_command`（开关 engine.shell_multi_segment 开启时支持 `;`/`&&` 分段）；`bash` 只做单条只读命令。';
+  } else {
+    how = '请拆成多次单独调用（一次一条命令）。';
+  }
   return `命令含${tool === 'execute_command' ? '分隔符/替换符' : '换行或分隔符'}「${d}」。${how}`
     + `当前工作目录**已是项目目录** \`${cwd}\`，一般**无需 \`cd\`**；写文件请用 \`write_file\`/\`edit_file\`。`;
 }
@@ -353,19 +368,26 @@ export function validateReadonlyBashCommand(command: string): BashVerdict {
   // zx_20260915 M5/P0-7：字符判定改用真源 `firstRejectedShellChar`（裸正则删除，判据代码只剩一处）。
   // payload 带 `char` 作**界桩**：调用方据此判断"这次拒绝是不是字符级的"，从而决定换不换文案——
   // 本函数其余七支（破坏性/解释器/$()/sed -i/find -exec/重定向/白名单）的文案一字不动（§7.3 红线）。
-  const rejCh = firstRejectedShellChar(command, 'bash');
+  // zx_20261113_2 M9：`2>&1`/`1>&2` 只是 fd 合并，不引入第二条命令——校验前去掉，执行仍用原串。
+  const check = stripSafeRedirections(command);
+  const rejCh = firstRejectedShellChar(check, 'bash');
   if (rejCh) return { ok: false, payload: { error: '命令包含换行/分隔符/命令替换，禁止执行。', char: displayChar(rejCh), deny_kind: 'illegal_char' } };
   if (/\$\s*\(/.test(command) || /\$\{/.test(command)) return { ok: false, payload: { error: '命令替换 $()/${} 禁止执行。' } };
   for (const segment of splitShellPipes(command)) {
     const s = segment.trim();
     if (!s) return { ok: false, payload: { error: '管道存在空段，命令非法。' } };
+    const sCheck = stripSafeRedirections(s);
     const name = s.split(/\s+/)[0]?.split('/').pop() || '';
     if (['sh', 'bash', 'zsh'].includes(name)) {
       return { ok: false, payload: { requires_privilege: true, command, message: '禁止直接执行shell解释器。请使用 ask_user 请求批准，用户批准后 run_privileged 执行。' } };
     }
+    if (name === 'cd') {
+      // zx_20261113_2 M9：`cd` 不是特权命令，是「用错了工具」——点名 execute_command。
+      return { ok: false, payload: { error: 'bash 不支持 cd；请改用 execute_command（它可 cd）。', deny_kind: 'not_in_whitelist' } };
+    }
     if (name === 'sed' && s.includes(' -i')) return { ok: false, payload: { error: 'sed -i 禁止，用 write_file 修改文件' } };
     if (name === 'find' && /-exec|-delete/.test(s)) return { ok: false, payload: { error: 'find -exec/-delete 禁止' } };
-    if (/>|>>/.test(s)) return { ok: false, payload: { error: '重定向被禁止，写文件请用 write_file' } };
+    if (/>|>>/.test(sCheck)) return { ok: false, payload: { error: '重定向被禁止，写文件请用 write_file' } };
     if (!SAFE_READONLY_COMMANDS.has(name) && !isReadonlyIntrospectionCommand(s)) {
       return { ok: false, payload: { error: `${name} 不在只读白名单。特权命令(安装依赖/启动服务)请用 ask_user→run_privileged。`, deny_kind: 'not_in_whitelist' } };
     }

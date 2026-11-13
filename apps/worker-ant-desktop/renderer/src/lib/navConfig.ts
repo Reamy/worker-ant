@@ -9,7 +9,7 @@
  *
  * 加/删一个导览项 = 在 `NAV_GROUPS` 里加/删 `tour` 字段一处；两处自动同源，不会分家。
  */
-import { LayoutDashboard, FolderKanban, MessageSquare, Settings, Cpu, Users, Package, Wand2, Server, Globe, Puzzle, Brain, Key, Box, User, LayoutTemplate, History, Network, Router, ScrollText, Library, Inbox } from 'lucide-react';
+import { LayoutDashboard, FolderKanban, MessageSquare, Settings, Cpu, Users, Package, Wand2, Server, Globe, Puzzle, Brain, Key, Box, User, Briefcase, LayoutTemplate, History, Network, Router, ScrollText, Library, Inbox } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
 export interface NavItem {
@@ -58,6 +58,8 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { to: '/projects', icon: FolderKanban, label: '项目', tour: '一个项目圈住一摊事：目标、记忆、产出都归它管。' },
       { to: '/tasks', icon: Box, label: '任务', tour: '把一句话交给工蚁，它自己拆解、执行、把成果交回来。' },
+      // zx_20261112_1 B1「岗」: 岗位是长期在岗的知识载体；有意不写 tour，避免首屏导览膨胀。
+      { to: '/positions', icon: Briefcase, label: '岗位' },
       { to: '/templates', icon: LayoutTemplate, label: '任务模板' },
       { to: '/deliverables', icon: Package, label: '产出物', tour: '每次干完留下的成果都汇总在这儿，可验收、可翻开。' },
       { to: '/im', icon: MessageSquare, label: 'IM渠道', tour: '接上微信／飞书／钉钉，用聊天派活、收成果。' },

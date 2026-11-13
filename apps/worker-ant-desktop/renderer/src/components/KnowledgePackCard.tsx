@@ -30,7 +30,7 @@ import type {
   KnowledgeImportResult,
 } from '../../../src/main/core/knowledge-import.js';
 
-export default function KnowledgePackCard({ projectId }: { projectId: string }) {
+export default function KnowledgePackCard({ projectId, onChanged }: { projectId: string; onChanged?: () => void }) {
   const [preview, setPreview] = useState<ProjectKnowledgePreview | null>(null);
   const [stats, setStats] = useState<KnowledgeInjectionStats | null>(null);
   const [exported, setExported] = useState<KnowledgeExportResult | null>(null);
@@ -116,12 +116,14 @@ export default function KnowledgePackCard({ projectId }: { projectId: string }) 
     try {
       setProfile(await knowledge.profileGenerate(projectId));
       setError(null);
+      // zx_20261113_4 B4：画像变了 ⇒ 首屏「业务知识」行要跟着变（不然页面还在说"未成型"）。
+      onChanged?.();
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setBusy(null);
     }
-  }, [projectId]);
+  }, [projectId, onChanged]);
 
   const doToggleProfile = useCallback(async (enabled: boolean) => {
     if (!projectId) return;
@@ -129,12 +131,13 @@ export default function KnowledgePackCard({ projectId }: { projectId: string }) 
     try {
       setProfile(await knowledge.profileEnabled(projectId, enabled));
       setError(null);
+      onChanged?.();
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setBusy(null);
     }
-  }, [projectId]);
+  }, [projectId, onChanged]);
 
   if (!projectId) return null;
 

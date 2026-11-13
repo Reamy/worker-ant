@@ -179,12 +179,12 @@ export class AnsClient {
     }
   }
 
-  async getOptimalModel(req: ModelRequirements): Promise<ModelEndpoint & { fallback?: ModelEndpoint }> {
+  async getOptimalModel(req: ModelRequirements): Promise<ModelEndpoint & { fallback?: ModelEndpoint; usedLocalFallback?: boolean }> {
     const cacheKey = JSON.stringify(req);
     const cached = this.modelCache.get(cacheKey);
     if (cached) return cached;
 
-    const result = await this.request<ModelEndpoint & { fallback?: ModelEndpoint }>('/api/v1/models/optimal', {
+    const result = await this.request<ModelEndpoint & { fallback?: ModelEndpoint; usedLocalFallback?: boolean }>('/api/v1/models/optimal', {
       method: 'POST',
       body: JSON.stringify(req),
     });

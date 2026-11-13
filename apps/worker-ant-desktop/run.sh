@@ -4,16 +4,8 @@
 set -e
 cd "$(dirname "$0")"
 
-# 检查是否在 IDE 终端中
-if [ -n "$JETBRAINS_HOME" ] || [ -n "$VSCODE_PID" ] || [ -n "$TERM_PROGRAM" ] && [ "$TERM_PROGRAM" != "Apple_Terminal" ]; then
-  echo "⚠️  检测到 IDE 终端环境，请在 macOS Terminal.app 中运行此脚本"
-  echo ""
-  echo "  方式1：在 Terminal.app 中执行："
-  echo "    cd $(pwd)"
-  echo "    bash run.sh"
-  echo ""
-  echo "  方式2：执行以下命令自动打开 Terminal.app："
-  echo "    open -a Terminal $(pwd)/run.sh"
+# 检查是否在 IDE 终端中（zx_20261113_2 M1：与 `pnpm desktop:dev` 共用同一道闸）
+if ! bash ../../scripts/preflight-terminal.sh; then
   exit 1
 fi
 

@@ -277,7 +277,14 @@ function statics(): void {
 
   console.log('\n[S3 次序归位·审批先于自由回复]');
   ok(router.indexOf('function checkPendingApproval') < router.indexOf('function handleAgentReply'), 'checkPendingApproval 定义先于 handleAgentReply');
-  ok(/checkPendingApproval\(ctx, fromUser, msgText\)\) return;/.test(router), '路由入口先试审批（命中即 return，不落入自由回复）');
+  // zx_20261108_1 B3：入站链路改走 `routeText`（剥 @ 后的正文）——按符号重定向（非放宽）：
+  //   审批仍先于自由回复，且命中即落 `'approval'` 路由并 return，不落进下面的意图判定。
+  const apprAt = router.indexOf('if (checkPendingApproval(ctx, fromUser, routeText)) {');
+  ok(apprAt >= 0
+    && router.slice(apprAt, apprAt + 240).includes("'approval'")
+    && router.slice(apprAt, apprAt + 240).includes('return;')
+    && apprAt < router.indexOf('handleAgentReply(ctx, fromUser, routeText'),
+    '路由入口先试审批（命中即 return，不落入自由回复）');
   ok(router.includes('pendingApprovals'), 'handleAgentReply 侧保留对 pendingApprovals 的定向');
 
   console.log('\n[S4 失败即抛·通知仍吞]');
@@ -390,7 +397,11 @@ function statics(): void {
   //   `recordExecutionFailure(…, { notify: ctx.sendImNotification })` 这一**共享点**（文案再由 task-notice 单源出），
   //   故直呼计数 6→4——**是减点不是新增点**，D2「不新增播报点」的意图依然成立；
   //   另钉住失败路仍在册，防"计数变小"被误读成"悄悄把失败播报删了"。
-  ok((ai.match(/ctx\.sendImNotification\(/g) || []).length === 4, 'ai-task 直呼 IM 推送点 6→4（两处失败播报收敛为共享点，非新增）', String((ai.match(/ctx\.sendImNotification\(/g) || []).length));
+  // zx_20261110_2 B5：完成播报的两处直呼（首跑完成 + 恢复完成）收敛进**同一个**后置作业
+  //   `scheduler.register(POSTLUDE_JOB_TYPE, …)` 体内 ⇒ 6→4→**3**。同样是**减点**（两处完成出口变成
+  //   一处共享点），D2「不新增播报点」的意图只更强；余下 3 点逐类可点名：账号级故障暂停 ×2 + 完成后置账 ×1。
+  const notifySites = (ai.match(/ctx\.sendImNotification\(/g) || []).length;
+  ok(notifySites === 3, 'ai-task 直呼 IM 推送点 6→4→3（两处失败播报收敛为共享点 + 两处完成播报收敛为 task-postlude 单点，皆减点非新增）', String(notifySites));
   // zx_20261012_2 批五 M5 重定向：失败播报的出口由 `ai-task` 的 `hooks.notify` 注入**移交给唯一写手**
   //   `task-terminal.markTaskFailed`（六处写点共用一处发）。判据随之订到**更强的载体**（数量不降）：
   //   ① 旧注入点清零（留一处即"一次事实两个出口"，改造后同一次失败发两遍）；
@@ -417,8 +428,11 @@ function statics(): void {
 
   console.log('\n[S16 展示组（Q1/Q2/Q9）]');
   ok(/interface DelivItem \{[^}]*is_primary\?: number/.test(tdp) && /interface DelivItem \{[^}]*acceptance_verified\?: number/.test(tdp), 'DelivItem 声明 is_primary/acceptance_verified');
-  ok(tdp.includes('d.is_primary===1') && tdp.includes('title="主要成果"'), '任务详情产出物行按 is_primary===1 显 ★');
-  ok(tdp.includes("boolSetting(settings['deliverable.show_acceptance'])") && tdp.includes('showAccD&&d.acceptance_verified===1'), '验收徽标同受 show_acceptance 门控、读 per-doc 位');
+  // zx_20261107_1 B9：产出物行随 `TaskArtifacts` 抽出（页面只把门控结果作为 props 传入）。
+  //   判据按符号重定向到该组件，并保留「页面读 show_acceptance」这一跳——两处一起才算门控真接线。
+  const taskArtifacts = app('renderer/src/components/task/TaskArtifacts.tsx');
+  ok(taskArtifacts.includes('d.is_primary === 1') && taskArtifacts.includes('title="主要成果"'), '任务详情产出物行按 is_primary === 1 显 ★（TaskArtifacts）');
+  ok(tdp.includes("boolSetting(settings['deliverable.show_acceptance'])") && taskArtifacts.includes('showAcceptance && d.acceptance_verified === 1'), '验收徽标同受 show_acceptance 门控、读 per-doc 位（页面读设置 → 组件按位渲染）');
   // zx_20260913 M2-6: 预览判据由手抄 `delivPreview.type === 'doc'` 收敛为共享 isPreviewType(doc/code)。
   ok(tdp.includes('fileExists: rd.file_exists === true') && tdp.includes('delivPreview.fileExists === false && isPreviewType(delivPreview.type)')
     && tdp.includes("from '../../../src/main/core/deliverable-types.js'"), '预览捕获 file_exists 并在缺失时警示（判据=共享 isPreviewType）');

@@ -26,6 +26,17 @@ import { splitTaskLayers, mergeTaskLayers, applySchemaRecall, extractKeywords } 
  */
 const SCHEMA_RECALL_KEY = 'memory.schema_recall';
 
+/**
+ * zx_20261110_1 B4：中层（重要性召回）阈值——单一真源。
+ * 此前 `0.7` 直接写在 SQL 字面量里，任何"调阈值"的读点都只能再抄一遍；
+ *   这里导出后 SQL 与判据同源（rr 以 0.69/0.70 两只标本钉边界）。
+ */
+export const MID_TERM_IMPORTANCE = 0.7;
+
+/** 三层合并时各层的优先配额（short / mid）；剩余名额由长期层补足。 */
+export const LAYER_QUOTA_SHORT = 2;
+export const LAYER_QUOTA_MID = 2;
+
 /** 检索簇所需的最小宿主面（`MemoryManager` 结构上满足）。 */
 export interface MemoryRetrievalHost {
   readonly db: Database.Database;
@@ -392,7 +403,8 @@ export function retrieveLayered(mgr: MemoryRetrievalHost, queryText: string, que
 
   const midTerm = mgr.db.prepare(
     // zx_20260930 M8: 中层（重要性召回）此前**没有任何类型过滤** ⇒ 墓碑会被当作"重要记忆"抽出来。
-    `SELECT * FROM wa_memories WHERE project_id = ? AND importance >= 0.7 AND ${MEM_LIVE_SQL} AND id NOT IN (` +
+    // zx_20261110_1 B4：阈值取 `MID_TERM_IMPORTANCE`（单源），不再写死字面量。
+    `SELECT * FROM wa_memories WHERE project_id = ? AND importance >= ${MID_TERM_IMPORTANCE} AND ${MEM_LIVE_SQL} AND id NOT IN (` +
     shortTerm.map(() => '?').join(',') + ") ORDER BY importance DESC, created_at DESC LIMIT ?",
   ).all(projectId, ...Array.from(shortIds), topK) as MemoryEntry[];
 
@@ -445,6 +457,33 @@ export type TaskRelevantSource = 'embedding' | 'cue' | 'none';
  * 治法：无向量 ⇒ 走**已有的** `retrieveByCue`（关键词 + 项目术语 + 编码语境，不新增第二套打分），
  *   并如实回报来源；线索也取不到时返回空集（**如实为空**，不编造）。
  */
+/**
+ * zx_20261110_1 B4（三层全用）: short → mid → long 按配额合并。
+ *   短层（近因）与中层（高重要度）此前在 `retrieveTaskRelevantWithSource` 里**根本没被用**——
+ *   检索到三层却只取长期层，等于"记了三本账、只翻一本"。这里按层优先取：
+ *   short 至多 2、mid 至多 2、剩余名额由 long 补足；按 `id` 去重（保先出现的层），总量 `topK`。
+ */
+export function mergeMemoryLayers(
+  shortTerm: MemoryEntry[], midTerm: MemoryEntry[], longTerm: MemoryEntry[], topK: number,
+): MemoryEntry[] {
+  const seen = new Set<string>();
+  const out: MemoryEntry[] = [];
+  const take = (list: MemoryEntry[], quota: number): void => {
+    let left = quota;
+    for (const m of list) {
+      if (out.length >= topK || left <= 0) return;
+      if (seen.has(m.id)) continue;
+      seen.add(m.id);
+      out.push(m);
+      left--;
+    }
+  };
+  take(shortTerm, LAYER_QUOTA_SHORT);
+  take(midTerm, LAYER_QUOTA_MID);
+  take(longTerm, Number.POSITIVE_INFINITY);
+  return out;
+}
+
 export function retrieveTaskRelevantWithSource(
   mgr: MemoryRetrievalHost, taskId: string, projectId: string, topK = 5, schemaText = '',
 ): { memories: MemoryEntry[]; source: TaskRelevantSource } {
@@ -458,13 +497,16 @@ export function retrieveTaskRelevantWithSource(
       const cue = retrieveByCue(mgr, queryText, projectId, topK);
       return { memories: cue, source: cue.length > 0 ? 'cue' : 'none' };
     }
-    const pool = retrieveLayered(mgr, queryText, queryEmb, projectId, topK, { longTermK: Math.max(topK * 4, 20) }).longTerm;
-    const { episodic, semantic } = splitTaskLayers(pool, (m) => mgr.retrievalStrength(m), Date.now());
-    const merged = mergeTaskLayers(episodic, semantic, topK);
+    // zx_20261110_1 B4：**一次** `retrieveLayered` 同时取三层（禁止为每层重复查库）；
+    //   长期层仍按 Tulving 二分（情景/语义）排序后再参与合并——M7-d 的排序尺不动。
+    const layered = retrieveLayered(mgr, queryText, queryEmb, projectId, topK, { longTermK: Math.max(topK * 4, 20) });
+    const { episodic, semantic } = splitTaskLayers(layered.longTerm, (m) => mgr.retrievalStrength(m), Date.now());
+    const longOrdered = mergeTaskLayers(episodic, semantic, layered.longTerm.length);
+    const merged = mergeMemoryLayers(layered.shortTerm, layered.midTerm, longOrdered, topK);
     const memories = (!schemaText || !readBoolSetting(mgr.db, SCHEMA_RECALL_KEY))
       ? merged
       : applySchemaRecall(merged, schemaText, { keywordsOf: extractKeywords });
-    return { memories, source: 'embedding' };
+    return { memories, source: memories.length > 0 ? 'embedding' : 'none' };
   } catch { return { memories: [], source: 'none' }; }
 }
 

@@ -9,6 +9,8 @@ import { imChannelEnabledSql } from './core/im/im-channel-status.js';
 import { getAnsClient, registerIpcHandlers, setAnsDb } from './ipc-handlers.js';
 import { initAuthIpc } from './ipc/auth.ipc.js';
 import { initProjectIpc, stopAllRuntimeProcesses } from './ipc/project.ipc.js';
+// zx_20261112_1 B1「岗」: 岗位管理出口（判据全在 core/positions.ts）。
+import { initPositionsIpc } from './ipc/positions.ipc.js';
 import { initImIpc, stopAllImAdapters } from './ipc/im.ipc.js';
 import { initAdminIpc, initSkillIpc, initMemoryIpc } from './ipc/admin.ipc.js';
 import { initLicenseIpc } from './ipc/license.ipc.js';
@@ -35,6 +37,7 @@ import { initExternalIpc, type InboundControl, type InboundStatusPayload, type T
 //     起停那一跳在此（装配层），不在 IPC 层——IPC 只做"翻译 + 软闸"（见 `external.ipc.ts` 头注释）。
 import {
   startInboundGate, stopInboundGate, isInboundRunning, inboundRunningPort, inboundLastError,
+  inboundMdnsHostName,
 } from './core/inbound-gate.js';
 import { createPairingPort, buildPairNotice, type PairingPort } from './core/external-terminals.js';
 // zx_20261106_1 M1: 通知/发送/补发账三处**静态**引入（全在 core、不依赖 electron）。
@@ -97,10 +100,16 @@ const log = createLogger('main');
 // zx_20261005 M16: 把"构建形态"灌进 ANS 身份解析（生产不得内置 dev-key/dev-secret）。
 //   在**任何** `resolveAnsCreds` 之前设一次——此处是 main 模块顶层，早于下文所有调用点。
 setAnsRuntimeMode(isDev);
-// 数据目录：开发阶段复用现有 data/ 目录，发布后使用 userData
+// 数据目录：开发阶段复用现有 data/ 目录，发布后使用 userData。
+// zx_20261108_1 B0：**仅 dev** 允许 `WA_DATA_DIR` 指向另一份数据目录（GUI 目视用副本 / 本机双实例验证）。
+//   生产分支不读该变量——防止环境变量把用户真实数据带偏。
+const devDataDirOverride = isDev ? (process.env.WA_DATA_DIR || '').trim() : '';
 const dataDir = isDev
-  ? path.resolve(__dirname, '..', '..', '..', '..', 'data')
+  ? (devDataDirOverride
+      ? path.resolve(devDataDirOverride)
+      : path.resolve(__dirname, '..', '..', '..', '..', 'data'))
   : app.getPath('userData');
+if (devDataDirOverride) log.warn({ dataDir }, 'dev 数据目录被 WA_DATA_DIR 覆盖（仅开发态生效）');
 // zx_20261005 M21: 仓库根（dev 下 ANS 源码与 tsx 的落点基准）。
 // zx_20261006 M3: 改由 `findRepoRoot`（按 `pnpm-workspace.yaml` 上溯）**一处真源**派生——
 //   原先此处手写四级、而 `ipc/ans.ipc.ts` 因层级不同干脆没传（用户手点「一键拉起」恒 `no-entry`）。
@@ -255,9 +264,14 @@ function createWindow(): void {
 }
 
 // 单实例锁（Windows/Linux OAuth 协议处理需要）
-const gotLock = app.requestSingleInstanceLock();
+// zx_20261108_1 B0：**仅 dev** 允许 `WA_ALLOW_MULTI_INSTANCE=1` 跳过锁，用于本机双实例派发验证。
+//   生产分支恒走单实例锁——不提供任何环境变量旁路。
+const devMultiInstance = isDev && process.env.WA_ALLOW_MULTI_INSTANCE === '1';
+const gotLock = devMultiInstance ? true : app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
+} else if (devMultiInstance) {
+  log.warn('dev 单实例锁被 WA_ALLOW_MULTI_INSTANCE=1 跳过（仅开发态生效）');
 } else {
   app.on('second-instance', (_event, _argv) => {
     if (mainWindow) {
@@ -303,6 +317,8 @@ app.whenReady().then(async () => {
   // A1 (2026-08-31): memory 声明提前，供 initProjectIpc 语义模板匹配懒加载
   let memory: MemoryManager | undefined;
   initProjectIpc(db, dataDir, () => memory);
+  // zx_20261112_1 B1「岗」: 岗位列表/详情/增改启停删/项目绑定/经验确认。
+  initPositionsIpc(db);
   // zx_20260930 M5: 传 `memory` 的惰性取用（与上一行 `initProjectIpc` 同形）——本行执行时它尚未构造。
   initImIpc(db, dataDir, () => memory);
   // zx_20260930 M14-3: 真健康自检的三个外部世界——心跳文件路径、调度器活体（**惰性取用**：
@@ -460,6 +476,9 @@ app.whenReady().then(async () => {
     const res = startInboundGate({
       enabled: true,
       nodeName: () => identity.name,
+      // zx_20261112_3：广播主机名按**节点 id** 派生（稳定且每台唯一），绝不借用系统的
+      //   LocalHostName——否则 macOS 会判定「本地主机名已被使用」并强制改名（真机 6/6 复现）。
+      mdnsHost: inboundMdnsHostName(identity.id),
       agentVersion: app.getVersion(),
       pairing,
       capability,
@@ -774,13 +793,17 @@ app.whenReady().then(async () => {
   // zx_20260907 M5 修(2026-09-08): 注入 GUI「执行」即时派发回调——task:updateStatus('running') 经此入内存队列
   // 立即执行(此前裸插 DB 作业只能等重启恢复,且 executeTask CAS 不认 running → 任务假"运行中"不执行)
   try {
-    const { setTaskRunEnqueuer, setResumeEnqueuer } = await import('./ipc/project.ipc.js');
+    const { setTaskRunEnqueuer, setResumeEnqueuer, setTaskRunReleaser } = await import('./ipc/project.ipc.js');
     // zx_20261023_3 批四：来源透传（缺省由调度器记 `unspecified` 并告警，不在此处编一个默认值冒充有据）。
     setTaskRunEnqueuer((taskId, projectId, source) => scheduler.enqueue('ai-task', { taskId, projectId, ...(source ? { source } : {}) }));
     // zx_20260908 实机复核修: resume/respond/inject 恢复作业同样入内存队列即时执行(此前裸插 DB 无人消费)
     // zx_20260915 P0-5(c): 载荷（含 `initiator:'user'`）由 project.ipc 构造，此处只负责"投递"——
     //   非用户路（调度器/D1/cron/重试六条）不传 `initiator`，由处理器取缺省 `'system'`，守卫据此区分两种恢复。
     setResumeEnqueuer((payload) => scheduler.enqueue('resume-ai-task', payload));
+    // zx_20261110_2 B3「恒」: 幽灵执行态的「释放」出口——内存在途表在调度器里，只能由它来清。
+    //   GUI 的「执行」/「恢复」判出 ghost 后经此把残留作业与在途键一并作废，否则 `hasPendingExecutionJob`
+    //   会继续挡住新作业，用户点了还是没有反应（正是事故 339ef167 的第二次假动作）。
+    setTaskRunReleaser((taskId, reason) => scheduler.releaseTaskRun(taskId, reason));
   } catch {}
 
   // zx_20260915 P0-5(a): 答复记账的事件出口注入（pause-settlement 保持零 electron 依赖，由装配处接线）
@@ -900,6 +923,8 @@ app.whenReady().then(async () => {
           //   `_scheduler` 是模块级 `let`，用 `?.` 取（未构造 ⇒ 空表 ⇒ 本拍不外派，不报错）。
           void driveOrchestration(driverDb, {
             io: dispatchIo,
+            // zx_20261108_1 B1：本机资源画像取盘按**真实数据目录**算（与心跳同一块盘）。
+            dataDir,
             readyTasks: (projectId) => _scheduler?.getReadyTasks(projectId) ?? [],
           });
         },

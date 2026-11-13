@@ -57,6 +57,8 @@ import { runShellCommand } from '../apps/worker-ant-desktop/src/main/core/shell-
 import { taskSourceLabel } from '../apps/worker-ant-desktop/renderer/src/lib/task-source.js';
 import { accountBadgeTask, isAwaitingReplyTask, isSelfAssessedQuality } from '../apps/worker-ant-desktop/renderer/src/lib/task-badges.js';
 import { ROUND_RE, checkBuildPins, stripKeepingLines } from './lib/rr-pins.js';
+// zx_20261112_1 B2: task:list JOIN `wa_positions` 取岗位名 ⇒ 夹具引生产同一份 DDL。
+import { POSITIONS_DDL } from '../apps/worker-ant-desktop/src/main/core/positions.js';
 
 const ROOT = path.join(__dirname, '..');
 const MAIN = 'apps/worker-ant-desktop/src/main/core';
@@ -96,8 +98,10 @@ function freshTasksDb(): DatabaseSync {
       id TEXT PRIMARY KEY, project_id TEXT, title TEXT, description TEXT, status TEXT,
       priority INTEGER DEFAULT 0, depends_on TEXT DEFAULT '', parent_task_id TEXT DEFAULT '',
       source TEXT DEFAULT 'user', acceptance_criteria TEXT DEFAULT '', aggregate_version INTEGER DEFAULT 0,
+      position_id TEXT NOT NULL DEFAULT '',
       quality_score REAL, context_json TEXT, created_at TEXT, updated_at TEXT
     );
+    ${POSITIONS_DDL}
   `);
   return db;
 }

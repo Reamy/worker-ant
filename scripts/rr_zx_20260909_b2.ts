@@ -130,7 +130,14 @@ ok(pdp.includes('useDeliverableDrawer') && pdp.includes('点行开详情') && pd
 //   判据随收敛改钉**共享词表**，并反钉本页不再留本地特判文案。
 ok(!pdp.includes("'在制'") && pdp.includes("from '../lib/deliverable-view'"),
   '项目页不再本地特判「在制」——状态文案收敛到共享真源（改钉更强真源，非放宽）');
-ok(tdp.includes('useDeliverableDrawer') && tdp.includes('版本流详情(抽屉)') && tdp.includes("settings['deliverable.doc_drawer']"), '任务详情 doc 行加抽屉入口(保留 eye 预览)');
+// zx_20261107_1 B9：doc 行随产出物块搬进 `TaskArtifacts`——门控仍在页面（`drawerOn`），
+//   入口（版本流详情 + eye 预览）在组件内。断言按符号重定向，同时钉住"门控→组件"这一跳。
+const taskArtifacts = rd('apps/worker-ant-desktop/renderer/src/components/task/TaskArtifacts.tsx');
+ok(tdp.includes('useDeliverableDrawer') && tdp.includes("settings['deliverable.doc_drawer']")
+  && tdp.includes('drawerEnabled={drawerOn}')
+  && taskArtifacts.includes('版本流详情(抽屉)') && taskArtifacts.includes('drawerEnabled')
+  && taskArtifacts.includes('Eye'),
+  '任务详情 doc 行加抽屉入口(保留 eye 预览)——门控在页面、入口随 TaskArtifacts 组件');
 ok(cpl.includes('useDeliverableDrawer') && cpl.includes('openDeliv(String(o.id))') && cpl.includes("settings['deliverable.doc_drawer']"), 'CommandPalette 产出物命中开抽屉(门控)');
 ok(dbts.includes("ensureSetting('deliverable.doc_drawer', 'true')"), 'database 注册 deliverable.doc_drawer 默认 true');
 

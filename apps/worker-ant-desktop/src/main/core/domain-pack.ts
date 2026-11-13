@@ -18,9 +18,14 @@
  * ⚠ **导入 ≠ 启用**：`wa_domain_packs` 是资产，`wa_project_domain_packs` 是启用关系；
  *   共享库拉取只落资产，启用是用户在本机显式动作。
  */
-import { deriveProjectKnowledge, PROJECT_KNOWLEDGE_SECTION_LABEL } from './project-knowledge.js';
+import { deriveProjectKnowledge, PROJECT_KNOWLEDGE_SECTION_LABEL, type ProjectKnowledgeEntry } from './project-knowledge.js';
+// B3：业务域聚类的两个既有真源——活知识卡（已蒸馏、过 Pro 闸的卡）与任务关键词（不另写切词）。
+import { KNOWLEDGE_CARD_KIND_LABEL, listActiveKnowledgeCards } from './knowledge-cards.js';
+import { extractKeywords } from './memory-select.js';
 import { proFeatureRefusal } from './pro-gate.js';
 import { estimateTokensFromChars } from './token-estimate.js';
+// zx_20261113_4 B2「荐」：候选包的"为什么推荐"复用**同一套**相似度判据（不另造分数）。
+import { scoreProjectPair } from './project-similarity.js';
 
 /** 可携带的三节——唯一定处（新增一节须穷举全部读取谓词）。 */
 export const DOMAIN_PACK_SECTIONS = ['domain', 'criteria', 'recipes'] as const;
@@ -33,8 +38,64 @@ export const DOMAIN_PACK_SECTION_LABEL: Record<DomainPackSection, string> = {
   recipes: PROJECT_KNOWLEDGE_SECTION_LABEL.recipes,
 };
 
-/** 包格式版本（结构变更时递增；读取侧按版本决定能否认识）。 */
-export const DOMAIN_PACK_VERSION = 1;
+/**
+ * zx_20261107_1 B3「实·通·信」（巴特莱特·图式 / 赫布·共现强化 / 托尔文·语义记忆）:
+ *   **业务域层**——同一个业务概念在不同项目里叫法不同、规则散落。本层在既有三节之外，
+ *   把「业务术语 / 业务规则 / 典型场景」确定性聚成一块可携带、按需注入的业务知识。
+ *
+ * 纪律：
+ *   · **零 LLM、零训练**：聚类 = 归一化 + 释义相等合并，同输入同输出同顺序；
+ *   · **不改写已有知识**：只读项目知识/知识卡/已启用领域包，产物只进新包的 `pack_json`；
+ *   · **同名异义不合并**（按名字分组，释义取最短一条，不猜）；**同义异名合并为别名**（释义归一后相等）；
+ *   · **按需注入**：有任务文本时只挑与关键词相关的条目，且整块 ≤ `BUSINESS_INJECT_MAX_TOKENS`；
+ *   · **v1 包照读**：无 `business` 字段即缺席，不补空壳（存储形状只加可选字段，不新增表列）。
+ */
+export interface BusinessTerm {
+  term: string;
+  meaning: string;
+  /** 同义异名（归一化后释义相等/名字写法变体）；注入时随条目一起给出。 */
+  aliases: string[];
+  sources: string[];
+}
+
+export interface BusinessRule {
+  rule: string;
+  sources: string[];
+}
+
+export interface BusinessScenario {
+  scenario: string;
+  sources: string[];
+}
+
+export interface BusinessDomain {
+  terms: BusinessTerm[];
+  rules: BusinessRule[];
+  scenarios: BusinessScenario[];
+}
+
+/** 输入形状（派生侧与回归共用）：允许缺释义/出处。 */
+export interface BusinessDomainInput {
+  terms?: Array<{ term: string; meaning?: string; source?: string }>;
+  rules?: Array<{ rule: string; source?: string }>;
+  scenarios?: Array<{ scenario: string; source?: string }>;
+}
+
+/** 有界：条目数、字段长、输入扫描量。 */
+export const BUSINESS_MAX_TERMS = 20;
+export const BUSINESS_MAX_RULES = 12;
+export const BUSINESS_MAX_SCENARIOS = 8;
+export const BUSINESS_TERM_MAX_CHARS = 40;
+export const BUSINESS_MEANING_MAX_CHARS = 120;
+export const BUSINESS_RULE_MAX_CHARS = 160;
+export const BUSINESS_SCENARIO_MAX_CHARS = 160;
+export const BUSINESS_SOURCE_MAX_CHARS = 80;
+const BUSINESS_INPUT_MAX_ITEMS = 200;
+/** 「业务域」子块自身的注入上界（整包总预算仍是 `DOMAIN_PACK_INJECT_MAX_TOKENS`）。 */
+export const BUSINESS_INJECT_MAX_TOKENS = 150;
+
+/** 包格式版本（结构变更时递增；读取侧按版本决定能否认识）。v2 = 可选业务域字段。 */
+export const DOMAIN_PACK_VERSION = 2;
 /** 整包体量上限（字符）。超界整节丢弃，不截字。 */
 export const DOMAIN_PACK_MAX_CHARS = 16_000;
 /** 超界时的丢弃次序（低价值/强项目相关者先走）：配方 → 验收 → 领域。 */
@@ -61,6 +122,8 @@ export interface DomainPackPayload {
   training: false;
   /** 超界被整节丢弃的节（空数组＝全带走了）。 */
   omitted_sections: DomainPackSection[];
+  /** v2 可选业务域层；缺席＝本项目没有可聚的业务概念（不写空壳）。 */
+  business?: BusinessDomain;
 }
 
 /** 包来路（zx_20261030_1 M6）：用户主动生成/导入，或系统按项目知识建议的候选。 */
@@ -84,14 +147,33 @@ export interface AppliedDomainPack {
   name: string;
   description: string;
   sections: DomainPackSectionPayload[];
+  /** v2 可选业务域层；缺席＝该包没有业务概念（不补空壳）。 */
+  business?: BusinessDomain;
   source_project_name: string;
   applied_at: string;
+}
+
+/** 候选包的推荐依据（与「相似项目」同一套分数与理由——不另造一把尺）。 */
+export interface DomainPackSimilarity {
+  score: number;
+  reasons: string[];
+}
+
+/** 候选包的内容预览（节名 + 首段摘要；有界，不把整包塞进列表）。 */
+export interface DomainPackPreviewSection {
+  section: string;
+  label: string;
+  snippet: string;
 }
 
 export interface DomainPackListRow extends DomainPackRow {
   applied: boolean;
   section_count: number;
   chars: number;
+  /** 仅 `listSuggestedDomainPacks` 填：与当前项目的相似度；无依据 ⇒ 缺席（不编 0 分）。 */
+  similarity?: DomainPackSimilarity;
+  /** 仅 `listSuggestedDomainPacks` 填：最多 3 节的内容预览。 */
+  preview?: DomainPackPreviewSection[];
 }
 
 export interface DomainPackStats {
@@ -121,6 +203,280 @@ function clip(s: string, max: number): string {
   return t.length > max ? t.slice(0, max) : t;
 }
 
+/**
+ * 业务词归一键：NFKC（全/半角、兼容字符）+ 小写 + 去掉空白/标点/符号。
+ *   `客户` 与 `客户 `、`API 密钥` 与 `api密钥` 由此同一；`客户` 与 `客户经理` 仍不同。
+ */
+function normBusinessKey(s: string): string {
+  return String(s ?? '').normalize('NFKC').toLowerCase().replace(/[\s\p{P}\p{S}]/gu, '');
+}
+
+/** 稳定排序：短者先，同长按码位字典序（不依赖 locale，跨机同序）。 */
+function byLenThenLex(a: string, b: string): number {
+  return a.length - b.length || (a < b ? -1 : a > b ? 1 : 0);
+}
+
+function pickMeaning(meanings: string[]): string {
+  return [...new Set(meanings.filter((m) => m.trim() !== ''))].sort(byLenThenLex)[0] ?? '';
+}
+
+/**
+ * 确定性业务域聚类（零 LLM）：
+ *   · 术语先按**归一名字**分组（同名异义取最短释义，不猜）；
+ *   · 再把归一释义相等的组并为同一条，其余名字进 `aliases`（同义异名）；
+ *   · 规则/场景按归一文本去重，首见者胜，各自有界。
+ */
+export function deriveBusinessDomain(input: BusinessDomainInput): BusinessDomain {
+  type TermGroup = { surfaces: string[]; meanings: string[]; sources: string[] };
+  const groups: TermGroup[] = [];
+  const byName = new Map<string, TermGroup>();
+  for (const t of (input.terms ?? []).slice(0, BUSINESS_INPUT_MAX_ITEMS)) {
+    const term = clip(t?.term ?? '', BUSINESS_TERM_MAX_CHARS);
+    const key = normBusinessKey(term);
+    if (!term || !key) continue;
+    let g = byName.get(key);
+    if (!g) {
+      g = { surfaces: [], meanings: [], sources: [] };
+      byName.set(key, g);
+      groups.push(g);
+    }
+    g.surfaces.push(term);
+    const meaning = clip(t?.meaning ?? '', BUSINESS_MEANING_MAX_CHARS);
+    if (meaning) g.meanings.push(meaning);
+    const source = clip(t?.source ?? '', BUSINESS_SOURCE_MAX_CHARS);
+    if (source) g.sources.push(source);
+  }
+
+  // 同义异名合并：释义（归一后）相等且非空 ⇒ 同一业务概念的不同叫法。
+  const byMeaning = new Map<string, TermGroup>();
+  const merged: TermGroup[] = [];
+  for (const g of groups) {
+    const meaning = pickMeaning(g.meanings);
+    const mk = meaning ? `m:${normBusinessKey(meaning)}` : '';
+    const host = mk ? byMeaning.get(mk) : undefined;
+    if (host) {
+      host.surfaces.push(...g.surfaces);
+      host.meanings.push(...g.meanings);
+      host.sources.push(...g.sources);
+    } else {
+      if (mk) byMeaning.set(mk, g);
+      merged.push(g);
+    }
+  }
+
+  const terms: BusinessTerm[] = merged.slice(0, BUSINESS_MAX_TERMS).map((g) => {
+    const surfaces = [...new Set(g.surfaces)].sort(byLenThenLex);
+    return {
+      term: surfaces[0] ?? '',
+      meaning: pickMeaning(g.meanings),
+      aliases: surfaces.slice(1),
+      sources: [...new Set(g.sources)].sort(),
+    };
+  });
+
+  const dedupe = <T extends { sources: string[] }>(
+    items: Array<{ text: string; source: string }>,
+    max: number,
+    build: (text: string, sources: string[]) => T,
+  ): T[] => {
+    const seen = new Set<string>();
+    const out: T[] = [];
+    for (const it of items.slice(0, BUSINESS_INPUT_MAX_ITEMS)) {
+      const key = normBusinessKey(it.text);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      out.push(build(it.text, it.source ? [it.source] : []));
+      if (out.length >= max) break;
+    }
+    return out;
+  };
+
+  return {
+    terms,
+    rules: dedupe(
+      (input.rules ?? []).map((r) => ({ text: clip(r?.rule ?? '', BUSINESS_RULE_MAX_CHARS), source: clip(r?.source ?? '', BUSINESS_SOURCE_MAX_CHARS) })).filter((r) => r.text !== ''),
+      BUSINESS_MAX_RULES,
+      (rule, sources) => ({ rule, sources }),
+    ),
+    scenarios: dedupe(
+      (input.scenarios ?? []).map((s) => ({ text: clip(s?.scenario ?? '', BUSINESS_SCENARIO_MAX_CHARS), source: clip(s?.source ?? '', BUSINESS_SOURCE_MAX_CHARS) })).filter((s) => s.text !== ''),
+      BUSINESS_MAX_SCENARIOS,
+      (scenario, sources) => ({ scenario, sources }),
+    ),
+  };
+}
+
+export function isEmptyBusinessDomain(b: BusinessDomain | null | undefined): boolean {
+  return !b || (b.terms.length === 0 && b.rules.length === 0 && b.scenarios.length === 0);
+}
+
+/** 解析一个业务域（形状坏/空 ⇒ `undefined`，不伪造空壳）。 */
+export function parseBusinessDomain(raw: unknown): BusinessDomain | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const o = raw as Record<string, unknown>;
+  const str = (v: unknown, max: number): string => (typeof v === 'string' ? clip(v, max) : '');
+  const list = (v: unknown, max: number, maxChars: number): string[] =>
+    Array.isArray(v)
+      ? [...new Set(v.map((x) => str(x, maxChars)).filter((x) => x !== ''))].slice(0, max)
+      : [];
+
+  const terms: BusinessTerm[] = [];
+  if (Array.isArray(o.terms)) {
+    for (const item of o.terms.slice(0, BUSINESS_MAX_TERMS)) {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+      const t = item as Record<string, unknown>;
+      const term = str(t.term, BUSINESS_TERM_MAX_CHARS);
+      if (!term) continue;
+      terms.push({
+        term,
+        meaning: str(t.meaning, BUSINESS_MEANING_MAX_CHARS),
+        aliases: list(t.aliases, BUSINESS_MAX_TERMS, BUSINESS_TERM_MAX_CHARS),
+        sources: list(t.sources, BUSINESS_MAX_TERMS, BUSINESS_SOURCE_MAX_CHARS),
+      });
+    }
+  }
+
+  const rules: BusinessRule[] = [];
+  if (Array.isArray(o.rules)) {
+    for (const item of o.rules.slice(0, BUSINESS_MAX_RULES)) {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+      const r = item as Record<string, unknown>;
+      const rule = str(r.rule, BUSINESS_RULE_MAX_CHARS);
+      if (rule) rules.push({ rule, sources: list(r.sources, BUSINESS_MAX_TERMS, BUSINESS_SOURCE_MAX_CHARS) });
+    }
+  }
+
+  const scenarios: BusinessScenario[] = [];
+  if (Array.isArray(o.scenarios)) {
+    for (const item of o.scenarios.slice(0, BUSINESS_MAX_SCENARIOS)) {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+      const s = item as Record<string, unknown>;
+      const scenario = str(s.scenario, BUSINESS_SCENARIO_MAX_CHARS);
+      if (scenario) scenarios.push({ scenario, sources: list(s.sources, BUSINESS_MAX_TERMS, BUSINESS_SOURCE_MAX_CHARS) });
+    }
+  }
+
+  const out: BusinessDomain = { terms, rules, scenarios };
+  return isEmptyBusinessDomain(out) ? undefined : out;
+}
+
+type BusinessInputAccumulator = {
+  terms: NonNullable<BusinessDomainInput['terms']>;
+  rules: NonNullable<BusinessDomainInput['rules']>;
+  scenarios: NonNullable<BusinessDomainInput['scenarios']>;
+};
+
+function stripListMarker(line: string): string {
+  return line.replace(/^\s*(?:[-*•·]|\d+[.)])\s*/, '').trim();
+}
+
+/** `术语：a=b · c=d` 的右半 → 逐对；`=`/`＝` 可有可无（无等号即只有词、无释义）。 */
+function termPairsOf(text: string): Array<{ term: string; meaning: string }> {
+  const out: Array<{ term: string; meaning: string }> = [];
+  const rest = text.replace(/^术语[：:]\s*/, '');
+  for (const part of rest.split(/ · /)) {
+    const p = part.trim();
+    if (!p) continue;
+    const at = p.search(/[=＝]/);
+    if (at >= 0) out.push({ term: p.slice(0, at).trim(), meaning: p.slice(at + 1).trim() });
+    else out.push({ term: p, meaning: '' });
+  }
+  return out;
+}
+
+/**
+ * 一节正文 → 业务域输入（`deriveDomainPack` 与 rr 同引）。
+ *   术语行 `术语：…` / 约定行 `约定：…` 只在 `domain` 节；`criteria`/`recipes` 的每条列表行
+ *   都是"典型场景"（许诺过的验收、跑通过的配方）——**不猜语义**，按行的**位置**归域。
+ *   `高频实体/高频关系` 等其余行不进业务域（它们是频度榜，不是业务概念）。
+ */
+function collectSectionBusiness(
+  section: DomainPackSection,
+  content: string,
+  source: string,
+  acc: BusinessInputAccumulator,
+): void {
+  for (const raw of String(content ?? '').split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (section === 'domain') {
+      if (/^术语[：:]/.test(line)) {
+        for (const p of termPairsOf(line)) acc.terms.push({ term: p.term, meaning: p.meaning, source });
+      } else if (/^约定[：:]/.test(line)) {
+        const rule = line.replace(/^约定[：:]\s*/, '');
+        if (rule) acc.rules.push({ rule, source });
+      }
+      continue;
+    }
+    const scenario = stripListMarker(line);
+    if (scenario) acc.scenarios.push({ scenario, source });
+  }
+}
+
+/**
+ * 三源汇一（唯一定处）：项目知识册三节 + 本项目活知识卡 + 已启用领域包。
+ *
+ * ⚠ **只读**：不改既有知识、不写任何表；产物只进新包的 `business` 字段。
+ * ⚠ 知识卡表在生产恒存在（`database.ts` 建表段）；旧夹具缺表时 `listActiveKnowledgeCards`
+ *   按其既有语义返回空表（不编卡，也不拖垮派生）。
+ */
+function collectBusinessInputs(
+  db: ReadDb,
+  pid: string,
+  entries: ReadonlyArray<ProjectKnowledgeEntry>,
+): BusinessDomainInput {
+  const acc: BusinessInputAccumulator = { terms: [], rules: [], scenarios: [] };
+  for (const e of entries) {
+    if (e.section === 'domain' || e.section === 'criteria' || e.section === 'recipes') {
+      const source = e.section === 'domain'
+        ? '项目知识·术语'
+        : e.section === 'criteria' ? '项目知识·验收' : '项目知识·配方';
+      // domain 节里术语行与约定行共存，源标按行细分（不把约定冒充术语）。
+      if (e.section === 'domain') {
+        for (const raw of e.content.split(/\r?\n/)) {
+          const line = raw.trim();
+          if (/^术语[：:]/.test(line)) {
+            for (const p of termPairsOf(line)) acc.terms.push({ term: p.term, meaning: p.meaning, source });
+          } else if (/^约定[：:]/.test(line)) {
+            const rule = line.replace(/^约定[：:]\s*/, '');
+            if (rule) acc.rules.push({ rule, source: '项目知识·约定' });
+          }
+        }
+      } else {
+        collectSectionBusiness(e.section, e.content, source, acc);
+      }
+    }
+  }
+
+  for (const c of listActiveKnowledgeCards(db, pid)) {
+    const source = `知识卡·${KNOWLEDGE_CARD_KIND_LABEL[c.kind]}`;
+    if (c.kind === 'term') {
+      // 卡是从 `domain` 节逐行蒸馏的：只有 `术语：` 行才是业务术语（频度榜不是）。
+      if (/^术语[：:]/.test(c.text)) {
+        for (const p of termPairsOf(c.text)) acc.terms.push({ term: p.term, meaning: p.meaning, source });
+      }
+    } else if (c.kind === 'lesson' || c.kind === 'pitfall') {
+      acc.rules.push({ rule: c.text, source });
+    } else {
+      acc.scenarios.push({ scenario: c.text, source });
+    }
+  }
+
+  for (const pack of listAppliedDomainPacks(db, pid)) {
+    const source = `领域包·${pack.name}`;
+    if (pack.business && !isEmptyBusinessDomain(pack.business)) {
+      for (const t of pack.business.terms) acc.terms.push({ term: t.term, meaning: t.meaning, source });
+      for (const r of pack.business.rules) acc.rules.push({ rule: r.rule, source });
+      for (const s of pack.business.scenarios) acc.scenarios.push({ scenario: s.scenario, source });
+    } else {
+      // v1 包没有 business：按同一套行格式读原文（不重写包，只在本次派生里用）。
+      for (const s of pack.sections) collectSectionBusiness(s.section, s.content, source, acc);
+    }
+  }
+
+  return acc;
+}
+
 function projectNameOf(db: ReadDb, projectId: string): string {
   try {
     const row = db.prepare('SELECT name FROM wa_projects WHERE id = ?').get(projectId) as { name?: string } | undefined;
@@ -144,6 +500,8 @@ export function parseDomainPackJson(raw: unknown): DomainPackPayload | null {
       if (typeof content !== 'string' || !content.trim()) continue;
       sections.push({ section: sec as DomainPackSection, content });
     }
+    // v2 可选业务域：形状坏/为空 ⇒ 缺席（不补空壳；v1 包照旧可读）。
+    const business = parseBusinessDomain((o as { business?: unknown }).business);
     return {
       version: Number(o.version) || 0,
       name: String(o.name ?? ''),
@@ -158,6 +516,7 @@ export function parseDomainPackJson(raw: unknown): DomainPackPayload | null {
       omitted_sections: Array.isArray(o.omitted_sections)
         ? o.omitted_sections.filter((s): s is DomainPackSection => (DOMAIN_PACK_SECTIONS as readonly string[]).includes(String(s)))
         : [],
+      ...(business ? { business } : {}),
     };
   } catch {
     return null;
@@ -204,6 +563,8 @@ export function deriveDomainPack(
   const name = clip(opts.name ?? '', DOMAIN_PACK_NAME_MAX) || clip(`${projectName || `项目 ${pid.slice(0, 8)}`} · 领域包`, DOMAIN_PACK_NAME_MAX);
   const description = clip(opts.description ?? '', DOMAIN_PACK_DESC_MAX)
     || `从「${projectName || pid.slice(0, 8)}」派生的可携带领域经验（术语约定 / 验收判据 / 配方样板）`;
+  // B3：业务域层（确定性聚类；空 ⇒ 字段缺席，不写空壳）。
+  const business = deriveBusinessDomain(collectBusinessInputs(db, pid, entries));
   return {
     ok: true,
     pack: {
@@ -215,6 +576,7 @@ export function deriveDomainPack(
       derived_at: opts.now ?? new Date().toISOString(),
       training: false,
       omitted_sections: omitted,
+      ...(isEmptyBusinessDomain(business) ? {} : { business }),
     },
   };
 }
@@ -320,12 +682,59 @@ export function ensureAutoCandidateDomainPack(
   return { id, created: true };
 }
 
+/** 预览边界（唯一定处）：最多几节、每节多少字。 */
+export const SUGGESTED_PREVIEW_MAX_SECTIONS = 3;
+export const SUGGESTED_PREVIEW_SNIPPET_CHARS = 120;
+
+/** 摘要截断：优先在句末/分句标点处收口；找不到合适标点才硬截，并统一加「…」。 */
+function previewSnippet(text: string): string {
+  const t = String(text ?? '').replace(/\s+/g, ' ').trim();
+  if (t.length <= SUGGESTED_PREVIEW_SNIPPET_CHARS) return t;
+  const head = t.slice(0, SUGGESTED_PREVIEW_SNIPPET_CHARS);
+  const marks = ['。', '！', '？', '；', '.', '!', '?', ';'];
+  let cut = -1;
+  for (const m of marks) cut = Math.max(cut, head.lastIndexOf(m));
+  const body = cut >= 40 ? head.slice(0, cut + 1) : head;
+  return `${body.trim()}…`;
+}
+
+/** 内容预览（最多 `SUGGESTED_PREVIEW_MAX_SECTIONS` 节；节名取同一份人话标签）。 */
+export function previewDomainPackSections(pack: {
+  sections: Array<{ section: DomainPackSection; content: string }>;
+}): DomainPackPreviewSection[] {
+  return pack.sections.slice(0, SUGGESTED_PREVIEW_MAX_SECTIONS).map((s) => ({
+    section: s.section,
+    label: DOMAIN_PACK_SECTION_LABEL[s.section] ?? s.section,
+    snippet: previewSnippet(s.content),
+  }));
+}
+
+/**
+ * zx_20261113_4 B2「荐」：候选包排序——**有据者先**。
+ *   · 相似度高者先；无相似依据（缺席）排后但**不隐藏**；
+ *   · 同分按 `updated_at` 降序、`id` 升序（确定性，跨机同序）。
+ */
+export function rankSuggestedPacks<
+  T extends { id: string; updated_at: string; similarity?: DomainPackSimilarity },
+>(rows: readonly T[]): T[] {
+  return [...rows].sort(
+    (a, b) =>
+      (b.similarity?.score ?? -1) - (a.similarity?.score ?? -1)
+      || String(b.updated_at ?? '').localeCompare(String(a.updated_at ?? ''))
+      || String(a.id ?? '').localeCompare(String(b.id ?? '')),
+  );
+}
+
 /**
  * 给某项目看的候选包：未忽略、未启用、**不是从本项目派生**的 `auto_candidate` 资产。
  * 只展示，不注入；用户点「启用」才走 `applyDomainPack`（Pro 闸）。
+ *
+ * zx_20261113_4 B2「荐」：每条候选附「与当前项目的相似度 + 为什么像」与内容预览，并按相似度排序。
+ *   · 相似度与「相似项目」同一套判据（`scoreProjectPair`），不另造分数；
+ *   · 来源项目已归档/无交集/读不到 ⇒ 如实缺席（界面说「无相似依据」），仍可启用，不隐藏。
  */
 export function listSuggestedDomainPacks(
-  db: ReadDb,
+  db: PackDb,
   projectId: string,
   limit: number = 5,
 ): DomainPackListRow[] {
@@ -346,8 +755,20 @@ export function listSuggestedDomainPacks(
       ORDER BY p.updated_at DESC, p.id
       LIMIT ?`,
   ).all(pid, pid, lim) as Array<DomainPackRow & { pack_json: string }>;
-  return rows.map((r) => {
+  const mapped: DomainPackListRow[] = rows.map((r) => {
     const pack = parseDomainPackJson(r.pack_json);
+    // 相似度只对「有来源项目」的候选有意义；读不到/无交集 ⇒ 缺席（不编 0 分）。
+    let similarity: DomainPackSimilarity | undefined;
+    if (r.source_project_id) {
+      try {
+        const sim = scoreProjectPair(
+          db as unknown as Parameters<typeof scoreProjectPair>[0],
+          pid,
+          r.source_project_id,
+        );
+        if (sim) similarity = { score: sim.score, reasons: sim.reasons };
+      } catch { /* 相似度读不到 ⇒ 少一维证据，不影响候选展示 */ }
+    }
     return {
       id: r.id,
       name: r.name,
@@ -361,8 +782,11 @@ export function listSuggestedDomainPacks(
       applied: false,
       section_count: pack?.sections.length ?? 0,
       chars: pack ? pack.sections.reduce((n, s) => n + s.content.length, 0) : 0,
+      ...(similarity ? { similarity } : {}),
+      ...(pack ? { preview: previewDomainPackSections(pack) } : {}),
     };
   });
+  return rankSuggestedPacks(mapped);
 }
 
 /** 忽略一条候选（只对 `auto_candidate` 生效；幂等）。返回是否真改了一行。 */
@@ -401,6 +825,58 @@ export function listDomainPacks(db: ReadDb, projectId?: string): DomainPackListR
       chars: pack ? pack.sections.reduce((n, s) => n + s.content.length, 0) : 0,
     };
   });
+}
+
+/** 单份领域包的可读详情（zx_20261113_5 M3「口」）：整包节内容 + 业务域，供"查看"用。 */
+export interface DomainPackDetailSection {
+  section: DomainPackSection;
+  label: string;
+  content: string;
+}
+
+export interface DomainPackDetail {
+  id: string;
+  name: string;
+  description: string;
+  source_project_name: string;
+  version: number;
+  derived_at: string;
+  sections: DomainPackDetailSection[];
+  omitted_sections: DomainPackSection[];
+  /** 与 `omitted_sections` 同序的中文节名（renderer 不手抄第二份词表）。 */
+  omitted_labels: string[];
+  /** v2 可选业务域层；缺席＝该包没有业务概念（不补空壳）。 */
+  business?: BusinessDomain;
+}
+
+/** 读一份包的详情。包不存在/包体损坏 ⇒ `null`（界面如实说"读不出"，不伪造空包）。 */
+export function readDomainPackDetail(db: ReadDb, packId: string): DomainPackDetail | null {
+  const id = String(packId ?? '');
+  if (!id) return null;
+  const row = db.prepare(
+    'SELECT id, name, description, source_project_name, pack_json FROM wa_domain_packs WHERE id = ?',
+  ).get(id) as
+    | { id: string; name: string; description: string; source_project_name: string; pack_json: string }
+    | undefined;
+  if (!row) return null;
+  const pack = parseDomainPackJson(row.pack_json);
+  if (!pack) return null;
+  return {
+    id: row.id,
+    name: row.name || pack.name,
+    description: row.description || pack.description,
+    source_project_name: row.source_project_name || pack.source.project_name,
+    version: pack.version,
+    derived_at: pack.derived_at,
+    sections: pack.sections.map((s) => ({
+      section: s.section,
+      label: DOMAIN_PACK_SECTION_LABEL[s.section] ?? s.section,
+      content: s.content,
+    })),
+    omitted_sections: pack.omitted_sections,
+    omitted_labels: pack.omitted_sections.map((s) => DOMAIN_PACK_SECTION_LABEL[s] ?? s),
+    ...(pack.business ? { business: pack.business } : {}),
+  };
 }
 
 /**
@@ -448,6 +924,7 @@ export function listAppliedDomainPacks(db: ReadDb, projectId: string): AppliedDo
       name: r.name,
       description: r.description,
       sections: pack.sections,
+      ...(pack.business ? { business: pack.business } : {}),
       source_project_name: r.source_project_name,
       applied_at: r.applied_at,
     });
@@ -493,21 +970,133 @@ export function domainPackInjectionStats(db: ReadDb, projectId: string): DomainP
 }
 
 /**
+ * 业务域子块渲染（B3 按需注入）：
+ *   · **有任务关键词** ⇒ 只留命中条目（术语名/释义/规则/场景任一包含关键词）；全不命中 ⇒ 空块；
+ *   · **无关键词**（判不出任务文本）⇒ 全留；
+ *   · 逐条整取，超 `tokenBudget` 即止——**不截半句**；一条都放不下 ⇒ 空串（不写空标题）。
+ * 关键词匹配用 `extractKeywords`（与知识卡/记忆选择同一把切词尺），不另造分度。
+ */
+export function renderBusinessBlock(
+  business: BusinessDomain | null | undefined,
+  keywords: readonly string[] = [],
+  tokenBudget: number = BUSINESS_INJECT_MAX_TOKENS,
+): string {
+  if (!business || isEmptyBusinessDomain(business)) return '';
+  const kws = keywords.map((k) => String(k).toLowerCase()).filter((k) => k !== '');
+  const hit = (text: string): boolean => kws.length === 0 || kws.some((k) => text.toLowerCase().includes(k));
+
+  const items: string[] = [];
+  for (const t of business.terms) {
+    const alias = t.aliases.length > 0 ? `（别名：${t.aliases.join('、')}）` : '';
+    const meaning = t.meaning ? `：${t.meaning}` : '';
+    const text = `${t.term}${alias}${meaning}`;
+    if (hit(text)) items.push(`- 术语 ${text}`);
+  }
+  for (const r of business.rules) {
+    if (hit(r.rule)) items.push(`- 规则 ${r.rule}`);
+  }
+  for (const s of business.scenarios) {
+    if (hit(s.scenario)) items.push(`- 场景 ${s.scenario}`);
+  }
+  if (items.length === 0) return '';
+
+  const header = '### 业务域';
+  const lines: string[] = [];
+  for (const item of items) {
+    const candidate = [header, ...lines, item].join('\n');
+    if (estimateTokensFromChars(candidate.length) > tokenBudget) break;
+    lines.push(item);
+  }
+  return lines.length > 0 ? [header, ...lines].join('\n') : '';
+}
+
+/** 一个包对当前任务关键词的命中：命中次数 + 命中的节/业务域种类数。 */
+function packHit(pack: AppliedDomainPack, keywords: readonly string[]): { hits: number; kinds: number } {
+  if (keywords.length === 0) return { hits: 0, kinds: 0 };
+  let hits = 0;
+  let kinds = 0;
+  for (const s of pack.sections) {
+    const text = String(s.content ?? '').toLowerCase();
+    const n = keywords.filter((k) => text.includes(k)).length;
+    if (n > 0) {
+      kinds++;
+      hits += n;
+    }
+  }
+  const biz = pack.business;
+  if (biz) {
+    const text = [
+      ...biz.terms.flatMap((t) => [t.term, t.meaning, ...t.aliases]),
+      ...biz.rules.map((r) => r.rule),
+      ...biz.scenarios.map((x) => x.scenario),
+    ]
+      .join('\n')
+      .toLowerCase();
+    const n = keywords.filter((k) => text.includes(k)).length;
+    if (n > 0) {
+      kinds++;
+      hits += n;
+    }
+  }
+  return { hits, kinds };
+}
+
+/**
+ * zx_20261113_4 B3「注」（管子·度量衡 / 维特根斯坦·意义即用法）：**多包注入的排序**——纯函数。
+ *
+ * 病根：多个已启用包按 `listAppliedDomainPacks` 的顺序**先到先得**，同一份 400 token 预算里
+ *   先塞的可能与本任务无关，相关的反而被挤掉。
+ *
+ * 判据：
+ *   · `keywords` 为空（判不出任务文本）⇒ **原序返回**（零行为变化，可回退）；
+ *   · 否则按「命中关键词数」降序 → 「命中的节/业务域种类数」降序 → 名称 → id（确定性）；
+ *   · **全不命中 ⇒ 原序**（不因排序把顺序重排，也不丢包）。
+ * ⚠ 只改顺序，不改整包取舍、不改预算、不截半句。
+ */
+export function rankDomainPacksForInject(
+  packs: readonly AppliedDomainPack[],
+  keywords: readonly string[],
+): AppliedDomainPack[] {
+  const kws = keywords.map((k) => String(k ?? '').toLowerCase()).filter((k) => k !== '');
+  if (kws.length === 0 || packs.length <= 1) return [...packs];
+  const scored = packs.map((p) => ({ p, ...packHit(p, kws) }));
+  if (scored.every((s) => s.hits === 0)) return [...packs];
+  // 名称/id 用**码位比较**而不是 localeCompare——后者随 ICU/locale 变，跨机可能不同序。
+  const cmp = (x: string, y: string): number => (x < y ? -1 : x > y ? 1 : 0);
+  return scored
+    .sort(
+      (a, b) =>
+        b.hits - a.hits
+        || b.kinds - a.kinds
+        || cmp(a.p.name, b.p.name)
+        || cmp(a.p.id, b.p.id),
+    )
+    .map((s) => s.p);
+}
+
+/**
  * 注入段渲染：整包取舍（塞不下整包跳过并**点名**），绝不截字。
  * 返回文本 + 逐包注入行（`ref_id` = 包 id；`chars` = 该包渲染块字数）。
+ *
+ * B3：给了 `taskText` 时，包内业务域子块按关键词**按需**挑选（≤ `BUSINESS_INJECT_MAX_TOKENS`）；
+ *   业务域计入整包成本，整包仍受 `tokenBudget` 约束（本段合计 ≤ 400 token 的既有口径不变）。
  */
 export function renderDomainPackSection(
   packs: ReadonlyArray<AppliedDomainPack>,
   tokenBudget: number = DOMAIN_PACK_INJECT_MAX_TOKENS,
+  taskText?: string | null,
 ): { text: string; injections: Array<{ ref_id: string; chars: number }> } {
+  const keywords = taskText ? extractKeywords(String(taskText)) : [];
   const blocks: Array<{ ref_id: string; text: string }> = [];
   const skipped: string[] = [];
   let used = 0;
-  for (const p of packs) {
+  // zx_20261113_4 B3「注」：有任务文本时按相关性排序；无文本 ⇒ 原序（零行为变化）。
+  for (const p of rankDomainPacksForInject(packs, keywords)) {
     const body = p.sections
       .map((s) => `### ${DOMAIN_PACK_SECTION_LABEL[s.section]}\n${s.content}`)
       .join('\n');
-    const text = `### 领域包：${p.name}\n${body}`;
+    const biz = renderBusinessBlock(p.business, keywords);
+    const text = `### 领域包：${p.name}\n${body}${biz ? `\n${biz}` : ''}`;
     const cost = estimateTokensFromChars(text.length);
     if (used + cost > tokenBudget) { skipped.push(p.name); continue; }
     used += cost;

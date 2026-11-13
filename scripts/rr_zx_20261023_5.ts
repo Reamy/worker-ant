@@ -893,7 +893,10 @@ async function main(): Promise<void> {
     ok(/totalCards \+= distillKnowledgeCards\(db, project_id\)\.cards/.test(jobsSrc),
       'B-9b 计数取真返回值（不是"调了就算"）');
 
-    const execSrc = STRIPPED(`${A}/src/main/core/agent-executor.ts`);
+    // zx_20261109_1 B6 按符号重定向（改钉更强的扫描面，非放宽）：验收失败块（摘要单源 + 候选卡写口）
+    //   随 `checkAcceptanceCriteria` 搬至 `exec-acceptance.ts`；扫描面取两文件之并，B-9d/B-9e 仍在执行体。
+    const execSrc = STRIPPED(`${A}/src/main/core/agent-executor.ts`)
+      + STRIPPED(`${A}/src/main/core/exec-acceptance.ts`);
     // zx_20261030_2 M4 按符号重定向（不放宽）：由「调用形状」升为「摘要单源 + 调用形状」同钉——
     //   同一 `failedItems` 既进记忆正文又进候选卡，且它只由 `summarizeAcceptanceFailures(payload.failed)` 产出。
     ok(/const failedItems = summarizeAcceptanceFailures\(payload\.failed\)/.test(execSrc)
@@ -918,11 +921,12 @@ async function main(): Promise<void> {
   }
 
   // ═══ C-1 渠道注册表 ═══════════════════════════════════════════════════════
-  console.log('\n【C-1】渠道注册表：五渠道在册、协议归属按注册顺序、锁定档不列出');
+  console.log('\n【C-1】渠道注册表：六渠道在册、协议归属按注册顺序、锁定档不列出');
   {
     const ids = listChannels().map((c) => c.id);
-    eq(ids, ['lan', 'mqtt', 'homeassistant', 'tuya-cloud', 'mijia-miio'],
-      'C-1a 内置五渠道（注册顺序即协议归属的解释权顺序）');
+    // zx_20261107_1 B2：补 `homeassistant-rest`（HA REST 账号路）——逐成员枚举，不接受只数个数。
+    eq(ids, ['lan', 'mqtt', 'homeassistant', 'tuya-cloud', 'homeassistant-rest', 'mijia-miio'],
+      'C-1a 内置六渠道（注册顺序即协议归属的解释权顺序）');
     eq(channelForProtocol('mqtt')?.id, 'mqtt', 'C-1b mqtt 归属 MQTT 网关（HA 未抢解释权）');
     eq(channelForProtocol('miio')?.id, 'mijia-miio', 'C-1c miio 归属米家渠道');
     eq(channelForProtocol('mdns')?.id, 'lan', 'C-1d mDNS 归属局域网渠道');
@@ -935,11 +939,11 @@ async function main(): Promise<void> {
 
     // zx_20261029_2 M6「阶梯」：渠道接入归 Pro（`device_discovery`）——**两只标本**：
     //   ① Pro 开、Team 锁 ⇒ 渠道仍可列（"能看"不等"能动"）；② Pro 锁 ⇒ 一条不列。
-    eq(listOnboardingChannels({ proUnlocked: true, teamUnlocked: true }).map((c) => c.id), ids, 'C-1h 双档解锁五条全列');
+    eq(listOnboardingChannels({ proUnlocked: true, teamUnlocked: true }).map((c) => c.id), ids, 'C-1h 双档解锁六条全列');
     eq(listOnboardingChannels({ proUnlocked: false, teamUnlocked: true }), [],
       'C-1i Pro 锁 ⇒ 一条不列（团队档不代行设备发现）');
     eq(listOnboardingChannels({ proUnlocked: true, teamUnlocked: false }).map((c) => c.id), ids,
-      'C-1i2 Pro 开、Team 锁 ⇒ 五条仍列（发现归专业版，控制另闸）');
+      'C-1i2 Pro 开、Team 锁 ⇒ 六条仍列（发现归专业版，控制另闸）');
 
     const free: DeviceChannel = {
       id: 'tmp-free', label: '免费演示渠道', kind: 'lan', requires: 'none',

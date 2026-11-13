@@ -27,6 +27,8 @@ import { kindClassOf } from './core/device-kind.js';
 // zx_20261029_3 M3: 后台进程登记表的 DDL 真源（rr 夹具同引，防夹具与生产建表漂移）。
 import { BACKGROUND_JOBS_DDL } from './core/background-jobs.js';
 import { PROJECT_NODES_DDL } from './core/project-node-policy.js';
+// zx_20261112_1 B1: 岗位库 DDL 真源与内置种子幂等播种（rr 夹具同引 DDL）。
+import { POSITIONS_DDL, seedBuiltinPositions } from './core/positions.js';
 // zx_20261105_1 M1: 运行证据表 DDL 真源（rr 夹具同引，防夹具与生产建表漂移）。
 import { RUNTIME_EVIDENCE_DDL } from './core/runtime-evidence.js';
 
@@ -68,6 +70,9 @@ export function initDatabase(dataDir: string, dbName = 'worker-ant-server.db'): 
       context_json TEXT DEFAULT '{}', workflow_config TEXT DEFAULT '{}',
       priority INTEGER DEFAULT 0, depends_on TEXT DEFAULT '', parent_task_id TEXT DEFAULT '',
       source TEXT DEFAULT 'user', acceptance_criteria TEXT DEFAULT '',
+      -- zx_20261112_1 B2（王阳明·知行合一）: 任务**指派给哪个岗位**。空串＝未指派（语义单一，
+      --   不代表"某个空岗位"）。只存 id，名字由读面 LEFT JOIN wa_positions 现取。
+      position_id TEXT NOT NULL DEFAULT '',
       aggregate_version INTEGER DEFAULT 0,
       created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now'))
     );
@@ -104,7 +109,14 @@ export function initDatabase(dataDir: string, dbName = 'worker-ant-server.db'): 
       --   只在**真知道**时才写：出站通知行（sendImCompletionNotice 手里就有 taskId）与
       --   入站回复行（handleAgentReply 落 [IM回复] 那刻已知 task.id）。**不猜**——
       --   宁可少标一行，不可标错一行（故不叫 run_id、不做按时间/关键词的模糊匹配）。
-      task_id TEXT DEFAULT ''
+      task_id TEXT DEFAULT '',
+      -- zx_20261108_1 B3(维特根斯坦·意义即使用 / 管子·度量衡): IM 理解可核对——
+      --   入站行记下「被当成什么（intent）/ 走了哪条路（route）/ 凭什么（route_reason）」。
+      --   空串 = 旧行或该条未经意图判定；语义与迁移处的注释同一份（新库走 CREATE，老库走 ALTER）。
+      intent TEXT DEFAULT '', route TEXT DEFAULT '', route_reason TEXT DEFAULT '',
+      -- zx_20261110_1 B2: 这条理解有多确定（high/medium/low）。medium 的建单/启动**不直接执行**，
+      --   先请用户确认——审计与界面据此看出"模型判了、但还没动手"。
+      intent_confidence TEXT DEFAULT ''
     );
     CREATE TABLE IF NOT EXISTS wa_deliverables (
       id TEXT PRIMARY KEY, project_id TEXT REFERENCES wa_projects(id), task_id TEXT,
@@ -113,7 +125,7 @@ export function initDatabase(dataDir: string, dbName = 'worker-ant-server.db'): 
       -- zx_20260924_1 M9-d(维特根斯坦·语言游戏 / 如实命名): 本表**没有 size 列**，且**刻意不加**——
       --   产出物的大小是**盘上文件的事实**（file_path → fs.statSync），不是登记那刻的笔录；
       --   台账里存一份会在文件被改后立刻变成**陈旧值**。故列表"大小"由 main 侧现场 stat
-      --   （ipc/project.ipc.ts 的 statSizeBytes），历史版本的大小才在 wa_deliverable_versions.size（见其注记）。
+      --   （core/deliverable-size.ts 的 statSizeBytes），历史版本的大小才在 wa_deliverable_versions.size（见其注记）。
       -- ⚠ 本段是**模板字符串内的 SQL** ⇒ 注记里**不得出现反引号**（会提前闭合模板串）。
       created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now'))
     );
@@ -308,6 +320,9 @@ export function initDatabase(dataDir: string, dbName = 'worker-ant-server.db'): 
     // zx_20260909_1 M3(C1 空性·假名): per-doc 验收位——wa_deliverables 补 acceptance_verified(0/1, 打标时机见 markDocAcceptanceVerified;
     //   展示从"任务 ctx 扇出"改"doc 级如实", 同任务多 doc 各显各的 ✓)
     "ALTER TABLE wa_deliverables ADD COLUMN acceptance_verified INTEGER DEFAULT 0",
+    // zx_20261110_2 B6「核」：打标**凭的是什么**——`criteria:<ref>` 表示该成果的验收来自判据路径的
+    //   跨任务/快照解析（`markTaskVerifiedVia` 唯一写口）；空/NULL = 走任务级验收账（既有口径）。
+    "ALTER TABLE wa_deliverables ADD COLUMN verified_via TEXT",
     // zx_20260912 M3(管子·度量衡 / 王阳明·知行合一): 出站补发账**记因**——此前表只有"未送达 N 条", 答不出"为什么没送到"。
     //   last_error=最近一次失败的真原因(具体原因优先, 无则 NULL 如实显示"原因未记录"); last_attempt_at=最近一次尝试时刻(UTC 秒级)。
     "ALTER TABLE wa_im_outbox ADD COLUMN last_error TEXT",
@@ -321,6 +336,9 @@ export function initDatabase(dataDir: string, dbName = 'worker-ant-server.db'): 
     // zx_20260924 M4: 出站媒体件的两列（既有库补列；语义见上方建表注释）。
     "ALTER TABLE wa_im_outbox ADD COLUMN media_path TEXT",
     "ALTER TABLE wa_im_outbox ADD COLUMN media_kind TEXT",
+    // zx_20261110_1 B7(维特根斯坦·意义即使用): 补发账终态可关闭——关闭时刻与理由留痕（不物理删）。
+    "ALTER TABLE wa_im_outbox ADD COLUMN dismissed_at TEXT",
+    "ALTER TABLE wa_im_outbox ADD COLUMN dismiss_reason TEXT",
     // zx_20260930 M2-c(维特根斯坦·意义即使用 / 一实一名): 这一行**属于哪个任务**。
     //   语义见上方建表注释：空串=**本条无归属**（不猜）；只在真知道的两处写。
     "ALTER TABLE wa_im_conversations ADD COLUMN task_id TEXT DEFAULT ''",
@@ -389,6 +407,26 @@ export function initDatabase(dataDir: string, dbName = 'worker-ant-server.db'): 
     //   旧库缺列时写入侧**降级写旧形状**、查询侧回退旧谓词（绝不因缺列丢通知）。
     "ALTER TABLE wa_im_notify_log ADD COLUMN outcome TEXT DEFAULT ''",
     "ALTER TABLE wa_im_notify_log ADD COLUMN detail TEXT DEFAULT ''",
+    // zx_20261108_1 B3（维特根斯坦·意义即使用 / 管子·度量衡）: IM 理解可核对——
+    //   入站行记下「被当成什么（intent）/ 走了哪条路（route）/ 凭什么（route_reason）」。
+    //   空串 = 旧行或该条未经意图判定（上下文分支另有 route，见 `im-intent.ts` 的 ImRoute）。
+    "ALTER TABLE wa_im_conversations ADD COLUMN intent TEXT DEFAULT ''",
+    "ALTER TABLE wa_im_conversations ADD COLUMN route TEXT DEFAULT ''",
+    "ALTER TABLE wa_im_conversations ADD COLUMN route_reason TEXT DEFAULT ''",
+    // zx_20261110_1 B2: 置信度落库——medium 的建单/启动先确认再执行，这一列是"为什么没直接做"的证据。
+    //   写入侧缺列时降级回三列写（`markInboundDecision`），不因一个可选列丢掉整行理解。
+    "ALTER TABLE wa_im_conversations ADD COLUMN intent_confidence TEXT DEFAULT ''",
+    // zx_20261112_1 B2（王阳明·知行合一 / 维特根斯坦·意义即使用）: 任务指派岗位列——空串=未指派。
+    //   语义单一真源在 `core/positions.ts`（`resolveTaskPosition` 校验可用性，`positionBlock` 出注入块）。
+    "ALTER TABLE wa_tasks ADD COLUMN position_id TEXT NOT NULL DEFAULT ''",
+    // zx_20261113_1 B2（托尔文·情景 vs 语义 / 夏克特·错误归因）: 岗位经验**可迁移**标记与来源边界。
+    //   项目摘要不冒充岗位规范：source=summary / reusable=0 的候选留档但不注入、不晋升。
+    //   老库的 source 列已由 zx_20261112_1 建出（本次不重复加列），只补四个新列 + 旧值归一。
+    "ALTER TABLE wa_position_lessons ADD COLUMN reusable INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE wa_position_lessons ADD COLUMN promoted_to TEXT",
+    "ALTER TABLE wa_position_lessons ADD COLUMN promoted_at TEXT",
+    "ALTER TABLE wa_position_lessons ADD COLUMN origin TEXT NOT NULL DEFAULT 'local'",
+    "UPDATE wa_position_lessons SET source = 'summary' WHERE source = 'task_close'",
   ];
   for (const sql of migrations) {
     try { db.exec(sql); } catch { /* 列已存在，跳过 */ }
@@ -403,6 +441,21 @@ export function initDatabase(dataDir: string, dbName = 'worker-ant-server.db'): 
     --   另一处消费是审计面 listTombstones 的 memory_type = 'deleted' 过滤。
     CREATE INDEX IF NOT EXISTS idx_wa_memories_tombstone ON wa_memories(memory_type, deleted_fingerprint);
   `);
+
+  // ===== IM 平台消息 id 去重账（zx_20261108_1 B3）=====
+  //   内存 Map 只能挡 30 秒且随重启清零；平台在重启后重投时会再落一行、群里再答一次。
+  //   主键 `(channel_id, external_user_id, platform_message_id)` 做**跨进程**判重；
+  //   写入侧 `INSERT OR IGNORE` 的 `changes === 0` 即"见过"（见 `im-router.ts` 的 `isSeenPlatformId`）。
+  db.exec(`CREATE TABLE IF NOT EXISTS wa_im_seen (
+    channel_id TEXT NOT NULL,
+    external_user_id TEXT NOT NULL,
+    platform_message_id TEXT NOT NULL,
+    seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (channel_id, external_user_id, platform_message_id)
+  )`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_wa_im_seen_at ON wa_im_seen(seen_at)`);
+  // 只留 30 天：去重只对"平台重投窗口"有意义，久账无价值且会无限长。
+  try { db.prepare("DELETE FROM wa_im_seen WHERE seen_at < datetime('now', '-30 day')").run(); } catch { /* 清理失败不影响启动 */ }
 
   // zx_20261018_3 批一（维特根斯坦·意义即用法）: 旧三元组主语是项目 id 前 8 位（一串十六进制），
   //   按任务词 `LIKE` 永远搜不到 ⇒ 只写不读。此处把旧行改成项目名（读不到名字的行原样保留）。
@@ -462,7 +515,11 @@ export function initDatabase(dataDir: string, dbName = 'worker-ant-server.db'): 
     -- zx_20260924 M4: 出站媒体件。media_path 非空 ⇒ 这条账发的是"件"不是文本,
     --   补发必须走 sendMedia——否则重试把一件文件退化成一条只有文件名的文字(账上却记"已送达")。
     media_path TEXT,
-    media_kind TEXT
+    media_kind TEXT,
+    -- zx_20261110_1 B7: 用户主动关闭（dead/unsupported_media/blocked_quota 三态）。
+    --   关闭只改状态、不物理删；这两列留痕，明细仍可查「何时、为何关的」。
+    dismissed_at TEXT,
+    dismiss_reason TEXT
   )`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_wa_im_outbox_due ON wa_im_outbox(status, next_retry_at)`);
 
@@ -514,6 +571,12 @@ export function initDatabase(dataDir: string, dbName = 'worker-ant-server.db'): 
   //   DDL 真源在 `core/project-node-policy.ts` 的 `PROJECT_NODES_DDL`（rr 夹具同引这一份）。
   //   未登记 = 跟随全局；登记 `participate=0` = 本项目退出。
   db.exec(PROJECT_NODES_DDL);
+
+  // ===== 岗位（zx_20261112_1 B1: 长期在岗的知识载体）=====
+  //   DDL 真源在 `core/positions.ts` 的 `POSITIONS_DDL`（rr 夹具同引这一份）。
+  //   内置 13 岗只在首次播种（`wa_settings.positions_seed_version` 标记），删掉的内置岗不会被复活。
+  db.exec(POSITIONS_DDL);
+  seedBuiltinPositions(db);
 
   // ===== 运行证据（zx_20261105_1 M1: 判卷可引用的执行留痕）=====
   //   DDL 真源在 `core/runtime-evidence.ts` 的 `RUNTIME_EVIDENCE_DDL`（rr 夹具同引这一份）。
@@ -759,7 +822,10 @@ export function initDatabase(dataDir: string, dbName = 'worker-ant-server.db'): 
   //   项目创建时（或详情页手动重跑）读仓一次，由模型归纳成结构化摘要，供后续任务稳定注入。
   //   与画像（库内事实派生）/九节册（零 LLM 派生）分工不同：须知是**代码仓的只读快照**。
   //   `brief_json` 保留最近一次**成功**的版本——一次重跑失败不清空已有认知；
-  //   `status` 仅用于界面如实展示（pending/running/ready/failed），注入侧只认 brief_json 非空。
+  //   `status` = **最近一次尝试的结局**（pending/running/ready/failed）；注入侧只认 brief_json 非空。
+  //   zx_20261111_1「实」：`generated_at` 与 `updated_at` 分账——前者只在成功时前进，后者记每次尝试；
+  //     `attempt_model` 记本次尝试模型（选型前失败为空串）。此前失败会把 `status` 强写回 ready、
+  //     把 `updated_at` 覆盖成失败时刻 ⇒ 界面把"旧内容 + 新时间 + 旧模型"当成一次成功展示。
   //   ⚠ 建表**必须在 `CREATE TABLE` 段**、不得放进上方 migrations 数组。
   //   语义单一真源在 `core/project-brief.ts`，此处只建表。
   db.exec(`CREATE TABLE IF NOT EXISTS wa_project_briefs (
@@ -772,8 +838,15 @@ export function initDatabase(dataDir: string, dbName = 'worker-ant-server.db'): 
     tokens_in INTEGER NOT NULL DEFAULT 0,
     tokens_out INTEGER NOT NULL DEFAULT 0,
     trigger TEXT NOT NULL DEFAULT '',
+    generated_at TEXT NOT NULL DEFAULT '',
+    attempt_model TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`);
+  // 老库补列：本表建在 migrations 数组**之后**，故 ALTER 只能跟在这里（放前面会被 try/catch 静默吞掉）。
+  try { db.exec("ALTER TABLE wa_project_briefs ADD COLUMN generated_at TEXT NOT NULL DEFAULT ''"); } catch { /* 列已存在 */ }
+  try { db.exec("ALTER TABLE wa_project_briefs ADD COLUMN attempt_model TEXT NOT NULL DEFAULT ''"); } catch { /* 列已存在 */ }
+  // 老库回填：只补空值、只认既有 ready 行（不重写历史状态；幂等）。
+  db.exec("UPDATE wa_project_briefs SET generated_at = updated_at WHERE status = 'ready' AND generated_at = ''");
 
   // ===== 领域包（zx_20261021_3 批一: 庄子·指穷于为薪，火传也）=====
   //   `wa_domain_packs` = **可携带资产**（从某项目派生的三节 JSON）；`wa_project_domain_packs` = **启用关系**。

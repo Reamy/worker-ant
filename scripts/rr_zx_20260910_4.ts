@@ -59,20 +59,24 @@ console.log('S3 GUI 六处费用展示仍为 ¥（防反向漂移）');
   const pd = stripComments(rd('apps/worker-ant-desktop/renderer/src/pages/ProjectDetailPage.tsx'));
   const pp = stripComments(rd('apps/worker-ant-desktop/renderer/src/pages/ProjectsPage.tsx'));
   const td = stripComments(rd('apps/worker-ant-desktop/renderer/src/pages/TaskDetailPage.tsx'));
+  // zx_20261107_1 B9：费用卡由 TaskDetailPage 按关节抽进 `TaskCost`——本组的「任务详情」落点
+  //   随之重定向到该组件（钉的仍是"同几个 ¥ 标记在位"，只是跟着代码走，不是放宽）。
+  const tc = stripComments(rd('apps/worker-ant-desktop/renderer/src/components/task/TaskCost.tsx'));
 
   ok(pd.includes('费用上限(¥)/任务'), '项目详情·展示行标签为 (¥)/任务');
-  ok(pd.includes('¥{ctx.budget.max_cost_usd_per_task'), '项目详情·展示行数值前缀 ¥');
+  // zx_20261107_1 B6：项目页数值改由共享 `formatMoney` 出（币种单源，CNY ⇒ ¥），不再内联 `¥{…}`。
+  ok(pd.includes('formatMoney(ctx.budget.max_cost_usd_per_task)'), '项目详情·展示行数值经共享 formatMoney 带 ¥（币种单源）');
   ok(pp.includes('单任务费用上限¥(如3.6)'), '项目列表·编辑占位符标 ¥');
   // zx_20260910_5 订正：断言改为钉「币种标记」而非逐字文案——zx_20260910_5 把成本卡改名为
   // 「费用（¥ 人民币）· 已用/上限」（新增费用水位），逐字断言会「每轮必误报」。护栏意图（必须是 ¥，不许漂 $）不变。
-  ok(/（¥ 人民币）/.test(td), '任务详情·费用明标（¥ 人民币）');
-  ok(td.includes('费用预算（¥ 人民币/任务）'), '任务详情·费用预算明标（¥ 人民币/任务）');
-  ok(/¥\$\{ctxForm\.max_cost_usd_per_task\}/.test(td), '任务详情·上限行以 ¥ 呈现');
+  ok(/（¥ 人民币）/.test(tc), '任务详情·费用明标（¥ 人民币）');
+  ok(tc.includes('费用预算（¥ 人民币/任务）'), '任务详情·费用预算明标（¥ 人民币/任务）');
+  ok(/¥\$\{ctxForm\.max_cost_usd_per_task\}/.test(tc), '任务详情·上限行以 ¥ 呈现');
 
   // 反向漂移护栏：两处渲染色必须紧随 ¥ 之后。
   // 项目详情是 JSX（`¥{…}`，$ 若被写进 JSX 文本会变成 `${…}`）；任务详情是模板串（`¥${…}`，漂移形态为 `$${…}`）。
   ok(!/\$\{ctx\.budget\.max_cost_usd_per_task/.test(pd), '项目详情·未把该字段改标 $（反向漂移护栏）');
-  ok(!/\$\$\{ctxForm\.max_cost_usd_per_task/.test(td), '任务详情·未把该字段改标 $（反向漂移护栏）');
+  ok(!/\$\$\{ctxForm\.max_cost_usd_per_task/.test(tc), '任务详情·未把该字段改标 $（反向漂移护栏）');
 }
 
 console.log('S4 历史误名约束注释在位（防"照名字修回去"）');

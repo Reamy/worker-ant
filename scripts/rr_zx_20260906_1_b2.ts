@@ -21,13 +21,21 @@ function ok(cond: boolean, label: string, detail?: string): void {
 
 const ROOT = path.join(__dirname, '..');
 const exe = fs.readFileSync(path.join(ROOT, 'apps/worker-ant-desktop/src/main/core/agent-executor.ts'), 'utf-8');
+// zx_20261110_2 B5：压缩的运行段已抽到 `context-compaction-run.ts`（执行体行数额度 R-75a）。
+//   S1 的三条静态判据按**符号**重定向到真载体；执行体一侧改钉"仍真引入且真调用"（抽走≠断线）。
+const ccr = fs.readFileSync(path.join(ROOT, 'apps/worker-ant-desktop/src/main/core/context-compaction-run.ts'), 'utf-8');
 const fe = fs.readFileSync(path.join(ROOT, 'apps/worker-ant-desktop/src/main/core/feedback-engine.ts'), 'utf-8');
 const te = fs.readFileSync(path.join(ROOT, 'apps/worker-ant-desktop/src/main/core/tension-engine.ts'), 'utf-8');
 
 console.log('S1 2a 摘要拼接(必修)');
-ok(exe.includes('taskCtx.history_summary = mergedSummary'), 'history_summary 写的是 mergedSummary(非 newSummary)');
-ok(exe.includes('`${prev}\\n[续]${next}`'), '旧摘要与新摘要以 [续] 拼接(保留早期意图)');
-ok(exe.includes('merged: !!existingSummary?.trim()'), '日志带 merged 标记(可观测)');
+ok(ccr.includes('taskCtx.history_summary = mergedSummary'), 'history_summary 写的是 mergedSummary(非 newSummary)');
+// zx_20261113_2 M12：拼接从运行段抽到纯模块 `context-compaction.ts` 的 `mergeCompactionSummaries`（去重 + [续]）。
+//   按**符号**重定向到新载体；运行段只钉"真调用"，不再要求模板字面量留在运行段。
+const ccSrc = fs.readFileSync(path.join(ROOT, 'apps/worker-ant-desktop/src/main/core/context-compaction.ts'), 'utf-8');
+ok(ccr.includes('mergeCompactionSummaries(') && ccSrc.includes('`${p}\\n[续]${n}`'),
+  '旧摘要与新摘要以 [续] 拼接(保留早期意图；真源在 mergeCompactionSummaries)');
+ok(ccr.includes('merged: !!existingSummary?.trim()'), '日志带 merged 标记(可观测)');
+ok(exe.includes("from './context-compaction-run.js'") && exe.includes('compactTaskConversations('), '执行体仍真引入并真调用压缩（抽走≠断线）');
 
 console.log('S2 2d 观察死链下线');
 ok(!/export function observeBehavior/.test(fe), 'observeBehavior 已下线');

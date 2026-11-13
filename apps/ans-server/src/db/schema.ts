@@ -1,6 +1,8 @@
 import Database from 'better-sqlite3';
 import path from 'node:path';
 import fs from 'node:fs';
+// zx_20261112_2 B4：历史用量账回填（名字 → 唯一 id；幂等）。
+import { backfillModelRefs } from '../services/model-ref.js';
 
 const DATA_DIR = path.resolve(process.cwd(), '../../data');
 
@@ -471,6 +473,11 @@ export function initDatabase(dbPath?: string): Database.Database {
       /* ok */
     }
   }
+
+  // zx_20261112_2 B4「数」：历史用量账的**一次性回填**——把按**模型名**写的 `model_id`，
+  //   在「名字唯一命中一个模型」时改写成该模型的 id。幂等（第二次跑命中 0 行）；孤儿行（无同名模型）
+  //   原样保留——它们是真实历史，不硬塞给谁。读端仍只按 id 聚合（单一真源）。
+  backfillModelRefs(db);
 
   return db;
 }

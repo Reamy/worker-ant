@@ -323,7 +323,10 @@ async function main(): Promise<void> {
 
     ok(exe.includes("via: 'write_file'") && exe.includes("via: 'edit_file'"),
       '★ P-3 接线：`write_file` 与 `edit_file` **两个入口**都走它（`edit_file` 正是本轮引爆的新入口，`5ee00c86` 所加）');
-    ok(/ensureDocDeliverable\(db,\s*\{[\s\S]{0,500}?via:\s*o\.via/.test(exe),
+    // zx_20261109_1 B6 按符号重定向（改钉更强的形状，非放宽）：写口改为在
+    //   `flushTaskCommandWrites` 的 register 回调内以解构简写 `via` 转发（B2 抽具名回调时改的形状）。
+    ok(/register:\s*\(absPath: string, via: string, win: CommandWriteWindow\)/.test(exe)
+      && /ensureDocDeliverable\(db,\s*\{[^}]*\bvia,\s*\}\)/.test(exe),
       '★ P-3 接线：子进程落盘那一路（`execute_command`/`run_privileged`）也走它——三处入口共用一处写口');
 
     // 不带 type 的旧式查行：**逐处点名**，且每处所在块**不写 status**

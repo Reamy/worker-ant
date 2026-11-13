@@ -12,7 +12,8 @@
  *
  * zx_20261007 M2 正名：`dispatch_fill_ratio`（旧名 `busy_ratio`）回答的是"**我给自己派了几成活**"，
  *   **不是**"这台机器还剩多少力"——旧名把"我方派单填充"说成了"机器忙闲"，是名实不符。真正的
- *   "机器还剩多少力"由 `capacity_free_ratio` 承担（CPU 利用率 + 内存压力 + 剩余槽，**三源取严**）。
+ *   "机器还剩多少力"由 `capacity_free_ratio` 承担（CPU 利用率 + 内存压力 + 剩余槽 + 磁盘余量，**四源取严**，
+ *   zx_20261108_1 B1 补磁盘；瓶颈与四源快照见 `capacity_basis`）。
  *   `task-accounting.ts` 的 `PROJECT_CONCURRENCY_DEFAULT` 仍是**那唯一一份**分母（填充率与剩余槽同源）。
  *
  * M2 上报：`startNodeHeartbeat()` 周期性经 `ansSignedRequest`（全仓到 ANS 的**唯一出路**）POST
@@ -33,6 +34,7 @@ import {
   type AccountingDb,
 } from './task-accounting.js';
 import { createCpuSampler, type CpuSampler } from './cpu-sampler.js';
+import { deriveClassRunning, type ClassRunning } from './node-class-load.js';
 import {
   NODE_SETTING_KEYS,
   ensureNodeIdentity,
@@ -48,11 +50,28 @@ import type { DeviceDb } from './device-registry.js';
 import { resolveTeamGate } from './team-gate.js';
 import type { ResolveLicenseOpts } from './license.js';
 
+/** 余力的四个来源（`capacity_free_ratio` 取严的候选）；数组顺序即并列时的定序。 */
+export type CapacitySource = 'cpu' | 'mem' | 'slot' | 'disk';
+
+/** 四源余量快照（0..1，未知为 `null`）——供解释"为什么是这个数"（哪一项最紧）。 */
+export interface NodeCapacityBasis {
+  cpu: number | null;
+  mem: number | null;
+  slot: number | null;
+  disk: number | null;
+  /** 余量最小的那一项（取严结果的来源）；全不可知 ⇒ `null`。 */
+  bottleneck: CapacitySource | null;
+}
+
 /** 本机环境快照——**一份**，喂心跳与喂本机行（M6）同源。 */
 export interface NodeEnvSnapshot {
   platform: string;
   arch: string;
   hostname: string;
+  /** OS 版本（`os.release()`）；取不到 ⇒ `null`。 */
+  os_release: string | null;
+  /** CPU 型号（`os.cpus()[0].model`）；取不到 ⇒ `null`。 */
+  cpu_model: string | null;
   cpu_count: number;
   /** 真 CPU 利用率（0–100）；**首次采样无基线 ⇒ `null`**（见 `cpu-sampler.ts`）。 */
   cpu_usage_percent: number | null;
@@ -63,12 +82,16 @@ export interface NodeEnvSnapshot {
   /** 磁盘可用/总量（字节）；取不到卷信息时为 `null`（"不知道"不等于 0）。 */
   disk_free: number | null;
   disk_total: number | null;
+  /** **磁盘余量**（0–1，可用/总量）；总量未知或为 0 ⇒ `null`。 */
+  disk_spare: number | null;
   /** 本机 running **作业**数（快照时刻实测）。⚠ 这是作业数，不是机器执行槽位数。 */
   jobs_running: number;
   /** 机器并发上限——真源 `resolveMachineConcurrencyLimit`（用户设置 `machine_max_concurrency`，未设按 CPU 派生）。 */
   machine_limit: number;
   /** 正占用机器槽位的**任务**数（`executing/preparing/planning`，与 `machineSlotGuard` 同口径）；读不到 ⇒ `null`。 */
   running_tasks: number | null;
+  /** B5：六类目各自在跑数（同一三态口径）；读不到任务表 ⇒ `null`（未知，不写全 0）。 */
+  class_running: ClassRunning | null;
   /** 空闲槽位 = `max(0, machine_limit - running_tasks)`；读不到 ⇒ `null`（"不知道"不等于"全空"）。 */
   free_slots: number | null;
   /** 派单容量分母——`PROJECT_CONCURRENCY_DEFAULT` 一处真源（**项目级**缺省，非机器上限）。 */
@@ -77,8 +100,10 @@ export interface NodeEnvSnapshot {
   dispatch_fill_ratio: number;
   /** **机器槽位填充率** = running_tasks / machine_limit（与执行闸同一把尺）；读不到 ⇒ `null`。 */
   slot_fill_ratio: number | null;
-  /** **机器余力**（0–1，1=全空）：CPU 余量 / 内存余量 / 剩余槽 **三源取严**（最紧的那一项）；全不可知 ⇒ `null`。 */
+  /** **机器余力**（0–1，1=全空）：CPU 余量 / 内存余量 / 剩余槽 / 磁盘余量 **四源取严**（最紧的那一项）；全不可知 ⇒ `null`。 */
   capacity_free_ratio: number | null;
+  /** 四源余量与瓶颈（增量字段，供解释/上屏）；旧读取方不依赖它。 */
+  capacity_basis: NodeCapacityBasis;
   collected_at: string;
 }
 
@@ -95,6 +120,56 @@ export interface CollectEnvOpts {
 
 /** 真机用的 CPU 采样器单例——有状态，全进程共用一个（回归各造各的，见 `cpu-sampler.ts` 注释）。 */
 const defaultCpuSampler: CpuSampler = createCpuSampler();
+
+/** 保留四位小数（与历史 `capacity_free_ratio` 口径一致）。 */
+function round4(v: number): number {
+  return Math.round(v * 10000) / 10000;
+}
+
+/**
+ * 四源取严（纯函数）：已知源取最小值，未知源**跳过**（不按 0 冒充满载），全未知 ⇒ `null`。
+ * 并列时按 `cpu → mem → slot → disk` 定序取第一个——只为让瓶颈解释确定，不改变数值。
+ */
+export function deriveCapacity(sources: {
+  cpu: number | null;
+  mem: number | null;
+  slot: number | null;
+  disk: number | null;
+}): { freeRatio: number | null; basis: NodeCapacityBasis } {
+  const entries: Array<[CapacitySource, number | null]> = [
+    ['cpu', sources.cpu],
+    ['mem', sources.mem],
+    ['slot', sources.slot],
+    ['disk', sources.disk],
+  ];
+  let bottleneck: CapacitySource | null = null;
+  let min = Infinity;
+  for (const [source, value] of entries) {
+    if (value == null || !Number.isFinite(value)) continue;
+    if (bottleneck === null || value < min) { bottleneck = source; min = value; }
+  }
+  const rounded = (v: number | null): number | null => (v == null || !Number.isFinite(v) ? null : round4(v));
+  return {
+    freeRatio: bottleneck === null ? null : round4(min),
+    basis: {
+      cpu: rounded(sources.cpu),
+      mem: rounded(sources.mem),
+      slot: rounded(sources.slot),
+      disk: rounded(sources.disk),
+      bottleneck,
+    },
+  };
+}
+
+/** CPU 型号（取第一颗核的 `model`）；取不到/空串 ⇒ `null`。 */
+function cpuModelOf(): string | null {
+  try {
+    const model = os.cpus()[0]?.model;
+    return typeof model === 'string' && model.trim() !== '' ? model.trim() : null;
+  } catch {
+    return null;
+  }
+}
 
 /** 采集本机环境快照。任何一处取不到都**如实留空/留 null**，不编一个像真的值。 */
 export function collectNodeEnv(db: NodeSettingDb, opts: CollectEnvOpts = {}): NodeEnvSnapshot {
@@ -123,6 +198,8 @@ export function collectNodeEnv(db: NodeSettingDb, opts: CollectEnvOpts = {}): No
   })();
   const freeSlots = runningTasks == null ? null : Math.max(0, machineLimit - runningTasks);
   const slotFill = runningTasks == null || machineLimit <= 0 ? null : runningTasks / machineLimit;
+  // B5：按类目的在跑数（与槽位同三态）；读不到 ⇒ null（未知），派单方不据此判断"这类空闲"。
+  const classRunning = deriveClassRunning(accountingDb);
 
   let diskFree: number | null = null;
   let diskTotal: number | null = null;
@@ -141,18 +218,22 @@ export function collectNodeEnv(db: NodeSettingDb, opts: CollectEnvOpts = {}): No
   // M1：真 CPU 利用率（两次采样做差；首次返回 null）。
   const cpuUsage = (opts.cpuSampler ?? defaultCpuSampler).sample().percent;
 
-  // M2：机器余力 = 三源取严（最紧的一项即瓶颈）。任一源不可知则只用可知者；全不可知 ⇒ null。
+  // M2：机器余力 = 四源取严（最紧的一项即瓶颈）。任一源不可知则只用可知者；全不可知 ⇒ null。
   const cpuSpare = cpuUsage == null ? null : Math.max(0, (100 - cpuUsage) / 100);
   const memSpare = totalMem > 0 ? Math.max(0, freeMem / totalMem) : null;
   // 槽位余量**只认任务占位**（与 `machineSlotGuard` 同源）；作业数再高也不影响它。
   const slotSpare = freeSlots == null || machineLimit <= 0 ? null : freeSlots / machineLimit;
-  const spares = [cpuSpare, memSpare, slotSpare].filter((v): v is number => v != null);
-  const capacityFree = spares.length > 0 ? Math.round(Math.min(...spares) * 10000) / 10000 : null;
+  const diskSpare = diskFree != null && diskTotal != null && diskTotal > 0
+    ? Math.max(0, Math.min(1, diskFree / diskTotal))
+    : null;
+  const capacity = deriveCapacity({ cpu: cpuSpare, mem: memSpare, slot: slotSpare, disk: diskSpare });
 
   return {
     platform: os.platform(),
     arch: os.arch(),
     hostname: os.hostname(),
+    os_release: os.release(),
+    cpu_model: cpuModelOf(),
     cpu_count: os.cpus().length,
     cpu_usage_percent: cpuUsage,
     // Windows 上 os.loadavg() 恒 [0,0,0]——那是"没有这个数"，不是"空闲"，如实留 null。
@@ -161,14 +242,17 @@ export function collectNodeEnv(db: NodeSettingDb, opts: CollectEnvOpts = {}): No
     free_mem: freeMem,
     disk_free: diskFree,
     disk_total: diskTotal,
+    disk_spare: diskSpare,
     jobs_running: jobsRunning,
     machine_limit: machineLimit,
     running_tasks: runningTasks,
+    class_running: classRunning,
     free_slots: freeSlots,
     concurrency_default: denom,
     dispatch_fill_ratio: denom > 0 ? jobsRunning / denom : 0,
     slot_fill_ratio: slotFill,
-    capacity_free_ratio: capacityFree,
+    capacity_free_ratio: capacity.freeRatio,
+    capacity_basis: capacity.basis,
     collected_at: new Date(opts.now ?? Date.now()).toISOString(),
   };
 }
@@ -498,16 +582,45 @@ export interface ReconcileResult {
  * ⚠ **永不抛**：对账失败只如实记日志，**不阻断启动**（网络不通/ANS 没起时不比启动更重要）。
  * ⚠ `request` **注入**（缺省 `ansSignedRequest`）：受控回归喂假 ⇒ 判据不碰真实网络。
  */
+/**
+ * zx_20261112_2 B1：许可恢复时**要不要把参与还回去**（纯函数，供回归直跑）。
+ *
+ * 三条同时成立才恢复：值仍是 `'0'`、来由是 `'license'`（不是用户手关）、许可已解锁。
+ * ⚠ 不要拿 `effectiveNodeParticipate` 当第三项——它自身含 `participate !== '0'`，合取恒假。
+ */
+export function shouldRestoreLicenseParticipation(f: {
+  participate: string | null;
+  offReason: string | null;
+  teamUnlocked: boolean;
+}): boolean {
+  return f.participate === '0' && f.offReason === 'license' && f.teamUnlocked === true;
+}
+
 export async function reconcileNodeParticipation(
   db: NodeSettingDb,
   opts: { request?: typeof ansSignedRequest; timeoutMs?: number; licenseOpts?: ResolveLicenseOpts } = {},
 ): Promise<ReconcileResult> {
   try {
     if (!isNodeEnrolled(db)) return { changed: false, note: 'not-enrolled' };
+    const participate = readNodeSetting(db, NODE_SETTING_KEYS.participate);
+    const offReason = readNodeSetting(db, NODE_SETTING_KEYS.participateOffReason);
+    // zx_20261112_2 B1：许可**恢复**了，而当初是许可替用户关的 ⇒ 把参与还回去。
+    //   用户手关的（`'user'` 或未知）永远不动——那是用户意志，不替他做主。
+    //   ⚠ 判据只能是「许可是否解锁」：`effectiveNodeParticipate` 自身含 `participate !== '0'`，
+    //     拿它当第三项会让整个合取恒假（恢复分支永不触发——那是本方案首版的真 bug）。
+    if (shouldRestoreLicenseParticipation({
+      participate, offReason, teamUnlocked: resolveTeamGate(db, opts.licenseOpts).unlocked,
+    })) {
+      return restoreLicenseParticipation(db, opts);
+    }
     // 本地已明确置"不参与" ⇒ 用户意志，不动（ANS 侧应已在置此值时同步过）。
-    if (readNodeSetting(db, NODE_SETTING_KEYS.participate) === '0') return { changed: false, note: 'already-off' };
+    if (participate === '0') return { changed: false, note: 'already-off' };
     // 生效参与为真（许可未锁）⇒ 与 ANS 侧一致，无须补报。
-    if (effectiveNodeParticipate(db, opts.licenseOpts)) return { changed: false, note: 'ok' };
+    if (effectiveNodeParticipate(db, opts.licenseOpts)) {
+      // 历史库可能只留了 `license` 标记而值已是参与：清掉标记，避免下次误判。
+      if (offReason === 'license') writeNodeSetting(db, NODE_SETTING_KEYS.participateOffReason, '');
+      return { changed: false, note: 'ok' };
+    }
 
     // 至此：本地参与但许可锁 ⇒ 向 ANS 报 participate=false，成功后镜像本地。
     const nodeId = readNodeSetting(db, NODE_SETTING_KEYS.id);
@@ -524,11 +637,68 @@ export async function reconcileNodeParticipation(
       return { changed: false, note };
     }
     writeNodeSetting(db, NODE_SETTING_KEYS.participate, '0');
+    // zx_20261112_2 B1：记下"是许可关的"——许可恢复时据此把参与还回去（用户手关的永不自动恢复）。
+    writeNodeSetting(db, NODE_SETTING_KEYS.participateOffReason, 'license');
     console.log('[工蚁] 许可未解锁——本机已退出派单（participate=false 已报 ANS）');
     return { changed: true, note: 'ok' };
   } catch (e) {
     const note = `reconcile-failed: ${(e as Error)?.message || String(e)}`;
     console.warn(`[工蚁] 启动期参与对账异常：${note}`);
+    return { changed: false, note };
+  }
+}
+
+/**
+ * zx_20261112_2 B1（王阳明·知行合一 / 白圭·乐观时变）：**许可恢复后把参与还回去**。
+ *
+ * 为什么先 PATCH 再写本地：ANS 的 `DISPATCHABLE_WHERE` 只看 ANS 那一列——本地写 `'1'` 不送达就只是自说自话。
+ * 为什么 PATCH 后要复核：PATCH 是 await，用户可能在这期间手动关了参与；此时若照写本地就会覆盖用户意志。
+ *   故复核只有「本地仍是 `'0'` 且来由仍是 `license`」才落本地；否则按用户当前值**纠正** ANS 一次。
+ * 永不抛：失败如实记日志，下次启动再试。
+ */
+export async function restoreLicenseParticipation(
+  db: NodeSettingDb,
+  opts: { request?: typeof ansSignedRequest; timeoutMs?: number },
+): Promise<ReconcileResult> {
+  const nodeId = readNodeSetting(db, NODE_SETTING_KEYS.id);
+  if (!nodeId) return { changed: false, note: 'not-enrolled' };
+  const request = opts.request ?? ansSignedRequest;
+  const timeoutMs = opts.timeoutMs ?? 5000;
+  try {
+    const r = await request(resolveAnsCreds(db as unknown as AnsSettingDb), `/api/v1/nodes/${nodeId}`, {
+      method: 'PATCH',
+      body: { participate: true },
+      timeoutMs,
+    });
+    if (!r.ok) {
+      const note = `restore-failed: ${ansFailureNote(r)}`;
+      console.warn(`[工蚁] 许可已恢复但参与回补失败：${note}`);
+      return { changed: false, note };
+    }
+    const nowPart = readNodeSetting(db, NODE_SETTING_KEYS.participate);
+    const nowReason = readNodeSetting(db, NODE_SETTING_KEYS.participateOffReason);
+    if (nowPart === '0' && nowReason === 'license') {
+      writeNodeSetting(db, NODE_SETTING_KEYS.participate, '1');
+      writeNodeSetting(db, NODE_SETTING_KEYS.participateOffReason, '');
+      console.log('[工蚁] 许可已恢复——本机重新参与派单（participate=true 已报 ANS）');
+      return { changed: true, note: 'restored' };
+    }
+    if (nowPart === '0') {
+      // 用户在 PATCH 期间手关了 ⇒ 把 ANS 改回去，尊重用户意志。
+      const back = await request(resolveAnsCreds(db as unknown as AnsSettingDb), `/api/v1/nodes/${nodeId}`, {
+        method: 'PATCH',
+        body: { participate: false },
+        timeoutMs,
+      });
+      if (!back.ok) console.warn(`[工蚁] 参与回补后用户已手关，但纠正 ANS 失败：${ansFailureNote(back)}`);
+      return { changed: false, note: 'user-changed' };
+    }
+    // 已是参与（用户或别处已改）：只清残留标记。
+    if (nowReason === 'license') writeNodeSetting(db, NODE_SETTING_KEYS.participateOffReason, '');
+    return { changed: true, note: 'restored' };
+  } catch (e) {
+    const note = `restore-failed: ${(e as Error)?.message || String(e)}`;
+    console.warn(`[工蚁] 许可恢复后参与回补异常：${note}`);
     return { changed: false, note };
   }
 }

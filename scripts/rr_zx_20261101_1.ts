@@ -386,10 +386,15 @@ function main(): void {
   console.log('\n【M5】接线：一处真源，三个写口都挂闸');
   {
     const imRouter = CODE('apps/worker-ant-desktop/src/main/services/im-router.ts');
-    const pairAt = imRouter.indexOf('if (handleTerminalPairReply(ctx, fromUser, msgText)) return;');
-    const inboxAt = imRouter.indexOf('await handleApprovalInbox(ctx, fromUser, msgText, chatType)');
-    ok(pairAt > 0 && inboxAt > pairAt, 'M5-1 授权台排在配对审批之后、任务审批之前（步骤 -0.5）',
-      `${pairAt} < ${inboxAt}`);
+    // zx_20261108_1 B3：入站链路改走 `routeText`（剥 @ 后的正文）——按符号重定向（非放宽），
+    //   并把「在任务审批之前」也从注释承诺改成代码次序断言。
+    // zx_20261112_2 B3：配对审批补 `chatType`（私聊闸）⇒ 按新签名定位，次序判据不变。
+    const pairAt = imRouter.indexOf('if (handleTerminalPairReply(ctx, fromUser, routeText, chatType)) {');
+    const inboxAt = imRouter.indexOf('await handleApprovalInbox(ctx, fromUser, routeText, chatType)');
+    const taskApprAt = imRouter.indexOf('if (checkPendingApproval(ctx, fromUser, routeText)) {');
+    ok(pairAt > 0 && inboxAt > pairAt && taskApprAt > inboxAt,
+      'M5-1 授权台排在配对审批之后、任务审批之前（步骤 -0.5）',
+      `${pairAt} < ${inboxAt} < ${taskApprAt}`);
     eq(imRouter.split('async function handleApprovalInbox(').length - 1, 1,
       'M5-2 授权台编排在本文件恰一处定义（不散两份）');
 

@@ -159,9 +159,11 @@ const cf = stripComments(rd('apps/worker-ant-desktop/src/main/core/tools/control
     //   那仍是在钉"**题面被传进去了**，只是后面跟的判型对了"。M7 把"题面"这条入口整个拆掉（`validateOutput`
     //   签名收成三参），故此处改钉**更强**的新真源：调用形状里**根本不再出现任务题面**，判型 `arch` 收尾。
     ok(!exe.includes('`${title} ${description}`, arch)'), '★收口门不再把**任务题面**递给文件判据（旧形状 `${title} ${description}`, arch 已离场）');
-    ok(exe.includes('validateOutputs(ansClient as never, missTargets)')
+    // zx_20261109_1 B3 就地改钉（非放宽）：批量面新增第三参（总预算 + 熔断器），
+    //   按旧的两参字面比对必红。改钉**更强**的新真源——连"总预算/熔断器确实传进去了"一并钉住。
+    ok(exe.includes('validateOutputs(ansClient as never, missTargets, { breaker: sufficiencyBreaker, budgetMs: LLM_VALIDATION_BUDGET_MS })')
       && !exe.includes('validateOutput(ansClient as never, abs, arch)'),
-      '收口门调用形状：批量面一次问完（判型随每条目标），逐文件直呼 `validateOutput` 已离场');
+      '收口门调用形状：批量面一次问完（判型随每条目标 + 总预算/熔断器齐传），逐文件直呼 `validateOutput` 已离场');
     // ⚠ 不得改写成 `!exe.includes('`${title} ${description}`')`——该表达式在本文件里另有 7 处**正当**用途
     //   （判原型 / 抽声明产出路径 / 记忆分类 …），那样写会扫出一片假红。判据须认得"车牌照"，不是"这两个字"。
   }
@@ -196,9 +198,11 @@ const cf = stripComments(rd('apps/worker-ant-desktop/src/main/core/tools/control
     // zx_20260922_1 M7（F9）就地改钉：原钉 `llmSufficiencyCheck(ansClient, filePath, taskDescription)`，
     //   并把它读作"LLM 校验照旧（刻意不改）"。那个形状**正是本批要拆的病根**——第三参是**任务题面**，
     //   于是"门禁问的是任务、答出来的记在文件名头上"。改钉后更强：入参只剩 (client, file, 判型)。
-    ok(/const llm = await llmSufficiencyCheck\(ansClient, filePath, archetype\);/.test(ov),
-      '★LLM 腿入参只余 (client, 文件, 判型)——**任务题面这条路已被拆掉**（document/analysis/research 仍走 LLM 腿，'
-      + '变的只是问句的主语）');
+    // zx_20261109_1 B3 就地改钉（非放宽）：第四参 `budget` 承载本批总预算与熔断器（仍**不含**任务题面），
+    //   按旧的三参字面比对必红。改钉更强：题面仍不在入参里，且预算/熔断器确实传到了 LLM 腿。
+    ok(/const llm = await llmSufficiencyCheck\(ansClient, filePath, archetype, budget\);/.test(ov),
+      '★LLM 腿入参 (client, 文件, 判型, 预算)——**任务题面这条路已被拆掉**（document/analysis/research 仍走 LLM 腿，'
+      + '变的只是问句的主语；预算/熔断器由第四参传入）');
     ok(!ov.includes('taskDescription'),
       '★那条通路的**名字**一并消失：`taskDescription` 在 `output-validator.ts`（去注释面）**零处**残留'
       + '（不是"改名留着"，是拆掉）');

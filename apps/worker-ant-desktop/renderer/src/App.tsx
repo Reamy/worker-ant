@@ -22,6 +22,8 @@ const ModelsPage = lazy(() => import('./pages/ModelsPage'));
 const UsersPage = lazy(() => import('./pages/UsersPage'));
 const DeliverablesPage = lazy(() => import('./pages/DeliverablesPage'));
 const SkillsPage = lazy(() => import('./pages/SkillsPage'));
+// zx_20261112_1 B1「岗」: 岗位管理页（四段编辑 / 项目启用 / 经验确认）。
+const PositionsPage = lazy(() => import('./pages/PositionsPage'));
 const TemplatesPage = lazy(() => import('./pages/TemplatesPage'));
 const McpPage = lazy(() => import('./pages/McpPage'));
 const A2aPage = lazy(() => import('./pages/A2aPage'));
@@ -190,6 +192,7 @@ export default function App() {
           <Route path="/activity" element={<ProtectedRoute><ActivityPage /></ProtectedRoute>} />
           <Route path="/projects" element={<ProtectedRoute><ProjectsPage /></ProtectedRoute>} />
           <Route path="/tasks" element={<ProtectedRoute><TasksPage /></ProtectedRoute>} />
+          <Route path="/positions" element={<ProtectedRoute><PositionsPage /></ProtectedRoute>} />
           <Route path="/tasks/:id" element={<ProtectedRoute><TaskDetailPage /></ProtectedRoute>} />
           <Route path="/projects/:id" element={<ProtectedRoute><ProjectDetailPage /></ProtectedRoute>} />
           <Route path="/im" element={<ProtectedRoute><IMPage /></ProtectedRoute>} />

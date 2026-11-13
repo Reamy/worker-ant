@@ -87,57 +87,10 @@ export type DeviceControlTransport = (
   args: Record<string, unknown>,
 ) => Promise<DeviceControlResult>;
 
-/**
- * 云元数据地址黑名单（zx_20261022_3 批四）。
- * 病：`169.254.0.0/16` 整段放行是为了照顾真链路本地设备，但云厂商把**实例凭据服务**也放在这一段——
- *   设备面板里自述一个 `169.254.169.254` 就能让本机替它去取 IAM 凭据（SSRF 直达云身份）。
- * 治法：只拒**已知元数据端点**，其余链路本地保留（局域网设备可能合法使用）。
- */
-const CLOUD_METADATA_ADDRS: ReadonlySet<string> = new Set([
-  '169.254.169.254', // AWS / GCP / Azure / OpenStack IMDS
-  '169.254.170.2',   // AWS ECS task metadata
-  'fd00:ec2::254',   // AWS IMDSv2 over IPv6
-]);
-
-/** 地址归一（去方括号/空白/大小写）——判黑名单用。 */
-function normalizeAddr(raw: string): string {
-  return String(raw ?? '').trim().replace(/^\[|\]$/g, '').toLowerCase();
-}
-
-/** 是否云元数据端点（显式拒绝，因由单独说）。 */
-export function isCloudMetadataAddress(addr: string): boolean {
-  return CLOUD_METADATA_ADDRS.has(normalizeAddr(addr));
-}
-
-/**
- * 局域网地址收口（SSRF）：私有 IPv4 / 链路本地 / 回环 / IPv6 LL / `.local` 放行，其余拒。
- * **云元数据端点一律先拒**（因由由 `lanAddressRefusal` 给，调用方如实上屏）。
- */
-export function isLanAddress(addr: string): boolean {
-  return lanAddressRefusal(addr) == null;
-}
-
-/** 拒绝因由（放行回 `null`）：元数据端点单独一句，其余非局域网一句。 */
-export function lanAddressRefusal(addr: string): string | null {
-  if (!addr) return '地址为空';
-  const norm = normalizeAddr(addr);
-  if (isCloudMetadataAddress(norm)) {
-    return `地址 ${norm} 是云元数据端点（实例凭据服务），出于安全**拒绝出站**（不替设备去取本机云身份）。`;
-  }
-  const m = norm.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (m) {
-    const a = Number(m[1]);
-    const b = Number(m[2]);
-    if (a === 10 || a === 127) return null;
-    if (a === 192 && b === 168) return null;
-    if (a === 172 && b >= 16 && b <= 31) return null;
-    if (a === 169 && b === 254) return null;
-    return `地址 ${addr} 非局域网地址（私网/链路本地/回环），出于安全**拒绝出站**。`;
-  }
-  if (/^fe80:/i.test(norm) || norm === '::1') return null;
-  if (/\.local$/i.test(norm)) return null;
-  return `地址 ${addr} 非局域网地址（私网/链路本地/.local），出于安全**拒绝出站**。`;
-}
+// zx_20261107_1 B1：地址判据上移至零依赖 `device-address.ts`（发现层也要用，不能把 AI SDK 拉进发现模块）。
+// 此处 re-export 保持既有调用点（IPC/面板/诊断）不变。
+import { isCloudMetadataAddress, isLanAddress, lanAddressRefusal } from '../device-address.js';
+export { isCloudMetadataAddress, isLanAddress, lanAddressRefusal };
 
 /**
  * 默认控制传输：**通用 HTTP**（K-3 协议无关的控制面其一）。

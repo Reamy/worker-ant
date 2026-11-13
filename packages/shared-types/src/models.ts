@@ -273,6 +273,12 @@ export interface ModelRequirements {
   excludeCapabilities?: ModelCapability[];
   /** 最小上下文窗口（tokens）。与能力门槛取严：`max(能力下限, 本值)`。未给则不设此闸。 */
   minContextWindow?: number;
+  /**
+   * zx_20261111_1 B2：**远端优先**。为 `true` 时，选中池按"非本地端点在前、本地端点在后"
+   * 稳定重排；池里没有任何远端候选时仍回退本地（`usedLocalFallback=true` 如实标明），不报"无模型"。
+   * 不传 ⇒ 排序与改动前逐字一致（旧调用方完全不受影响）。
+   */
+  preferRemote?: boolean;
 }
 
 /** 匹配策略 */

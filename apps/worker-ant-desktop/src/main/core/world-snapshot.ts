@@ -6,8 +6,13 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import type Database from 'better-sqlite3';
+import { tagWithRun } from './run-trace.js';
 import { createLogger } from './logger.js';
 import { buildPlanMilestoneLine } from './project-analytics.js';
+import { walkWorkingDir, type WorkingFile } from './working-dir-walk.js';
+// ⚠ 与 `working-dir-scan-cache` 互为 import（它要 `scanWorkingDirOnce`，本文件要 `factListingCached`）：
+//   两侧只在**函数体内**读对方绑定、顶层不求值 ⇒ ESM 循环安全（与 `exec-finalize` 回引 `agent-executor` 同形）。
+import { factListingCached } from './working-dir-scan-cache.js';
 
 const logger = createLogger('world-snapshot');
 
@@ -81,8 +86,11 @@ function writeDiffDump(opts: { taskId?: string; dataDir?: string } | undefined, 
 /** 采样 stat 的并发批量（libuv 线程池默认 4，此处只做"别一次排几千个"的背压） */
 const STAT_CONCURRENCY = 64;
 
-/** M3 补：逐条过滤（纯 CPU）每多少条让出一拍——见 `captureWorldSnapshot` 内说明 */
-const FILTER_YIELD_EVERY = 16384;
+/** zx_20261109_1 B1：`SKIP_DIRS` 的**唯一一处**对外形态——供目录级剪枝与 rr 共用，禁止在别处复制正则。 */
+export function isSkippedWorkingPath(rel: string): boolean { return SKIP_DIRS.test(rel); }
+/** 目录剪枝：目录相对路径（带尾斜杠）命中即不下沉；与文件谓词 `isSampledWorkingFile` 同源。 */
+const shouldSkipSampledDir = (relDir: string): boolean => isSkippedWorkingPath(relDir);
+const shouldSkipSampledFile = (name: string, rel: string): boolean => !isSampledWorkingFile(name, rel);
 
 /**
  * zx_20260917 M4：工作目录采样的**口径**（唯一一处）——隐藏项与 `SKIP_DIRS` 下的项都不收录。
@@ -112,16 +120,12 @@ export async function listFilesWrittenSince(root: string, sinceMs: number): Prom
   const out: string[] = [];
   if (!root) return out;
   try {
-    const entries = await fsp.readdir(root, { recursive: true, withFileTypes: true });
-    const cands: string[] = [];
-    for (let i = 0; i < entries.length; i++) {
-      if (i > 0 && i % FILTER_YIELD_EVERY === 0) await new Promise((r) => setImmediate(r));
-      const e = entries[i]!;
-      if (!e.isFile()) continue;
-      const fp = path.join((e as unknown as { parentPath?: string }).parentPath || root, e.name);
-      if (!isSampledWorkingFile(e.name, path.relative(root, fp))) continue;
-      cands.push(fp);
-    }
+    // zx_20261109_1 B1：目录级剪枝（不再先枚举 `node_modules` 等再逐条丢）。
+    const walk = await walkWorkingDir(root, {
+      shouldSkipDir: shouldSkipSampledDir,
+      shouldSkipFile: shouldSkipSampledFile,
+    });
+    const cands = walk.files.map((f) => f.abs);
     for (let i = 0; i < cands.length; i += STAT_CONCURRENCY) {
       const batch = await Promise.all(cands.slice(i, i + STAT_CONCURRENCY).map(async (fp) => {
         // 单个 stat 失败只跳过该条（与 `captureWorldSnapshot` 同一条纪律：不让一条坏路径废掉整轮盘点）
@@ -177,6 +181,95 @@ export function sampleSnapshotCandidates(paths: readonly string[], limit: number
   return out;
 }
 
+// ── zx_20261109_1 B2：一次遍历两用 ──────────────────────────────────────
+/** 本 run 的工作目录扫描结果：一次 walker + 一次批量 stat（`size`/`mtimeMs` 全量在手）。 */
+export interface WorkingDirScan {
+  root: string;
+  files: WorkingFile[];
+  dirsScanned: number;
+  entriesScanned: number;
+  truncatedScan: boolean;
+}
+
+/** 大仓上限（G15）：条目数与时长，超限即停在已扫描处并如实标记。 */
+export const SCAN_MAX_ENTRIES = 200_000;
+export const SCAN_DEADLINE_MS = 10_000;
+
+/**
+ * 工作目录**一次**扫描（B2 的唯一取数口）。
+ *
+ * 旧实现同一段收口要扫两遍：第二证据通道 `listFilesWrittenSince`（全量 stat）
+ * + `captureWorldSnapshot`（再 readdir + 采样 stat）。两遍读的是同一棵树、同一时刻附近，
+ * 却各付一次遍历成本（怡寿里实测 188–217ms + 200ms 级）。此处一次拿全，两个消费者共用。
+ *
+ * 目录不可读/不存在 ⇒ `null`（调用方按"没有可扫描的世界"处理，不假装扫过）。
+ *
+ * zx_20261110_2 B5：**这条口径此前并不成立**——`walkWorkingDir` 对根目录的 `readdir` 失败是
+ * `catch { return }`（"一条坏路径不废整轮盘点"），于是不存在的目录会得到"0 个文件的合法扫描"，
+ * 与"目录是空的"分不开。调用方据此写"没有变化"就是假话（审计最不能接受的一句）。
+ * 故先 `stat` 根目录：读不到/不是目录 ⇒ `null`；一次 stat 的代价换"空"与"没有"分得清。
+ */
+export async function scanWorkingDirOnce(
+  root: string,
+  opts: { maxEntries?: number; deadlineMs?: number; yieldEvery?: number } = {},
+): Promise<WorkingDirScan | null> {
+  const dir = String(root ?? '').trim();
+  if (!dir) return null;
+  try {
+    const st = await fsp.stat(dir).catch(() => null);
+    if (!st || !st.isDirectory()) return null;
+    const walk = await walkWorkingDir(dir, {
+      shouldSkipDir: shouldSkipSampledDir,
+      shouldSkipFile: shouldSkipSampledFile,
+      statMode: 'all',
+      maxEntries: opts.maxEntries ?? SCAN_MAX_ENTRIES,
+      deadlineMs: opts.deadlineMs ?? SCAN_DEADLINE_MS,
+      yieldEvery: opts.yieldEvery,
+    });
+    return {
+      root: dir,
+      files: walk.files,
+      dirsScanned: walk.dirsScanned,
+      entriesScanned: walk.entriesScanned,
+      truncatedScan: walk.truncatedScan,
+    };
+  } catch { return null; }
+}
+
+/**
+ * 由一次扫描生成**与 `captureWorldSnapshot` 同形**的快照（逐字段一致）。
+ *
+ * `truncated` 有两个来源，任一为真即不冒充全量：① 样本超过 `SNAPSHOT_FILE_LIMIT`；
+ * ② 扫描本身被大仓上限截断（`truncatedScan`）——后者若漏记，前后两份快照会拿
+ * "部分 vs 全量"做增删判定，把没扫到的文件全报成"消失"。
+ */
+export function snapshotFromScan(
+  db: Database.Database,
+  projectId: string,
+  scan: WorkingDirScan | null,
+): Record<string, unknown> | null {
+  try {
+    const root = scan?.root ?? '';
+    const scanned = scan?.files ?? [];
+    const totalCount = scanned.length;
+    const sizeByPath = new Map(scanned.map((f) => [f.abs, f.size]));
+    const sample = sampleSnapshotCandidates(scanned.map((f) => f.abs), SNAPSHOT_FILE_LIMIT, root);
+    const files = sample
+      .map((p) => ({ path: p, size: sizeByPath.get(p) }))
+      .filter((f): f is { path: string; size: number } => typeof f.size === 'number');
+    const tasks = db.prepare('SELECT id, title, status FROM wa_tasks WHERE project_id = ?').all(projectId) as Array<{ id: string; title: string; status: string }>;
+    const deliverables = db.prepare('SELECT id, name, status, file_path FROM wa_deliverables WHERE project_id = ?').all(projectId) as Array<{ id: string; name: string; status: string; file_path: string | null }>;
+    return {
+      timestamp: new Date().toISOString(),
+      fileCount: totalCount,
+      truncated: totalCount > SNAPSHOT_FILE_LIMIT || scan?.truncatedScan === true,
+      fileHashes: files.map(f => `${f.path.replace(root, '')}:${f.size}`).sort(),
+      taskStates: tasks.map(t => `${t.id}:${t.status}`).sort(),
+      deliverableStates: deliverables.map(d => `${d.id}:${d.status}`).sort(),
+    };
+  } catch { return null; }
+}
+
 /** B2: 捕获世界快照（文件列表+任务状态+产出物状态）
  *
  *  zx_20260916_2 M3：改 `async`，并把**排序提到 stat 之前**。
@@ -187,50 +280,10 @@ export function sampleSnapshotCandidates(paths: readonly string[], limit: number
 export async function captureWorldSnapshot(db: Database.Database, projectId: string): Promise<Record<string, unknown> | null> {
   try {
     const proj = db.prepare('SELECT working_dir FROM wa_projects WHERE id = ?').get(projectId) as { working_dir: string } | undefined;
-    const candidates: Array<{ path: string }> = [];
-    let totalCount = 0;
-    if (proj?.working_dir) {
-      try {
-        const entries = await fsp.readdir(proj.working_dir, { recursive: true, withFileTypes: true });
-        // `readdir(recursive)` 把**被跳过目录里的条目也一并返回**（实测真目录 55622 条只留 6104 条），
-        // 逐条 `path.join`+`path.relative`+正则过滤是纯 CPU——实测这一轮独占 97ms 事件循环（I/O 只占 1ms）。
-        // 故每 `FILTER_YIELD_EVERY` 条让出一拍：把一次 ~100ms 的卡顿切成几段 <30ms 的（顺序、结果不变）。
-        for (let i = 0; i < entries.length; i++) {
-          if (i > 0 && i % FILTER_YIELD_EVERY === 0) await new Promise((r) => setImmediate(r));
-          const e = entries[i]!;
-          if (!e.isFile()) continue;
-          const fp = path.join((e as unknown as { parentPath?: string }).parentPath || proj.working_dir, e.name);
-          // zx_20260917 M4: 过滤口径改读 `isSampledWorkingFile`（与 M4 的落盘盘点同一处判据），
-          // 判定**逐字不变**（`!hidden && !SKIP_DIRS` 只是换了个写法的同一谓词）。
-          if (!isSampledWorkingFile(e.name, path.relative(proj.working_dir, fp))) continue;
-          candidates.push({ path: fp });
-        }
-        // M3①: 先记**截断前真实总数**，再截样本。样本量本身从此只是样本量。
-        totalCount = candidates.length;
-      } catch { /* ignore */ }
-    }
-    // zx_20261021_4 批五：截样本改走**顶层目录轮转**（`sampleSnapshotCandidates` 是唯一一处）。
-    //   旧写法「全局字典序排序后切前 2000」让排在后面的子树永远不进样本——样本里的"无增删"只是排序的结论。
-    const sample = sampleSnapshotCandidates(candidates.map((c) => c.path), SNAPSHOT_FILE_LIMIT, proj?.working_dir).map((p) => ({ path: p }));
-    const files: Array<{ path: string; size: number }> = [];
-    for (let i = 0; i < sample.length; i += STAT_CONCURRENCY) {
-      const batch = await Promise.all(sample.slice(i, i + STAT_CONCURRENCY).map(async (c) => {
-        // 单个 stat 失败只跳过该条：旧实现此处整体 abort ⇒ fileCount 记成 0 ⇒ 审计静默失效（有意收紧）
-        try { return { path: c.path, size: (await fsp.stat(c.path)).size }; } catch { return null; }
-      }));
-      for (const f of batch) if (f) files.push(f);
-    }
-    const tasks = db.prepare('SELECT id, title, status FROM wa_tasks WHERE project_id = ?').all(projectId) as Array<{ id: string; title: string; status: string }>;
-    const deliverables = db.prepare('SELECT id, name, status, file_path FROM wa_deliverables WHERE project_id = ?').all(projectId) as Array<{ id: string; name: string; status: string; file_path: string | null }>;
-    return {
-      timestamp: new Date().toISOString(),
-      // M3⑥: 截断后**不得把样本量当总数**（那正是 §1.4 病根的另一种形态）
-      fileCount: totalCount,
-      truncated: totalCount > SNAPSHOT_FILE_LIMIT,
-      fileHashes: files.map(f => `${f.path.replace(proj?.working_dir || '', '')}:${f.size}`).sort(),
-      taskStates: tasks.map(t => `${t.id}:${t.status}`).sort(),
-      deliverableStates: deliverables.map(d => `${d.id}:${d.status}`).sort(),
-    };
+    // zx_20261109_1 B2：一次扫描（walker + 全量 stat）产出候选与样本 size，快照由 `snapshotFromScan` 一处成文。
+    //   采样面不变：文件仍由 `isSampledWorkingFile` 最终过滤（B1 剪枝口径），`fileCount` 仍记截断前真实总数。
+    const scan = proj?.working_dir ? await scanWorkingDirOnce(proj.working_dir) : null;
+    return snapshotFromScan(db, projectId, scan);
   } catch { return null; }
 }
 
@@ -300,8 +353,12 @@ export function loadWorldSnapshot(db: Database.Database, ref: string): Record<st
   } catch { return null; }
 }
 
-/** ctx 里存的那一格 → 整份快照：新形（ref）按引用取，旧形（内联对象，含 rr 标本）原样用。 */
-function resolveStoredSnapshot(db: Database.Database, stored: unknown): Record<string, unknown> | null {
+/**
+ * ctx 里存的那一格 → 整份快照：新形（ref）按引用取，旧形（内联对象，含 rr 标本）原样用。
+ * zx_20261110_2 B6：导出——判据路径阶梯的第④步要读"开跑那一刻的世界文件清单"，
+ * 读法必须与本文件同源（不得由 exec-acceptance 再手抄一遍 ref/内联两种形态的分支）。
+ */
+export function loadStoredSnapshot(db: Database.Database, stored: unknown): Record<string, unknown> | null {
   if (!stored || typeof stored !== 'object') return null;
   const o = stored as Record<string, unknown>;
   if (Array.isArray(o.fileHashes)) return o;
@@ -420,21 +477,45 @@ export async function auditWorldConsistency(
   taskId: string,
   projectId: string,
   addConversation: (taskId: string, role: string, content: string) => void,
-  opts?: { dataDir?: string; runStartedAtMs?: number; fileMutationCount?: number },
+  opts?: {
+    dataDir?: string;
+    runStartedAtMs?: number;
+    fileMutationCount?: number;
+    scan?: Promise<WorkingDirScan | null>;
+    /** zx_20261109_1 B5：本 run 身份——审计 INFO/WARN 行带 run 前缀，续跑后分得清哪一轮。 */
+    runId?: string;
+  },
 ): Promise<void> {
   try {
     const task = db.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get(taskId) as { context_json: string } | undefined;
     let ctx: Record<string, unknown> = {};
     try { ctx = JSON.parse(task?.context_json || '{}'); } catch { /* ignore */ }
-    // zx_20261104_1 M7：**第二证据通道**——本任务命令窗口内实际写入的文件（`listFilesWrittenSince` 不截断）。
+    let workingDir = '';
+    try {
+      const project = db.prepare('SELECT working_dir FROM wa_projects WHERE id = ?').get(projectId) as { working_dir?: string } | undefined;
+      workingDir = String(project?.working_dir ?? '').trim();
+    } catch { /* 项目读不到 ⇒ 无工作目录可扫 */ }
+    // zx_20261109_1 B2：**一次扫描两用**——`opts.scan` 由收口路在循环结束后启动（与旧审计同刻），
+    //   这里不再各扫一遍：written 由 scan 的 mtime 派生，after 快照由同一份 scan 成文。
+    let scanLoaded = false;
+    let scan: WorkingDirScan | null = null;
+    const ensureScan = async (): Promise<WorkingDirScan | null> => {
+      if (scanLoaded) return scan;
+      scanLoaded = true;
+      scan = opts?.scan ? await opts.scan.catch(() => null) : await scanWorkingDirOnce(workingDir);
+      return scan;
+    };
+    // zx_20261104_1 M7：**第二证据通道**——本任务命令窗口内实际写入的文件。
     //   它与前后快照互补：快照截断时至少还有"本任务确实动过哪些文件"这一本账；
     //   与 fileMutationCount（write_file/edit_file 调用次数）对账，对不上时如实写差额，不静默。
     if (opts?.runStartedAtMs) {
       try {
-        const project = db.prepare('SELECT working_dir FROM wa_projects WHERE id = ?').get(projectId) as { working_dir?: string } | undefined;
-        const workingDir = String(project?.working_dir ?? '').trim();
-        const written = workingDir ? await listFilesWrittenSince(workingDir, opts.runStartedAtMs) : [];
-        const names = written.map((fp) => path.relative(workingDir, fp) || fp).sort();
+        const sc = await ensureScan();
+        const since = opts.runStartedAtMs;
+        const names = (sc?.files ?? [])
+          .filter((f) => typeof f.mtimeMs === 'number' && f.mtimeMs >= since)
+          .map((f) => path.relative(workingDir, f.abs) || f.abs)
+          .sort();
         const shown = names.slice(0, SNAPSHOT_LIST_LIMIT);
         const tail = names.length > shown.length ? ` …（共 ${names.length} 个）` : '';
         const mut = typeof opts.fileMutationCount === 'number' ? opts.fileMutationCount : null;
@@ -442,7 +523,15 @@ export async function auditWorldConsistency(
           ? `；与文件改写计数不符：引擎记 ${mut} 次、窗口盘点 ${names.length} 个（差额 ${Math.abs(mut - names.length)}；改写计数含同一文件多次编辑）`
           : '';
         const checks = Array.isArray(ctx.finalize_checks) ? (ctx.finalize_checks as string[]) : [];
-        checks.push(`[INFO] 世界模型审计第二通道：本任务命令窗口写入 ${names.length} 个文件${shown.length ? `：${shown.join(', ')}${tail}` : ''}${diff}（这是本任务写过的，不是世界全量）`);
+        if (!sc && workingDir) {
+          // 扫描不可用 ≠ 没写过文件：如实说"没盘点到"，不写"写入 0 个"。
+          checks.push(tagWithRun('[INFO] 世界模型审计：工作目录扫描不可用，本轮未做命令窗口盘点', opts.runId));
+        } else if (sc?.truncatedScan) {
+          // G15：大仓上限触发 ⇒ 结论只覆盖已扫描部分，**不得**把截断写成"本任务未写文件"。
+          checks.push(tagWithRun(`[INFO] 世界模型审计：工作目录过大（本轮只检查了前 ${sc.entriesScanned} 条，达到条目或时长上限后提前结束），未完成全量盘点与增删判定；已扫描范围内本任务命令窗口写入 ${names.length} 个文件${shown.length ? `：${shown.join(', ')}${tail}` : ''}${diff}（不是全量）`, opts.runId));
+        } else {
+          checks.push(tagWithRun(`[INFO] 世界模型审计第二通道：本任务命令窗口写入 ${names.length} 个文件${shown.length ? `：${shown.join(', ')}${tail}` : ''}${diff}（这是本任务写过的，不是世界全量）`, opts.runId));
+        }
         ctx.finalize_checks = checks;
         db.prepare('UPDATE wa_tasks SET context_json = ? WHERE id = ?').run(JSON.stringify(ctx), taskId);
       } catch { /* 第二通道 best-effort：盘点失败不阻断审计 */ }
@@ -450,15 +539,18 @@ export async function auditWorldConsistency(
     if (!ctx.world_snapshot_before) return;
     // zx_20261028_2 M1: 新形是 `{ref,…}` 摘要（原文在 `wa_world_snapshots`）；旧形内联对象原样用。
     //   引用取不到（行被清/库被换）⇒ 如实说"没做判定"，不拿空快照去比（否则全库文件都成"新增"）。
-    const before = resolveStoredSnapshot(db, ctx.world_snapshot_before);
+    const before = loadStoredSnapshot(db, ctx.world_snapshot_before);
     if (!before) {
       const checks = Array.isArray(ctx.finalize_checks) ? (ctx.finalize_checks as string[]) : [];
-      checks.push('[INFO] 世界模型审计：执行前快照不可读，未做增删判定');
+      checks.push(tagWithRun('[INFO] 世界模型审计：执行前快照不可读，未做增删判定', opts?.runId));
       ctx.finalize_checks = checks;
       db.prepare('UPDATE wa_tasks SET context_json = ? WHERE id = ?').run(JSON.stringify(ctx), taskId);
       return;
     }
-    const after = await captureWorldSnapshot(db, projectId);
+    // zx_20261109_1 B2：after 快照复用**同一份** scan（不再二次 readdir/stat）。
+    //   扫描不可用 ⇒ 与旧 `captureWorldSnapshot` **同形**（空候选的合法快照，`fileCount` 记 0）——
+    //   这是既有语义，不在此擅自改判；只保证不拿"扫了一半"冒充全量（`truncatedScan` 已进 `truncated`）。
+    const after = snapshotFromScan(db, projectId, await ensureScan());
     if (!after) return;
     // zx_20261030_2 M6: 只对本任务自己造成的世界变化负责——范围 = 本任务 + 直接子任务；
     //   本任务自身的 executing→paused 属正常流转，由 compareSnapshots 按 opts.taskId 排除。
@@ -482,8 +574,8 @@ export async function auditWorldConsistency(
       // M3④: 结论进收口 checks（与其余 checks 同处可见，renderer 按前缀着色：[WARN] 黄、[INFO] 蓝）。
       //   **仍不阻断**——它不是闸，只求"用户看得见"。任务未 finalize 过则新建该键，否则该结论无处可见。
       const checks = Array.isArray(ctx.finalize_checks) ? (ctx.finalize_checks as string[]) : [];
-      if (warns.length > 0) checks.push(`[WARN] 世界模型审计：${warns.join('；')}`);
-      if (infos.length > 0) checks.push(`[INFO] 世界模型审计：${infos.join('；')}`);
+      if (warns.length > 0) checks.push(tagWithRun(`[WARN] 世界模型审计：${warns.join('；')}`, opts?.runId));
+      if (infos.length > 0) checks.push(tagWithRun(`[INFO] 世界模型审计：${infos.join('；')}`, opts?.runId));
       ctx.finalize_checks = checks;
     }
     db.prepare('UPDATE wa_tasks SET context_json = ? WHERE id = ?').run(JSON.stringify(ctx), taskId);
@@ -512,21 +604,25 @@ export async function generateFactSnapshot(db: Database.Database, projectId: str
     parts.push(`项目: ${proj.name}`);
     if (proj.working_dir) {
       try {
-        const allFiles: string[] = [];
-        const walk = async (dir: string, depth = 0): Promise<void> => {
-          if (depth > 3) return;
-          let entries;
-          try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; /* 目录不可读：跳过 */ }
-          for (const e of entries) {
-            if (e.name.startsWith('.') || SKIP_DIRS.test(e.name)) continue;
-            const rel = path.relative(proj.working_dir, path.join(dir, e.name));
-            if (e.isDirectory()) { allFiles.push(`${rel}/`); await walk(path.join(dir, e.name), depth + 1); }
-            else {
-              try { const stat = await fsp.stat(path.join(dir, e.name)); allFiles.push(`${rel} (${formatSize(stat.size)})`); } catch { /* 单文件不可读：跳过 */ }
-            }
-          }
-        };
-        await walk(proj.working_dir);
+        // zx_20261110_2 B5「损」：同一目录 60s 内复用同一份清单（事实快照是**只读**消费者——
+        //   它描述"开跑这一刻的世界"，不会因为本 run 后面写了文件就变；缓存只吸收重复扫描的等待）。
+        //   前后比对类消费者**不得**走这里（见 `working-dir-scan-cache.ts` 顶注）。
+        const allFiles = await factListingCached(proj.working_dir, async () => {
+          const acc: string[] = [];
+          // zx_20261109_1 B1：深度 ≤3 的目录树改用同一剪枝 walker。
+          // 本消费者与快照消费者的口径**不同**（这里按 basename 跳过隐藏项与 SKIP_DIRS，且列出目录本身），
+          // 故经参数传入各自谓词——walker 不复制任何业务正则；顺序/上限/输出形状与旧实现一致。
+          await walkWorkingDir(proj.working_dir, {
+            maxDepth: 3,
+            includeNonFiles: true,
+            statMode: 'all',
+            shouldSkipDir: (_relDir, name) => name.startsWith('.') || SKIP_DIRS.test(name),
+            shouldSkipFile: (name) => name.startsWith('.') || SKIP_DIRS.test(name),
+            onDir: (rel) => acc.push(`${rel}/`),
+            onFile: (f) => { if (f.size != null) acc.push(`${f.rel} (${formatSize(f.size)})`); },
+          });
+          return acc;
+        });
         if (allFiles.length > 0) {
           const preview = allFiles.slice(0, 30);
           parts.push(`\n工作目录文件(${allFiles.length}个，显示前${preview.length}):\n${preview.map(f => `  - ${f}`).join('\n')}${allFiles.length > 30 ? `\n  ...共${allFiles.length}个文件` : ''}`);

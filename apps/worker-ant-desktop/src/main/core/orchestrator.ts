@@ -27,21 +27,28 @@ import {
   type OrchestrateDb,
   type OrchestrateMode,
 } from './node-orchestrate.js';
-import { isNodeEnrolled } from './node-heartbeat.js';
-import { ensureNodeIdentity, type NodeSettingDb } from './node-identity.js';
-import { fetchNodes, listDispatchablePeers } from './node-list.js';
-import { projectScanVerdict, resolveProjectConcurrency } from './task-accounting.js';
+import { collectNodeEnv, isNodeEnrolled } from './node-heartbeat.js';
+import { ensureNodeIdentity, readNodeSetting, NODE_SETTING_KEYS, type NodeSettingDb } from './node-identity.js';
+import { fetchNodes, listDispatchablePeers, type NodeLedger } from './node-list.js';
+import { projectScanVerdict, resolveMachineConcurrencyLimit, resolveProjectConcurrency } from './task-accounting.js';
 import { teamFeatureRefusal, type TeamFeature } from './team-gate.js';
 import { resolveLicenseTier, type LicenseSettingDb } from './license.js';
-import type { AnsNode } from '@worker-ant/shared-types';
+import { isNodeCardCategory, type AnsNode, type NodeCardCategory } from '@worker-ant/shared-types';
 import { routeCategoryForTask } from './task-routing.js';
 import { collectUpstreamSummaries, taskParentDispatchBlock } from './collab-dispatch.js';
-import { projectHasNodePolicy, type ProjectNodePolicyDb } from './project-node-policy.js';
+import {
+  buildDispatchPolicy,
+  projectHasNodePolicy,
+  toWireDispatchPolicy,
+  type ProjectDispatchPolicy,
+  type ProjectNodePolicyDb,
+} from './project-node-policy.js';
 import { isProjectDispatchMode, readProjectDispatchModeRaw, resolveProjectDispatchMode } from './project-dispatch-mode.js';
 import {
   PEER_COOLDOWN_MS,
   planCapabilityDispatch,
   peerProfileOf,
+  resourceProfileOfStatus,
   type CapabilityReadyTask,
 } from './capability-dispatch.js';
 import { nodeReliabilityOf } from './node-cluster.js';
@@ -49,8 +56,10 @@ import { listNodeDispatchRecords, type DispatchLogDb } from './node-dispatch-log
 import { deriveNodeCategories } from './node-card.js';
 import { listDevices, type DeviceDb } from './device-registry.js';
 import { peerCapabilitySummary } from './capability-vocabulary.js';
-import type { NodeMatchProfile } from './node-match.js';
+import type { NodeMatchProfile, NodeResources } from './node-match.js';
 import { requirementsForTask } from './task-capability.js';
+import { deriveClassRunning, type ClassRunning } from './node-class-load.js';
+import { listPositions, type PositionDb } from './positions.js';
 
 const logger = createLogger('orchestrator');
 
@@ -80,6 +89,11 @@ export interface OrchestrateDriveDeps {
    *   回归可注入，免得一跑就把上一次失败留下的冷却带进来。
    */
   cooldownUntil?: Map<string, number>;
+  /**
+   * zx_20261108_1 B1：本机资源画像的取盘目录（磁盘余量按此卷算）。缺省 `process.cwd()`
+   *   （旧口径）；真机由启动接线传入真实数据目录，使"本机扛不扛得住"与心跳报的是同一块盘。
+   */
+  dataDir?: string;
 }
 
 /**
@@ -106,6 +120,21 @@ export interface OrchestrateDriveResult {
 }
 
 /** 缺省取对端：本机可派台账（`fetchNodes` 失败时如实回空——不编一份假台账）。 */
+/**
+ * 本机用户权重（B10a）：设置里的 `node.weight`（`nodes:update` 已把 ANS 收窄后的值镜像进来）。
+ * 未设/坏值 ⇒ 5（中性）；**显式 0 保留**——它表示"不参与协同"，由 `matchNode` 硬否决。
+ */
+function readLocalWeight(db: Database.Database): number {
+  try {
+    const raw = readNodeSetting(db as unknown as NodeSettingDb, NODE_SETTING_KEYS.weight);
+    if (raw == null || raw.trim() === '') return 5;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : 5;
+  } catch {
+    return 5;
+  }
+}
+
 async function defaultListPeers(db: Database.Database, nowMs: number): Promise<AnsNode[]> {
   const localNodeId = ensureNodeIdentity(db as unknown as NodeSettingDb).id;
   const ledger = await fetchNodes(db, localNodeId);
@@ -178,7 +207,7 @@ function readTaskForDispatch(
  * 本件按**任务形态**该派给哪类节点；`null` = 不确定/对话形态 ⇒ 不外派（本地跑）。
  * 类目判据在 `task-routing.ts` 一处，本函数只做"读行 → 问它"。
  */
-function taskRouteCategory(db: Database.Database, taskId: string): string | null {
+function taskRouteCategory(db: Database.Database, taskId: string): NodeCardCategory | null {
   const row = readTaskForDispatch(db, taskId);
   return routeCategoryForTask(row?.title, row?.description);
 }
@@ -252,6 +281,14 @@ export async function driveOrchestration(
       categories: NodeMatchProfile['categories'];
       intents: string[];
       deviceClasses: NodeMatchProfile['deviceClasses'];
+      /** 本机资源面（与心跳/对端同一 `resourceProfileOfStatus` 派生）；采集失败 ⇒ `null`（中性）。 */
+      localResources: NodeResources | null;
+      /** B5：本机六类目在跑数；读不到 ⇒ `null`（未知，不加不减）。 */
+      classRunning: ClassRunning | null;
+      /** B5：本机机器并发上限（与执行闸同源）；取不到 ⇒ `null`。 */
+      machineLimit: number | null;
+      /** B5：本机已启用岗位 id（与心跳卡同源）；读不到 ⇒ 空数组（不假装有岗位）。 */
+      positionIds: string[];
     }
     let capCtx: CapabilityContext | null | undefined;
     const capabilityContext = (): CapabilityContext | null => {
@@ -262,11 +299,35 @@ export async function driveOrchestration(
           records = listNodeDispatchRecords(db as unknown as DispatchLogDb, 200);
         } catch { /* 台账不可读 ⇒ 可靠性未知（按中性计分），不因此拒派 */ }
         const localSummary = peerCapabilitySummary(listDevices(db as unknown as DeviceDb));
+        // B1：本机资源面与对端**同引** `resourceProfileOfStatus`；采集失败 ⇒ 中性（不装空闲、也不拒派）。
+        const localResources = (() => {
+          try {
+            const env = collectNodeEnv(db as unknown as NodeSettingDb, deps.dataDir ? { dataDir: deps.dataDir } : {});
+            return resourceProfileOfStatus(env as unknown as Record<string, unknown>);
+          } catch (e) {
+            logger.warn({ err: e }, '本机资源画像采集失败，按未知中性计');
+            return null;
+          }
+        })();
+        // B5：本机侧与对端**同一套口径**——类目在跑数（同三态）、机器上限（同执行闸）、岗位公示（同卡）。
+        //   任一项取不到就留 null/空（未知），不编一个像真的值。
+        const machineLimit = (() => {
+          try { return resolveMachineConcurrencyLimit(db).limit; } catch { return null; }
+        })();
+        const positionIds = (() => {
+          try {
+            return listPositions(db as unknown as PositionDb).filter((p) => p.enabled).map((p) => p.id);
+          } catch { return []; }
+        })();
         capCtx = {
           peerProfiles: peers.map((n) => peerProfileOf(n, nowMs, nodeReliabilityOf(records, n.node_id))),
           categories: deriveNodeCategories(db as unknown as DeviceDb),
           intents: localSummary.intents.map((i) => i.id),
           deviceClasses: localSummary.device_categories.map((d) => d.class),
+          localResources,
+          classRunning: deriveClassRunning(db),
+          machineLimit,
+          positionIds,
         };
       } catch (e) {
         logger.warn({ err: e }, '能力画像构建失败，本拍能力模式不派（溢出模式不受影响）');
@@ -302,18 +363,38 @@ export async function driveOrchestration(
         continue;
       }
 
+      const projectTargeted = projectHasNodePolicy(db as unknown as ProjectNodePolicyDb, project.id);
       const resolution = resolveProjectDispatchMode({
         projectMode: readProjectDispatchModeRaw(project.contextJson),
         globalMode: mode,
         tier,
         enrolled: true,
         onlinePeers: peers.length,
-        hasDivision: projectHasNodePolicy(db as unknown as ProjectNodePolicyDb, project.id),
+        hasDivision: projectTargeted,
       });
       if (resolution.mode === 'off') {
         logger.debug({ projectId: project.id, reason: resolution.reason }, '本项目本拍不外派');
         continue;
       }
+
+      // zx_20261110_1 B3：项目登记了分工 ⇒ 溢出路与能力路都带同一份 policy（候选收窄 + 权重倍率），
+      //   与建单路 `buildDispatchPolicy` 同一把尺。读不到/无分工 ⇒ `null`（退回既有全局池，不把活卡在本机）。
+      const ledgerForPolicy: NodeLedger = { nodes: peers, localNodeId };
+      const policyCache = new Map<NodeCardCategory, ProjectDispatchPolicy | null>();
+      const policyOf = (category: NodeCardCategory): ProjectDispatchPolicy | null => {
+        if (!projectTargeted) return null;
+        const cached = policyCache.get(category);
+        if (cached !== undefined) return cached;
+        let policy: ProjectDispatchPolicy | null = null;
+        try {
+          policy = buildDispatchPolicy(db as unknown as ProjectNodePolicyDb, project.id, category, ledgerForPolicy, nowMs);
+        } catch (e) {
+          logger.warn({ projectId: project.id, category, err: (e as Error)?.message }, '项目分工读取失败，退回按全局池派发');
+          policy = null;
+        }
+        policyCache.set(category, policy);
+        return policy;
+      };
 
       if (resolution.mode === 'overflow') {
         const taskIds = planOffloads({
@@ -341,11 +422,17 @@ export async function driveOrchestration(
             continue;
           }
           attempted++;
+          const policy = policyOf(category);
           let r: DispatchResult;
           try {
             r = await dispatchNodeRequest(
               db,
-              { category, payload: taskDispatchPayload(db, taskId), requireTarget: true },
+              {
+                category,
+                payload: taskDispatchPayload(db, taskId),
+                requireTarget: true,
+                ...(policy ? { policy: toWireDispatchPolicy(policy) } : {}),
+              },
               { ...(deps.io !== undefined ? { io: deps.io } : {}), ...(deps.emit !== undefined ? { emit: deps.emit } : {}) },
             );
           } catch (e) {
@@ -373,6 +460,9 @@ export async function driveOrchestration(
       const cap = capabilityContext();
       if (!cap) { capabilityFailed++; continue; }
       sawCapability = true;
+      // B10a：本机权重取用户设置（`nodes:update` 修改本机时已镜像进 settings），
+      //   不再硬编码 5——否则用户把本机权重调低/设为 0 对派发毫无影响（说了点不到）。
+      //   未设/坏值回落 5（中性）；显式 0 保留为"不参与协同"。
       const localProfile: NodeMatchProfile = {
         nodeId: localNodeId,
         isLocal: true,
@@ -381,8 +471,14 @@ export async function driveOrchestration(
         intents: cap.intents,
         deviceClasses: cap.deviceClasses,
         freeRatio: limit > 0 ? Math.max(0, Math.min(1, available / limit)) : null,
-        weight: 5,
+        weight: readLocalWeight(db),
         reliability: null,
+        // B1：本机资源面取自**同一份**采集快照（与心跳同源）；采集失败才为 null（中性 0.5）。
+        resources: cap.localResources,
+        // B5：本机也走同一套岗位加成/类目压力——否则"本机有岗位、对端没有"时本机反被低估。
+        positions: cap.positionIds,
+        classRunning: cap.classRunning,
+        machineLimit: cap.machineLimit,
       };
       const attempts = new Map<string, number>();
       const capabilityReady: CapabilityReadyTask[] = [];
@@ -397,14 +493,30 @@ export async function driveOrchestration(
             title: row.title,
             description: row.description,
             contextJson: row.context_json as string | null | undefined,
+            // B5：任务点名岗位（`wa_tasks.position_id`，就绪行来自 `SELECT *` 故在场）。
+            positionId: row.position_id,
           }),
         });
       }
+      // zx_20261110_1 B3：项目有分工 ⇒ 候选池先按 policy 收窄（取本拍涉及类目的并集），再进能力决策器；
+      //   无分工/策略全读失败 ⇒ 全局池（fail-open，不把活卡死在本机）。
+      const capabilityPeers = (() => {
+        if (!projectTargeted) return cap.peerProfiles;
+        const categorySet = new Set<NodeCardCategory>();
+        for (const t of capabilityReady) {
+          for (const c of t.requirements.categories) if (isNodeCardCategory(c)) categorySet.add(c);
+        }
+        const policies = [...categorySet].map((c) => policyOf(c)).filter((p): p is ProjectDispatchPolicy => p !== null);
+        if (policies.length === 0) return cap.peerProfiles;
+        const allowed = new Set<string>();
+        for (const p of policies) for (const id of p.candidateNodeIds) allowed.add(id);
+        return cap.peerProfiles.filter((pp) => allowed.has(pp.nodeId));
+      })();
       const decisions = planCapabilityDispatch({
         mode: resolution.mode,
         ready: capabilityReady,
         local: localProfile,
-        peers: cap.peerProfiles,
+        peers: capabilityPeers,
         attempts,
         cooldownUntil: cooldown,
         now: nowMs,
@@ -420,6 +532,7 @@ export async function driveOrchestration(
           continue;
         }
         attempted++;
+        const policy = policyOf(d.category);
         let r: DispatchResult;
         try {
           r = await dispatchNodeRequest(
@@ -429,6 +542,7 @@ export async function driveOrchestration(
               payload: taskDispatchPayload(db, d.taskId),
               targetNodeId: d.peerNodeId,
               requireTarget: true,
+              ...(policy ? { policy: toWireDispatchPolicy(policy) } : {}),
             },
             { ...(deps.io !== undefined ? { io: deps.io } : {}), ...(deps.emit !== undefined ? { emit: deps.emit } : {}) },
           );

@@ -32,6 +32,8 @@ import { checkBuildPins } from './lib/rr-pins.js';
 import { childBreadthRefusal } from '../apps/worker-ant-desktop/src/main/core/task-accounting.js';
 // zx_20261105_1 M7：重放回执体抽成具名纯函数——切片只留调用，纯 JS 窗口可直接执行。
 import { buildCreateReplay } from '../apps/worker-ant-desktop/src/main/core/acceptance-check.js';
+// zx_20261112_1 B2：切片窗口内新增「指派岗位先验再插」——判据以**真实现**注入，不在脚本里复刻。
+import { resolveTaskPosition, POSITIONS_DDL } from '../apps/worker-ant-desktop/src/main/core/positions.js';
 
 let pass = 0; let fail = 0;
 function ok(cond: boolean, label: string, detail?: string): void {
@@ -78,6 +80,7 @@ CREATE TABLE wa_tasks (id TEXT PRIMARY KEY, project_id TEXT,
   context_json TEXT DEFAULT '{}', workflow_config TEXT DEFAULT '{}',
   priority INTEGER DEFAULT 0, depends_on TEXT DEFAULT '', parent_task_id TEXT DEFAULT '',
   source TEXT DEFAULT 'user', acceptance_criteria TEXT DEFAULT '',
+  position_id TEXT NOT NULL DEFAULT '',
   aggregate_version INTEGER DEFAULT 0,
   created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));
 CREATE TABLE wa_task_conversations (id TEXT PRIMARY KEY, task_id TEXT,
@@ -88,6 +91,7 @@ CREATE TABLE wa_event_log (id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT U
   aggregate_version INTEGER NOT NULL DEFAULT 1, payload TEXT NOT NULL DEFAULT '{}',
   metadata TEXT DEFAULT '{}', occurred_at TEXT NOT NULL,
   created_at TEXT DEFAULT (datetime('now')));
+${POSITIONS_DDL}
 `;
 const mkdb = (): AnyDb => { const d = new DatabaseSync(':memory:'); d.exec(SCHEMA); return d as unknown as AnyDb; };
 
@@ -120,24 +124,33 @@ ok(branch.includes('if (hit) return { data: buildCreateReplay(hit) };'), '切片
 ok(branch.indexOf('if (hit) return { data: buildCreateReplay(hit) };') < branch.indexOf('INSERT INTO wa_tasks'),
   '查在插之前（顺序即语义：先判后写，不是先写后判）');
 ok(!/\bawait\b/.test(branch), '窗口断言：查—插整段**不含 await**（跨 await 就会两次并发各自查到"无"再各自插，去重形同虚设）');
+// zx_20261112_1 B2：岗位闸的顺序即语义——排在 INSERT 之前才不会落孤儿指派行（行为侧见 §S1-6）。
+ok(branch.includes('resolveTaskPosition(db, projectId, wantedPositionId)')
+  && branch.indexOf('resolveTaskPosition(db, projectId, wantedPositionId)') < branch.indexOf('INSERT INTO wa_tasks'),
+  '岗位先在 INSERT 之前判（"先验再插"，与父任务校验同一纪律）');
 
 /** 把生产切片挂上真库执行——参数名与生产 handler 解构名逐字一致 */
 // ⚠ zx_20260916_3 M1：切片窗口内新增了「父任务存在性校验 + 槽位闸」一段（它是 INSERT 前的同步代码，
 //   落在同一去重窗口内是**对的**——跨窗口才会让并发去重失效）。故补两个自由变量：`parent_task_id`
 //   （本脚本一律传 undefined：夹具不建父子链，该分支自然不进入）与 `childBreadthRefusal`（真实现）。
+// ⚠ zx_20261112_1 B2：同一窗口又加了「指派岗位先验再插」——补 `positionId`（既有用例传 undefined，
+//   该分支不进入）与 `resolveTaskPosition`（真实现）。§S1-6 对其做行为断言，不只静态钉。
 const mkCreate = (db: AnyDb) => new Function(
   'db', 'crypto', 'projectId', 'title', 'description', 'priority', 'acceptance_criteria', 'client_request_id',
-  'parent_task_id', 'childBreadthRefusal', 'buildCreateReplay',
+  'parent_task_id', 'childBreadthRefusal', 'buildCreateReplay', 'positionId', 'resolveTaskPosition',
   `${branch}\nreturn { data: db.prepare('SELECT * FROM wa_tasks WHERE id = ?').get(id) };`,
 ) as (db: AnyDb, crypto: { randomUUID: () => string }, projectId: string, title: string,
   description: string | undefined, priority: number | undefined, acceptance_criteria: string | undefined,
   client_request_id: string | undefined, parent_task_id: string | undefined,
   childBreadthRefusal: (db: AnyDb, taskId: string) => string | null,
-  buildCreateReplay: (hit: unknown) => Record<string, unknown>) => { data: { id: string } };
+  buildCreateReplay: (hit: unknown) => Record<string, unknown>,
+  positionId: string | undefined,
+  resolveTaskPosition: (db: AnyDb, projectId: string, positionId: string) => unknown) =>
+  { data?: { id: string; position_id?: string }; error?: { code: string; message: string } };
 
 const cryptoShim = { randomUUID };
-const create = (db: AnyDb, key: string | undefined, title = '同名任务', projectId = 'p1') =>
-  mkCreate(db)(db, cryptoShim, projectId, title, '', 0, '', key, undefined, childBreadthRefusal, buildCreateReplay);
+const create = (db: AnyDb, key: string | undefined, title = '同名任务', projectId = 'p1', positionId?: string) =>
+  mkCreate(db)(db, cryptoShim, projectId, title, '', 0, '', key, undefined, childBreadthRefusal, buildCreateReplay, positionId, resolveTaskPosition);
 
 // §S1-0（zx_20261105_1 M7）：重放回执体是**具名纯函数**——原行键一个不少，候选只读附上。
 {
@@ -188,12 +201,14 @@ const snap = (db: AnyDb) => {
   const stripped = branch.replace(/const reqId = [\s\S]*?if \(hit\) return \{ data: buildCreateReplay\(hit\) \};\n {6}\}/, 'const reqId = null;\n      ');
   ok(stripped !== branch, '反证③前提：能构造出"无去重"分支（切片确实变了）');
   const noDedupe = new Function('db', 'crypto', 'projectId', 'title', 'description', 'priority', 'acceptance_criteria', 'client_request_id',
-    'parent_task_id', 'childBreadthRefusal',
+    'parent_task_id', 'childBreadthRefusal', 'positionId', 'resolveTaskPosition',
     `${stripped}\nreturn { data: { id } };`) as (db: AnyDb, crypto: { randomUUID: () => string }, projectId: string,
       title: string, description: string | undefined, priority: number | undefined,
       acceptance_criteria: string | undefined, client_request_id: string | undefined,
-      parent_task_id: string | undefined, childBreadthRefusal: (db: AnyDb, taskId: string) => string | null) => { data: { id: string } };
-  const callCreate = (f: typeof noDedupe, k: string | undefined) => f(db, cryptoShim, 'p1', '同名任务', '', 0, '', k, undefined, childBreadthRefusal);
+      parent_task_id: string | undefined, childBreadthRefusal: (db: AnyDb, taskId: string) => string | null,
+      positionId: string | undefined,
+      resolveTaskPosition: (db: AnyDb, projectId: string, positionId: string) => unknown) => { data: { id: string } };
+  const callCreate = (f: typeof noDedupe, k: string | undefined) => f(db, cryptoShim, 'p1', '同名任务', '', 0, '', k, undefined, childBreadthRefusal, undefined, resolveTaskPosition);
   callCreate(noDedupe, 'key-A');
   callCreate(noDedupe, 'key-A');
   eq(rowCount(db), 2, '反证③：摘掉去重分支 ⇒ 同键两次 2 行（正是 M0.6 修前的实机现象）⇒ ①的判据真的抓得住缺陷');
@@ -205,6 +220,32 @@ const snap = (db: AnyDb) => {
   create(db, 'key-A', '任务', 'p1');
   create(db, 'key-A', '任务', 'p2');
   eq(rowCount(db), 2, '同键但**不同项目** ⇒ 2 行（键域=项目内，不跨项目吞掉另一个项目的创建）');
+}
+
+// ── ⑥ 指派岗位「先验再插」（zx_20261112_1 B2，行为断言而非静态钉）──
+{
+  const db = mkdb();
+  db.prepare(`INSERT INTO wa_positions (id, name, category, description, skills_json, rules_json, knowledge_json, enabled, builtin, version)
+    VALUES ('pos_x', '测试岗', 'tech', '说明', '[]', '[]', '[]', 1, 0, 1)`).run();
+  db.prepare("INSERT INTO wa_project_positions (project_id, position_id, enabled) VALUES ('p1', 'pos_x', 1)").run();
+
+  const good = create(db, 'key-P1', '任务', 'p1', 'pos_x') as { data?: { id: string; position_id?: string } };
+  eq(rowCount(db), 1, 'S1-6a 合法岗位（启用 ∧ 项目已绑定）⇒ 0→1 真插一行');
+  eq(good.data?.position_id, 'pos_x', 'S1-6a 行上 position_id 落位（不是"校验过了却没写"）');
+
+  const unbound = create(db, 'key-P2', '任务', 'p2', 'pos_x') as { error?: { code: string; message: string } };
+  eq(unbound.error?.code, 'BAD_REQUEST', 'S1-6b 项目未绑定 ⇒ 拒绝（BAD_REQUEST，不静默降级成未指派）');
+  ok(/未在本项目启用/.test(String(unbound.error?.message ?? '')), 'S1-6b 拒绝原因说人话（用户能看懂为什么不能指派）');
+  eq(rowCount(db), 1, 'S1-6b 被拒后**行数不变**——先验再插，没留名不副实的指派行');
+
+  db.prepare("UPDATE wa_positions SET enabled = 0 WHERE id = 'pos_x'").run();
+  const disabled = create(db, 'key-P3', '任务', 'p1', 'pos_x') as { error?: { code: string } };
+  eq(disabled.error?.code, 'BAD_REQUEST', 'S1-6c 岗位已停用 ⇒ 拒绝');
+  eq(rowCount(db), 1, 'S1-6c 被拒后行数仍不变');
+
+  const none = create(db, undefined) as { data?: { position_id?: string } };
+  eq(none.data?.position_id, '', 'S1-6d 未指派 ⇒ position_id 空串（与 NOT NULL DDL 一致，不落 NULL）');
+  eq(rowCount(db), 2, 'S1-6d 未指派照常建单（岗位不是必填）');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -243,9 +284,10 @@ console.log('\n【S3】渲染层两处入口均：在途标志 + 一会话一键
   const reqIdSlot = declParams.findIndex((p) => p.includes('clientRequestId'));
   ok(declArity >= 8 && reqIdSlot === 7,
     `ipc 层 tasks.create 声明元数=${declArity}，clientRequestId 槽位=${reqIdSlot}（元数真源；页面实参由此派生）`);
-  // 两页实参个数由声明派生：TasksPage 用满全部槽（含尾部 attachmentPaths）；
-  //   TaskDetailPage 建子任务**无附件 UI**，故止于 clientRequestId（少尾部 attachmentPaths 一项）。
-  const expectArgs: Record<string, number> = { 'TasksPage.tsx': declArity, 'TaskDetailPage.tsx': declArity - 1 };
+  // 两页实参个数由声明派生：TasksPage 用满全部槽（含尾部 attachmentPaths / positionId）；
+  //   TaskDetailPage 建子任务**无附件/岗位 UI**，故止于 clientRequestId（第 reqIdSlot+1 位）。
+  //   ⚠ 批次加尾部可选参不必改这里——派生自声明，加几次都跟着走（zx_20261112_1 B2 加 positionId 即此）。
+  const expectArgs: Record<string, number> = { 'TasksPage.tsx': declArity, 'TaskDetailPage.tsx': reqIdSlot + 1 };
 
   const sites: Array<[string, string, string]> = [
     ['TasksPage.tsx', '创建', '无条件判据（新建任务）'],

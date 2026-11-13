@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { projects, tasks, admin, invoke, deliverables } from '../lib/ipc';
+import { projects, tasks, admin, invoke, deliverables, knowledge } from '../lib/ipc';
 import { useActivity } from '../lib/activity';
 import { useStaleness } from '../lib/useLiveQuery';
 import { useSettings } from '../lib/settingsStore';
@@ -14,26 +14,38 @@ import NodeDivisionCard from '../components/NodeDivisionCard';
 import CollabBoardCard from '../components/CollabBoardCard';
 import KnowledgePackCard from '../components/KnowledgePackCard';
 import KnowledgeInboxCard from '../components/KnowledgeInboxCard';
+// zx_20261113_1 B1「联」: 项目详情岗位卡——能派给谁、各自干了多少；IM 拒因指向的入口由此真实存在。
+import ProjectPositionsCard from '../components/ProjectPositionsCard';
 import DomainPackCard from '../components/DomainPackCard';
-import { ArrowLeft, Play, Pause, Check, Archive, Edit, Trash2, Brain, Clock, Terminal, Activity, AlertTriangle, Lightbulb, RefreshCw, Package, BookOpen } from 'lucide-react';
+import LoadFailure from '../components/LoadFailure';
+// zx_20261111_3「显」：第一行的唯一真源在 main 纯模块（页面只说事实，不自己排优先级）。
+import NextActionBar from '../components/NextActionBar';
+import { nextActionForProject, type NextActionId } from '../../../src/main/core/next-action.js';
+import { ArrowLeft, Play, Pause, Check, Archive, Edit, Trash2, Brain, Clock, Terminal, Activity, AlertTriangle, Lightbulb, RefreshCw, Package, BookOpen, Network, Users } from 'lucide-react';
 // zx_20261029_1「知」: 须知的渲染数据类型与 main 侧同形（IPC 只传纯数据）。
-import type { ProjectBriefRecord } from '../lib/ipc';
+import type { ProjectBriefRecord, ProjectModelOverridePayload, KnowledgeBusinessStatus } from '../lib/ipc';
 // zx_20260910_3 M3(G3): 布尔 setting 判据**两侧共用同一文件**——渲染层不再自带第二份写法
 import { boolSetting } from '../../../src/main/core/settings-bool.js';
 // zx_20260920_1 M7: ★ 的语义是「**高于**基线」。基线抬到 0.6 后若仍写 `> 0.5`，则**每条新记忆默认带 ★**
 //   （因为新写入恰为 0.6）——星号就失去意义。故阈值改引真源，不手抄 0.5/0.6。
 import { MEM_IMPORTANCE_DEFAULT } from '../../../src/main/core/memory-constants.js';
+// zx_20261107_1 B6: 指定来源词表取 main 同一份（跨 root 引真源，不在页面里手抄第二份）。
+import { PIN_SOURCE_LABEL } from '../../../src/main/core/model-selection.js';
 // zx_20261019 实机 E2E 修: 记忆类型词表取**唯一一份**（core/memory-lifecycle.ts）——此前本页与
 //   `MemoriesPage` 各手抄一份，两份都漏 `acceptance_failure`/`panorama`/`retrospective` 等 ⇒ 显示英文键。
 import { MEM_TYPE_LABEL } from '../../../src/main/core/memory-lifecycle.js';
 // 交付物类型/状态词表与库内时间——四处渲染点共此一份真源
 // zx_20260930 M3-d: 大小换算也取同一份（成果页签需要，不在这里自带第二套除 1024 的写法）
 import { DELIVERABLE_TYPE_LABEL, DELIVERABLE_STATUS_LABEL, formatDbTime, formatBytes } from '../lib/deliverable-view';
+// zx_20261107_1 B9: 计数/金额/ token 展示与其它页同尺（此前本页 `toLocaleString` 与内联 K 各写一份）
+import { formatCount, formatMoney, formatTokens } from '../lib/format';
 import { TASK_STATUS_LABEL, PROJECT_STATUS_LABEL, statusText } from '../lib/status-view';
 // zx_20261021_1 M1: 策略/健康视图/调参历史词表的唯一真源（此前面板直出内部键：capability-best、costEfficiency…）
 import { MODEL_STRATEGY_LABEL, HEALTH_VIEW_LABEL, HEALTH_METRIC_LABEL, formatStrategyAdjustments, formatStrategyNumber } from '../lib/project-insight';
 // zx_20260930 M4-2: 列表批次大小（成果页/本页/任务详情共用一份，见该模块头注）
 import { LIST_PAGE_SIZE, pageExhausted } from '../lib/list-page';
+// zx_20261108_1 B5：动作路径的可见结果（失败回显 + 原因）。
+import { ActionFeedback, useActionFeedback, messageOf } from '../lib/action-feedback';
 
 interface Project { id: string; name: string; description: string; status: string; cron_schedule?: string; cron_timezone?: string; working_dir?: string; autonomous_mode?: string; sandbox_mode?: string; context_json?: string; taskStats?: { total: number; completed: number }; deliverableStats?: { total: number } & Record<string, number>; tokenStats?: { total_tokens: number }; lastActive?: string; staleness?: string; created_at: string; updated_at: string; }
 interface CtxData { budget?: { max_tokens_per_task?: number; max_cost_usd_per_task?: number }; rhythm?: { activeHourStart?: number; activeHourEnd?: number; maxConcurrency?: number }; cron_run_command?: string; im_commands?: Record<string, { script: string; label: string }>; cron_create_task?: { title: string; description: string }; }
@@ -59,6 +71,10 @@ export default function ProjectDetailPage() {
   const [budgetForm, setBudgetForm] = useState({ max_tokens_per_task: '', max_cost_usd_per_task: '' });
   const [rhythmForm, setRhythmForm] = useState({ activeHourStart: '9', activeHourEnd: '18', maxConcurrency: '2' });
   const [cronForm, setCronForm] = useState({ cron_task_title: '', cron_task_desc: '', cron_run_command: '' });
+  // zx_20261107_1 B6: 项目级模型覆盖。生效项由 main 按「恢复路 > 项目 > 全局默认」裁定，本页只显示不重算。
+  const [modelOv, setModelOv] = useState<ProjectModelOverridePayload | null>(null);
+  const [modelDraft, setModelDraft] = useState('');
+  const [modelSaving, setModelSaving] = useState(false);
   // 记忆 Tab
   // zx_20260930 M3-d(成果页签): 本项目的产出此前只能跳到全局成果页再看（该页是跨项目的）。
   //   新增「本项成果」页签：取数与全局页**同一个端口** `deliverables.list(projectId)`，
@@ -81,12 +97,25 @@ export default function ProjectDetailPage() {
   const [milestoneLoading, setMilestoneLoading] = useState(false);
   // zx_20260905 批5: 项目质量聚合（均质/趋势）
   const [qualityStats, setQualityStats] = useState<Record<string, unknown> | null>(null);
+  // zx_20261112_2 B6「面」：三处此前被 `catch {}` 吞掉的失败——现在如实上屏（"没取到"不等于"没有数据"）。
+  const [qualityError, setQualityError] = useState('');
+  const [headerError, setHeaderError] = useState('');
+  const [ctxError, setCtxError] = useState('');
   // 矛盾张力面板
   const [tensions, setTensions] = useState<Record<string, Record<string, unknown>>>({});
   const [tensionConfigs, setTensionConfigs] = useState<Record<string, Record<string, unknown>>>({});
   // 多维度健康视图 + 知识全景
   const [healthViews, setHealthViews] = useState<Record<string, Record<string, unknown>>>({});
   const [panorama, setPanorama] = useState<Record<string, unknown> | null>(null);
+  // zx_20261110_1 B5：卡片级读取失败与「确实没有数据」分家（失败带因由 + 重试，不置空冒充无数据）。
+  const [healthErr, setHealthErr] = useState('');
+  const [panoErr, setPanoErr] = useState('');
+  const [membersErr, setMembersErr] = useState('');
+  const [usersErr, setUsersErr] = useState('');
+  const [briefErr, setBriefErr] = useState('');
+  const [healthBusy, setHealthBusy] = useState(false);
+  const [panoBusy, setPanoBusy] = useState(false);
+  const [membersBusy, setMembersBusy] = useState(false);
   // 本项目成果页签（zx_20260930 M3-d）
   const [pjDelivs, setPjDelivs] = useState<Array<Record<string, unknown>>>([]);
   // zx_20260930 M4-2: 真分页——`pjDelivTotal` 取服务端总数（"共 M 条"），`pjDelivExhausted` 决定是否出「加载更多」。
@@ -101,20 +130,61 @@ export default function ProjectDetailPage() {
   // C1 (2026-09-03): 自适应策略可视 + D1 主要矛盾可视
   const [strategyInfo, setStrategyInfo] = useState<{ modelStrategy?: string | null; temperature?: number | null; maxSteps?: number | null; updatedAt?: string | null; adjustments?: Array<Record<string, unknown>> } | null>(null);
   const [bottleneck, setBottleneck] = useState<{ summary?: string; principals?: Array<Record<string, unknown>>; computedAt?: string } | null>(null);
+  // zx_20261108_1 B5：项目本体**加载失败**与「项目不存在」是两回事——前者可重试，后者是事实。
+  const [loadError, setLoadError] = useState('');
+  // zx_20261111_3「显」：本项目「等你回复 / 执行失败」的件数——**复用全局那本账**（`tasks:actionNeeded`），
+  //   不在这里另写一份 SQL。`null` = 没取到（第一行据此说"读不到"，不冒充 0 件）。
+  const [projectAction, setProjectAction] = useState<{ awaiting: number; failed: number } | null>(null);
+  const [projectActionError, setProjectActionError] = useState('');
+  // zx_20261113_4 B2「荐」：首屏业务知识状态（画像 / 已启用领域包 / 待采纳建议）。
+  const [bizStatus, setBizStatus] = useState<KnowledgeBusinessStatus | null>(null);
+  const [bizStatusError, setBizStatusError] = useState('');
 
-  useEffect(() => { if (id) { void load(); void loadQuality(); void loadBrief(); } }, [id]);
+  // zx_20261111_3「显」：本项目的"等你回复/失败"件数取自全局账，按 project_id 过滤（不新造查询）。
+  async function loadProjectAction(): Promise<void> {
+    try {
+      const r = await invoke<{ items?: Array<{ project_id?: string | null; kind?: string }> }>('tasks:actionNeeded');
+      const mine = (r?.items ?? []).filter((it) => String(it.project_id ?? '') === String(id ?? ''));
+      setProjectAction({
+        awaiting: mine.filter((it) => it.kind === 'await_input').length,
+        failed: mine.filter((it) => it.kind === 'failed').length,
+      });
+      setProjectActionError('');
+    } catch (e) {
+      setProjectAction(null);
+      setProjectActionError(messageOf(e));
+    }
+  }
+  // zx_20261113_4 B2「荐」：首屏业务知识状态——一次调用回齐；读不到如实说，不冒充"未成型"或"0 条"。
+  async function loadBusinessStatus(): Promise<void> {
+    if (!id) return;
+    try {
+      setBizStatus(await knowledge.businessStatus(id));
+      setBizStatusError('');
+    } catch (e) {
+      setBizStatus(null);
+      setBizStatusError(messageOf(e));
+    }
+  }
+  useEffect(() => { if (id) { void load(); void loadQuality(); void loadBrief(); void loadProjectAction(); void loadBusinessStatus(); } }, [id]);
   // A1/A2 (2026-09-04_2): 项目详情保鲜度——事件驱动静默刷新头部统计（无常·保鲜；不打断编辑态）
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const projStale = useStaleness(lastUpdated);
   const { subscribe } = useActivity();
   const projRefreshTimer = useRef<number | undefined>(undefined);
+  // zx_20261108_1 B5：动作失败可见（含原因）——此前这些 catch 全为空，"点了没反应"与"成功"在界面上无差别。
+  const fb = useActionFeedback();
   async function refreshHeader() {
     if (!id) return;
     try {
       const p = await projects.get(id) as unknown as Project;
       setProject(p);
       setLastUpdated(Date.now());
-    } catch {}
+      setHeaderError('');
+    } catch (e) {
+      // 失败如实说：头部不刷新 ≠ 项目没变化。
+      setHeaderError(`项目头部刷新失败：${(e as Error)?.message || String(e)}`);
+    }
     void loadQuality();
     // zx_20260906 批3 (3c): 知识全景随 deliverable.* 等事件刷新（byType/最近产出物保鲜）
     void loadPanorama();
@@ -122,7 +192,15 @@ export default function ProjectDetailPage() {
   // zx_20260905 批5: 项目质量聚合加载（任务完成/事件刷新头部时同步刷新，保持均质/趋势保鲜）
   async function loadQuality() {
     if (!id) return;
-    try { const q = await projects.qualityStats(id) as unknown as Record<string, unknown>; setQualityStats(q); } catch { setQualityStats(null); }
+    try {
+      const q = await projects.qualityStats(id) as unknown as Record<string, unknown>;
+      setQualityStats(q);
+      setQualityError('');
+    } catch (e) {
+      // 读不到 ≠ 没有质量数据（旧实现把两者都显示成"没有"）。
+      setQualityStats(null);
+      setQualityError(`质量数据读取失败：${(e as Error)?.message || String(e)}`);
+    }
   }
   // zx_20260905 批6: 张力自调结果实时回推——auto_adjusted 命中当前项目即静默刷新策略/瓶颈/张力（此前主进程每5min自调仅 console.log，页面为死区）
   useEffect(() => {
@@ -145,7 +223,7 @@ export default function ProjectDetailPage() {
       const liveProjectEvent = e.type === 'project.status_changed' || e.type === 'deliverable.registered' || e.type === 'deliverable.status_changed' || e.type === 'task.status_changed' || e.type === 'task.completed' || e.type === 'task.failed' || e.type === 'memory.changed';
       if (!liveProjectEvent) return;
       if (projRefreshTimer.current !== undefined) return;
-      projRefreshTimer.current = window.setTimeout(() => { projRefreshTimer.current = undefined; void refreshHeader(); }, 700);
+      projRefreshTimer.current = window.setTimeout(() => { projRefreshTimer.current = undefined; void refreshHeader(); void loadProjectAction(); }, 700);
       const tab = activeTabRef.current;
       if (tab === 'memories' || tab === 'milestones' || tab === 'tensions' || tab === 'deliverables' || tab === 'packs') {
         if (panelTimer.current !== undefined) window.clearTimeout(panelTimer.current);
@@ -160,7 +238,10 @@ export default function ProjectDetailPage() {
       }
     });
   }, [id, subscribe]);
-  useEffect(() => () => { if (projRefreshTimer.current !== undefined) window.clearTimeout(projRefreshTimer.current); }, []);
+  useEffect(() => () => {
+    if (projRefreshTimer.current !== undefined) window.clearTimeout(projRefreshTimer.current);
+    for (const t of Object.values(tensionTimers.current)) window.clearTimeout(t);
+  }, []);
   // C1/D1: 加载项目自适应策略与当前主要矛盾（IPC 返回，非 UI 假数据）
   useEffect(() => {
     if (!id) return;
@@ -174,6 +255,8 @@ export default function ProjectDetailPage() {
 
   async function load() {
     setLoading(true);
+    setLoadError('');
+    setCtxError('');
     try {
       const p = await projects.get(id!) as unknown as Project;
       setProject(p);
@@ -186,16 +269,42 @@ export default function ProjectDetailPage() {
           return raw as Record<string,unknown>;
         }
         try { const parsed = JSON.parse(raw as string); return parsed; }
-        catch(e) { console.error('[ProjectDetail] parse error:', e, 'raw type:', typeof raw, 'first 40:', String(raw).slice(0, 40)); return {}; }
+        catch(e) {
+          setCtxError(`项目配置解析失败：${(e as Error)?.message || String(e)}`);
+          console.error('[ProjectDetail] parse error:', e, 'raw type:', typeof raw, 'first 40:', String(raw).slice(0, 40));
+          return {};
+        }
       })() as CtxData;
       setCtx(c);
       if (c.budget) setBudgetForm({ max_tokens_per_task: String(c.budget.max_tokens_per_task || ''), max_cost_usd_per_task: String(c.budget.max_cost_usd_per_task || '') });
       if (c.rhythm) setRhythmForm({ activeHourStart: String(c.rhythm.activeHourStart || 9), activeHourEnd: String(c.rhythm.activeHourEnd || 18), maxConcurrency: String(c.rhythm.maxConcurrency || 2) });
       if (c.cron_create_task) setCronForm({ cron_task_title: c.cron_create_task.title || '', cron_task_desc: c.cron_create_task.description || '', cron_run_command: c.cron_run_command || '' });
       else setCronForm({ cron_task_title: '', cron_task_desc: '', cron_run_command: c.cron_run_command || '' });
-    } catch {}
+      // B6: 模型覆盖与项目同批读——取不到就按"没读到"显示（不伪造一个生效模型）。
+      try {
+        const mo = await projects.modelOverride.get(id!);
+        setModelOv(mo);
+        setModelDraft(mo.project_override || '');
+      } catch { setModelOv(null); setModelDraft(''); }
+    } catch (e) {
+      setLoadError(messageOf(e));
+    }
     setLoading(false);
     setLastUpdated(Date.now());
+  }
+
+  // B6: `next` 省略 ⇒ 用输入框；显式传 `null` ⇒ 清除（删 `context_json.model_override` 一个键）。
+  async function saveModelOverride(next?: string | null) {
+    if (!id) return;
+    setModelSaving(true);
+    try {
+      await projects.modelOverride.set(id, next === undefined ? (modelDraft.trim() || null) : next);
+      const mo = await projects.modelOverride.get(id);
+      setModelOv(mo);
+      setModelDraft(mo.project_override || '');
+      fb.ok(next === null ? '已清除项目指定模型' : '项目指定模型已保存');
+    } catch (e) { fb.fail('「项目指定模型」未保存', e); }
+    setModelSaving(false);
   }
 
   // zx_20260930 M3-d: 本项目成果——与全局成果页同一个 `deliverables.list`（仅多传 projectId），
@@ -205,13 +314,16 @@ export default function ProjectDetailPage() {
   async function loadProjectDeliverables() {
     setPjDelivLoading(true);
     try {
-      const d = await deliverables.list(id!, undefined, undefined, { limit: LIST_PAGE_SIZE, offset: 0 });
+      const d = await deliverables.list({ projectId: id!, limit: LIST_PAGE_SIZE, offset: 0 });
       const rows = (d?.rows ?? []) as unknown as Array<Record<string, unknown>>;
       const total = Number(d?.total) || 0;
       setPjDelivs(rows);
       setPjDelivTotal(total);
       setPjDelivExhausted(pageExhausted(rows.length, total));
-    } catch { setPjDelivs([]); setPjDelivTotal(0); setPjDelivExhausted(true); }
+    } catch (e) {
+      setPjDelivs([]); setPjDelivTotal(0); setPjDelivExhausted(true);
+      fb.fail('「本项目成果」加载失败', e);
+    }
     setPjDelivLoading(false);
   }
 
@@ -220,7 +332,7 @@ export default function ProjectDetailPage() {
   async function loadMoreProjectDeliverables() {
     setPjDelivMoreBusy(true);
     try {
-      const d = await deliverables.list(id!, undefined, undefined, { limit: LIST_PAGE_SIZE, offset: pjDelivs.length });
+      const d = await deliverables.list({ projectId: id!, limit: LIST_PAGE_SIZE, offset: pjDelivs.length });
       const more = (d?.rows ?? []) as unknown as Array<Record<string, unknown>>;
       setPjDelivs(prev => {
         const seen = new Set(prev.map(r => String(r.id)));
@@ -229,7 +341,7 @@ export default function ProjectDetailPage() {
       const total = Number(d?.total) || 0;
       setPjDelivTotal(total);
       setPjDelivExhausted(pageExhausted(pjDelivs.length + more.length, total));
-    } catch {}
+    } catch (e) { fb.fail('「加载更多成果」失败', e); }
     setPjDelivMoreBusy(false);
   }
 
@@ -239,7 +351,7 @@ export default function ProjectDetailPage() {
       const d = await projects.memories(id!, type || undefined) as unknown as { list: Array<Record<string, unknown>>; counts: Array<{ memory_type: string; cnt: number }> };
       setMemories(d.list || []);
       setMemCounts(d.counts || []);
-    } catch {}
+    } catch (e) { fb.fail('「记忆」加载失败', e); }
     setMemLoading(false);
   }
 
@@ -250,7 +362,7 @@ export default function ProjectDetailPage() {
       setBlockers(d.blockers || []);
       setMilestones(d.milestones || []);
       setPlanMilestones(d.planMilestones || []);
-    } catch {}
+    } catch (e) { fb.fail('「里程碑」加载失败', e); }
     setMilestoneLoading(false);
   }
 
@@ -259,11 +371,31 @@ export default function ProjectDetailPage() {
       const d = await projects.tensions(id!) as unknown as { tensions: Record<string, Record<string, unknown>>; configs: Record<string, Record<string, unknown>> };
       setTensions(d.tensions || {});
       setTensionConfigs(d.configs || {});
-    } catch {}
+    } catch (e) { fb.fail('「矛盾张力」加载失败', e); }
   }
 
-  async function handleTensionChange(tensionId: string, position: number) {
-    try { await projects.updateTension(id!, tensionId, position); loadTensions(); } catch {}
+  // zx_20261110_1 B5：拖动中只更新本地（此前每动一格写一次库），停手 400ms 才写一次；
+  //   写失败如实回显并撤掉本地草稿 ⇒ 滑杆回落服务端值（不把"没存上"显示成"已存"）。
+  const [tensionDraft, setTensionDraft] = useState<Record<string, number>>({});
+  const tensionTimers = useRef<Record<string, number>>({});
+  function onTensionInput(tensionId: string, position: number) {
+    setTensionDraft((p) => ({ ...p, [tensionId]: position }));
+    const prev = tensionTimers.current[tensionId];
+    if (prev !== undefined) window.clearTimeout(prev);
+    tensionTimers.current[tensionId] = window.setTimeout(() => {
+      delete tensionTimers.current[tensionId];
+      void commitTension(tensionId, position);
+    }, 400);
+  }
+  async function commitTension(tensionId: string, position: number) {
+    try {
+      await projects.updateTension(id!, tensionId, position);
+      await loadTensions();
+    } catch (e) {
+      fb.fail('「张力位置」未保存', e);
+    } finally {
+      setTensionDraft((p) => { const n = { ...p }; delete n[tensionId]; return n; });
+    }
   }
 
   useEffect(() => {
@@ -278,16 +410,23 @@ export default function ProjectDetailPage() {
   }, [id]);
 
   async function loadMembers() {
-    try { const m = await projects.members(id!); setMembers((m as Array<Record<string, unknown>>) || []); } catch { setMembers([]); }
-    try { const u = await admin.users(); setUsers((u as Array<Record<string, unknown>>) || []); } catch { setUsers([]); }
+    setMembersBusy(true);
+    try { const m = await projects.members(id!); setMembers((m as Array<Record<string, unknown>>) || []); setMembersErr(''); }
+    catch (e) { setMembersErr(messageOf(e)); }
+    try { const u = await admin.users(); setUsers((u as Array<Record<string, unknown>>) || []); setUsersErr(''); }
+    catch (e) { setUsersErr(messageOf(e)); }
+    setMembersBusy(false);
   }
   async function handleAddMember() {
     if (!addMemberId) return;
-    try { await projects.addMember(id!, addMemberId); setAddMemberId(''); loadMembers(); } catch {}
+    try { await projects.addMember(id!, addMemberId); setAddMemberId(''); loadMembers(); }
+    catch (e) { fb.fail('「添加成员」失败', e); }
   }
 
   // zx_20261029_1「知」: 项目须知（模型读工作目录一次生成；生成在后台作业里，页面只读不生成）。
   const [briefRec, setBriefRec] = useState<ProjectBriefRecord | null>(null);
+  // zx_20261111_2「述」：项目描述也是须知来源——有描述即可生成，不再要求必须有工作目录。
+  const hasBriefSource = Boolean(project?.working_dir || project?.description?.trim());
   const [briefStale, setBriefStale] = useState<boolean | null>(null);
   const [briefLoading, setBriefLoading] = useState(true);
   const [briefWait, setBriefWait] = useState(false);
@@ -298,15 +437,16 @@ export default function ProjectDetailPage() {
       const d = await projects.brief(id);
       setBriefRec(d.brief);
       setBriefStale(d.stale);
+      setBriefErr('');
       return d.brief;
-    } catch { setBriefRec(null); setBriefStale(null); return null; }
+    } catch (e) { setBriefErr(messageOf(e)); return null; }
     finally { setBriefLoading(false); }
   }
   async function handleInitBrief() {
     if (!id || briefWait) return;
     const prevAt = briefRec?.updatedAt || '';
     setBriefWait(true);
-    try { await projects.initBrief(id); } catch { setBriefWait(false); return; }
+    try { await projects.initBrief(id); } catch (e) { setBriefWait(false); fb.fail('「项目须知」生成未启动', e); return; }
     // 轮询：看到 `updatedAt` 变化（新一轮已落账）或进入 failed 即停；最多 3 分钟。
     let attempts = 0;
     const tick = async () => {
@@ -327,18 +467,28 @@ export default function ProjectDetailPage() {
   }, [briefRec]);
 
   async function loadHealthViews() {
-    try { const d = await projects.healthViews(id!) as unknown as Record<string, Record<string, unknown>>; setHealthViews(d || {}); } catch { setHealthViews({}); }
+    setHealthBusy(true);
+    try { const d = await projects.healthViews(id!) as unknown as Record<string, Record<string, unknown>>; setHealthViews(d || {}); setHealthErr(''); }
+    catch (e) { setHealthErr(messageOf(e)); }  // 保留上一份数据：清空等于把"没取到"说成"没有"
+    setHealthBusy(false);
   }
   async function loadPanorama() {
-    try { const d = await projects.knowledgePanorama(id!) as unknown as Record<string, unknown>; setPanorama(d || null); } catch { setPanorama(null); }
+    setPanoBusy(true);
+    try { const d = await projects.knowledgePanorama(id!) as unknown as Record<string, unknown>; setPanorama(d || null); setPanoErr(''); }
+    catch (e) { setPanoErr(messageOf(e)); }
+    setPanoBusy(false);
   }
 
-  async function handleStatus(status: string) { try { await projects.updateStatus(id!, status); load(); } catch {} }
+  async function handleStatus(status: string) {
+    try { await projects.updateStatus(id!, status); load(); }
+    catch (e) { fb.fail('「项目状态」未更改', e); }
+  }
   // zx_20261012_3 批一: 与 `ProjectsPage` **同一个** `DeleteProjectDialog`（带「同时删除项目数据目录」复选框）。
   const [showDelete, setShowDelete] = useState(false);
   async function confirmDelete(removeDataDir: boolean) {
     setShowDelete(false);
-    try { await projects.delete(id!, { removeDataDir }); navigate('/projects'); } catch {}
+    try { await projects.delete(id!, { removeDataDir }); navigate('/projects'); }
+    catch (e) { fb.fail('「删除项目」失败', e); }
   }
   async function handleSave() {
     try {
@@ -349,10 +499,17 @@ export default function ProjectDetailPage() {
       body.cron_run_command = cronForm.cron_run_command || undefined;
       await projects.update(id!, body);
       setEditing(false); load();
-    } catch {}
+    } catch (e) { fb.fail('「项目设置」未保存', e); }
   }
 
   if (loading) return <div className="flex justify-center py-12"><div className="animate-spin h-8 w-8 border-2 border-blue-500 border-t-transparent rounded-full"/></div>;
+  // zx_20261108_1 B5：读失败与「不存在」分开说——读失败给重试，不把"没加载到"谎报成"没有"。
+  if (!project && loadError) return (
+    <div className="p-6 space-y-3">
+      <p className="text-sm text-red-600">项目加载失败：{loadError}</p>
+      <button onClick={() => void load()} className="px-3 py-1.5 rounded-lg bg-blue-600 text-white text-sm hover:bg-blue-700">重试</button>
+    </div>
+  );
   if (!project) return <p className="text-red-500 p-6">项目不存在</p>;
 
   // zx_20261027_1 M6: 有推进的板在前；空转板（done+doing=0）折叠到开关后。
@@ -360,9 +517,36 @@ export default function ProjectDetailPage() {
   const activeBoards = planMilestones.filter((p) => boardProgress(p) > 0);
   const idleBoards = planMilestones.filter((p) => boardProgress(p) === 0);
   const shownBoards = showIdleBoards ? [...activeBoards, ...idleBoards] : activeBoards;
+  // zx_20261107_1 B7: 交付物计数 **UI 单源**——统计卡与知识全景都从这一处取。
+  //   数据层本已同源（`countDeliverablesByType`），此前病在页面把同一把尺印了两次。
+  const projectDeliverables = project.deliverableStats;
+
+  // zx_20261112_2 B6：Cron 五段校验（空 = 未设，合法）。非法时不提交，避免"保存成功但从不触发"。
+  const cronRaw = form.cron_schedule.trim();
+  const cronValid = !cronRaw || /^(\S+\s+){4}\S+$/.test(cronRaw);
+
+  // zx_20261111_3「显」：第一行——只喂事实，优先级由 main 纯函数定（页面不再写第二份 if 链）。
+  const projectNextAction = nextActionForProject({
+    loadError: loadError || projectActionError || null,
+    status: project?.status ?? null,
+    awaiting: projectAction?.awaiting ?? null,
+    failed: projectAction?.failed ?? null,
+    briefStatus: briefRec?.status ?? null,
+    briefStale,
+    briefError: briefRec?.error || briefErr || null,
+    hasBriefSource,
+  });
+  function handleNextAction(aid: NextActionId): void {
+    if (aid === 'view_tasks') navigate(`/tasks?projectId=${id}`);
+    else if (aid === 'init_brief') void handleInitBrief();
+    else if (aid === 'edit_project') setEditing(true);
+    else if (aid === 'view_deliverables') navigate(`/deliverables?projectId=${id}`);
+  }
 
   return (
     <div className="space-y-6">
+      {/* zx_20261108_1 B5：动作/面板失败在此如实上屏（含原因） */}
+      <ActionFeedback note={fb.note} onClose={() => fb.setNote(null)} />
       <div className="flex items-center gap-3">
         <button onClick={() => navigate('/projects')} className="p-1 hover:bg-gray-100 rounded"><ArrowLeft className="w-5 h-5"/></button>
         <h1 className="text-2xl font-bold">{project.name}</h1>
@@ -374,22 +558,92 @@ export default function ProjectDetailPage() {
         <button onClick={() => setShowDelete(true)} className="p-1.5 hover:bg-red-50 rounded"><Trash2 className="w-4 h-4 text-red-500"/></button>
       </div>
 
-      {/* 状态操作 */}
-      <div className="flex items-center gap-2">
-        {project.status==='active' && <button onClick={() => handleStatus('paused')} className="flex items-center gap-1 px-3 py-1 border rounded-lg text-sm hover:bg-yellow-50"><Pause className="w-3.5 h-3.5 text-yellow-600"/>暂停</button>}
-        {project.status==='paused' && <button onClick={() => handleStatus('active')} className="flex items-center gap-1 px-3 py-1 border rounded-lg text-sm hover:bg-green-50"><Play className="w-3.5 h-3.5 text-green-600"/>恢复</button>}
-        {(project.status==='active'||project.status==='paused')&&<button onClick={() => handleStatus('completed')} className="flex items-center gap-1 px-3 py-1 border rounded-lg text-sm hover:bg-blue-50"><Check className="w-3.5 h-3.5 text-blue-600"/>完成</button>}
-        {project.status==='completed'&&<button onClick={() => handleStatus('archived')} className="flex items-center gap-1 px-3 py-1 border rounded-lg text-sm hover:bg-gray-100"><Archive className="w-3.5 h-3.5"/>归档</button>}
-      </div>
+      {/* zx_20261111_3「显」：第一行——此刻是什么 / 凭什么 / 下一步点哪个（唯一真源 `core/next-action.ts`） */}
+      <NextActionBar action={projectNextAction} onAction={handleNextAction} />
+
+      {/* zx_20261112_2 B6：状态操作收进「更多操作」——第一行已有主操作时，不再三个按钮并列抢注意力。
+          「完成」是不可逆动作，先问一句（完成后只能归档）。 */}
+      <details className="rounded-lg border bg-white">
+        <summary className="cursor-pointer select-none px-3 py-1.5 text-xs text-gray-500 hover:text-gray-700">更多操作（状态）</summary>
+        <div className="flex items-center gap-2 px-3 pb-2.5">
+          {project.status==='active' && <button onClick={() => handleStatus('paused')} className="flex items-center gap-1 px-3 py-1 border rounded-lg text-sm hover:bg-yellow-50"><Pause className="w-3.5 h-3.5 text-yellow-600"/>暂停</button>}
+          {project.status==='paused' && <button onClick={() => handleStatus('active')} className="flex items-center gap-1 px-3 py-1 border rounded-lg text-sm hover:bg-green-50"><Play className="w-3.5 h-3.5 text-green-600"/>恢复</button>}
+          {(project.status==='active'||project.status==='paused')&&<button onClick={() => { if (window.confirm('确定把项目标记为「完成」吗？完成后不可退回进行中，只能归档。')) void handleStatus('completed'); }} className="flex items-center gap-1 px-3 py-1 border rounded-lg text-sm hover:bg-blue-50"><Check className="w-3.5 h-3.5 text-blue-600"/>完成</button>}
+          {project.status==='completed'&&<button onClick={() => handleStatus('archived')} className="flex items-center gap-1 px-3 py-1 border rounded-lg text-sm hover:bg-gray-100"><Archive className="w-3.5 h-3.5"/>归档</button>}
+        </div>
+      </details>
 
       {project.description && <p className="text-sm text-gray-500">{project.description}</p>}
 
-      {/* 统计卡片 */}
-      <div className="grid grid-cols-4 gap-3">
-        {[{label:'任务',value:`${project.taskStats?.total||0} (✅${project.taskStats?.completed||0})`},{label:'Token消耗',value:`${((project.tokenStats?.total_tokens||0)/1000).toFixed(0)}K`},{label:'产出物（项目合计）',value:`${project.deliverableStats?.total||0} 条`,title:'本项目全部任务的成果合计——与任务页「本任务（含子任务）」不是同一把尺'},{label:'活跃度',value:project.staleness==='healthy'?'活跃':project.staleness==='stale'?'低活跃':'不活跃'}].map(({label,value,title})=>(
-          <div key={label} className="bg-white rounded-lg border p-3" title={title}><p className="text-xs text-gray-400">{label}</p><p className="text-lg font-bold mt-1">{value}</p></div>
-        ))}
+      {/* zx_20261112_2 B6「面」：首屏一条「进度 + 风险 + 待办」摘要。
+          数据与既有读口同源（taskStats / projectDeliverables / blockers / tokenStats），不新建计数器；
+          风险不再藏在「里程碑」Tab 里——阻塞数就在首屏，点一下直达。 */}
+      {(() => {
+        const total = project.taskStats?.total || 0;
+        const done = project.taskStats?.completed || 0;
+        const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+        return (
+          <div className="bg-white rounded-lg border px-3 py-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+            <span className="font-semibold text-gray-700">进度</span>
+            <span title="本项目全部任务（含子任务）">任务 {total} · 完成 {done}（{pct}%）</span>
+            <span className="text-gray-500">未完成 {Math.max(0, total - done)}</span>
+            <button type="button" onClick={() => setActiveTab('milestones')}
+              className={`px-1.5 py-0.5 rounded ${blockers.length > 0 ? 'bg-red-50 text-red-700 hover:bg-red-100' : 'text-gray-500 hover:bg-gray-50'}`}
+              title="点击打开「里程碑/阻塞」">
+              阻塞 {blockers.length}
+            </button>
+            <span title="本项目全部任务的成果合计——与任务页「本任务（含子任务）」不是同一把尺">产出物 {projectDeliverables?.total || 0} 条</span>
+            <span className="text-gray-500">Token {formatTokens(project.tokenStats?.total_tokens)}</span>
+            <span className="ml-auto text-xs text-gray-400">{project.staleness==='healthy'?'活跃':project.staleness==='stale'?'低活跃':'不活跃'}</span>
+          </div>
+        );
+      })()}
+
+      {/* zx_20261113_4 B2「荐」：首屏业务知识状态——画像 / 已启用领域包 / 待采纳建议。
+          数据一次回齐（`knowledge:business-status`），不在这里另算；点一下直达知识资产区。 */}
+      <div className="bg-white rounded-lg border px-3 py-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+        <span className="font-semibold text-gray-700">业务知识</span>
+        {bizStatusError ? (
+          <span className="text-xs text-red-600">读取失败：{bizStatusError}</span>
+        ) : !bizStatus ? (
+          <span className="text-xs text-gray-400">读取中…</span>
+        ) : (
+          <>
+            <span className={bizStatus.profile.exists ? 'text-gray-700' : 'text-gray-500'}>
+              画像 {bizStatus.profile.exists
+                ? (bizStatus.profile.enabled ? '已成型 · 启用中' : '已成型 · 已停用')
+                : '未成型'}
+              {bizStatus.profile.stale ? ' · 已过期' : ''}
+            </span>
+            <span className="text-gray-500">已启用领域包 {bizStatus.appliedPacks}</span>
+            <span className={bizStatus.suggestedPacks > 0 ? 'text-teal-700' : 'text-gray-500'}>
+              待采纳建议 {bizStatus.suggestedPacks}
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                // zx_20261113_5 M3「口」：只滚动不展开 ⇒ 用户看不到画像/知识包正文。
+                const el = document.getElementById('project-knowledge-assets') as HTMLDetailsElement | null;
+                if (!el) return;
+                el.open = true;
+                el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+              }}
+              className="ml-auto text-xs text-teal-700 hover:underline"
+            >
+              查看知识资产
+            </button>
+          </>
+        )}
       </div>
+
+      {/* zx_20261112_2 B6：三处失败如实上屏（此前 `catch {}` 显示成"没有数据"） */}
+      {(headerError || qualityError || ctxError) && (
+        <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 space-y-0.5">
+          {headerError && <div>{headerError}</div>}
+          {qualityError && <div>{qualityError}</div>}
+          {ctxError && <div>{ctxError}</div>}
+        </div>
+      )}
 
       {/* zx_20260905 批5: 项目质量聚合（均质/趋势——quality_score 列与 context_json 双写） */}
       {(qualityStats && Number((qualityStats as { count?: number }).count ?? 0) > 0) && (
@@ -419,17 +673,42 @@ export default function ProjectDetailPage() {
       {/* zx_20261003 M6: 本项目运行面（守护/作业的当前存量——知识全景此前唯一未上屏的一半） */}
       <KnowledgeFaceCard projectId={id!} />
 
-      {/* zx_20261101_2 M3: 项目节点分工——谁参与/项目角色/项目权重（保存即生效，ANS 只收窄候选并在层内缩放） */}
-      <NodeDivisionCard projectId={id!} />
+      {/* zx_20261107_1 B7：首屏卡 ≤6（米勒 7±2 / 老子·无为）——两两同域者收成一组建默认折叠。
+          ① 协同组：节点分工（谁能接）+ 协同看板（谁在跑哪件）回答同一件事的两半。 */}
+      <details className="mt-3">
+        <summary className="cursor-pointer select-none text-sm font-semibold text-gray-700 flex items-center gap-2 py-1">
+          <Network className="w-4 h-4 text-teal-600 shrink-0" />协同（节点分工 · 协同看板）
+          <span className="text-xs font-normal text-gray-400">谁能接、谁在跑哪件</span>
+        </summary>
+        {/* zx_20261101_2 M3: 项目节点分工——谁参与/项目角色/项目权重（保存即生效，ANS 只收窄候选并在层内缩放） */}
+        <NodeDivisionCard projectId={id!} />
 
-      {/* zx_20261106_3 B8「协」: 协同看板——谁在跑哪件、为何选它、进度到哪、改派过几次（数据同源，不另算） */}
-      <CollabBoardCard projectId={id!} />
+        {/* zx_20261106_3 B8「协」: 协同看板——谁在跑哪件、为何选它、进度到哪、改派过几次（数据同源，不另算） */}
+        <CollabBoardCard projectId={id!} />
+      </details>
 
-      {/* zx_20261017_1 批七: 项目知识包——预览（与注入同一把尺）+ 导出 JSONL（仅导出，不训练） */}
-      <KnowledgePackCard projectId={id!} />
+      {/* ② 岗位组：谁来做——绑定后才可指派；规范与经验随岗位跨项目复用。
+          IM 拒因「到项目详情的「岗位」里启用」指向的就是这一块（B1 前是断链）。 */}
+      <details className="mt-3">
+        <summary className="cursor-pointer select-none text-sm font-semibold text-gray-700 flex items-center gap-2 py-1">
+          <Users className="w-4 h-4 text-emerald-600 shrink-0" />岗位（谁来做 · 学到什么）
+          <span className="text-xs font-normal text-gray-400">绑定后才可指派；经验随岗位跨项目</span>
+        </summary>
+        <ProjectPositionsCard projectId={id!} />
+      </details>
 
-      {/* zx_20261030_1 M6「荐」: 知识收件箱——增量水位 / 建议的领域包（候选永不自动启用）/ 相似项目（只展示） */}
-      <KnowledgeInboxCard projectId={id!} />
+      {/* ③ 知识资产组：知识包（会被注入什么）+ 知识收件箱（新知识从哪来）。 */}
+      <details className="mt-3" id="project-knowledge-assets">
+        <summary className="cursor-pointer select-none text-sm font-semibold text-gray-700 flex items-center gap-2 py-1">
+          <BookOpen className="w-4 h-4 text-indigo-600 shrink-0" />知识资产（知识包 · 知识收件箱）
+          <span className="text-xs font-normal text-gray-400">会被注入什么、新知识从哪来</span>
+        </summary>
+        {/* zx_20261017_1 批七: 项目知识包——预览（与注入同一把尺）+ 导出 JSONL（仅导出，不训练） */}
+        <KnowledgePackCard projectId={id!} onChanged={() => void loadBusinessStatus()} />
+
+        {/* zx_20261030_1 M6「荐」: 知识收件箱——增量水位 / 建议的领域包（候选永不自动启用）/ 相似项目（只展示） */}
+        <KnowledgeInboxCard projectId={id!} onChanged={() => void loadBusinessStatus()} />
+      </details>
 
       {/* zx_20261029_1「知」: 项目须知——模型读工作目录一次生成的仓库快照。
           它不进普通记忆表（记忆按年限衰减、按相关度检索），而是单独成表 + 稳定前缀注入。 */}
@@ -438,33 +717,43 @@ export default function ProjectDetailPage() {
           <h3 className="font-semibold flex items-center gap-2"><BookOpen className="w-4 h-4 text-cyan-600"/>项目须知
             <span className="text-xs font-normal text-gray-400">· 读工作目录生成的仓库快照，任务执行时自动带上</span>
           </h3>
-          <button onClick={() => void handleInitBrief()} disabled={briefWait || briefRec?.status === 'running' || !project.working_dir}
-            title={!project.working_dir ? '未设置工作目录，无法初始化' : '重新读一遍工作目录并生成须知（后台执行，不阻塞页面）'}
+          <button onClick={() => void handleInitBrief()} disabled={briefWait || briefRec?.status === 'running' || !hasBriefSource}
+            title={!hasBriefSource ? '未设置工作目录且项目描述为空，无法初始化' : '重新读一遍工作目录与项目描述并生成须知（后台执行，不阻塞页面）'}
             className="flex items-center gap-1 px-2.5 py-1 border rounded-lg text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50 shrink-0">
             <RefreshCw className={`w-3.5 h-3.5 ${briefWait || briefRec?.status === 'running' ? 'animate-spin' : ''}`} />
             {briefWait || briefRec?.status === 'running' ? '生成中…' : briefRec?.brief ? '重新初始化' : '生成须知'}
           </button>
         </div>
         {briefStale === true && (
-          <div className="mb-2 text-xs text-amber-700 bg-amber-50 rounded px-2 py-1">仓库文件已变化，须知可能过期——可点「重新初始化」更新。</div>
+          <div className="mb-2 text-xs text-amber-700 bg-amber-50 rounded px-2 py-1">仓库文件或项目描述已变化，须知可能过期——可点「重新初始化」更新。</div>
         )}
         {briefLoading ? (
           <p className="text-sm text-gray-400 py-2">加载中…</p>
         ) : !briefRec?.brief ? (
-          briefRec?.status === 'failed' ? (
+          briefErr ? (
+            <LoadFailure what="「项目须知」" reason={briefErr} onRetry={() => void loadBrief()} busy={briefLoading} />
+          ) : briefRec?.status === 'failed' ? (
             <div className="text-sm p-2 bg-red-50 rounded">
               <p className="text-red-700">生成失败：{briefRec.error || '原因未记录'}</p>
-              <p className="text-xs text-gray-500 mt-1">确认工作目录可读、ANS 已连接后点「生成须知」重试。</p>
+              <p className="text-xs text-gray-500 mt-1">
+                尝试模型 {briefRec.attemptModel || '—'} · 失败于 {formatDbTime(briefRec.updatedAt)}。确认工作目录可读、ANS 已连接后点「生成须知」重试。
+              </p>
             </div>
           ) : briefRec?.status === 'running' || briefWait ? (
             <p className="text-sm text-gray-500 py-2">正在读工作目录生成须知（通常 1 分钟内完成，可离开本页）。</p>
           ) : (
-            <p className="text-sm text-gray-400 py-2">{project.working_dir ? '尚未生成须知。' : '未设置工作目录，无法初始化。'}</p>
+            <p className="text-sm text-gray-400 py-2">{hasBriefSource ? '尚未生成须知。' : '未设置工作目录且项目描述为空，无法初始化。'}</p>
           )
         ) : (
           <div className="space-y-2 text-sm">
+            {briefErr && <LoadFailure what="「项目须知」" reason={briefErr} onRetry={() => void loadBrief()} busy={briefLoading} />}
             {briefRec.status === 'failed' && briefRec.error && (
-              <p className="text-xs text-red-700 bg-red-50 rounded px-2 py-1">上次重跑失败：{briefRec.error}（下方仍是上一份成功的须知）</p>
+              <div className="text-xs text-red-700 bg-red-50 rounded px-2 py-1">
+                <p>上次重跑失败：{briefRec.error}（下方仍是上一份成功的须知）</p>
+                <p className="text-gray-500 mt-0.5">
+                  尝试模型 {briefRec.attemptModel || '—'} · 失败于 {formatDbTime(briefRec.updatedAt)}
+                </p>
+              </div>
             )}
             {briefRec.brief.summary && <p className="text-gray-700">{briefRec.brief.summary}</p>}
             {briefRec.brief.stack.length > 0 && (
@@ -502,7 +791,7 @@ export default function ProjectDetailPage() {
         )}
         {briefRec?.brief && (
           <p className="text-[10px] text-gray-400 mt-2">
-            生成于 {formatDbTime(briefRec.updatedAt)} · 模型 {briefRec.model || '—'} · 约 {(briefRec.tokensIn + briefRec.tokensOut).toLocaleString()} tokens · {briefRec.trigger === 'create' ? '创建时生成' : '手动重跑'}
+            上次成功生成于 {formatDbTime(briefRec.generatedAt || briefRec.updatedAt)} · 模型 {briefRec.model || '—'}（成功那轮） · 约 {formatCount(briefRec.tokensIn + briefRec.tokensOut)} tokens · {briefRec.trigger === 'create' ? '创建时生成' : '手动重跑'}
           </p>
         )}
       </div>
@@ -562,18 +851,52 @@ export default function ProjectDetailPage() {
               {bottleneck.computedAt && <p className="text-[10px] text-gray-400 mt-2">分析时间 {formatDbTime(bottleneck.computedAt)}</p>}
             </div>
           )}
-          <div className="grid grid-cols-2 gap-4">
+          {/* zx_20261107_1 B7：运行配置与 IM 命令是「改一次长期不动」的配置面，下沉到高级区默认折叠；
+              内容逐字未动（含 B6 的项目级模型指定），只是不再抢占首屏。 */}
+          <details className="mt-3">
+          <summary className="cursor-pointer select-none text-sm font-semibold text-gray-600 flex items-center gap-2 py-1">
+            <Terminal className="w-4 h-4 text-gray-500 shrink-0" />高级：运行配置与 IM 命令
+            <span className="text-xs font-normal text-gray-400">预算 · 节奏 · 模型指定 · IM 关键词</span>
+          </summary>
+          <div className="grid grid-cols-2 gap-4 mt-2">
             <div className="bg-white rounded-lg border p-4">
               <h3 className="font-semibold mb-3 flex items-center gap-2"><Activity className="w-4 h-4"/>运行配置</h3>
               <div className="space-y-2 text-sm">
                 {ctx.budget ? <>
-                  <div className="flex justify-between"><span className="text-gray-500">Token预算/任务</span><span>{(ctx.budget.max_tokens_per_task||0).toLocaleString()}</span></div>
-                  <div className="flex justify-between"><span className="text-gray-500">费用上限(¥)/任务</span><span>¥{ctx.budget.max_cost_usd_per_task || '—'}</span></div>
+                  <div className="flex justify-between"><span className="text-gray-500">Token预算/任务</span><span>{formatCount(ctx.budget.max_tokens_per_task)}</span></div>
+                  <div className="flex justify-between"><span className="text-gray-500">费用上限(¥)/任务</span><span>{formatMoney(ctx.budget.max_cost_usd_per_task)}</span></div>
                   {!ctx.budget.max_cost_usd_per_task && <p className="text-[10px] text-gray-400">费用上限「—」= 本项目暂无金额闸（任务仅按 Token 预算收敛；费用照常累计与展示，可在项目设置中填写上限）</p>}
                 </> : <p className="text-gray-400 text-xs">未设置预算</p>}
                 {ctx.rhythm ? <div className="flex justify-between"><span className="text-gray-500">活跃时段</span><span>{ctx.rhythm.activeHourStart}:00-{ctx.rhythm.activeHourEnd}:00 · 并发{ctx.rhythm.maxConcurrency||2}</span></div> : <p className="text-gray-400 text-xs">未设置节奏</p>}
                 {project.cron_schedule && <div className="flex justify-between"><span className="text-gray-500">Cron</span><span className="font-mono text-xs">{project.cron_schedule}</span></div>}
                 {project.working_dir && <div className="flex justify-between"><span className="text-gray-500">工作目录</span><span className="font-mono text-xs truncate">{project.working_dir}</span></div>}
+                {/* zx_20261107_1 B6: 项目级模型覆盖——「生效项」由 main 裁定，用户只填「本项目指定」。
+                    池外回落与逐次来源记在任务选型记录里（本页不判"这模型在不在池"。） */}
+                <div className="pt-2 border-t border-gray-100">
+                  <div className="flex justify-between items-center">
+                    <span className="text-gray-500">模型</span>
+                    <span className="text-xs">
+                      {modelOv?.effective ? (
+                        <>{modelOv.effective.requested}
+                          <span className="text-gray-400 ml-1">（{PIN_SOURCE_LABEL[modelOv.effective.source] ?? modelOv.effective.source}）</span>
+                        </>
+                      ) : <span className="text-gray-400">按任务自动选型</span>}
+                    </span>
+                  </div>
+                  <div className="flex gap-1 mt-1">
+                    <input
+                      value={modelDraft}
+                      onChange={e => setModelDraft(e.target.value)}
+                      placeholder="本项目指定模型（留空=跟随全局/自动）"
+                      className="flex-1 min-w-0 border rounded px-2 py-1 text-xs"
+                    />
+                    <button onClick={() => void saveModelOverride()} disabled={modelSaving} className="px-2 py-1 text-xs bg-blue-600 text-white rounded disabled:opacity-50">保存</button>
+                    {modelOv?.project_override && (
+                      <button onClick={() => void saveModelOverride(null)} disabled={modelSaving} className="px-2 py-1 text-xs border rounded">清除</button>
+                    )}
+                  </div>
+                  <p className="text-[10px] text-gray-400 mt-1">优先级：恢复路（续跑沿用）&gt; 本项目指定 &gt; 全局默认；指定模型不在本次可用池时自动回落，并如实记入任务选型记录。</p>
+                </div>
               </div>
             </div>
             <div className="bg-white rounded-lg border p-4">
@@ -589,11 +912,13 @@ export default function ProjectDetailPage() {
               ) : <p className="text-gray-400 text-xs">未配置 IM 命令</p>}
             </div>
           </div>
+          </details>
 
           {/* 多维度健康视图 */}
-          {Object.keys(healthViews).length > 0 && (
+          {(Object.keys(healthViews).length > 0 || healthErr) && (
             <div className="bg-white rounded-lg border p-4">
               <h3 className="font-semibold mb-3 flex items-center gap-2"><Activity className="w-4 h-4 text-green-500"/>多维度健康视图</h3>
+              {healthErr && <div className="mb-3"><LoadFailure what="「健康视图」" reason={healthErr} onRetry={() => void loadHealthViews()} busy={healthBusy} /></div>}
               <div className="grid grid-cols-3 gap-3">
                 {(['investor', 'developer', 'manager'] as const).map(view => {
                   const v = healthViews[view];
@@ -622,9 +947,11 @@ export default function ProjectDetailPage() {
           )}
 
           {/* 知识全景 */}
-          {panorama && (
+          {(panorama || panoErr) && (
             <div className="bg-white rounded-lg border p-4">
               <h3 className="font-semibold mb-3 flex items-center gap-2"><Brain className="w-4 h-4 text-indigo-500"/>知识全景</h3>
+              {panoErr && <div className="mb-3"><LoadFailure what="「知识全景」" reason={panoErr} onRetry={() => void loadPanorama()} busy={panoBusy} /></div>}
+              {panorama && <>
               <div className="grid grid-cols-2 gap-3 text-sm">
                 <div className="p-3 bg-gray-50 rounded">
                   <p className="text-xs text-gray-400 mb-1">记忆总览</p>
@@ -636,12 +963,13 @@ export default function ProjectDetailPage() {
                   <p className="font-bold">{Number((panorama.graphSummary as Record<string, unknown>)?.totalTriples ?? 0)} 个三元组</p>
                   <p className="text-xs text-gray-500 mt-1">核心实体: {((panorama.graphSummary as Record<string, unknown>).topEntities as Array<{name:string}>|undefined)?.slice(0,4).map(e=>e.name).join('、') || '无'}</p>
                 </div>
-                {/* zx_20260906 批3 (3c): 产出物 byType 分布（deliverableSummary.byType doc/mcp/a2a/daemon/ui/code 计数） */}
-                <div className="p-3 bg-gray-50 rounded" title="本项目全部任务的成果合计（与任务页「本任务（含子任务）」不同尺）">
-                  <p className="text-xs text-gray-400 mb-1">产出物（项目合计）</p>
-                  <p className="font-bold">{Number((panorama.deliverableSummary as Record<string, unknown>)?.total ?? 0)} 条</p>
-                  <div className="mt-1.5 flex items-center gap-1 flex-wrap">
-                    {Object.entries(((panorama.deliverableSummary as Record<string, unknown>)?.byType as Record<string, number>) || {}).map(([t, c]) => c > 0 ? (
+                {/* zx_20260906 批3 (3c): 产出物 byType 分布。
+                    zx_20261107_1 B7: 总数不再在此重印（统计卡「产出物（项目合计）」已是同一把尺的唯一落点），
+                    本格只做类型分解，且分项与总数取自**同一个** `projectDeliverables`。 */}
+                <div className="p-3 bg-gray-50 rounded" title="产出物类型分布（与统计卡「产出物（项目合计）」同源）">
+                  <p className="text-xs text-gray-400 mb-1">产出物类型分布</p>
+                  <div className="mt-0.5 flex items-center gap-1 flex-wrap">
+                    {Object.entries(projectDeliverables || {}).map(([t, c]) => t !== 'total' && c > 0 ? (
                       <span key={t} className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${DELIV_TYPE_CLS[t] || 'bg-gray-100 text-gray-600'}`}>{DELIVERABLE_TYPE_LABEL[t] || t} {c}</span>
                     ) : null)}
                   </div>
@@ -678,13 +1006,16 @@ export default function ProjectDetailPage() {
                   <p className="text-xs text-yellow-600 mt-1">{(panorama.missingArchetypes as Array<{label:string}>).map(a=>a.label).join('、')}</p>
                 </div>
               ) : null}
+              </>}
             </div>
           )}
 
           {/* 成员管理 */}
           <div className="bg-white rounded-lg border p-4">
             <h3 className="font-semibold mb-3 flex items-center gap-2"><Clock className="w-4 h-4 text-gray-500"/>成员管理 ({members.length})</h3>
-            {members.length === 0 ? <p className="text-xs text-gray-400">暂无成员</p> : (
+            {membersErr && <div className="mb-2"><LoadFailure what="「项目成员」" reason={membersErr} onRetry={() => void loadMembers()} busy={membersBusy} /></div>}
+            {usersErr && <div className="mb-2"><LoadFailure what="「用户列表」" reason={usersErr} onRetry={() => void loadMembers()} busy={membersBusy} /></div>}
+            {members.length === 0 ? (membersErr ? null : <p className="text-xs text-gray-400">暂无成员</p>) : (
               <div className="space-y-1 mb-3">
                 {members.map((m: Record<string, unknown>, i: number) => (
                   <div key={i} className="flex items-center justify-between text-sm py-1 px-2 bg-gray-50 rounded">
@@ -817,7 +1148,7 @@ export default function ProjectDetailPage() {
             <div className="space-y-4">
               {Object.entries(tensionConfigs).map(([tid, cfg]) => {
                 const t = tensions[tid] || { position: 50 };
-                const pos = (t.position as number) ?? 50;
+                const pos = tensionDraft[tid] ?? (t.position as number) ?? 50;
                 return (
                   <div key={tid} className="p-3 border rounded">
                     <div className="flex justify-between text-sm mb-2">
@@ -826,7 +1157,7 @@ export default function ProjectDetailPage() {
                     </div>
                     <div className="flex items-center gap-3">
                       <span className="text-xs text-gray-500 w-20 text-right">{cfg.leftLabel as string} ({100-pos}%)</span>
-                      <input type="range" min={0} max={100} value={pos} onChange={e => handleTensionChange(tid, Number(e.target.value))} className="flex-1"/>
+                      <input type="range" min={0} max={100} value={pos} onChange={e => onTensionInput(tid, Number(e.target.value))} className="flex-1"/>
                       <span className="text-xs text-gray-500 w-20">{cfg.rightLabel as string} ({pos}%)</span>
                     </div>
                     {/* zx_20260905 批6: 自动调节开关——启用后主进程每5min按规则自动微调并实时回推本页(此前 autoAdjust 无 UI 入口=默认 false 永不触发) */}
@@ -923,7 +1254,7 @@ export default function ProjectDetailPage() {
       {/* zx_20261021_3 批五: 领域包页签——生成/启用/撤销/注入成效。判据与闸全在 main（core/domain-pack）。
           事件驱动重载靠换 key（卡内 load 的 effect 挂在 projectId 上，key 变即重挂）。 */}
       {activeTab === 'packs' && (
-        <DomainPackCard key={packTick} projectId={id!} />
+        <DomainPackCard key={packTick} projectId={id!} onChanged={() => void loadBusinessStatus()} />
       )}
 
       {ctx.cron_run_command && <div className="bg-white rounded-lg border p-4"><h3 className="font-semibold mb-2 flex items-center gap-2"><Clock className="w-4 h-4"/>Cron 运行命令</h3><pre className="text-xs font-mono bg-gray-50 p-2 rounded overflow-x-auto">{ctx.cron_run_command}</pre></div>}
@@ -936,7 +1267,11 @@ export default function ProjectDetailPage() {
             <div className="space-y-3">
               <div><label className="text-sm font-medium">名称</label><input value={form.name} onChange={e=>setForm({...form,name:e.target.value})} className="w-full px-3 py-2 border rounded-lg text-sm mt-1"/></div>
               <div><label className="text-sm font-medium">描述</label><textarea value={form.description} onChange={e=>setForm({...form,description:e.target.value})} className="w-full px-3 py-2 border rounded-lg text-sm mt-1" rows={2}/></div>
-              <div><label className="text-sm font-medium">Cron</label><input value={form.cron_schedule} onChange={e=>setForm({...form,cron_schedule:e.target.value})} className="w-full px-3 py-2 border rounded-lg text-sm mt-1 font-mono" placeholder="0 9 * * 1-5"/></div>
+              <div>
+                <label className="text-sm font-medium">Cron</label>
+                <input value={form.cron_schedule} onChange={e=>setForm({...form,cron_schedule:e.target.value})} className={`w-full px-3 py-2 border rounded-lg text-sm mt-1 font-mono ${cronRaw && !cronValid ? 'border-red-400' : ''}`} placeholder="0 9 * * 1-5"/>
+                {cronRaw && !cronValid && <p className="text-xs text-red-600 mt-1">Cron 需 5 段（分 时 日 月 周），例如 `0 9 * * 1-5`；非法表达式不会生效，先改对再保存。</p>}
+              </div>
               <div className="grid grid-cols-2 gap-3">
                 <div><label className="text-sm font-medium">时区</label><input value={form.cron_timezone} onChange={e=>setForm({...form,cron_timezone:e.target.value})} className="w-full px-3 py-2 border rounded-lg text-sm mt-1"/></div>
                 <div><label className="text-sm font-medium">沙箱模式</label><select value={form.sandbox_mode} onChange={e=>setForm({...form,sandbox_mode:e.target.value})} className="w-full px-3 py-2 border rounded-lg text-sm mt-1"><option value="workspace">工作区(可写)</option><option value="strict">严格只读</option><option value="off">无限制</option></select></div>
@@ -961,7 +1296,7 @@ export default function ProjectDetailPage() {
                 <div><label className="text-xs text-gray-500">最大并发</label><input type="number" min={1} max={10} value={rhythmForm.maxConcurrency} onChange={e=>setRhythmForm({...rhythmForm,maxConcurrency:e.target.value})} className="w-full px-3 py-2 border rounded-lg text-sm mt-0.5"/></div>
               </div>
             </div>
-            <div className="flex justify-end gap-2 mt-6"><button onClick={()=>setEditing(false)} className="px-4 py-2 border rounded-lg text-sm">取消</button><button onClick={handleSave} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm">保存</button></div>
+            <div className="flex justify-end gap-2 mt-6"><button onClick={()=>setEditing(false)} className="px-4 py-2 border rounded-lg text-sm">取消</button><button onClick={handleSave} disabled={!cronValid} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm disabled:opacity-50 disabled:cursor-not-allowed">保存</button></div>
           </div>
         </div>
       )}

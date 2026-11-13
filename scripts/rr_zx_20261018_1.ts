@@ -992,12 +992,15 @@ async function main(): Promise<void> {
     eq(payload.acceptance_criteria, '测试全绿', 'R-6d ★`acceptance_criteria` 原样（判卷读的就是它）');
     ok(payload.prompt.includes('实现登录模块') && payload.prompt.includes('测试全绿'),
       'R-6e `prompt` 仍为整句（旧对端兼容面不变）');
-    // 接线：真派发那一跳用的就是它（zx_20261023_5 批一：改为带上游摘要的二元调用——钉更强形状，不放宽）。
+    // 接线：真派发那一跳用的就是它（zx_20261023_5 批一：改为带上游摘要的二元调用；
+    //   zx_20261112_1 B5：第三参带上岗位摘要——钉更强形状，不放宽）。
     const src = CODE(`${A}/src/main/core/collab-dispatch.ts`);
-    ok(/payload:\s*\{\s*\.\.\.buildDispatchPayload\(task,\s*upstream\)\s*\}/.test(src),
-      'R-6f ★★真派发那一跳：`payload: { ...buildDispatchPayload(task, upstream) }`（读去注释后的代码）');
+    ok(/payload:\s*\{\s*\.\.\.buildDispatchPayload\(task,\s*upstream,\s*position\)\s*\}/.test(src),
+      'R-6f ★★真派发那一跳：`payload: { ...buildDispatchPayload(task, upstream, position) }`（三参含岗位摘要，读去注释后的代码）');
     ok(/const\s+upstream\s*=\s*collectUpstreamSummaries\(db,\s*task\.id\)/.test(src),
       'R-6f2 ★上游摘要由该任务真实的上游派生（取自同一函数体，不是占位空数组）');
+    ok(/const\s+position\s*=\s*dispatchPositionOfTask\(db,\s*task\.id\)/.test(src),
+      'R-6f3 ★岗位摘要由该任务真实的行派生（同函数体取，未指派时为 null 而非占位对象）');
   }
 
   // ═══ R-7｜远端任务落库带上验收标准（0→1，真跑 TaskManager.create）════════════════
@@ -2828,8 +2831,12 @@ async function main(): Promise<void> {
     //       让界面查"这一项我能不能用"时读同一判据，不自己判档。
     //   zx_20261104_3 M5「联」：`ipc/admin.ipc.ts` 的 `settings:set` 在**写渠道配置前**取
     //     `resolveProGate` 喂给 `channelSettingRefusal`（真判据仍在 `device-channel.ts`，IPC 壳不另写档位判断）。
-    eq(importers, ['core/agent-executor.ts', 'core/device-channel.ts', 'core/domain-pack.ts', 'core/knowledge-cards.ts', 'core/knowledge-export.ts', 'core/knowledge-import.ts', 'core/memory-manager.ts', 'core/tier-catalog.ts', 'core/tools/media.ts', 'ipc-handlers.ts', 'ipc/admin.ipc.ts', 'ipc/devices.ipc.ts', 'ipc/license.ipc.ts'],
-      'R-68d ★★引 pro-gate 的动作层/读模型逐成员枚举（导出编排 + 导入编排 + 领域包 + 知识卡蒸馏 + 知识卡读口 + view_image + long_video 装配 + 档位对照 + 设备发现两处 + 插件安装唯一出口 + 单项查询出口 + 渠道配置写入闸；IPC 壳不逐 handler 另写档位判断）');
+    //   zx_20261108_1 B6「产出物批量导出」：闸只落 `ipc/project.ipc.ts` 的 `deliverable:exportCsv` 一跳，
+    //     调共享 `proFeatureRefusal('deliverable_export')`——IPC 壳仍不另写档位判断（只做一次闸调用）。
+    //   zx_20261113_1 B6「岗位知识包」：闸落 `ipc/positions.ipc.ts` 的 export/import 两跳
+    //     （先闸后读/写），IPC 壳仍只做一次 `proFeatureRefusal('position_transfer')` 调用。
+    eq(importers, ['core/agent-executor.ts', 'core/device-channel.ts', 'core/domain-pack.ts', 'core/knowledge-cards.ts', 'core/knowledge-export.ts', 'core/knowledge-import.ts', 'core/memory-manager.ts', 'core/tier-catalog.ts', 'core/tools/media.ts', 'ipc-handlers.ts', 'ipc/admin.ipc.ts', 'ipc/devices.ipc.ts', 'ipc/license.ipc.ts', 'ipc/positions.ipc.ts', 'ipc/project.ipc.ts'],
+      'R-68d ★★引 pro-gate 的动作层/读模型逐成员枚举（导出编排 + 导入编排 + 领域包 + 知识卡蒸馏 + 知识卡读口 + view_image + long_video 装配 + 档位对照 + 设备发现两处 + 插件安装唯一出口 + 单项查询出口 + 渠道配置写入闸 + 产出物批量导出 + 岗位知识包两跳；IPC 壳不逐 handler 另写档位判断）');
     // 新增两处各钉形状（上一条枚举只证明"引了"，这条证明"引在哪、怎么用"）。
     const handlersSrc68 = CODE(`${A}/src/main/ipc-handlers.ts`);
     ok(/PLUGIN_INSTALL_PATH/.test(handlersSrc68) && /proFeatureRefusal\([^)]*'plugin_install'/.test(handlersSrc68),

@@ -31,8 +31,9 @@
  *   模块图也不拉 `bonjour-service`。与 `device-discovery.ts` 的 browse 同库**不同用途**（那是"找设备"，
  *   这是"被找到"），**刻意不合并**。
  */
+import { createHash } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { networkInterfaces, type NetworkInterfaceInfo } from 'node:os';
+import { hostname as osHostname, networkInterfaces, type NetworkInterfaceInfo } from 'node:os';
 import type { PairingPort } from './external-terminals.js';
 // 批四：能力**类目**自述的唯一组装处（门牌与 rr 同引，不在门里另拼一份）。
 import { offeredCapabilities } from './external-calls.js';
@@ -71,6 +72,23 @@ export const INBOUND_INTENT_RESOLVE_PATH = '/api/v1/intent/resolve';
 export const INBOUND_INTENT_EXECUTE_PATH = '/api/v1/intent/execute';
 /** mDNS 广播的 service type（`_workerant._tcp`）。 */
 export const INBOUND_MDNS_SERVICE = 'workerant';
+
+/**
+ * zx_20261112_3「名」（道德经·名可名非常名 / 管子·度量衡）: 入站门广播用的
+ * **A/AAAA 记录名**（SRV 的 target）——`workerant-<8hex>.local`，**一处真源**。
+ *
+ * 病根（真机 6/6 复现）：`bonjour-service` 未给 `host` 时回落到 `os.hostname()`，而 macOS 上
+ * 那就是 `LocalHostName`（`<名字>.local`）——mDNSResponder 自己也拥有它。第三方裸开 5353
+ * 抢注这个 A/AAAA ⇒ 系统判定冲突、注销自己的记录并**改本地主机名**（每次启动后缀 +1，
+ * 弹「本电脑的本地主机名…已在此网络上使用」）。故广播名必须由**节点自持**的标识派生，
+ * **绝不**回落到系统名：空 seed 也只把 `os.hostname()` 当哈希输入，不直接当输出。
+ * 同 seed 同值 ⇒ 重启不变；异 seed 异值 ⇒ 局域网内不互撞。
+ */
+export function inboundMdnsHostName(seed: string): string {
+  const material = seed.trim() || `anon|${osHostname()}`;
+  const hex = createHash('sha256').update(`worker-ant-mdns|${material}`).digest('hex').slice(0, 8);
+  return `workerant-${hex}.local`;
+}
 
 /** 端口解析（单源 + 逃生口）。非法/缺省 ⇒ `INBOUND_DEFAULT_PORT`。 */
 export function resolveInboundPort(env: NodeJS.ProcessEnv = process.env): number {
@@ -364,16 +382,17 @@ function defaultServerFactory(handler: (req: IncomingMessage, res: ServerRespons
 
 /** mDNS 广播（"被找到"）——只用到的那一小面。 */
 export interface MdnsPublisher { stop(): void; }
-export type MdnsPublishFactory = (nodeName: string, port: number) => MdnsPublisher;
+/** 第三参是**广播主机名**（A/AAAA 记录名）；省略时工厂内兜底派生，绝不用 `os.hostname()`。 */
+export type MdnsPublishFactory = (nodeName: string, port: number, host?: string) => MdnsPublisher;
 
 interface MdnsInstance {
-  publish(o: { name: string; type: string; protocol?: string; port: number; txt?: Record<string, unknown> }): { stop(cb?: () => void): void };
+  publish(o: { name: string; type: string; protocol?: string; port: number; host?: string; txt?: Record<string, unknown> }): { stop(cb?: () => void): void };
   destroy(): void;
 }
 interface MdnsBonjourCtor { new (): MdnsInstance; }
 
 /** 真广播：惰性 `import('bonjour-service')`（同 `device-discovery.ts` 范式）。不可用即**如实降级**。 */
-function defaultMdnsPublish(nodeName: string, port: number): MdnsPublisher {
+function defaultMdnsPublish(nodeName: string, port: number, host?: string): MdnsPublisher {
   let stopped = false;
   let cleanup: (() => void) | null = null;
   void (async () => {
@@ -381,7 +400,10 @@ function defaultMdnsPublish(nodeName: string, port: number): MdnsPublisher {
       const mod = (await import('bonjour-service')) as unknown as { default?: MdnsBonjourCtor } & MdnsBonjourCtor;
       const Bonjour = (mod.default ?? mod) as MdnsBonjourCtor;
       const bonjour = new Bonjour();
-      const svc = bonjour.publish({ name: nodeName, type: INBOUND_MDNS_SERVICE, protocol: 'tcp', port, txt: { v: '1' } });
+      // zx_20261112_3：显式给 `host`——`bonjour-service` 缺省会拿 `os.hostname()`（macOS 的
+      //   LocalHostName）当 A/AAAA 记录名，与系统 mDNSResponder 抢名 ⇒ 系统改名并弹窗。
+      const advertisedHost = (host ?? '').trim() || inboundMdnsHostName(nodeName);
+      const svc = bonjour.publish({ name: nodeName, type: INBOUND_MDNS_SERVICE, protocol: 'tcp', port, host: advertisedHost, txt: { v: '1' } });
       cleanup = () => {
         try { svc.stop(); } catch { /* 已停 */ }
         try { bonjour.destroy(); } catch { /* 已销毁 */ }
@@ -418,6 +440,12 @@ export interface StartInboundOpts {
   serverFactory?: InboundServerFactory;
   /** mDNS 广播工厂；`null` = 不广播（rr）。缺省真广播。 */
   mdnsFactory?: MdnsPublishFactory | null;
+  /**
+   * zx_20261112_3：广播主机名（A/AAAA 记录名）。省略 ⇒ 由 `nodeName` 经
+   * `inboundMdnsHostName` 派生；**永不**回落到 `os.hostname()`（那是系统 LocalHostName，
+   * 抢注会触发 macOS 改名弹窗）。装配层应传按节点 id 派生的稳定值。
+   */
+  mdnsHost?: string;
 }
 
 let activeServer: InboundServer | null = null;
@@ -470,7 +498,11 @@ export function startInboundGate(opts: StartInboundOpts): { started: boolean; po
   // mDNS 广播随开关起（"被找到"与"能应答"同时到位）。
   const mdnsFactory = opts.mdnsFactory === undefined ? defaultMdnsPublish : opts.mdnsFactory;
   if (mdnsFactory) {
-    try { activeMdns = mdnsFactory(opts.nodeName(), port); } catch { activeMdns = null; }
+    // zx_20261112_3：广播名与实例名**分开**——实例名（`nodeName`）只在本服务类型内区分；
+    //   A/AAAA 的主机名必须自持（按节点 id 派生），不能借用系统的 LocalHostName。
+    const nodeName = opts.nodeName();
+    const mdnsHost = (opts.mdnsHost ?? '').trim() || inboundMdnsHostName(nodeName);
+    try { activeMdns = mdnsFactory(nodeName, port, mdnsHost); } catch { activeMdns = null; }
   }
   return { started: true, port, reason: 'started' };
 }

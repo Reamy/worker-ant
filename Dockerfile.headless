@@ -1,0 +1,74 @@
+# zx_20261108_1 B8：无头工蚁节点（真 Linux 环境）——只为跨机验收，不随桌面打包。
+#
+# 为什么用 Node 官方镜像 + 容器内 pnpm install（而不是挂宿主 node_modules）：
+#   宿主的 better-sqlite3 是 Node/Electron ABI 的 darwin-arm64 产物，挂进来必 `NODE_MODULE_VERSION` 崩；
+#   容器里按自身平台重装，才是"第二台机器"应有的形态。
+#
+# 构建（仓库根；本网络 Docker Hub 不可达，基础镜像经 daocloud 镜像取得后本地打回官方 tag）：
+#   docker pull docker.m.daocloud.io/library/node:22-bookworm-slim
+#   docker tag  docker.m.daocloud.io/library/node:22-bookworm-slim node:22-bookworm-slim
+#   docker build -f Dockerfile.headless -t wa-headless:dev .
+#
+# 固化复跑（推荐）：
+#   bash scripts/headless-docker.sh                 # 读宿主库凭据 → build → 起命名容器 wa-headless
+#   docker compose -f docker-compose.headless.yml up -d --build   # 等价声明式写法
+#
+# 一次性命令（本轮 B8 验收实际使用的形态，作为可复现记录）：
+#   docker run -d --name wa-headless --add-host=host.docker.internal:host-gateway \
+#     -e ANS_SERVER_URL=http://host.docker.internal:27183 \
+#     -e ANS_API_KEY=... -e ANS_SECRET_KEY=... \
+#     -e WA_NODE_NAME=wa-docker-linux -e WA_DATA_DIR=/data \
+#     -v wa-headless-data:/data \
+#     wa-headless:dev --duration 900 --heartbeat-sec 5 --work
+FROM node:22-bookworm-slim
+
+ENV PNPM_HOME=/pnpm
+ENV PATH=$PNPM_HOME:$PATH
+# electron 只是桌面 devDependency；容器里绝不下载 Electron 二进制（省 ~100MB 且毫无用处）。
+ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1
+# 本网络下 registry.npmjs.org ≈0.5MB/s 且会卡在个别大包（实测 10 分钟不走一格）；
+# npmmirror ≈5MB/s。lockfile 只钉版本+integrity，换源不改包内容。
+ENV npm_config_registry=https://registry.npmmirror.com
+
+RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
+
+# better-sqlite3 的 prebuild-install 拿不到本 Node ABI（22.23.x）的预编译件时会退到 node-gyp 源码编译，
+# slim 镜像没有 python3/make/g++ 就当场 `gyp ERR! configure error`。装最小构建链，让它在容器内自编 linux-arm64 产物
+# （这才是"第二台机器按自身平台重装"应有的形态；宿主的 darwin 产物绝不能挂进来）。
+# 换 Debian 镜像源：本网络下 deb.debian.org ≈45KB/s（实测 20 分钟没下完 apt 依赖），
+# 南京大学镜像 ≈6MB/s——纯下载源差异，不改变包内容。
+RUN sed -i 's|deb.debian.org|mirror.nju.edu.cn|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null \
+ || sed -i 's|deb.debian.org|mirror.nju.edu.cn|g' /etc/apt/sources.list
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 make g++ \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# 清单层：依赖不变则该层命中缓存。
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY apps/ans-server/package.json apps/ans-server/
+COPY apps/worker-ant-desktop/package.json apps/worker-ant-desktop/
+COPY apps/worker-ant-desktop/renderer/package.json apps/worker-ant-desktop/renderer/
+COPY packages/ans-client/package.json packages/ans-client/
+COPY packages/shared-types/package.json packages/shared-types/
+# 这两个工作区包带 `prepare: pnpm run build`（tsup src/index.ts），安装阶段就会跑；
+# 只复制清单会 `Cannot find src/index.ts` 直接失败。给最小源码面，dist 仍留到 `COPY . .` 后重建。
+COPY tsconfig.base.json ./
+COPY packages/shared-types/src packages/shared-types/src
+COPY packages/shared-types/tsconfig.json packages/shared-types/
+COPY packages/ans-client/src packages/ans-client/src
+COPY packages/ans-client/tsconfig.json packages/ans-client/
+# tsx 由 ans-server 的 devDependency 提供（仓库内 rr/无头入口同用这一份），故一并装。
+RUN pnpm install --frozen-lockfile --filter @worker-ant/desktop... --filter @worker-ant/ans-server
+# 根级验收脚本（scripts/*.ts，含无头入口）按包名导入工作区包；宿主 node_modules 里早有这些链接
+# （历史安装留下），容器按 filter 安装不会在根建它们——补同一个链接，不为一条验收链去改根清单/lockfile。
+RUN mkdir -p node_modules/@worker-ant \
+ && ln -sfn ../../packages/ans-client node_modules/@worker-ant/ans-client \
+ && ln -sfn ../../packages/shared-types node_modules/@worker-ant/shared-types
+
+COPY . .
+
+# `pnpm exec` 从 cwd 的 node_modules/.bin 解析 tsx（ans-server 的依赖）。
+WORKDIR /app/apps/ans-server
+ENTRYPOINT ["pnpm", "exec", "tsx", "/app/scripts/headless-node.ts"]

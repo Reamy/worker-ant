@@ -42,7 +42,11 @@ import { ansSignedRequest, ansFailureNote, type AnsCreds } from './ans-signed-re
 import { extractExpectedOutputPaths, normalizeOutputPath } from './output-paths.js';
 import { describeExecutionError } from './exec-error.js';
 // zx_20261106_3 B1：能力词校验与需求派生复用**一处真源**（三份既有词表在 task-capability 内）。
-import { deriveTaskRequirements, requirementsFromCapabilityWords, type DispatchRequirements } from './task-capability.js';
+import { deriveTaskRequirements, requirementsFromCapabilityWords, type DispatchPreflightRecord, type DispatchRequirements } from './task-capability.js';
+// zx_20261107_1 B5：拆解预检（纯判据 + 取数口同在一处；落行前先问"跑不跑得了"）。
+import { collectPreflightContext, runPreflight, toPreflightRecord, type PreflightContext } from './task-preflight.js';
+// zx_20261109_1 G9：项目须知（仅 ready 且有内容时才注入拆解提示词）。
+import { loadProjectBrief, renderProjectBrief } from './project-brief.js';
 
 const logger = createLogger('decompose');
 
@@ -198,7 +202,7 @@ export const DECOMPOSE_MODEL_REQUEST: Record<string, unknown> = auxModelRequest(
  *   不承接任何 M 号，里程碑板留下未承接项（`unclaimedMilestones` 恒非空）。空串时**不加这一句**
  *   （保持原提示词逐字不变，不污染既有夹具）。
  */
-export function buildDecomposePrompt(taskDescription: string, decompositionPatterns?: string, milestoneHint?: string, parentAcceptance?: string): string {
+export function buildDecomposePrompt(taskDescription: string, decompositionPatterns?: string, milestoneHint?: string, parentAcceptance?: string, projectBriefText?: string): string {
   const patternHint = decompositionPatterns
     ? `\n\n历史拆解模式参考（同类任务的典型子任务数，供参考而非强制）：\n${decompositionPatterns}`
     : '';
@@ -209,9 +213,13 @@ export function buildDecomposePrompt(taskDescription: string, decompositionPatte
   const parentRule = parentAcceptance
     ? `\n\n父任务已设定的验收标准（子任务判据须能支撑它，不得与之冲突）：\n${parentAcceptance}`
     : '';
+  // zx_20261109_1 G9：项目须知（ready 时的有界事实）——空串时**逐字节不变**。
+  const briefRule = projectBriefText
+    ? `\n\n${projectBriefText}\n\n**硬规则**：子任务描述里点名的文件、端点、命令，必须出现在上面的项目资料或仓库目录中；不确定就改写成「在 <目录职能> 内实现 X，并以 <可执行命令> 核实」。**不得**按框架习惯补上仓库里不存在的文件名。`
+    : '';
   return `你是一个任务拆解专家。请将以下任务拆解为${DECOMPOSE_MIN_SUBTASKS}-${DECOMPOSE_MAX_SUBTASKS}个子任务，每个子任务应该是独立可执行的。
 
-任务描述：${taskDescription}${patternHint}${milestoneRule}${parentRule}
+任务描述：${taskDescription}${patternHint}${milestoneRule}${parentRule}${briefRule}
 
 请以JSON数组格式返回，每个元素包含：
 - title: 子任务标题（简洁，10字以内）
@@ -376,9 +384,9 @@ export function acceptanceSourcesNotice(derived: number, missing: number): strin
  */
 export async function decomposeTask(
   taskDescription: string,
-  opts: { deps: DecomposeDeps; patterns?: string; milestoneHint?: string; parentAcceptance?: string; onFailure?: (reason: string) => void },
+  opts: { deps: DecomposeDeps; patterns?: string; milestoneHint?: string; parentAcceptance?: string; projectBriefText?: string; onFailure?: (reason: string) => void },
 ): Promise<DecompositionTemplate[]> {
-  const prompt = buildDecomposePrompt(taskDescription, opts.patterns, opts.milestoneHint, opts.parentAcceptance);
+  const prompt = buildDecomposePrompt(taskDescription, opts.patterns, opts.milestoneHint, opts.parentAcceptance, opts.projectBriefText);
   const failed = (reason: string): DecompositionTemplate[] => {
     // 留痕失败不影响拆解结论（回调是旁路，不是判据）。
     try { opts.onFailure?.(reason); } catch { /* ignore */ }
@@ -522,6 +530,12 @@ export interface PlanSubtasksOptions {
    * 本批内仍照常走序号解析与兄弟环检测。
    */
   extraDepIds?: ReadonlyArray<readonly string[]>;
+  /**
+   * zx_20261107_1 B5：落库前的拆解预检环境（本机/对端画像 + 项目预算）。
+   * 由调用方用 `collectPreflightContext` 取好传入；缺省 ⇒ 不预检（保持旧行为，续拆路不阻断）。
+   * `subtasks` 不在此给——预检对象一律由**模板**现场派生（本批要判的正是这份模板，含未建满的余量）。
+   */
+  preflight?: PreflightContext;
 }
 
 export interface PlanSubtasksResult {
@@ -544,6 +558,8 @@ export interface PlanSubtasksResult {
   droppedDepNotes: string[];
   /** 引擎推断出的前置边（模型未声明）——如实回传，不冒充模型声明。 */
   inferredDeps: InferredDep[];
+  /** zx_20261107_1 B5：预检结论（未预检时为 `null`）；非 `ok` 时 `created===0` 且 `refusal` 即其理由。 */
+  preflight: DispatchPreflightRecord | null;
 }
 
 /** savepoint 名——事务边界只此一处（拆解落行要么全成、要么零残留）。 */
@@ -575,7 +591,7 @@ export function planSubtasksFromTemplate(db: AccountingDb, opts: PlanSubtasksOpt
   const template = inferred.templates;
   const planned = template.length;
   const childDepth = opts.depth + 1;
-  const empty = { created: 0, planned, childIds: [] as string[], noDepCount: 0, droppedDeps: 0, droppedDepNotes: [] as string[], inferredDeps: inferred.inferred };
+  const empty = { created: 0, planned, childIds: [] as string[], noDepCount: 0, droppedDeps: 0, droppedDepNotes: [] as string[], inferredDeps: inferred.inferred, preflight: null as DispatchPreflightRecord | null };
   if (childDepth > MAX_TASK_DEPTH) {
     return { ...empty, refusal: `子任务嵌套深度 ${childDepth} 超过上限 ${MAX_TASK_DEPTH}（父任务已在第 ${opts.depth} 层）` };
   }
@@ -638,10 +654,26 @@ export function planSubtasksFromTemplate(db: AccountingDb, opts: PlanSubtasksOpt
     if (!kept.length) noDepCount++;
   }
 
-  // ③ 单事务落行：要么全成，要么零残留。
+  // ③ 预检（zx_20261107_1 B5）：能力/预算/节点可用三关，**在落行之前**判——不过即零残留。
+  //   对象一律取**整份模板**（含本批建不下的余量）：余量将来由续拆路落库，此刻就该一次判清。
+  //   依赖环不在此判：上面已按边丢掉成环边（更强且可自动化解的行为，旧断言钉着，不改成整批拒绝）。
+  let preflightRecord: DispatchPreflightRecord | null = null;
+  if (opts.preflight) {
+    const pre = runPreflight({
+      ...opts.preflight,
+      subtasks: template.map((t, i) => ({ index: i + 1, title: t.title, requirements: requirementsForTemplate(t) })),
+    });
+    if (pre.verdict !== 'ok') {
+      return { ...empty, droppedDeps, droppedDepNotes, refusal: pre.reason ?? '拆解预检未通过', preflight: toPreflightRecord(pre) };
+    }
+    preflightRecord = toPreflightRecord(pre);
+  }
+
+  // ④ 单事务落行：要么全成，要么零残留。
   db.prepare(`SAVEPOINT ${PLAN_SAVEPOINT}`).run();
   try {
     for (let i = 0; i < creatable; i++) {
+      const requirements = requirementsForTemplate(template[i]!);
       const ctx = withAcceptanceSource({
         depth: childDepth,
         auto_decomposed: true,
@@ -651,7 +683,8 @@ export function planSubtasksFromTemplate(db: AccountingDb, opts: PlanSubtasksOpt
         //   不编一个空串冒充"目的已标注"（缺键 ≠ 坏值）。
         ...(template[i]!.purpose ? { purpose: template[i]!.purpose } : {}),
         // zx_20261106_3 B1：外派需求随子任务落库（读不到/坏值 ⇒ 派发时规则派生，向后兼容）。
-        dispatch_requirements: requirementsForTemplate(template[i]!),
+        // zx_20261107_1 B5：预检结论随需求一并落库（"凭什么说它能派"可当场核对）。
+        dispatch_requirements: preflightRecord ? { ...requirements, preflight: preflightRecord } : requirements,
         ...(opts.contextExtra ?? {}),
       }, template[i]!.acceptance_source);
       db.prepare(
@@ -670,12 +703,12 @@ export function planSubtasksFromTemplate(db: AccountingDb, opts: PlanSubtasksOpt
   } catch (err) {
     try { db.prepare(`ROLLBACK TO ${PLAN_SAVEPOINT}`).run(); } catch { /* 回滚失败仍尝试释放 */ }
     try { db.prepare(`RELEASE ${PLAN_SAVEPOINT}`).run(); } catch { /* 无外层事务可释放 */ }
-    return { ...empty, droppedDeps, droppedDepNotes, refusal: `建子任务事务失败，已回滚：${(err as Error).message}` };
+    return { ...empty, droppedDeps, droppedDepNotes, refusal: `建子任务事务失败，已回滚：${(err as Error).message}`, preflight: preflightRecord };
   }
 
   // 截断真因与 `childBreadthRefusal` 同一句（填满后 active = MAX_CHILD_BREADTH）。
   const refusal = creatable < planned ? childBreadthRefusalFor(MAX_CHILD_BREADTH) : null;
-  return { created: childIds.length, planned, childIds, noDepCount, refusal, droppedDeps, droppedDepNotes, inferredDeps: inferred.inferred };
+  return { created: childIds.length, planned, childIds, noDepCount, refusal, droppedDeps, droppedDepNotes, inferredDeps: inferred.inferred, preflight: preflightRecord };
 }
 
 /**
@@ -1158,11 +1191,23 @@ export async function autoDecomposeForTask(opts: AutoDecomposeOptions): Promise<
     const milestoneHint = milestoneHintOf(opts.db, opts.goal, opts.projectId);
     // zx_20261106_1 M3：父任务已设的判据传给拆解器——子任务判据须能支撑它；缺口时也作为派生来源。
     const parentAcceptance = readParentAcceptance(opts.db, opts.taskId);
+    // zx_20261109_1 G9（判据读项目真身）：按**内容**判——解析出须知就注入；
+    //   zx_20261111_1：`status` 已改为"最近一次尝试的结局"，失败重跑时旧 `brief` 仍可用，
+    //   故这里不再看 `status`（否则一次失败会让拆解静默丢掉已有认知）。
+    let projectBriefText = '';
+    try {
+      // `AccountingDb` 的 `run` 返回值比 `BriefDb` 宽（只读口，不改宽全局类型）。
+      const stored = loadProjectBrief(opts.db as unknown as Parameters<typeof loadProjectBrief>[0], opts.projectId);
+      if (stored?.brief) {
+        projectBriefText = renderProjectBrief(stored.brief, stored.generatedAt || stored.updatedAt);
+      }
+    } catch { /* 读须知失败不阻断拆解 */ }
     const template = await decomposeTask(opts.goal, {
       deps,
       ...(opts.patterns ? { patterns: opts.patterns } : {}),
       ...(milestoneHint ? { milestoneHint } : {}),
       ...(parentAcceptance ? { parentAcceptance } : {}),
+      ...(projectBriefText ? { projectBriefText } : {}),
       // zx_20261018_3 批二: 真失败要留痕（会话行 0→1）——此前拆解失败**无声**，用户只看到"任务没拆"，
       //   无从分辨是"任务本来就简单"还是"模型端点不通"。回调只画"失败"这一格，正常空答不画。
       onFailure: (reason) => {
@@ -1174,11 +1219,26 @@ export async function autoDecomposeForTask(opts: AutoDecomposeOptions): Promise<
       },
     });
     if (template.length < 2) return null;
+    // zx_20261107_1 B5：落行前取预检环境（本机/对端画像 + 项目预算）。取不到 ⇒ 不预检（旧行为）。
+    //   注意此处在**模板已拆出之后**才取：拆解本身没成功时不必为一个不会落行的模板多打一次节点台账。
+    const preflight = await collectPreflightContext(opts.db, { projectId: opts.projectId });
     const r = planSubtasksFromTemplate(opts.db, {
       parentTaskId: opts.taskId, projectId: opts.projectId, template, depth: opts.depth, source: 'auto-decompose',
       ...(opts.contextExtra ? { contextExtra: opts.contextExtra } : {}),
+      ...(preflight ? { preflight } : {}),
     });
-    if (r.created === 0) return null;
+    if (r.created === 0) {
+      // zx_20261107_1 B5：预检不过要**说清为什么**（旧路只有静默返回 null）。
+      //   "不落半成品"与"不说原因"是两件事——后者会让用户只看到"任务没拆"却无从下手。
+      if (r.preflight && r.preflight.verdict !== 'ok') {
+        opts.db.prepare('INSERT INTO wa_task_conversations (id, task_id, role, content) VALUES (?, ?, ?, ?)').run(
+          randomUUID(), opts.taskId, 'system',
+          `[智能拆解] ${opts.label}：拆解预检未通过（${r.preflight.reason ?? r.preflight.verdict}），未建子任务，本任务按单任务执行。`,
+        );
+        logger.info({ taskId: opts.taskId.slice(0, 8), verdict: r.preflight.verdict }, '拆解预检未通过，不落子任务');
+      }
+      return null;
+    }
     // zx_20261106_1 M3：实建那几条的判据来源——回话要说实话（派生/未设各有几条）。
     const builtTemplate = template.slice(0, r.created);
     const derivedAcceptance = builtTemplate.filter((t) => t.acceptance_source === 'derived_parent' || t.acceptance_source === 'derived_generic').length;

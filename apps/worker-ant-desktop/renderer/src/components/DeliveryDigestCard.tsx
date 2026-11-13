@@ -66,15 +66,17 @@ export default function DeliveryDigestCard({ projectId }: { projectId: string })
   const mainCount = (primaryEnabled ? primary.length : 0) + verified.length;
   if (sections === 0) return null;
 
+  // zx_20261111_2「折」：本卡默认折叠——项目详情首屏已够长，成果单按需展开（`<details>` 无 `open` 即折叠）。
   return (
-    <div className="mt-3 bg-white rounded-lg border p-4">
-      <div className="flex items-center justify-between mb-2">
+    <details className="mt-3 bg-white rounded-lg border">
+      <summary className="cursor-pointer select-none px-4 py-3 flex items-center justify-between gap-2">
         <h3 className="text-sm font-semibold flex items-center gap-1.5 text-gray-700">
           <Trophy className="w-4 h-4 text-amber-500" />本阶段成果交付单
           {mainCount > 0 && <span className="text-[10px] font-normal px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">主成果 {mainCount} 条</span>}
         </h3>
-        <span className="text-[10px] text-gray-300">已落地里程碑 / 主要成果·已验收 doc / 高质任务 — 行内点跳直达</span>
-      </div>
+        <span className="text-[10px] text-gray-300 text-right">已落地里程碑 / 主要成果·已验收 doc / 高质任务 — 行内点跳直达</span>
+      </summary>
+      <div className="px-4 pb-4">
       {windowSwitchOn && (
         <div className="flex items-center gap-1 mb-2">
           {(['all', '30', '7'] as const).map((w) => (
@@ -132,7 +134,8 @@ export default function DeliveryDigestCard({ projectId }: { projectId: string })
           </div>
         </div>
       )}
-    </div>
+      </div>
+    </details>
   );
 }
 

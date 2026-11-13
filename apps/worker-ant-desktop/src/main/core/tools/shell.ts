@@ -9,6 +9,8 @@ import path from 'node:path';
 import { readBoolSetting } from '../settings-bool.js';
 import { jsonSchema } from 'ai';
 import { runShellCommand, truncationNote } from '../shell-exec.js';
+// zx_20261113_2 M3「通」：网络失败分类与「责任应用」提示（一处真源，零依赖）。
+import { networkNoteFor } from '../network-diagnosis.js';
 
 import { validateReadonlyBashCommand, sanitizeLoneSurrogates, searchPathForPattern, paginateReadFile, shellRejectPayload, shellRejectPayloadForChar, buildToolConstraintBrief, evaluateMultiSegment } from '../tool-guards.js';
 // zx_20261029_3 M3：四个工具在**唯一执行口** `runShellCommand` 前后登记后台进程（账不是闸，失败不阻断）。
@@ -18,7 +20,7 @@ import { makeShellHooks, leftoverNote } from '../background-jobs.js';
 import { recordRuntimeEvidence } from '../runtime-evidence.js';
 
 export function shellTools(deps: ToolDeps) {
-  const { db, taskId, projectId, workingDir, pauseForDecision, registerFilesWrittenByCommand } = deps;
+  const { db, taskId, projectId, workingDir, pauseForDecision, commandWriteQueue } = deps;
   // zx_20261105_1 M6：拒绝原因与 `deny_kind` 一并落证据账（传入 payload 时自动取出，字符串照旧）。
   const noteDeny = (tool: string, command: string, reason: unknown) => {
     const o = reason && typeof reason === 'object'
@@ -99,8 +101,12 @@ export function shellTools(deps: ToolDeps) {
         const tracked = makeShellHooks(db, { projectId, taskId, tool: 'execute_command', command: args.command, cwd: workingDir });
         const r = await runShellCommand(args.command, { cwd: workingDir, timeoutMs: 30_000, maxBuffer: 1024 * 1024, ...tracked.hooks });
         noteRun('execute_command', args.command, r);
-        await registerFilesWrittenByCommand(db, { projectId, taskId, workingDir, sinceMs: writeBaselineMs, via: 'execute_command' });
-        if (!r.ok) return JSON.stringify({ error: r.error, stdout: r.stdout.slice(0, 5000), stderr: r.stderr.slice(0, 5000) });
+        // zx_20261109_1 B2：只记窗口（同步 O(1)）；盘点与补登记合并到 run 结束前一次（见 `command-write-queue.ts`）。
+        commandWriteQueue.enqueue({ projectId, taskId, workingDir, sinceMs: writeBaselineMs, via: 'execute_command' });
+        if (!r.ok) {
+          const netHint = networkNoteFor(r);
+          return JSON.stringify({ error: r.error, stdout: r.stdout.slice(0, 5000), stderr: r.stderr.slice(0, 5000), ...(netHint ? { network_hint: netHint } : {}) });
+        }
         return r.stdout.slice(0, 10000) + truncationNote(r) + leftoverNote(db, tracked.jobId);
       },
     },
@@ -129,7 +135,10 @@ export function shellTools(deps: ToolDeps) {
         const tracked = makeShellHooks(db, { projectId, taskId, tool: 'bash', command, cwd: workingDir });
         const r = await runShellCommand(command, { cwd: workingDir, timeoutMs: 30_000, maxBuffer: 1024 * 1024, ...tracked.hooks });
         noteRun('bash', command, r);
-        if (!r.ok) return JSON.stringify({ error: r.error, stdout: r.stdout.slice(0, 3000), stderr: r.stderr.slice(0, 3000) });
+        if (!r.ok) {
+          const netHint = networkNoteFor(r);
+          return JSON.stringify({ error: r.error, stdout: r.stdout.slice(0, 3000), stderr: r.stderr.slice(0, 3000), ...(netHint ? { network_hint: netHint } : {}) });
+        }
         return r.stdout.slice(0, 10000) + truncationNote(r) + leftoverNote(db, tracked.jobId);
       },
     },
@@ -223,8 +232,12 @@ export function shellTools(deps: ToolDeps) {
         const tracked = makeShellHooks(db, { projectId, taskId, tool: 'run_privileged', command: args.command, cwd: workingDir });
         const r = await runShellCommand(args.command, { cwd: workingDir, timeoutMs: 60_000, maxBuffer: 2 * 1024 * 1024, ...tracked.hooks });
         noteRun('run_privileged', args.command, r);
-        await registerFilesWrittenByCommand(db, { projectId, taskId, workingDir, sinceMs: writeBaselineMs, via: 'run_privileged' });
-        if (!r.ok) return JSON.stringify({ error: r.error, stdout: r.stdout.slice(0, 5000), stderr: r.stderr.slice(0, 5000) });
+        // zx_20261109_1 B2：同 `execute_command`——只记窗口，盘点合并到 run 结束前一次。
+        commandWriteQueue.enqueue({ projectId, taskId, workingDir, sinceMs: writeBaselineMs, via: 'run_privileged' });
+        if (!r.ok) {
+          const netHint = networkNoteFor(r);
+          return JSON.stringify({ error: r.error, stdout: r.stdout.slice(0, 5000), stderr: r.stderr.slice(0, 5000), ...(netHint ? { network_hint: netHint } : {}) });
+        }
         return r.stdout.slice(0, 10000) + truncationNote(r) + leftoverNote(db, tracked.jobId);
       },
     },

@@ -530,6 +530,9 @@ async function main(): Promise<void> {
       id TEXT PRIMARY KEY, project_id TEXT DEFAULT '', task_id TEXT DEFAULT '', kind TEXT NOT NULL,
       target TEXT DEFAULT '', operation TEXT DEFAULT '', ok INTEGER DEFAULT 0, duration_ms INTEGER DEFAULT 0,
       error TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')))`);
+    // zx_20261113_3 B1：`describeServiceCalls` 的最近明细 LEFT JOIN `wa_tasks`（标“任务已删除”）——
+    //   生产建表顺序里 `wa_tasks` 恒在；夹具补上，保持与生产同源（缺表即 no such table，不静默）。
+    db2.exec('CREATE TABLE wa_tasks (id TEXT PRIMARY KEY, title TEXT)');
     const insD = db2.prepare('INSERT INTO wa_deliverables (id, project_id, type, name, status) VALUES (?,?,?,?,?)');
     const insJ = db2.prepare('INSERT INTO wa_jobs (id, type, payload, status) VALUES (?,?,?,?)');
     // P1：3 个守护（2 running / 1 stopped）；3 个作业（2 pending / 1 completed）；另各插 1 条 P2 的（**不该**计入）。
@@ -613,6 +616,8 @@ async function main(): Promise<void> {
       id TEXT PRIMARY KEY, project_id TEXT DEFAULT '', task_id TEXT DEFAULT '', kind TEXT NOT NULL,
       target TEXT DEFAULT '', operation TEXT DEFAULT '', ok INTEGER DEFAULT 0, duration_ms INTEGER DEFAULT 0,
       error TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')))`);
+    // zx_20261113_3 B1：最近明细 LEFT JOIN `wa_tasks`（生产恒有）；夹具补上，与生产同源。
+    db3.exec('CREATE TABLE wa_tasks (id TEXT PRIMARY KEY, title TEXT)');
     const insT = db3.prepare('INSERT INTO wa_knowledge_triples (id, project_id, subject, predicate, object, confidence) VALUES (?,?,?,?,?,?)');
     const insD = db3.prepare('INSERT INTO wa_deliverables (id, project_id, type, file_path, name, status) VALUES (?,?,?,?,?,?)');
     const insS = db3.prepare('INSERT INTO wa_service_calls (id, project_id, kind, target, operation, ok, duration_ms, error) VALUES (?,?,?,?,?,?,?,?)');

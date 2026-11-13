@@ -100,6 +100,7 @@ import {
 import {
   LEGACY_TUYA_ACCOUNT_ID,
   accountConfigProblem,
+  baseProviderOf,
   cloudAccountCapacityVerdict,
   createCloudAccount,
   deleteCloudAccount,
@@ -169,6 +170,8 @@ import { refusalWithContext } from '../core/tier-usage.js';
 import { resolveLicenseTier, type LicenseSettingDb } from '../core/license.js';
 // zx_20261030_1 M5「限」：设备登记容量的**读数**（上限由 `TIER_LIMITS[tier].maxDevices` 派生，0=不限）。
 import { capacityLimit, countCloudAccounts, countDevices, type CapacityDb } from '../core/tier-capacity.js';
+// zx_20261112_2 B3：GUI 授权与 IM 授权台同一把尺——都留审计。
+import { recordAudit } from '../core/audit-log.js';
 
 /** 首屏一屏读全：台账 + 最近审计 + 发现是否在跑。 */
 /** zx_20261101_2 M2：台账行 + 影子投影（期望/实况/相符判定），面板一处读全。 */
@@ -376,9 +379,13 @@ export function initDevicesIpc(db: Database.Database, getAnsClient?: DevicesAnsC
       const gate = resolveTeamGate(licDb);
       const discoveryGate = resolveProGate(licDb);
       const channel = r.channel;
-      // "已配置"只问渠道级前置键（每设备凭据是下一步的事，不在此拦）。
-      const hasCredentials = channel.configKeys.length > 0
-        && channel.configKeys.every((k) => (settingsGet(k) ?? '') !== '');
+      // "已配置"只问渠道级前置条件（每设备凭据是下一步的事，不在此拦）。
+      // zx_20261107_1 B2：云渠道的凭据在**账号表**（一账号一 Provider），不再只认旧 settings 键——
+      //   否则用户在「设备云账号」里配好了，向导仍说"缺凭据"（说了点不到）。
+      const hasAccount = channel.accountProvider != null
+        && listCloudAccounts(ddb).some((a) => a.enabled && baseProviderOf(a.providerId) === channel.accountProvider);
+      const hasCredentials = hasAccount
+        || (channel.configKeys.length > 0 && channel.configKeys.every((k) => (settingsGet(k) ?? '') !== ''));
       const verdict = authorizeChannel(channel, {
         proUnlocked: discoveryGate.unlocked,
         teamUnlocked: gate.unlocked,
@@ -955,6 +962,13 @@ export function initDevicesIpc(db: Database.Database, getAnsClient?: DevicesAnsC
       if (refusal) return { error: { code: 'TEAM_REQUIRED', message: refusalWithContext(db, refusal, { requiredTier: 'team' }) } };
       const dev = setDeviceAuthorized(ddb, deviceId, !!authorized);
       if (!dev) return { error: { code: 'NOT_FOUND', message: `设备不存在：${deviceId}` } };
+      // zx_20261112_2 B3：GUI 授权与 IM 授权台**同一把尺**——都留审计（此前只有 IM 那条留）。
+      recordAudit(ddb as never, {
+        actorKind: 'local', actorRef: 'gui',
+        action: authorized ? 'device.authorize' : 'device.revoke',
+        targetType: 'device', targetId: dev.id,
+        detail: { via: 'gui', deviceKind: dev.kind, name: dev.name },
+      });
       void eventBus.emit('device.status_changed', { deviceId: dev.id, device: dev });
       return { data: dev };
     } catch (e) {

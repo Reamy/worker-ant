@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { admin, ansProxy, invoke } from '../lib/ipc';
 import { useActivity } from '../lib/activity';
 import { JOB_STATUS_LABEL } from '../lib/status-view';
+// zx_20261107_1 B9: token 展示与详情页/列表页同尺（此前本页 0 位小数、详情页 1 位，同一个数印成两个值）
+import { formatTokens } from '../lib/format';
 import { FreshnessPill } from '../components/FreshnessPill';
 import { useStaleness } from '../lib/useLiveQuery';
 // zx_20260924_1 M6（F7）: 自省两本账的形状由 main 侧真源提供（与 lib/ipc.ts 的 `admin.diagnostics()` 同源）——
@@ -20,7 +22,7 @@ import { HEAL_OUTCOME_LABEL, healOutcomeOf, type HealOutcome } from '../../../sr
 //   （`health-check.ts` 的运行时依赖只有零 import 的 `im-channel-status.ts` ⇒ 引得动），
 //   不在此手抄一份"ok/degraded/unavailable 各叫什么"。改前这里按 `status==='healthy'` 判——
 //   新三态进来后 `ok` 与 `unavailable` **会被显示成同一个词**（"空闲"），正是"名实不符"。
-import { HEALTH_LEVEL_LABEL, type HealthLevel, type HealthReport } from '../../../src/main/core/health-check.js';
+import { HEALTH_LEVEL_LABEL, HEALTH_LEVEL_RANK, type HealthLevel, type HealthReport } from '../../../src/main/core/health-check.js';
 import { Clock, Activity, AlertTriangle, CheckCircle, XCircle, BarChart3, RefreshCw, TrendingUp, Wrench, Heart, FileText, GitBranch, Server } from 'lucide-react';
 // 产出物类型词表——与产出物各页共此一份真源（此前此处另有窄表，缺 code 且简写 "MCP"/"守护"）
 import { DELIVERABLE_TYPE_LABEL } from '../lib/deliverable-view';
@@ -94,6 +96,21 @@ const HEALTH_LEVEL_CLASS: Record<HealthLevel, string> = {
 function healthLevelOf(h: HealthData | null): HealthLevel | null {
   const l = h?.report?.level;
   return l && l in HEALTH_LEVEL_LABEL ? l : null;
+}
+
+/**
+ * zx_20261113_5「见」：整体状态的下钻——取**最差那一面**（与 main 侧 `worstHealthLevel` 同一把尺，
+ * 排序键取 `HEALTH_LEVEL_RANK`，不另写一份强弱序）。
+ * 整体非「正常」时把这一面的名字与依据直接印在「整体状态」下面——此前只有「降级」一个词，
+ * 原因藏在「架构诊断」页签里，用户看到的是一个没有出处的结论。
+ */
+function worstHealthItem(h: HealthData | null): HealthReport['items'][number] | null {
+  const items = h?.report?.items ?? [];
+  let worst: HealthReport['items'][number] | null = null;
+  for (const it of items) {
+    if (!worst || HEALTH_LEVEL_RANK[it.level] > HEALTH_LEVEL_RANK[worst.level]) worst = it;
+  }
+  return worst;
 }
 const TAB_ITEMS = [
   { key: 'overview' as const, label: '系统状态' },
@@ -276,7 +293,6 @@ export default function DashboardPage() {
   }, []);
 
   const formatUptime = (s: number) => { const h=Math.floor(s/3600),m=Math.floor((s%3600)/60); return h>0?`${h}h ${m}m`:`${m}m`; };
-  const formatToken = (n?: number) => n?n>=1000?(n/1000).toFixed(0)+'K':String(n):'0';
   // zx_20260906_2 批4 (2026-09-06): 承接 4f——终核修正(2026-09-06)：heartbeat.tokens 与 admin:stats.totalTokens 同源于 wa_task_conversations.token_count(SUM)，
   // 叠加会双计且长单步期间 DB 无新对话行则其值本不变 → 不加"实时 token 增量"；改为执行中任务「心跳在线」副行(计数+最长时长，随 heartbeat 每~20s 跳动)诚实表达推进、不虚增账
   const liveRunCount = Object.keys(heartbeats).length;
@@ -331,7 +347,7 @@ export default function DashboardPage() {
           {label:'项目数',value:health?.projects??'—',color:'bg-green-50 text-green-700'},
           {label:'总任务',value:health?.tasks??'—',color:'bg-blue-50 text-blue-700'},
           {label:'活跃任务',value:health?.runningTasks??'—',color:'bg-yellow-50 text-yellow-700',animate:!!health?.runningTasks},
-          { label:'Token消耗', value:formatToken(stats?.totalTokens), color:'bg-purple-50 text-purple-700',
+          { label:'Token消耗', value:formatTokens(stats?.totalTokens), color:'bg-purple-50 text-purple-700',
             sub: liveRunCount > 0 ? `⏳ 执行中 ${liveRunCount} 项 · 最长 ${liveMaxSec >= 60 ? `${Math.floor(liveMaxSec / 60)}m${liveMaxSec % 60}s` : `${liveMaxSec}s`} 心跳在线` : undefined,
             animate: liveRunCount > 0 }
         ].map(({label,value,color,animate,sub})=>(
@@ -365,7 +381,7 @@ export default function DashboardPage() {
                   <button key={tid} type="button" onClick={() => navigate(`/tasks/${tid}`)} className="w-full flex items-center gap-2 text-xs px-2 py-1.5 rounded bg-blue-50 hover:bg-blue-100 text-left">
                     <span className="relative flex h-2 w-2 shrink-0"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" /><span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" /></span>
                     <span className="flex-1 min-w-0 truncate text-gray-700">{h.title || tid.slice(0, 8)}</span>
-                    <span className="shrink-0 text-blue-600 font-medium">{h.tokens >= 1000 ? (h.tokens / 1000).toFixed(1) + 'K' : String(h.tokens)} tokens</span>
+                    <span className="shrink-0 text-blue-600 font-medium">{formatTokens(h.tokens)} tokens</span>
                     <span className="shrink-0 text-gray-400">{h.elapsedSec >= 60 ? `${Math.floor(h.elapsedSec / 60)}m${h.elapsedSec % 60}s` : `${h.elapsedSec}s`}</span>
                   </button>
                 ))}
@@ -381,6 +397,20 @@ export default function DashboardPage() {
                 const lvl = healthLevelOf(health);
                 return lvl ? <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${HEALTH_LEVEL_CLASS[lvl]}`}>{HEALTH_LEVEL_LABEL[lvl]}</span> : <span className="text-gray-400">—</span>;
               })()}</div>
+              {/* zx_20261113_5「见」：整体非正常时，把**最差那一面**的依据就地印出来（原来只在诊断页签）。 */}
+              {(() => {
+                const lvl = healthLevelOf(health);
+                if (!lvl || lvl === 'ok') return null;
+                const worst = worstHealthItem(health);
+                if (!worst) return null;
+                return (
+                  <div className="py-1.5 text-[11px] text-gray-500 leading-relaxed">
+                    最差一面：
+                    <span className="text-amber-700 font-medium">{HEALTH_LEVEL_LABEL[worst.level]} · {worst.label}</span>
+                    <span className="ml-1 break-all">{worst.evidence}</span>
+                  </div>
+                );
+              })()}
               <div className="flex justify-between py-2 border-b"><span className="text-gray-500">架构模式</span><span className="text-blue-600 font-medium">单进程 Electron + IPC</span></div>
               <div className="flex justify-between py-2 border-b"><span className="text-gray-500">数据库引擎</span><span>better-sqlite3 (WAL)</span></div>
               <div className="flex justify-between py-2 border-b"><span className="text-gray-500">运行时间</span><span>{health?formatUptime(health.uptime):'—'}</span></div>
@@ -489,7 +519,7 @@ export default function DashboardPage() {
                       <div className="flex-1 bg-gray-100 rounded-full h-4">
                         <div className="bg-blue-500 rounded-full h-4" style={{width:`${pct}%`}}/>
                       </div>
-                      <span className="w-24 text-right text-xs text-gray-500">{tokens>=1000?(tokens/1000).toFixed(0)+'K':String(tokens)} tokens | {r.taskCount as number}任务</span>
+                      <span className="w-24 text-right text-xs text-gray-500">{formatTokens(tokens)} tokens | {r.taskCount as number}任务</span>
                     </div>
                   );
                 })}
@@ -555,9 +585,9 @@ export default function DashboardPage() {
       ) : tab==='stats' ? (
         <div className="space-y-4">
           {/* 使用趋势 */}
-          {trends.length>0 && <div className="bg-white rounded-lg border p-4"><h3 className="font-semibold mb-3 flex items-center gap-2"><TrendingUp className="w-4 h-4"/>Token 使用趋势 (近30天·自然日·ANS记账)</h3><div className="flex gap-0.5 h-32">{trends.map((t,i)=>{const maxT=Math.max(...trends.map(x=>x.tokens));const barPx=maxT>0?(t.tokens>0?Math.max(2,Math.round(t.tokens/maxT*112)):0):0;return <div key={i} className="flex-1 h-full min-w-0 flex flex-col justify-end items-center" title={`${t.date}: ${formatToken(t.tokens)}`}><div className={`w-full rounded-t transition-colors ${barPx>0?'bg-blue-400 hover:bg-blue-600':''}`} style={{height:`${barPx}px`}}/><span className="text-[8px] text-gray-400 leading-4 whitespace-nowrap overflow-hidden w-full text-center hidden sm:block">{t.date.slice(5)}</span></div>;})}</div></div>}
+          {trends.length>0 && <div className="bg-white rounded-lg border p-4"><h3 className="font-semibold mb-3 flex items-center gap-2"><TrendingUp className="w-4 h-4"/>Token 使用趋势 (近30天·自然日·ANS记账)</h3><div className="flex gap-0.5 h-32">{trends.map((t,i)=>{const maxT=Math.max(...trends.map(x=>x.tokens));const barPx=maxT>0?(t.tokens>0?Math.max(2,Math.round(t.tokens/maxT*112)):0):0;return <div key={i} className="flex-1 h-full min-w-0 flex flex-col justify-end items-center" title={`${t.date}: ${formatTokens(t.tokens)}`}><div className={`w-full rounded-t transition-colors ${barPx>0?'bg-blue-400 hover:bg-blue-600':''}`} style={{height:`${barPx}px`}}/><span className="text-[8px] text-gray-400 leading-4 whitespace-nowrap overflow-hidden w-full text-center hidden sm:block">{t.date.slice(5)}</span></div>;})}</div></div>}
           {/* Token 消耗按模型 */}
-          {billing.length>0 && <div className="bg-white rounded-lg border p-4"><h3 className="font-semibold mb-3 flex items-center gap-2"><BarChart3 className="w-4 h-4"/>Token 消耗 (按模型·近30×24h·ANS记账)</h3><div className="space-y-2">{billing.slice(0,8).map((b,i)=>{const total=b.total_tokens_in+b.total_tokens_out;const max=Math.max(...billing.map(x=>x.total_tokens_in+x.total_tokens_out));return(<div key={i} className="flex items-center gap-2 text-sm"><span className="w-32 text-xs text-gray-500 truncate">{b.model_name||b.model_id?.slice(0,20)||'unknown'}</span><div className="flex-1 bg-gray-100 rounded-full h-4"><div className="bg-blue-500 rounded-full h-4" style={{width:`${max>0?(total/max*100):0}%`}}/></div><span className="w-20 text-right text-xs text-gray-500">{total>=1000?(total/1000).toFixed(1)+'K':String(total)}</span></div>);})}</div></div>}
+          {billing.length>0 && <div className="bg-white rounded-lg border p-4"><h3 className="font-semibold mb-3 flex items-center gap-2"><BarChart3 className="w-4 h-4"/>Token 消耗 (按模型·近30×24h·ANS记账)</h3><div className="space-y-2">{billing.slice(0,8).map((b,i)=>{const total=b.total_tokens_in+b.total_tokens_out;const max=Math.max(...billing.map(x=>x.total_tokens_in+x.total_tokens_out));return(<div key={i} className="flex items-center gap-2 text-sm"><span className="w-32 text-xs text-gray-500 truncate">{b.model_name||b.model_id?.slice(0,20)||'unknown'}</span><div className="flex-1 bg-gray-100 rounded-full h-4"><div className="bg-blue-500 rounded-full h-4" style={{width:`${max>0?(total/max*100):0}%`}}/></div><span className="w-20 text-right text-xs text-gray-500">{formatTokens(total)}</span></div>);})}</div></div>}
           {/* 工具调用统计 */}
           {toolStats.length>0 && <div className="bg-white rounded-lg border p-4"><h3 className="font-semibold mb-3 flex items-center gap-2"><Wrench className="w-4 h-4"/>工具调用 (Top 10)</h3><div className="space-y-2">{toolStats.map((t,i)=>{const total=t.call_count+t.error_count;const max=Math.max(...toolStats.map(x=>x.call_count+x.error_count));const errRate=total>0?(t.error_count/total*100):0;return(<div key={i} className="flex items-center gap-2 text-sm"><span className="w-36 text-xs text-gray-500 truncate">{t.tool_name}</span><div className="flex-1 bg-gray-100 rounded-full h-4"><div className={`rounded-full h-4 ${errRate>20?'bg-red-500':errRate>5?'bg-yellow-500':'bg-green-500'}`} style={{width:`${max>0?(total/max*100):0}%`}}/></div><span className="w-24 text-right text-xs text-gray-500">{total}次{errRate>0?` (${errRate.toFixed(0)}%错)`:''}</span></div>);})}</div></div>}
         </div>

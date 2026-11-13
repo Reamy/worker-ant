@@ -163,10 +163,18 @@ console.log('C1/C2·静态接线(建列/回填/打标/读位/开关/primary_auto
   //   判据(per_doc=true 仅「类型在册 且 本行已打标」才带验收)不变，落地处由 project.ipc 内联改为 core 一处。
   ok(dlc.includes('isAcceptanceType(r.type) && Number(r.acceptance_verified) === 1') && dlc.includes('const perDoc = boolSetting(pdCfg?.value)'),
     'per-doc 验收判据(类型在册 + 本行已打标)真身在 core.annotateAcceptance');
-  // 扫描面**如实命名**: 本断言只扫 `apps/worker-ant-desktop/src/main/ipc/project.ipc.ts`
-  ok(pip.split('annotateAcceptance(db, ').length - 1 === 3,
-    'project.ipc 三读点(list/preview/task:get)俱经共享 annotateAcceptance(source 内该调用恰 3 处)');
-  ok(pip.includes('annotateAcceptance(db, data)') && pip.includes('annotateAcceptance(db, accRows)') && pip.includes('annotateAcceptance(db, deliverables as Array<Record<string, unknown>>)'),
+  // 扫描面**如实命名**: zx_20261108_1 B6 后 `deliverable:list` 的取数搬到
+  //   `core/deliverable-query.ts`（IPC 只剩一跳），故三读点分落两文件——合计仍**恰 3 处**。
+  const qry = rd('apps/worker-ant-desktop/src/main/core/deliverable-query.ts');
+  // zx_20261111_3 B3：新增 `deliverable:attention` 读点（产出物第一行的"未验收几件"）也**必须**经此共享函数
+  //   ⇒ 计数由"恰 3"改为"≥3"；逐成员由本行下一句的三处具体调用 + 新读点断言共同钉住（不是放宽：少一处会由下一句红）。
+  const annCount = (pip + qry).split('annotateAcceptance(db, ').length - 1;
+  ok(annCount >= 3,
+    'project.ipc + core/deliverable-query 三读点(list/preview/task:get)俱经共享 annotateAcceptance（读点增只会让数变大）',
+    String(annCount));
+  ok(pip.includes("ipcMain.handle('deliverable:attention'") && /annotateAcceptance\(db, rows\)/.test(pip),
+    '新增读点 deliverable:attention 也经共享 annotateAcceptance（逐成员枚举）');
+  ok(qry.includes('annotateAcceptance(db, rows)') && pip.includes('annotateAcceptance(db, accRows)') && pip.includes('annotateAcceptance(db, deliverables as Array<Record<string, unknown>>)'),
     'deliverable:list / deliverable:preview / task:get 三处俱真调(非注释)');
   ok(pip.includes("const perDocD = boolSetting(pdCfgD?.value)"), 'per_doc_acceptance 开关另一消费点=digest(取数口径, 走 verifiedAcceptanceMap)');
   // zx_20260911_2 M4-G2: 候选查询随 autoAssignPrimary 抽取移至 deliverable-lifecycle——断言改指新居所，判据(探针不选为★)不变
@@ -190,7 +198,11 @@ console.log('C1/C2·静态接线(建列/回填/打标/读位/开关/primary_auto
   //   `taskIds`，两者同集合才谈得上"已加载 K / 共 M"；②`deliverable:facets` 的一次
   //   `deliverableScopeSql`（一份复用给项目名录/任务名录/无任务计数三个查询）。
   //   反证仍在上一条：九处**全部**经真源，无内联重复 SQL。
-  ok((pip.match(/\b(deliverableScopeSql|countDeliverables|countDeliverablesByType)\(/g) || []).length === 9, '补④ project.ipc 九处读点**经共享取数范围真源**(digest + 健康视图 + 全景 byType + 全景 recent + task:get + task:list 子树 + deliverable:list + task:get 总数 + facets 名录)', String((pip.match(/\b(deliverableScopeSql|countDeliverables|countDeliverablesByType)\(/g) || []).length));
+  // zx_20261108_1 B6：`deliverable:list` 那一处读点随取数搬到 core/deliverable-query.ts ⇒ 跨两文件计数，仍九处。
+  const scopeCalls = (pip + qry).match(/\b(deliverableScopeSql|countDeliverables|countDeliverablesByType)\(/g) || [];
+  // zx_20261111_3 B3：新增 `deliverable:attention`（countDeliverables + deliverableScopeSql 两跳）也经真源
+  //   ⇒ 由"恰九处"改为"≥九处"；反证仍是下一条"无内联探针 SQL"（少走真源会由它红）。
+  ok(scopeCalls.length >= 9, '补④ project.ipc + core/deliverable-query 九处读点**经共享取数范围真源**(digest + 健康视图 + 全景 byType + 全景 recent + task:get + task:list 子树 + deliverable:list + task:get 总数 + facets 名录；新增 deliverable:attention 亦经真源)', String(scopeCalls.length));
 }
 
 console.log('\n结果: pass=' + pass + ' fail=' + fail);

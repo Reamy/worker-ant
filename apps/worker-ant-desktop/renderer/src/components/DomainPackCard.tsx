@@ -7,17 +7,44 @@
  * ⚠ 导入 ≠ 启用：从共享库拉来的包只会出现在列表里，需在这里显式启用。
  */
 import { useCallback, useEffect, useState } from 'react';
-import { Boxes, Plus, RefreshCw } from 'lucide-react';
+import { Boxes, Eye, Plus, RefreshCw } from 'lucide-react';
 import { IpcError, packs as packsApi } from '../lib/ipc';
-import type { DomainPackListRow, DomainPackStats } from '../../../src/main/core/domain-pack.js';
+import type { DomainPackDetail, DomainPackListRow, DomainPackStats } from '../../../src/main/core/domain-pack.js';
+import TeamItemPreview, { type PreviewView } from './TeamItemPreview';
 
-export default function DomainPackCard({ projectId }: { projectId: string }) {
+/** zx_20261113_5 M3「口」：单包详情 → 预览弹层的视图（只做排版，不再解析包体）。 */
+function detailView(d: DomainPackDetail): PreviewView {
+  const rows = [
+    d.description ? { label: '描述', value: d.description } : null,
+    { label: '版本', value: `v${d.version}` },
+    d.source_project_name ? { label: '出处项目', value: d.source_project_name } : null,
+    d.derived_at ? { label: '生成时间', value: d.derived_at } : null,
+  ].filter((x): x is { label: string; value: string } => x !== null);
+  const sections = d.sections.map((s) => ({ label: s.label, content: s.content }));
+  if (d.business) {
+    const lines: string[] = [];
+    for (const t of d.business.terms) lines.push(`概念：${t.term}${t.meaning ? ` —— ${t.meaning}` : ''}`);
+    for (const r of d.business.rules) lines.push(`规则：${r.rule}`);
+    for (const s of d.business.scenarios) lines.push(`场景：${s.scenario}`);
+    if (lines.length) sections.push({ label: '业务域', content: lines.join('\n') });
+  }
+  const note = d.omitted_labels.length
+    ? `超体量上限，未携带的节：${d.omitted_labels.join(' / ')}`
+    : undefined;
+  return { title: d.name, rows, sections, note };
+}
+
+export default function DomainPackCard({ projectId, onChanged }: { projectId: string; onChanged?: () => void }) {
   const [rows, setRows] = useState<DomainPackListRow[]>([]);
   const [stats, setStats] = useState<DomainPackStats | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [locked, setLocked] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // zx_20261113_5 M3「口」：单包只读预览（看不是启用；不挂 Pro 闸）。
+  const [preview, setPreview] = useState<PreviewView | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!projectId) return;
@@ -40,6 +67,8 @@ export default function DomainPackCard({ projectId }: { projectId: string }) {
       const msg = await fn();
       if (msg) setNotice(msg);
       setError(null);
+      // zx_20261113_4 B4：启用/撤销/生成后，首屏「业务知识」行即时刷新。
+      onChanged?.();
     } catch (e) {
       if (e instanceof IpcError && e.code === 'FEATURE_REQUIRED') setLocked(e.message);
       else setError((e as Error).message);
@@ -47,7 +76,7 @@ export default function DomainPackCard({ projectId }: { projectId: string }) {
       setBusy(null);
       await load();
     }
-  }, [load]);
+  }, [load, onChanged]);
 
   const derive = useCallback(() => run('derive', async () => {
     const r = await packsApi.derive(projectId);
@@ -68,6 +97,16 @@ export default function DomainPackCard({ projectId }: { projectId: string }) {
     const r = await packsApi.unapply(projectId, packId);
     return r.removed ? '已取消启用（包资产仍在库里）。' : '该领域包本未启用。';
   }), [projectId, run]);
+
+  const openPreview = useCallback((packId: string) => {
+    setPreview(null);
+    setPreviewError(null);
+    setPreviewLoading(true);
+    void packsApi.detail(packId)
+      .then((d) => setPreview(detailView(d)))
+      .catch((e) => setPreviewError((e as Error).message))
+      .finally(() => setPreviewLoading(false));
+  }, []);
 
   if (!projectId) return null;
 
@@ -150,30 +189,60 @@ export default function DomainPackCard({ projectId }: { projectId: string }) {
                     {r.applied && (
                       <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700">注入常开</span>
                     )}
+                    {/* zx_20261113_4 B3「注」：逐包成效——注入过几次、其中完成/失败各几件 */}
                     {st && st.injections > 0 && (
-                      <span className="text-[10px] text-gray-400">已注入 {st.injections} 次</span>
+                      <span className="text-[10px] text-gray-400">
+                        已注入 {st.injections} 次 · 完成 {st.completed} / 失败 {st.failed}
+                      </span>
+                    )}
+                    {r.applied && (!st || st.injections === 0) && (
+                      <span className="text-[10px] text-gray-400">尚未注入</span>
                     )}
                   </p>
                   {r.description && <p className="mt-0.5 text-[11px] text-gray-500">{r.description}</p>}
                 </div>
-                <button
-                  type="button"
-                  onClick={() => void (r.applied ? unapply(r.id) : apply(r.id))}
-                  disabled={busy !== null}
-                  className={`shrink-0 text-xs px-2 py-1 rounded border disabled:opacity-50 ${
-                    r.applied
-                      ? 'text-gray-600 border-gray-300 hover:text-red-600 hover:border-red-300'
-                      : 'text-gray-600 border-gray-300 hover:text-teal-700 hover:border-teal-300'
-                  }`}
-                >
-                  {busy === `apply:${r.id}` || busy === `unapply:${r.id}`
-                    ? '处理中…'
-                    : r.applied ? '取消启用' : '启用'}
-                </button>
+                <span className="shrink-0 flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => openPreview(r.id)}
+                    disabled={busy !== null}
+                    className="flex items-center gap-1 text-xs px-2 py-1 rounded border text-gray-600 border-gray-300 hover:text-teal-700 hover:border-teal-300 disabled:opacity-50"
+                    title="查看包内三节全文（只读；启用仍走右侧按钮）"
+                  >
+                    <Eye className="w-3.5 h-3.5" />查看
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void (r.applied ? unapply(r.id) : apply(r.id))}
+                    disabled={busy !== null}
+                    className={`text-xs px-2 py-1 rounded border disabled:opacity-50 ${
+                      r.applied
+                        ? 'text-gray-600 border-gray-300 hover:text-red-600 hover:border-red-300'
+                        : 'text-gray-600 border-gray-300 hover:text-teal-700 hover:border-teal-300'
+                    }`}
+                  >
+                    {busy === `apply:${r.id}` || busy === `unapply:${r.id}`
+                      ? '处理中…'
+                      : r.applied ? '取消启用' : '启用'}
+                  </button>
+                </span>
               </div>
             );
           })}
         </div>
+      )}
+
+      {(preview || previewLoading || previewError) && (
+        <TeamItemPreview
+          view={preview}
+          loading={previewLoading}
+          error={previewError}
+          onClose={() => {
+            setPreview(null);
+            setPreviewError(null);
+            setPreviewLoading(false);
+          }}
+        />
       )}
     </div>
   );

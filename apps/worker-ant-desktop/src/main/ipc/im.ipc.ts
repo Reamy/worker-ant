@@ -23,7 +23,7 @@ import {
   clearActiveImAdapters,
 } from '../core/im/im-adapter-registry.js';
 import { sendImText } from '../core/im/im-send.js';
-import { listOutbox, outboxStats, outboxStatusCounts, retryOutboxEntry, enqueueImOutbox } from '../core/im/im-outbox.js';
+import { listOutbox, outboxStats, outboxStatusCounts, retryOutboxEntry, enqueueImOutbox, dismissOutboxEntry, dismissAllTerminal } from '../core/im/im-outbox.js';
 import { emitOutboundMessage } from '../core/im/outbound-event.js';
 import { markImRead, computeImUnread, computeImUnreadByChannel } from '../core/im/im-unread.js';
 import { accountOutboundFailure } from '../core/im/reply-accounting.js';
@@ -38,7 +38,13 @@ import { resolveAttachmentRead } from '../services/im-media.js';
 // zx_20260930 M5: 只作类型用（取实例走 `_getMemoryForIm` 惰性取用，本模块不持有它、也不构造它）。
 import type { MemoryManager } from '../core/memory-manager.js';
 // zx_20261101_1 M4「授」：新建渠道受档位容量闸（`maxIMChannels`，0=不限）；拒因另附用量与升级差异。
-import { resolveLicenseTier } from '../core/license.js';
+import { resolveLicenseTier, type LicenseSettingDb } from '../core/license.js';
+// zx_20261108_1 B3: 入站「理解结果」的审计只读口 + 导出（Team `audit_view` / `audit_export` 同一套闸）。
+import {
+  exportIntentAuditCsvGated,
+  listIntentAuditGated,
+  type IntentAuditDb,
+} from '../core/im/im-intent-audit.js';
 import { capacityRefusal, countIMChannels, type CapacityDb } from '../core/tier-capacity.js';
 import { refusalWithContext } from '../core/tier-usage.js';
 
@@ -289,6 +295,48 @@ export function initImIpc(db: Database.Database, dataDir: string, getMemory?: ()
     }
   });
 
+  // zx_20261108_1 B3（维特根斯坦·意义即使用）: **入站理解审计**——每条消息为什么被当成任务/查询/闲聊，
+  //   连同路由理由与关联任务一起可核对。只读；档位闸在 core 侧（`audit_view`），
+  //   锁定即回 `TEAM_REQUIRED`，不返回空表假装"没有记录"（与 `audit:list` 同一判断次序）。
+  ipcMain.handle('im:intentAudit', async (_event, args?: { channelId?: string; limit?: number; offset?: number }) => {
+    try {
+      const r = listIntentAuditGated(
+        db as unknown as IntentAuditDb,
+        db as unknown as LicenseSettingDb,
+        {
+          ...(typeof args?.channelId === 'string' && args.channelId ? { channelId: args.channelId } : {}),
+          ...(typeof args?.limit === 'number' ? { limit: args.limit } : {}),
+          ...(typeof args?.offset === 'number' ? { offset: args.offset } : {}),
+        },
+      );
+      if (!r.unlocked) return { error: { code: 'TEAM_REQUIRED', message: r.refusal } };
+      return { data: { rows: r.rows, total: r.total } };
+    } catch (err) {
+      return { error: { code: 'INTERNAL', message: (err as Error).message } };
+    }
+  });
+
+  // 导出吃筛选、不吃分页；闸是 `audit_export`（先拒、再读、再落盘）。
+  // 文件名用 UTC 时刻，与库内 `datetime('now')` 同基准。
+  ipcMain.handle('im:intentAuditExport', async (_event, args?: { channelId?: string }) => {
+    try {
+      const iso = new Date().toISOString();
+      const [d, t] = iso.split('T');
+      const stamp = `${(d ?? '').replace(/-/g, '')}-${(t ?? '').replace(/[:.]/g, '').slice(0, 9)}`;
+      const r = exportIntentAuditCsvGated(
+        db as unknown as IntentAuditDb,
+        db as unknown as LicenseSettingDb,
+        path.join(_dataDirForIm, 'exports', `im-intent-${stamp}.csv`),
+        { ...(typeof args?.channelId === 'string' && args.channelId ? { channelId: args.channelId } : {}) },
+      );
+      if (!r.unlocked) return { error: { code: 'TEAM_REQUIRED', message: r.refusal } };
+      if (!r.saved) return { error: { code: 'EXPORT_FAILED', message: r.error } };
+      return { data: { savedTo: r.path, rows: r.rows } };
+    } catch (err) {
+      return { error: { code: 'INTERNAL', message: (err as Error).message } };
+    }
+  });
+
   // zx_20260914 M1-3(维特根斯坦·同一把尺 / 海德格尔·在场): **只读**未读——导航红点取初值用。
   //   与 `im:markRead` 同源同形（都出自 `computeImUnread`，故两值恒等），但**绝不写库**：
   //   刻意不调 `refreshImUnread`——那是"报到显示端"的口（托盘），"看一眼"不该产生任何副作用。
@@ -469,6 +517,29 @@ export function initImIpc(db: Database.Database, dataDir: string, getMemory?: ()
         ? '本次补发无上下文 token，按主动推送计配额；配额耗尽时将无法送达，请让用户回复任意消息刷新。'
         : undefined;
       return { data: { ok: r.ok, status: r.status, attempts: r.attempts, ...(r.quota ? { quota: true } : {}), ...(r.error ? { error: r.error } : {}), ...(note ? { note } : {}) } };
+    } catch (err) { return { error: { code: 'INTERNAL', message: (err as Error).message } }; }
+  });
+
+  // zx_20261110_1 B7(维特根斯坦·意义即使用): 永不再补发的行要有出口——单条关闭。
+  //   只改状态为 dismissed（不物理删），理由可选；sent/pending 由 core 侧拒绝。
+  ipcMain.handle('im:outboxDismiss', async (_event, id: string, reason?: string) => {
+    try {
+      if (!_dbForIm) return { error: { code: 'NO_DB', message: '数据库未就绪' } };
+      const r = dismissOutboxEntry(_dbForIm, String(id || ''), reason);
+      if (r.code === 'not_found') return { error: { code: 'NOT_FOUND', message: r.error } };
+      return { data: r };
+    } catch (err) { return { error: { code: 'INTERNAL', message: (err as Error).message } }; }
+  });
+
+  // 批量关闭：`statuses` 必传且只能是 dead/unsupported_media/blocked_quota 的子集——
+  //   无过滤全清在 UI 上不存在，在 IPC 边界也拒绝（二次防线在 core 的白名单过滤）。
+  ipcMain.handle('im:outboxDismissTerminal', async (_event, statuses: string[], reason?: string) => {
+    try {
+      if (!_dbForIm) return { error: { code: 'NO_DB', message: '数据库未就绪' } };
+      if (!Array.isArray(statuses) || statuses.length === 0) {
+        return { error: { code: 'INVALID_PARAM', message: '必须显式指定可关闭的状态' } };
+      }
+      return { data: { dismissed: dismissAllTerminal(_dbForIm, statuses, reason) } };
     } catch (err) { return { error: { code: 'INTERNAL', message: (err as Error).message } }; }
   });
 

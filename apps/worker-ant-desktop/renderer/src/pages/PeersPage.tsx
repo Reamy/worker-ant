@@ -20,7 +20,7 @@ import { useLiveQuery } from '../lib/useLiveQuery';
 // zx_20261018_2 批六「见新」：门态/留痕以事件驱动为主，轮询只作兜底——节拍一处真源。
 import { ACTIVE_POLL_MS, FALLBACK_POLL_MS } from '../lib/refresh';
 import { FreshnessPill } from '../components/FreshnessPill';
-import { readNodeEnv, isNodeOnline, seenAgo, snapshotAgo, isSnapshotStale, dispatchFillView, slotFillView, fillColor, capacityView, capacityColor, CALL_STATUS_LABEL, DISPATCH_STATUS_LABEL, nodeCategories, canRemovePeer, canEditNode, selectionReasonOf, type NodeEnvView } from '../lib/node-view';
+import { readNodeEnv, isNodeOnline, seenAgo, snapshotAgo, isSnapshotStale, dispatchFillView, slotFillView, fillColor, capacityView, capacityColor, diskUsageView, bottleneckView, adviceReliabilityOf, CALL_STATUS_LABEL, DISPATCH_STATUS_LABEL, nodeCategories, nodePositions, classLoadView, canRemovePeer, canEditNode, selectionReasonOf, type NodeEnvView } from '../lib/node-view';
 import { formatBytes, formatDbTime, parseDbTime } from '../lib/deliverable-view';
 import { resultBrief } from '../lib/result-brief';
 import { Network, RefreshCw, Cpu, HardDrive, MemoryStick, Check, Send, Trash2, DoorOpen, Gauge, RotateCcw, GitBranch } from 'lucide-react';
@@ -38,6 +38,8 @@ import type { ExternalCallRow } from '../../../src/main/core/external-calls.js';
 import type { DispatchBoardPayload } from '../../../src/main/core/collab-dispatch.js';
 // zx_20261106_3 B7：发现到的 A2A 门牌形状取自 main 侧真源（`agent-discovery.ts`），仅类型引用、打包期擦除。
 import type { DiscoveredAgent } from '../../../src/main/core/agent-discovery.js';
+// zx_20261108_1 B2：角色建议判据（pure、零 IO ⇒ 渲染层可直引；同 `node-receipt.js` 范式）。
+import { suggestNodeRole, type RoleAdvice, type SuggestedRole } from '../../../src/main/core/node-role-advice.js';
 
 /** 在线判据与"多久前"共用的节拍（10s 一推进）——阈值本身取自共享真源，见 node-view.ts。 */
 function useTick(ms = 10_000): number {
@@ -62,34 +64,88 @@ function EnvLine({ env }: { env: NodeEnvView | null }) {
   if (!env) return <span className="text-xs text-gray-400">尚无环境快照（从未心跳）</span>;
   const memUsed = env.total_mem != null && env.free_mem != null ? env.total_mem - env.free_mem : null;
   const fill = dispatchFillView(env);
+  const disk = diskUsageView(env);
+  const bottleneck = bottleneckView(env);
+  const cpuTitle = ['真 CPU 利用率（两次采样做差）', env.cpu_model ? `CPU 型号：${env.cpu_model}` : '']
+    .filter(Boolean).join('；');
   return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-500">
-      {/* M1：先示**真 CPU 利用率**；load 只作旁证（Windows 无此数 ⇒ '—'，不显假的 0.00）。 */}
-      <span className="inline-flex items-center gap-1" title="真 CPU 利用率（两次采样做差）">
-        <Cpu className="w-3.5 h-3.5" />{env.cpu_count ?? '?'} 核 · CPU {env.cpu_usage_percent != null ? `${env.cpu_usage_percent}%` : '—'} · 负载 {env.load_avg1 != null ? env.load_avg1.toFixed(2) : '—'}
-      </span>
-      <span className="inline-flex items-center gap-1"><MemoryStick className="w-3.5 h-3.5" />{memUsed != null ? `${formatBytes(memUsed)} / ${formatBytes(env.total_mem)}` : '—'}</span>
-      <span className="inline-flex items-center gap-1"><HardDrive className="w-3.5 h-3.5" />{env.disk_free != null ? `${formatBytes(env.disk_free)} 可用` : '—'}</span>
-      {/* zx_20261022_3 批一：槽位与作业**分开写**——槽位是机器执行位（与执行闸同源），作业是我方队列里的活。 */}
-      <span className="inline-flex items-center gap-1" title="机器执行槽位（在跑任务 ÷ 机器并发上限，与执行闸同源）">
-        <Gauge className="w-3.5 h-3.5" />槽位 {env.running_tasks != null && env.machine_limit != null ? `${env.running_tasks} / ${env.machine_limit}` : '—'}
-        {env.free_slots != null ? `（空 ${env.free_slots}）` : ''}
-      </span>
-      <span className="text-gray-400" title="派单作业数 ÷ 项目缺省并发——不是机器槽位">作业 {fill.label}</span>
-      {env.platform && <span className="text-gray-400">{env.platform}/{env.arch}{env.hostname ? ` · ${env.hostname}` : ''}</span>}
+    <>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-500">
+        {/* M1：先示**真 CPU 利用率**；load 只作旁证（Windows 无此数 ⇒ '—'，不显假的 0.00）。 */}
+        <span className="inline-flex items-center gap-1" title={cpuTitle}>
+          <Cpu className="w-3.5 h-3.5" />{env.cpu_count ?? '?'} 核 · CPU {env.cpu_usage_percent != null ? `${env.cpu_usage_percent}%` : '—'} · 负载 {env.load_avg1 != null ? env.load_avg1.toFixed(2) : '—'}
+        </span>
+        <span className="inline-flex items-center gap-1"><MemoryStick className="w-3.5 h-3.5" />{memUsed != null ? `${formatBytes(memUsed)} / ${formatBytes(env.total_mem)}` : '—'}</span>
+        {/* zx_20261108_1 B2：磁盘给"已用/总量（可用%）"——只报剩余字节答不了"这盘还剩几成"。 */}
+        <span className="inline-flex items-center gap-1" title="磁盘已用 / 总量（可用百分比）">
+          <HardDrive className="w-3.5 h-3.5" />{disk.label}
+        </span>
+        {/* zx_20261022_3 批一：槽位与作业**分开写**——槽位是机器执行位（与执行闸同源），作业是我方队列里的活。 */}
+        <span className="inline-flex items-center gap-1" title="机器执行槽位（在跑任务 ÷ 机器并发上限，与执行闸同源）">
+          <Gauge className="w-3.5 h-3.5" />槽位 {env.running_tasks != null && env.machine_limit != null ? `${env.running_tasks} / ${env.machine_limit}` : '—'}
+          {env.free_slots != null ? `（空 ${env.free_slots}）` : ''}
+        </span>
+        <span className="text-gray-400" title="派单作业数 ÷ 项目缺省并发——不是机器槽位">作业 {fill.label}</span>
+        {env.platform && (
+          <span className="text-gray-400">
+            {env.platform}/{env.arch} · OS {env.os_release ?? '未知'}{env.hostname ? ` · ${env.hostname}` : ''}
+          </span>
+        )}
+      </div>
+      {/* zx_20261108_1 B2：余力取严的**瓶颈一句**——无瓶颈数据就不说（不编）。 */}
+      {bottleneck && <div className="mt-0.5 text-[10px] text-amber-700">{bottleneck}</div>}
+    </>
+  );
+}
+
+/**
+ * M11 能力卡 + zx_20261112_1 B5「衡」岗位：该节点**对外的那份自述**（读台账 `card`，与心跳上送同源）。
+ *   岗位**未上报**（旧版心跳无该字段）≠「没有岗位」——两种都如实说，不画成同一句话。
+ */
+function CardLine({ node }: { node: AnsNode }) {
+  const cats = nodeCategories(node);
+  const pos = nodePositions(node);
+  if (cats.length === 0 && !pos.reported) return null;
+  return (
+    <div className="mt-1.5 space-y-1">
+      {cats.length > 0 && (
+        <div className="flex items-center gap-1.5 flex-wrap text-[10px] text-gray-400">
+          <span>能做</span>
+          {cats.map(c => (
+            <span key={c} className="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600">{NODE_CARD_CATEGORY_LABEL[c]}</span>
+          ))}
+        </div>
+      )}
+      <div className="flex items-center gap-1.5 flex-wrap text-[10px] text-gray-400">
+        <span>岗位</span>
+        {!pos.reported ? (
+          <span className="text-gray-400">未上报</span>
+        ) : pos.items.length === 0 ? (
+          <span className="text-gray-400">（无）</span>
+        ) : (
+          pos.items.map(p => (
+            <span key={p.id} title={`${p.id} · v${p.version}`}
+              className="px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700">{p.name}</span>
+          ))
+        )}
+      </div>
     </div>
   );
 }
 
-/** M11 能力卡：该节点**对外的那份自述**（读台账 `card`，与心跳上送同源——不在此另算一份）。 */
-function CardLine({ node }: { node: AnsNode }) {
-  const cats = nodeCategories(node);
-  if (cats.length === 0) return null;
+/**
+ * zx_20261112_1 B5：六类目在飞数——按固定顺序逐类上屏（不按数值排序，免得次序跳动）。
+ *   旧快照/未上报 ⇒ 每类「未知」（不拿 0 冒充「都闲着」）。
+ */
+function ClassLoadStrip({ env }: { env: NodeEnvView | null }) {
+  const rows = classLoadView(env);
   return (
-    <div className="mt-1.5 flex items-center gap-1.5 flex-wrap text-[10px] text-gray-400">
-      <span>能做</span>
-      {cats.map(c => (
-        <span key={c} className="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600">{NODE_CARD_CATEGORY_LABEL[c]}</span>
+    <div className="mt-1.5 flex items-center gap-1.5 flex-wrap text-[10px] text-gray-500">
+      <span className="text-gray-400">类目在飞</span>
+      {rows.map(r => (
+        <span key={r.category} className="px-1.5 py-0.5 rounded bg-gray-50">
+          {r.label} {r.running == null ? '未知' : r.running}
+        </span>
       ))}
     </div>
   );
@@ -465,7 +521,41 @@ function DispatchLedger({ nameOf }: { nameOf: (id: string) => string }) {
   );
 }
 
-function NodeRow({ node, local, localRole, localNodeId, nowMs, onSaved, onRemove }: { node: AnsNode; local: boolean; localRole: NodeRole | null; localNodeId: string | null; nowMs: number; onSaved: () => void; onRemove?: () => void }) {
+const ADVICE_CONFIDENCE_LABEL: Record<RoleAdvice['confidence'], string> = { low: '低', medium: '中', high: '高' };
+
+/**
+ * zx_20261108_1 B2：**角色建议**小块——只摆建议与理由；采纳须用户点击并二次确认（不自动改）。
+ * 建议与当前角色一致时只作说明（不摆一个点了也没变化的按钮）。
+ */
+function RoleAdviceCard({ advice, currentRole, editable, busy, onAdopt }: {
+  advice: RoleAdvice;
+  currentRole: NodeRole;
+  editable: boolean;
+  busy: boolean;
+  onAdopt: (role: SuggestedRole) => void;
+}) {
+  const same = advice.suggested === currentRole;
+  return (
+    <div className="mt-1.5 rounded border border-dashed border-gray-200 bg-gray-50/60 px-2 py-1.5 text-[11px] text-gray-600">
+      <div className="flex items-center gap-1.5 flex-wrap">
+        <span className="font-medium">角色建议：{NODE_ROLE_LABEL[advice.suggested]}</span>
+        <span className="text-gray-400">（置信 {ADVICE_CONFIDENCE_LABEL[advice.confidence]}）</span>
+        <span className="text-gray-400">{same ? '· 与当前角色一致' : '· 仅供参考，不会自动改'}</span>
+      </div>
+      <ul className="mt-0.5 list-disc pl-4 text-gray-500 space-y-0.5">
+        {advice.reasons.map((r, i) => <li key={`${i}-${r}`}>{r}</li>)}
+      </ul>
+      {!same && editable && (
+        <button onClick={() => onAdopt(advice.suggested)} disabled={busy}
+          className="mt-1 inline-flex items-center gap-1 text-[11px] px-2 py-0.5 border border-blue-300 text-blue-700 rounded hover:bg-blue-50 disabled:opacity-50">
+          <Check className="w-3 h-3" />采纳为{NODE_ROLE_LABEL[advice.suggested]}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function NodeRow({ node, local, localRole, localNodeId, nowMs, reliability, onSaved, onRemove }: { node: AnsNode; local: boolean; localRole: NodeRole | null; localNodeId: string | null; nowMs: number; reliability: { successRate: number; avgLatencyMs: number | null; samples: number } | null; onSaved: () => void; onRemove?: () => void }) {
   const env = readNodeEnv(node);
   const online = isNodeOnline(node.last_seen_at, nowMs);
   const dispatchable = isDispatchable(node);
@@ -479,6 +569,17 @@ function NodeRow({ node, local, localRole, localNodeId, nowMs, onSaved, onRemove
   const [saving, setSaving] = useState(false);
   const [saveErr, setSaveErr] = useState<string | null>(null);
 
+  // zx_20261108_1 B2：四源余力 + 瓶颈 + 可靠性画像 ⇒ 角色建议（纯函数，只建议）。
+  const advice = suggestNodeRole({
+    online,
+    currentRole: node.role,
+    weight: node.weight,
+    capacityFreeRatio: env?.capacity_free_ratio ?? null,
+    bottleneck: env?.capacity_basis?.bottleneck ?? null,
+    freeSlots: env?.free_slots ?? null,
+    reliability,
+  });
+
   // 台账刷新后回填（保存成功 → 复取 → 值一致；他处改动 → 这里跟手）。
   useEffect(() => { setRole(node.role); setWeight(String(node.weight)); setParticipate(node.participate); setName(node.name); }, [node.role, node.weight, node.participate, node.name]);
 
@@ -491,6 +592,20 @@ function NodeRow({ node, local, localRole, localNodeId, nowMs, onSaved, onRemove
       onSaved();
     } catch (e) {
       setSaveErr((e as Error)?.message || '保存失败');
+    } finally { setSaving(false); }
+  }
+
+  /** zx_20261108_1 B2：采纳建议**只改角色**（走既有 `nodes:update`）——须用户二次确认，无自动路径。 */
+  async function adoptRole(suggested: SuggestedRole) {
+    const label = NODE_ROLE_LABEL[suggested];
+    if (!window.confirm(`把「${node.name || node.node_id.slice(0, 8)}」的角色改为${label}？\n\n只改角色，不动权重与参与开关；以 ANS 台账为准。`)) return;
+    setSaving(true); setSaveErr(null);
+    try {
+      await nodesApi.update(node.node_id, { role: suggested });
+      setRole(suggested);
+      onSaved();
+    } catch (e) {
+      setSaveErr((e as Error)?.message || '采纳失败');
     } finally { setSaving(false); }
   }
 
@@ -518,12 +633,16 @@ function NodeRow({ node, local, localRole, localNodeId, nowMs, onSaved, onRemove
           </span>
         )}
       </div>
+      <ClassLoadStrip env={env} />
       {/* M3：断网期间的快照——"这段数据是陈的"必须上屏（此前落库即沉默）。 */}
       {env?.stale_since && (
         <div className="mt-1 text-[10px] text-amber-600">
           数据陈旧：自 {formatDbTime(env.stale_since)} 起未再更新（上报恢复后自动清除）
         </div>
       )}
+      {/* zx_20261108_1 B2：一屏回答"它该当什么角色"——只建议；采纳走既有改档口（见 `adoptRole`）。 */}
+      <RoleAdviceCard advice={advice} currentRole={node.role} editable={editable} busy={saving} onAdopt={(r) => void adoptRole(r)} />
+      {saveErr && <p className="mt-1 text-[11px] text-red-500">{saveErr}</p>}
       {editable ? (
         <div className={`mt-2 pt-2 border-t flex items-center gap-3 flex-wrap ${local ? 'border-blue-100' : 'border-gray-100'}`}>
           <label className="text-[11px] text-gray-500 inline-flex items-center gap-1">名称
@@ -544,7 +663,6 @@ function NodeRow({ node, local, localRole, localNodeId, nowMs, onSaved, onRemove
           <button onClick={save} disabled={saving} className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50">
             <Check className="w-3 h-3" />{saving ? '保存中…' : '保存'}
           </button>
-          {saveErr && <span className="text-[11px] text-red-500">{saveErr}</span>}
           <span className="text-[10px] text-gray-400">
             {local ? '改的是本机名称与档位（存 ANS，供派单选目标）' : '改的是对端节点的名称与档位（存 ANS，立即影响派单选目标）'}
           </span>
@@ -1223,6 +1341,18 @@ export default function PeersPage() {
     liveTypes: ['node.request_dispatched'],
     debounceMs: 700,
   });
+  // zx_20261112_2 B1：外派策略三态切换（off / default / always）的本地忙碌与失败提示。
+  const [autoBusy, setAutoBusy] = useState(false);
+  const [autoErr, setAutoErr] = useState('');
+  const changeAutoMode = async (mode: 'off' | 'default' | 'always'): Promise<void> => {
+    setAutoBusy(true); setAutoErr('');
+    try {
+      const r = await nodesApi.setAutoDispatchMode(mode);
+      if ((r as { error?: { message?: string } }).error) setAutoErr((r as { error?: { message?: string } }).error?.message || '切换失败');
+      void auto.reload();
+    } catch (e) { setAutoErr((e as Error)?.message || String(e)); }
+    finally { setAutoBusy(false); }
+  };
   // zx_20261023_5 批一: 待派任务三分组——纯本地读；上游收口（task.completed/task.failed）与派发发生时会变，故订阅这几类。
   const board = useLiveQuery(async () => nodesApi.dispatchBoard(), [], {
     liveTypes: ['node.request_dispatched', 'node.presence_changed', 'task.completed', 'task.failed'],
@@ -1247,6 +1377,9 @@ export default function PeersPage() {
   const groups = NODE_ROLES.map(role => ({ role, peers: others.filter(n => n.role === role) })).filter(g => g.peers.length > 0);
   // zx_20261011 M4: 出站台账里目标节点 id → 名字（用同一份台账解，不另取）。
   const nameOf = (id: string) => data?.nodes.find(n => n.node_id === id)?.name || '';
+  // zx_20261108_1 B2：角色建议的可靠性画像取自集群行（同一份出站台账、同一把样本下限尺）。
+  const clusterById = new Map((cluster.data?.nodes ?? []).map(n => [n.id, n]));
+  const reliabilityFor = (id: string) => adviceReliabilityOf(clusterById.get(id));
 
   // zx_20261011_3: 把一台**离线他机**移出协同网络（`nodes:delete` ⇒ ANS 硬删除 + 吊销其 key）。
   //   确认文案**说清后果**（不是"删一行"那么轻）——对方对 ANS 的全部调用将失效，需重新入网。
@@ -1306,6 +1439,7 @@ export default function PeersPage() {
           <div className="text-xs text-indigo-700">{gate.detail}</div>
           <ul className="mt-1.5 text-[11px] text-indigo-700 list-disc pl-4 space-y-0.5">
             <li>团队版：最多 20 台协同节点（含本机），能力优先派发、跨机进度与失败收口、AI 终端接入。</li>
+            <li>跨机外派只发「不需要本机工作目录」的任务（纯调研且题面不涉仓库/文件）；派没派、为什么没派，任务详情第一屏可见。</li>
             <li>专业版：仍是单机专业版——并发与项目照常，不跨机派活、不接入外部终端。</li>
             <li>本页的入网、派活、AI 终端接入都属于团队版能力，需团队授权包；锁定档位不删数据、不拦在跑任务。</li>
           </ul>
@@ -1328,17 +1462,64 @@ export default function PeersPage() {
       {/* zx_20261017_1 批三: 建单即派状态——开关在「设置 · 多机协同编排」；此处**如实**显示开/关、
           来由（缺省替用户开 / 用户自己设的）与最近一次自动外派。
           未读到（`auto.data == null`）不渲染，不把"还没读到"显示成"未开启"。 */}
-      {auto.data && (
-        <div className={`mb-4 rounded-lg border px-3 py-2 text-xs ${auto.data.enabled ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-gray-200 bg-gray-50 text-gray-600'}`}>
-          <span className="font-medium">建单即派：{auto.data.enabled ? '已开启' : '未开启'}</span>
-          <span>　{auto.data.policy.reason}。</span>
-          {auto.data.enabled
-            ? (auto.data.last
-              ? <span>　最近一次：{formatDbTime(auto.data.last.at)} 派给 {nameOf(auto.data.last.nodeId) || auto.data.last.nodeId.slice(0, 8)}（类目 {auto.data.last.category}）</span>
-              : <span>　还没有自动外派记录——本机满负荷时，符合条件的新任务会先预查在线对端，预查无果则留在本机。</span>)
-            : <span>　开启后，本机满负荷时符合条件的新建任务会交给擅长这类活的对端；可在「设置」页切换。</span>}
-        </div>
-      )}
+      {auto.data && (() => {
+        // 三态：关 / 满负荷才溢出（缺省替团队版开）/ 总是外派（用户显式开）。
+        const mode: 'off' | 'default' | 'always' = !auto.data!.enabled
+          ? 'off'
+          : auto.data!.policy.source === 'default' ? 'default' : 'always';
+        const enrolled = es.data?.enrolled === true;
+        const role = localNode?.role ?? null;
+        const canDispatchRole = role === 'primary' || role === 'observer';
+        const requisites: Array<{ ok: boolean | null; label: string; how: string }> = [
+          { ok: true, label: '团队版已解锁', how: '当前档位已含多机协同' },
+          { ok: enrolled, label: '本机已入网', how: '先在下方完成入网' },
+          { ok: localNode ? !!localNode.participate : null, label: '本机参与协同（接活）', how: '在本机卡片把「参与」打开；派活只看角色与入网，不看这一项' },
+          { ok: localNode ? canDispatchRole : null, label: `派发方角色 ${role ?? '未知'}`, how: '本机改成 primary 或 observer 才能派活（worker 只接不分）' },
+        ];
+        const tone = mode === 'off' ? 'border-gray-200 bg-gray-50 text-gray-600'
+          : 'border-emerald-200 bg-emerald-50 text-emerald-800';
+        return (
+          <div className={`mb-4 rounded-lg border px-3 py-2.5 text-xs ${tone}`}>
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-medium">
+                建单即派：{mode === 'off' ? '已关闭' : mode === 'default' ? '满负荷才外派（缺省）' : '总是外派'}
+              </span>
+              <span className="text-[11px] opacity-80">{auto.data!.policy.reason}</span>
+            </div>
+            <div className="mt-1.5 flex items-center gap-1.5">
+              {([
+                ['off', '关闭'],
+                ['default', '满负荷才外派'],
+                ['always', '总是外派'],
+              ] as const).map(([m, label]) => (
+                <button key={m} type="button" disabled={autoBusy} onClick={() => void changeAutoMode(m)}
+                  className={`px-2 py-0.5 rounded border ${mode === m ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'} disabled:opacity-50`}>
+                  {label}
+                </button>
+              ))}
+              {autoBusy && <span className="text-[10px] opacity-70">写入中…</span>}
+            </div>
+            {autoErr && <div className="mt-1 text-red-600">{autoErr}</div>}
+            <div className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-0.5 text-[11px]">
+              {requisites.map((r) => (
+                <div key={r.label} className="flex items-start gap-1">
+                  <span className={r.ok === true ? 'text-emerald-600' : r.ok === false ? 'text-red-600' : 'text-gray-400'}>
+                    {r.ok === true ? '✓' : r.ok === false ? '✕' : '?'}
+                  </span>
+                  <span className={r.ok === false ? 'text-red-700' : ''}>{r.label}{r.ok === false ? `——${r.how}` : ''}</span>
+                </div>
+              ))}
+            </div>
+            <div className="mt-1 text-[11px] opacity-80">
+              {auto.data!.last
+                ? `最近一次：${formatDbTime(auto.data!.last.at)} 派给 ${nameOf(auto.data!.last.nodeId) || auto.data!.last.nodeId.slice(0, 8)}（类目 ${auto.data!.last.category}）`
+                : mode === 'off'
+                  ? '关闭后不会自动外派；仍可在任务详情手动派活。'
+                  : '还没有自动外派记录——只有「无父、无依赖、无附件、且不需要本机工作目录」的任务才符合条件。'}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* zx_20261018_1 批一: 首次满足条件的**一次性告知**（zx_20261029_2 M7：询问→告知）——说过即不再出现。 */}
       {showOnboard && (
@@ -1346,7 +1527,7 @@ export default function PeersPage() {
           <div className="font-medium">已为本机开启「建单即派」：仅在本机满负荷时溢出到其他节点</div>
           <div className="mt-0.5 text-blue-800">
             团队版已解锁且本机已入网，因此默认替你打开了它——本机跑得动就先在本机跑，跑满了才把新任务交给擅长这类活的对端。
-            只外派无父、无依赖、无附件、项目未指定本机工作目录的任务；其余一律留在本机。
+            只外派无父、无依赖、无附件、且**不需要本机工作目录**的任务（纯调研且题面不涉及仓库/文件）；其余一律留在本机。
           </div>
           {onboardErr && <div className="mt-1 text-red-600">{onboardErr}</div>}
           <div className="mt-1.5 flex items-center gap-2">
@@ -1376,7 +1557,7 @@ export default function PeersPage() {
       {localNode
         ? <div className="mb-5">
             <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5">自知者明 · 本机</p>
-            <NodeRow node={localNode} local localRole={localNode.role} localNodeId={localId} nowMs={nowMs} onSaved={() => void q.reload()} />
+            <NodeRow node={localNode} local localRole={localNode.role} localNodeId={localId} nowMs={nowMs} reliability={reliabilityFor(localNode.node_id)} onSaved={() => void q.reload()} />
           </div>
         // zx_20261011_3（名实）: 本机**以为**已入网（`enrolled`），而 ANS 回 401/403 ⇒ 凭据被拒。
         //   很可能是本机已被移出协同网络（`node.resource_group` 是**本地**设置，ANS 删除动不了它 ⇒ `enrolled`
@@ -1406,7 +1587,7 @@ export default function PeersPage() {
           <div key={g.role} className="mb-5">
             <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5">{NODE_ROLE_LABEL[g.role]}（{g.peers.length}）</p>
             <div className="space-y-2">
-              {g.peers.map(n => <NodeRow key={n.node_id} node={n} local={false} localRole={localNode?.role ?? null} localNodeId={localId} nowMs={nowMs} onSaved={() => void q.reload()} onRemove={() => void removePeer(n)} />)}
+              {g.peers.map(n => <NodeRow key={n.node_id} node={n} local={false} localRole={localNode?.role ?? null} localNodeId={localId} nowMs={nowMs} reliability={reliabilityFor(n.node_id)} onSaved={() => void q.reload()} onRemove={() => void removePeer(n)} />)}
             </div>
           </div>
         ))}

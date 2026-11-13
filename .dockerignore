@@ -1,0 +1,19 @@
+# 无头节点镜像的构建上下文：只要源码与清单，不要任何本地产物/依赖/数据。
+**/node_modules
+**/dist
+**/dist-smoke
+**/release
+**/.turbo
+**/.next
+apps/worker-ant-desktop/build
+data
+docs
+business-plan
+plans
+.git
+.gstack
+.idea
+.wrangler
+.DS_Store
+**/*.log
+**/*.tsbuildinfo

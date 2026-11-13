@@ -19,34 +19,39 @@ function ok(cond: boolean, label: string, detail?: string): void {
 }
 
 const ROOT = path.join(__dirname, '..');
-const ipc = fs.readFileSync(path.join(ROOT, 'apps/worker-ant-desktop/src/main/ipc/project.ipc.ts'), 'utf-8');
+// zx_20261108_1 B6：列表取数整段搬到 `core/deliverable-query.ts`（IPC 只剩 `queryDeliverables` 一跳），
+//   服务端判据按**符号**重定向到新载体；判据形状更强（参数在具名接口里，不再是 handler 解构）。
+const query = fs.readFileSync(path.join(ROOT, 'apps/worker-ant-desktop/src/main/core/deliverable-query.ts'), 'utf-8');
 const lipc = fs.readFileSync(path.join(ROOT, 'apps/worker-ant-desktop/renderer/src/lib/ipc.ts'), 'utf-8');
 const dp = fs.readFileSync(path.join(ROOT, 'apps/worker-ant-desktop/renderer/src/pages/DeliverablesPage.tsx'), 'utf-8');
 
 console.log('S1 3a 服务端 handler');
-const listStart = ipc.indexOf('ipcMain.handle(\'deliverable:list\'');
-// zx_20260930 M4-2: 分页后返回体由裸数组变 `{ rows, total, retiredCount, limit, offset }`，
-//   故边界锚点**改钉更强的真源**（原来的 `return { data }` 已不存在；若只改数字而不换锚，
-//   `indexOf` 返 -1 会让切片吞掉整份文件，后面的 `includes` 断言反而更容易假绿）。
-const listSeg = ipc.slice(listStart, ipc.indexOf('return { data: { rows: data', listStart));
+const listSeg = query;
 ok(listSeg.includes('keyword?: string'), '解构含 keyword(可选)');
 ok(listSeg.includes('d.name LIKE ? OR d.description LIKE ? OR d.type LIKE ? OR d.file_path LIKE ?') && listSeg.includes("COALESCE(d.registry_id, '') LIKE ?"), 'LIKE 谓词覆盖 名称/描述/类型/路径/registry_id');
-ok(listSeg.indexOf('if (kw)') > listSeg.indexOf("if (status)"), 'keyword 分支追加于 项目/类型/状态 之后(可叠加；projectId 空即跨项目)');
+ok(listSeg.indexOf('if (kw)') > listSeg.indexOf("if (p.status)"), 'keyword 分支追加于 项目/类型/状态 之后(可叠加；projectId 空即跨项目)');
 ok(!listSeg.includes('d.content_snapshot'), '不检索大字段 content_snapshot');
 
 console.log('S2 3a renderer IPC');
-// zx_20260930 M4-2: 签名尾追 `page?: { limit?; offset? }`，故 pin 到**完整新签名**（三参+分页可选）；
-//   只 pin 前缀 `…keyword?: string)` 会因少了 `)` 直接判红，而放宽成"含 keyword"又退化成不设闸。
-ok(lipc.includes('list: (projectId?: string, type?: string, keyword?: string, page?: { limit?: number; offset?: number })'), 'deliverables.list 三参+分页签名');
-ok(lipc.includes("'deliverable:list', { projectId, type, keyword, ...page }"), 'keyword 与分页参数透传 IPC');
+// zx_20261108_1 B6: 位置参数（项目/类型/关键词/分页）整体换成**一个参数对象**，形状直接取 main 真源
+//   `DeliverableListParams`；钉完整签名 + 透传同一对象（少一环就是静默丢 keyword）。
+ok(lipc.includes('list: (params: DeliverableListParams = {})'), 'deliverables.list 参数对象签名');
+ok(lipc.includes("'deliverable:list', params"), 'keyword 与分页参数透传 IPC');
 
 console.log('S3 3a DeliverablesPage');
 ok(dp.includes("const [keyword, setKeyword] = useState('')") && dp.includes("const [appliedKeyword, setAppliedKeyword] = useState('')"), 'keyword/appliedKeyword state');
 ok(dp.includes('setAppliedKeyword(keyword.trim()), 250'), '250ms 防抖');
-ok(dp.includes('appliedKeyword || undefined'), 'load 向服务端传 keyword(空则不带)');
-ok(dp.includes('[filterProj, filterType, appliedKeyword]'), 'load 依赖含 appliedKeyword(输入触发刷新)');
+ok(dp.includes('keyword: appliedKeyword || undefined'), 'load 向服务端传 keyword(空则不带)');
+// zx_20261108_1 B6：`load` 现在只依赖 `buildParams`，而 `buildParams` 的依赖含 `appliedKeyword`
+//   ——输入仍触发刷新，只是那一跳换了载体（判据按符号重定向，未放宽）。
+ok(/const buildParams = useCallback\([\s\S]*?\}\), \[[^\]]*appliedKeyword[^\]]*\]\);/.test(dp)
+  && dp.includes('}, [buildParams]);'),
+  'load 依赖含 appliedKeyword(输入触发刷新)');
 ok(dp.includes('placeholder="搜名称/描述/类型/路径（跨项目）"'), '搜索框存在(跨项目占位)');
-ok(dp.includes('appliedKeyword ? \'无匹配产出物\' : \'暂无产出物\''), '空态区分「无匹配产出物」');
+// 空态：搜索词计入 anyFilterActive，命中 0 时印「无匹配产出物」而非「暂无产出物」。
+ok(dp.includes('const anyFilterActive = !!(filterProj') && dp.includes('appliedKeyword')
+  && dp.includes("anyFilterActive ? '无匹配产出物'"),
+  '空态区分「无匹配产出物」');
 
 console.log('S4 3a SQL 语义冒烟(复制 handler LIKE 谓词)');
 const db = new DatabaseSync(':memory:') as any;

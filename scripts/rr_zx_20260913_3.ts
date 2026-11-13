@@ -601,8 +601,12 @@ console.log('\n[S7 M3-7 buildChildBriefs（只取既有字段，不新增表）]
   ok(ai.includes('（逐子交付摘要 ${briefs.length} 条）'), '日志如实报出摘要条数（可事后核对是否真带上）');
 
   // 只取既有真源（不新增表/字段）
-  ok(ai.includes('normalizeSnippet(ctx.completion_summary.trim(), 80)'),
-    '摘要取 context_json.completion_summary（与 finalize_task 写点同源）');
+  // zx_20261110_1 B6：摘要仍取同一写点，但改走推送净化函数（`plainTextSnippet` 单源），
+  //   不再用只压空白的 `normalizeSnippet`——判据按更强形状重定向到新载体。
+  ok(/plainTextSnippet\(ctx\.completion_summary\.trim\(\), 80\)/.test(ai),
+    '摘要取 context_json.completion_summary（与 finalize_task 写点同源；B6 起经推送净化）');
+  ok(/import \{[^}]*\bplainTextSnippet\b[^}]*\} from '\.\.\/im-reply\.js'/.test(ai),
+    '摘要净化取自 im-reply 的 plainTextSnippet（一处真源，不自带第二份）');
   ok(ae.includes('ctxJson.completion_summary = args.summary;'),
     '写点确认：finalize_task 落 completion_summary（读点有写点相配，非凭空 key）');
   ok(ai.includes("WHERE task_id = ? AND role = 'assistant' ORDER BY created_at DESC LIMIT 1"),

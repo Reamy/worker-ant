@@ -31,6 +31,7 @@ import { enqueueJob } from './job-enqueuer.js';
 import { readBoolSetting } from './settings-bool.js';
 import { markGoalNotAchieved, goalAchievedOf, buildCompletionAccount, syncGoalAchievedFromAccount, countNewDeliverablesSince } from './task-outcome.js';
 import { readTaskAcceptanceCriteria, acceptanceVerdictOf, goalEvidenceOf, toAcceptanceSummary, recordAcceptanceOutcome, type AcceptanceSummary, type AcceptanceVerdict } from './acceptance-check.js';
+import { mergeFinalizeChecks } from './run-trace.js';
 import { readAcceptanceCheck } from './deliverable-lifecycle.js';
 import { budgetCapReached, stepCapContinuationOf, buildStepContinuationNote } from './step-budget.js';
 import { childrenPendingAttention } from './children-gate.js';
@@ -39,6 +40,7 @@ import { finalizeRunClose } from './exec-finalize.js';
 // zx_20261018_1 批七：旁路 token 并账也收进唯一写口，不再在收尾段手改两处 JSON。
 import { reconcileExecutionTokens } from './exec-metrics.js';
 import type { AdaptiveStrategy, TaskArchetype } from './task-archetype.js';
+import type { SufficiencyBreaker } from './output-validator.js';
 import type { AgentContext } from './agent-executor.js';
 import {
   docValidationTargets, cachedOutputValidation, fileSig, archetypeForFile,
@@ -79,12 +81,14 @@ export async function runCloseSection(o: {
   ctxJson: Record<string, unknown>;
   /** 本 run 起始时刻（`executeTask` 认领后取值）——区分"本轮新增交付物"与历史交付物。 */
   runStartedAtMs: number;
+  /** zx_20261109_1 B3：本 run 的旁路校验熔断器（与 finalize 门共用；首条超时后其余不再各等一次）。 */
+  sufficiencyBreaker?: SufficiencyBreaker;
 }): Promise<{ content: string; steps: number }> {
   const {
     db, ctx, taskId, projectId, workingDir, archetype, adaptiveStrategy,
     title, modelName, maxSteps, maxTokens,
     stepCount, totalTokensUsed, toolCallCount, fileMutationCount, finalContent, rawCost,
-    sideAtFirstPersist, goalDefined, ctxJson, runStartedAtMs,
+    sideAtFirstPersist, goalDefined, ctxJson, runStartedAtMs, sufficiencyBreaker,
   } = o;
 
   // zx_20260904_3 批4 (2026-09-04): 内容充分性门禁——目标集(声明产出∪注册文档交付物)已落盘但校验不充分 → 不得标 completed
@@ -94,7 +98,7 @@ export async function runCloseSection(o: {
   const contentReasons: Array<{ file: string; reasons: string[] }> = [];
   if (gateTargets.length > 0) {
     try {
-      const { validateOutputs, canReuseOutputValidation, VALIDATION_CRITERIA_VERSION } = await import('./output-validator.js');
+      const { validateOutputs, canReuseOutputValidation, VALIDATION_CRITERIA_VERSION, LLM_VALIDATION_BUDGET_MS, summarizeUnverified } = await import('./output-validator.js');
       // 两条来路（缓存命中 / 本轮实判）落**同一个判据版本**——此处只读一次，两处写点共用（M3-C 钉形状）。
       const criteriaVersion = VALIDATION_CRITERIA_VERSION;
       const ansClient = await ctx.getAnsClient();
@@ -137,7 +141,9 @@ export async function runCloseSection(o: {
           missTargets.push({ file: abs, archetype: arch });
         }
       });
-      const results = await validateOutputs(ansClient as never, missTargets);
+      // zx_20261109_1 B3：与 finalize 门**共用**同一份 12s 总预算与熔断器——本 run 已在 finalize 门
+      //   用尽预算/撞过超时的话，这里不再对每个未命中文件重等一轮；没有则从此刻起算 12s。
+      const results = await validateOutputs(ansClient as never, missTargets, { breaker: sufficiencyBreaker, budgetMs: LLM_VALIDATION_BUDGET_MS });
       results.forEach((r, k) => {
         // 省耗账实(1a): 收口内容校验(未命中缓存)为旁路子 LLM——usage 记入执行期账本（逐条累加）
         addSideTokens(ctx, r.usage);
@@ -156,6 +162,13 @@ export async function runCloseSection(o: {
       }
       ctxJson.output_validations = ov;
       if (reused > 0) ctxJson.output_validations_reused = reused;
+      // zx_20261109_1 B3：本段自己的"未核"也要入账（此前只在 finalize 门写，收口段算出来的
+      //   unknown 到了这里就丢了）。文案与判据与 finalize 门**同源**（`summarizeUnverified`）。
+      const unverifiedInfo = summarizeUnverified(results, sufficiencyBreaker);
+      if (unverifiedInfo) {
+        // zx_20261109_1 B5：旧条目保留、新条目带 run 前缀、相邻同文去重（续跑后仍分得清哪一轮）。
+        ctxJson.finalize_checks = mergeFinalizeChecks(ctxJson.finalize_checks, [unverifiedInfo], ctx.runId);
+      }
     } catch { /* 校验失败不阻塞（回退到存在性门禁） */ }
   }
   // zx_20260916_3 M4（O-D · 同病根的第二处落点）：本 run 刚算出的充分性校验结论，此前**只在"有不充分"时**
@@ -357,7 +370,7 @@ export async function runCloseSection(o: {
   //     外移，`finalizeRunClose` 的调用点随之落到本文件末尾。上方 D1「过早结束」闸与陈旧标记清理**同在本段内**，
   //     按搬迁前的先后排在本调用之前——顺序与搬迁前逐字一致（不得把本调用提到它们之前）。
   return finalizeRunClose({
-    db, ctx, taskId, projectId, archetype, adaptiveStrategy, fileMutationCount, finalContent,
+    db, ctx, taskId, projectId, workingDir, archetype, adaptiveStrategy, fileMutationCount, finalContent,
     stepCount, qualityScore, closeVerdict, closeTotal, closeFailedN, closeAcceptance,
     title, modelName, maxSteps, totalTokensUsed, toolCallCount, rawCost, prematureNote,
   });

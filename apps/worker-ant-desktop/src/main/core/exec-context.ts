@@ -47,6 +47,16 @@ import { generateFactSnapshot } from './world-snapshot.js';
 import { getToolUsageHint } from './feedback-engine.js';
 // zx_20261029_1「知」: 项目须知是"模型读工作目录一次生成的代码仓快照"，与术语/画像不同源。
 import { loadProjectBrief, renderProjectBrief } from './project-brief.js';
+// zx_20261112_1 B2「任」: 岗位注入只引岗位模块真源（有界块 + 已采纳经验）。
+import {
+  DISPATCH_POSITION_KEY,
+  POSITION_DISPATCH_SUMMARY_MAX,
+  positionBlockDetail,
+  selectPositionLessonsForInjection,
+  type PositionBlockItem,
+  resolveTaskPosition,
+  sanitizeDispatchPosition,
+} from './positions.js';
 import { truncateHistoryTail, contentChars } from './context-compaction.js';
 import {
   buildBudgetContextBlock, classifyTaskGuidance, truncateCtx,
@@ -73,6 +83,8 @@ export const CONTEXT_BLOCK_ORDER = [
   // zx_20261027_3 M4「批了就用」：人工批准的自我优化规则——与项目/任务无关，属稳定前缀。
   'self_rules',
   // —— 稳定前缀结束 ——
+  // zx_20261112_1 B2「任」: 岗位块随**任务**而变（不同任务指派不同岗位），故在稳定前缀之外。
+  'position',
   'autonomy',
   'tension',
   'memory',
@@ -106,6 +118,14 @@ export interface TaskContextAssembly {
    * `injected_memory_ids` 与 `memory_used_ids_run`。本模块**只回传、不落库**（保持纯装配）。
    */
   lessonsIds: string[];
+  /**
+   * zx_20261113_1 B3「用」：本次岗位块**真进文**的条目（说明/规范/技能/知识/可迁移经验）。
+   * 调用方据此写注入账（`source='position'`）与 `context_json.injected_position` 快照；
+   * 本模块只回传、不落库（与 `lessonsIds` 同一纪律）。
+   */
+  positionInjections: PositionBlockItem[];
+  /** 岗位块真进文的全文（空串＝未注入）；调用方据此判断是否被预算整段裁掉。 */
+  positionText: string;
   /**
    * zx_20261018_1 批七「账」：本段装配出的四源字符数（system/memory/knowledge/history），
    * 调用方补上 tools/user/output 即得七源分账。`memory + knowledge` 恰等于 `memoryContext.length`
@@ -165,6 +185,9 @@ export async function buildTaskContext(o: {
   // 块容器：先把内容按 key 收集，末尾**一次性**按 `CONTEXT_BLOCK_ORDER` 物化。
   //   `add` 的类型是 `ContextBlock` ⇒ 新增块但忘了登记顺序 = 编译期错（不由人肉记序）。
   const blocks = new Map<ContextBlock, string[]>();
+  // zx_20261113_1 B3「用」：岗位条目级注入明细（只在岗位块真进文时非空）。
+  let positionInjections: PositionBlockItem[] = [];
+  let positionText = '';
   const add = (k: ContextBlock, content: string): void => {
     const arr = blocks.get(k);
     if (arr) arr.push(content); else blocks.set(k, [content]);
@@ -226,7 +249,8 @@ export async function buildTaskContext(o: {
   try {
     const stored = loadProjectBrief(db, projectId);
     if (stored?.brief) {
-      const rendered = renderProjectBrief(stored.brief, stored.updatedAt);
+      // zx_20261111_1：注入面标注的是**上次成功**生成时刻，不拿最近一次失败尝试的时间冒充。
+      const rendered = renderProjectBrief(stored.brief, stored.generatedAt || stored.updatedAt);
       if (rendered) add('project_brief', `<project-brief>\n${rendered}\n</project-brief>`);
     }
   } catch { /* 须知注入失败不影响执行 */ }
@@ -247,6 +271,41 @@ export async function buildTaskContext(o: {
     if (block.text) add('self_rules', block.text);
     if (block.dropped > 0) logger.warn(`自我优化规则超出上下文预算，本次丢弃 ${block.dropped} 条（未截半条）`);
   } catch { /* 规则注入失败不影响执行 */ }
+
+  // zx_20261112_1 B2「任」：任务指派的岗位注入（≤1200 字，只取前 3 条已采纳经验）。
+  //   未指派 ⇒ 不出块（与既有上下文逐字节相同）；岗位停用 / 项目解绑 ⇒ 下一轮自然为空（历史任务不改）。
+  try {
+    const trow = db.prepare('SELECT position_id, context_json FROM wa_tasks WHERE id = ?').get(taskId) as
+      | { position_id?: string | null; context_json?: string | null }
+      | undefined;
+    const pid = String(trow?.position_id ?? '').trim();
+    if (pid) {
+      const position = resolveTaskPosition(db, projectId, pid);
+      if (position) {
+        // zx_20261113_1 B3：只注入「已采纳 ∧ 可迁移 ∧ 未晋升」的经验；摘要候选永远不进岗位块。
+        const detail = positionBlockDetail(position, selectPositionLessonsForInjection(db, pid));
+        if (detail.text) {
+          add('position', detail.text);
+          positionText = detail.text;
+          positionInjections = detail.items;
+        }
+      }
+    } else {
+      // zx_20261112_1 B5：本机未指派岗位时，才用**对端派来的岗位摘要**（≤600，名称+说明+规范；
+      //   知识/经验从不出本机）。本机已指派 ⇒ 不叠加两套岗位说明。
+      // zx_20261113_1 B3：对端摘要不记入本机岗位注入账（它不是本机岗位的知识，记了会污染 ROI）。
+      let remote: ReturnType<typeof sanitizeDispatchPosition> = null;
+      try {
+        const ctxJson = JSON.parse(String(trow?.context_json ?? '{}')) as Record<string, unknown>;
+        remote = sanitizeDispatchPosition(ctxJson[DISPATCH_POSITION_KEY]);
+      } catch { remote = null; }
+      if (remote) {
+        const body = remote.summary.trim();
+        const block = `${`【岗位·来自对端】${remote.name}`}${body ? `\n${body}` : ''}`;
+        add('position', block.slice(0, POSITION_DISPATCH_SUMMARY_MAX + 40));
+      }
+    }
+  } catch { /* 岗位注入失败不影响执行 */ }
 
   // A1.3: 自治模式感知（autonomous_mode + backlog 链）
   try {
@@ -449,6 +508,8 @@ export async function buildTaskContext(o: {
     projectCtx,
     summaryOnly,
     lessonsIds,
+    positionInjections,
+    positionText,
     sections: {
       system: systemChars,
       memory: Math.max(0, memoryContext.length - knowledgeChars),

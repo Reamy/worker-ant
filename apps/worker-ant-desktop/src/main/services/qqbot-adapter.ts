@@ -239,6 +239,9 @@ export class QqbotAdapter implements ImAdapter {
     let content = '';
     let chatType = 'direct';
 
+    // zx_20261108_1 B3: QQ 的群事件本身就是 **@ 机器人** 事件（`GROUP_AT_MESSAGE_CREATE` / 频道 `AT_MESSAGE_CREATE`），
+    //   故群聊 `mentionsBot` 可证实地置 `true`；直接消息无 @ 语义，保持 `undefined`。
+    let mentionsBot: boolean | undefined;
     if (eventType === EVENT.C2C_MESSAGE_CREATE) {
       from = (authorObj.user_openid as string) || '';
       content = (data.content as string) || '';
@@ -247,10 +250,12 @@ export class QqbotAdapter implements ImAdapter {
       from = (data.group_openid as string) || '';
       content = (data.content as string) || '';
       chatType = 'group';
+      mentionsBot = true;
     } else if (eventType === EVENT.AT_MESSAGE_CREATE) {
       from = (data.channel_id as string) || '';
       content = (data.content as string) || '';
       chatType = 'group';
+      mentionsBot = true;
     } else if (eventType === EVENT.DIRECT_MESSAGE_CREATE) {
       from = (data.guild_id as string) || '';
       content = (data.content as string) || '';
@@ -258,6 +263,7 @@ export class QqbotAdapter implements ImAdapter {
     } else {
       return;
     }
+    const messageId = (data.id as string) || undefined;
     if (!content) {
       // zx_20260914 M1-2(维特根斯坦·意义即使用): 非文本消息（图片/文件/语音/视频）在 QQ 侧走
       // `attachments`、`content` 为空——此前 `if (!content) return` 把整条丢弃。现按第一个附件
@@ -271,8 +277,13 @@ export class QqbotAdapter implements ImAdapter {
         const size = a.size;
         const sizeBytes = typeof size === 'number' && Number.isFinite(size) ? size : undefined;
         content = nonTextPlaceholder(kind, fileName, sizeBytes);
-        const messageId = (data.id as string) || undefined;
-        const meta: ImMessageMeta = { kind, ...(fileName ? { fileName } : {}), ...(sizeBytes !== undefined ? { sizeBytes } : {}), ...(messageId ? { messageId } : {}) };
+        const meta: ImMessageMeta = {
+          kind,
+          ...(fileName ? { fileName } : {}),
+          ...(sizeBytes !== undefined ? { sizeBytes } : {}),
+          ...(messageId ? { messageId } : {}),
+          ...(mentionsBot !== undefined ? { mentionsBot } : {}),
+        };
         // 取件：`attachments[0].url` 即下载地址（**自带签名**，故 GET 不带任何鉴权头——不是漏了）。
         const url = (a.url as string) || undefined;
         if (url) {
@@ -288,7 +299,11 @@ export class QqbotAdapter implements ImAdapter {
     }
 
     console.log(`[IM:qqbot] 收到消息 from=${from.slice(0, 8)} text="${content.slice(0, 50)}"`);
-    if (this.onMessageHandler) void this.onMessageHandler(from, content, chatType, '');
+    const textMeta: ImMessageMeta | undefined =
+      messageId || mentionsBot !== undefined
+        ? { ...(messageId ? { messageId } : {}), ...(mentionsBot !== undefined ? { mentionsBot } : {}) }
+        : undefined;
+    if (this.onMessageHandler) void this.onMessageHandler(from, content, chatType, '', textMeta);
   }
 
   /** 发送回复消息。失败时抛异常（与 wechat 同契约），供上层感知"未送达"并落 outbox 补发。

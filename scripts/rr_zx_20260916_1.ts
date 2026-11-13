@@ -335,7 +335,9 @@ async function main(): Promise<void> {
     //   现在终态与评分**同源同刻**（都读 `closeAccNow`/`readAcceptanceCheck`），判据的实质不变。
     ok(/const closeVerdict: AcceptanceVerdict = acceptanceVerdictOf\(closeAccNow\)/.test(aeSrc),
       'M1-5 run_close 路：取的是**验收刚落账那一刻读回的账**（`closeAccNow`），与完成分读的是同一份' );
-    const blockRule = acSrc.includes("return { outcome: { ran: true, passed: false, block }, checks };");
+    // zx_20261109_1 B5 按符号重定向：决策结果多带 `...withOrder`（输入判据次序随结论落账），
+    //   钉的仍是"`ran && 有未达项` ⇒ 带 block"这一条，不因新增透传字段放宽。
+    const blockRule = /\{ outcome: \{ ran: true, passed: false, block \}, checks, \.\.\.withOrder \}/.test(acSrc);
     ok(blockRule, 'M1-5 且 `block` 的产出规则是 `ran && 有未达项`——与 `acceptanceVerdictOf` 的 `failed` 同界（一个判据两个出口）');
     ok(isAcceptanceVerified({ checked_at: 't', verified: true }) && !isAcceptanceVerified({ checked_at: 't', verified: false }),
       'M1-5 两路共用的 `isAcceptanceVerified` 语义未变（未核验一律不算验过）');
@@ -356,7 +358,9 @@ async function main(): Promise<void> {
     ok(badgeIdx > 0, '静态：`TaskDetailPage.tsx` 在**状态徽标行**含如实提示（否则同屏仍是绿徽 + "0 通过 · 8 未达"两种口径）');
     // zx_20260930 M4-4 锚点订正：徽标的**文案表达式**已收敛到共享词表（`statusText(TASK_STATUS_LABEL, …)`），
     // 故改以徽标自身的**着色表达式**定位——同一 span、判据同为"徽标在此"，且不钉词表名（不早于本轮）。
-    const statusIdx = tdpSrc.indexOf('STATUS_COLOR[task.status]');
+    // zx_20261107_1 B9：着色表达式进一步收敛到共享 `taskStatusPill(task.status)`（`lib/status-view.ts`），
+    //   锚点随真源前移；"徽标在此且位于提示之前"的判据不变。
+    const statusIdx = tdpSrc.indexOf('taskStatusPill(task.status)');
     ok(statusIdx > 0 && statusIdx < badgeIdx, '静态：提示**紧邻状态徽标之后**（同一行、同一 flex 容器）');
     ok(/acceptanceFailed &&/.test(tdpSrc), '静态：提示由**同一个判据**派生（`acceptanceFailed`，非本处另判一遍）');
     ok(/acceptanceCheck\.verified !== false && \(acceptanceCheck\.failed \?\? \[\]\)\.length > 0/.test(tdpSrc),
@@ -638,8 +642,12 @@ async function main(): Promise<void> {
     ok(/world_snapshot_after/.test(wsSrc), 'M3-4 源码：审计写回 world_snapshot_after');
     // zx_20261104_1 M7：同一处注入面扩到 `runStartedAtMs` + `fileMutationCount`（第二证据通道所需两个真源），
     //   判据按更强的完整形状钉——三者同处一次注入，不是"还留着 dataDir"就算数。
-    ok(/\{ dataDir: ctx\.dataDir, runStartedAtMs, fileMutationCount \}/.test(aeSrc),
-      'M3-3 接线：agent-executor 向审计注入 dataDir + 本轮起始时刻 + 改写计数（world-snapshot 零 electron，不在模块内解析数据目录）');
+    // zx_20261109_1 B2：同一处再多注入**本 run 的那一份扫描**（第二通道与 after 快照共用，不再各扫一遍）
+    //   ⇒ 钉的仍是"完整形状同处一次注入"，只是多了第四项，不是放宽。
+    // zx_20261109_1 B5 按符号重定向：同一处再注入 `runId`（审计行前缀与完成事件同源同一个 run），
+    //   钉的仍是"完整形状同处一次注入"——多第五项而非放宽。
+    ok(/\{ dataDir: ctx\.dataDir, runStartedAtMs, fileMutationCount, scan: auditScan, runId: ctx\.runId \}/.test(aeSrc),
+      'M3-3 接线：agent-executor 向审计注入 dataDir + 本轮起始时刻 + 改写计数 + 本 run 的扫描 + run_id（world-snapshot 零 electron，不在模块内解析数据目录）');
     // zx_20260922_1 M5（F7）**就地加固**：原断言只要求 renderer 认得 `[WARN]`，并注明"本轮不加新前缀值"。
     //   M5 给这份词表加了 `[INFO]`（世界模型审计的"未做判定"如实说明）⇒ 按"renderer 是词表的第二个落点"
     //   的纪律，此处必须**逐值**钉住（`zx_20260912` G9：新增取值漏改 renderer 会静默落进兜底灰）。

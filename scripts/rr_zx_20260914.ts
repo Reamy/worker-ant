@@ -280,7 +280,9 @@ const offenders = (hits: RawHit[]): RawHit[] => hits.filter((h) => !RAW_WHITELIS
   // 白名单内计数钉死（多了说明有人往调度器/兜底里塞新裸插，须人工过目）
   eq(rawCount('core/task-scheduler.ts'), 3, 'task-scheduler.ts 裸插恰 3 处（enqueue/schedule/start；zx_20260930 M11-4 删 batchEnqueue 后 4→3）');
   eq(rawCount('core/job-enqueuer.ts'), 1, 'job-enqueuer.ts 裸插恰 1 处（唯一兜底）');
-  eq(rawCount('ipc/project.ipc.ts'), 3, 'project.ipc.ts 裸插恰 3 处（既有两处 enqueuer 的兜底）');
+  // zx_20261110_2 B7: 4 处——第 4 处是「释放并重排」在 enqueuer 未注入时的兜底（`source='released_by_user'`）。
+  //   与另两处同形同因（enqueuer 是 IPC 注入的，rr/裸主进程注入之前也得能把作业排上），不是新的裸插范式。
+  eq(rawCount('ipc/project.ipc.ts'), 4, 'project.ipc.ts 裸插恰 4 处（三处 enqueuer 兜底：执行/恢复/释放并重排）');
 
   // 调用点：已全部改为 enqueueJob，裸插归零
   eq(rawCount('core/agent-executor.ts'), 0, 'agent-executor.ts 裸插 0 处（原 8 处已改调 enqueueJob）');
@@ -308,11 +310,26 @@ const offenders = (hits: RawHit[]): RawHit[] => hits.filter((h) => !RAW_WHITELIS
     { rel: 'apps/worker-ant-desktop/src/main/core/tools/control.ts', n: 3 },
     { rel: 'apps/worker-ant-desktop/src/main/core/tools/resource.ts', n: 3 },
   ], '执行体 ∪ 工具模块 enqueueJob 逐文件清点（合计 8 次；D4 后 7，zx_20261022_2 批一 +1）');
-  eq(countIn(`${A}/src/main/services/im-router.ts`), 8, 'im-router.ts enqueueJob 恰 8 次');
+  // zx_20261112_1 B3: IM「暂停/继续」增第 9 个入队点（恢复执行）——逐成员在册，不是放宽计数。
+  const imEnqueueSites = [
+    `enqueueJob(ctx.db, 'resume-ai-task', { taskId, source: 'im'`,                    // B3：继续
+    `enqueueJob(db, 'resume-ai-task', { taskId: task.id, projectId: approval.projectId`, // 审批确认
+    `enqueueJob(ctx.db, 'resume-ai-task', { taskId: r.taskId`,                        // 回退路径选项
+    `enqueueJob(db, 'ai-task', { taskId, projectId: proj.id`,                         // 建单即派
+    `enqueueJob(db, 'resume-ai-task', { taskId: task.id, source: 'im'`,               // 编号启动
+    `enqueueJob(db, 'resume-ai-task', { taskId: task.id, projectId: task.project_id`, // 直接回复
+    `enqueueJob(ctx.db, 'ai-task', { taskId: task.id, source: 'im'`,                  // 启动·指定任务
+    `enqueueJob(ctx.db, 'ai-task', { taskId: t.id, source: 'im'`,                     // 启动·唯一任务
+    `enqueueJob(ctx.db, 'ai-task', { taskId, projectId, source: 'im'`,                // Intent 路建单即派
+  ];
+  const imRouterSrc = stripComments(RD(`${A}/src/main/services/im-router.ts`));
+  eq(imEnqueueSites.filter((s) => imRouterSrc.includes(s)).length, imEnqueueSites.length,
+    `im-router.ts enqueueJob 逐成员在册（${imEnqueueSites.length} 处）`);
+  eq(countIn(`${A}/src/main/services/im-router.ts`), imEnqueueSites.length, `im-router.ts enqueueJob 恰 ${imEnqueueSites.length} 次`);
   eq(countIn(`${A}/src/main/index.ts`), 1, 'index.ts enqueueJob 恰 1 次（cron 注入点）');
   eq(perEngineFile.reduce((n, h) => n + h.n, 0)
-    + countIn(`${A}/src/main/services/im-router.ts`) + countIn(`${A}/src/main/index.ts`), 17,
-    '三处调用点合计 enqueueJob 恰 17 次（8+8+1）');
+    + countIn(`${A}/src/main/services/im-router.ts`) + countIn(`${A}/src/main/index.ts`), 18,
+    '三处调用点合计 enqueueJob 恰 18 次（8+9+1）');
   // D4 专项：核实收口建修复任务的那一段不得再入队（否则又与父任务并发改文件）
   eq(countIn(`${A}/src/main/core/tools/control-finalize.ts`), 0,
     'control-finalize.ts enqueueJob 0 处（D4：改为 depends_on 由调度器接续）');

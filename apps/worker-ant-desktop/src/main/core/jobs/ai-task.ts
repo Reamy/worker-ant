@@ -13,7 +13,15 @@ import { assessComplexity, isComplexOrPlanish } from '../task-archetype.js';
 import { describeExecutionError } from '../exec-error.js';
 // zx_20260915 P0-3(c): 「有失败子」这一问只在 children-gate.ts 一处回答（含回退开关），五处闸同取
 import { failedChildren, childNames } from '../children-gate.js';
-import { PAUSE_REASON_CHILDREN_INCOMPLETE, PAUSE_REASON_CHILDREN_FAILED, PAUSE_REASON_GOAL_DEVIATION, PAUSE_REASON_ABNORMAL_END, PAUSE_REASON_LABEL } from '../pause-reason.js';
+import { PAUSE_REASON_CHILDREN_INCOMPLETE, PAUSE_REASON_CHILDREN_FAILED, PAUSE_REASON_GOAL_DEVIATION, PAUSE_REASON_ABNORMAL_END, PAUSE_REASON_GHOST_LOOP, PAUSE_REASON_LABEL } from '../pause-reason.js';
+// zx_20261110_2 B3「恒」: 恢复入口的裁决不再看**状态词**，改看**派生执行态**——
+//   "executing" 曾既表示"正在跑"也表示"曾经置过"，故用户点恢复会被告知"已在执行"而什么都不发生。
+import { readExecState } from '../exec-state-read.js';
+import { resumeAction } from '../exec-state.js';
+// zx_20261110_2 B3: 幽灵自动接管的**账与上限**收在 `exec-ghost.ts` 一处（rr 直跑真实现，不抄第二份）。
+import { GHOST_REQUEUE_CAP, bumpGhostRequeueCount, ghostCapReached, ghostSelfHealStopLine } from '../exec-ghost.js';
+// zx_20261110_2 B3: 幽灵归位前要复核"是不是刚有真 run 起来"——与调度器的让位判据同一把尺（`hasTaskRun`）。
+import { hasTaskRun } from '../task-run-registry.js';
 import { pauseTask } from '../pause-task.js';
 // zx_20260915 P0-4: 通知文案的**唯一**构造处——状态词现查 DB，调用方无从谎报
 import { buildTaskNotice, completionTruthOf } from '../task-notice.js';
@@ -41,6 +49,12 @@ import { closeSdkIncident } from '../sdk-incident.js';
 import { markTaskFailed, grantDeliverableRetryQuota, isReviewableStatus } from '../task-terminal.js';
 // zx_20261018_3 D6: 父恢复的前提是「本子任务刚走到终态」——判据与收口闸同取一处（completed/failed/archived）。
 import { isTerminalTask } from '../task-jobs.js';
+// zx_20261110_2 B5「损」：收口之后那几笔账的身份/去重口（一处真源）。
+import { POSTLUDE_JOB_TYPE, postludeDue, markPostludeDone } from '../postlude.js';
+import { createLogger } from '../logger.js';
+
+/** zx_20261110_2 B5：本模块首个结构化日志点（后置账去重键写不进去时要能被 grep 到，与 console 口径分开）。 */
+const logger = createLogger('ai-task');
 // zx_20261023_5 批一：本地任务到终态 ⇒ 依赖它的后继重新走一次派发决策（与远端回写处同一触发口）。
 import { scheduleDependentDispatch } from '../collab-dispatch.js';
 // zx_20261027_3 M6b: 任务完成 ⇒ 画像随项目知识自动跟随（仅已启用且已有本机画像；永不抛）。
@@ -52,7 +66,7 @@ import { completionNoticeFallback } from '../task-outcome.js';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 // zx_20260909 Y1(空性·如实): IM 完成回话"主要成果摘要化"纯逻辑(选 doc/验收徽标/摘要块), 供 rr 复跑同源
-import { selectSummaryDoc, displayDocName, describeAcceptance, buildSummaryBlock, normalizeSnippet } from '../im-reply.js';
+import { selectSummaryDoc, displayDocName, describeAcceptance, buildSummaryBlock, plainTextSnippet } from '../im-reply.js';
 import type { AcceptanceInfo, SummaryDocRow } from '../im-reply.js';
 
 // zx_20260904_5 D2/D4 (2026-09-04): goal 偏离自动恢复上限——达上限不再自动 resume，暂停待人工介入/拆分子任务
@@ -424,7 +438,7 @@ export function buildChildBriefs(db: Database.Database, parentId: string): strin
     // zx_20261105_1 M4：子代理的结构化结论优先于自由文本摘要；缺失时不补 pass，如实说未提供。
     const sub = isSubagentTaskContext(k.context_json) ? readSubagentResult(k.context_json) : null;
     let summary = typeof ctx.completion_summary === 'string' && ctx.completion_summary.trim()
-      ? normalizeSnippet(ctx.completion_summary.trim(), 80)
+      ? plainTextSnippet(ctx.completion_summary.trim(), 80)
       : '';
     // 摘要优先级：完成摘要 > 该子自己的工具摘要（读/写/跑）> 最后一条 assistant 行。
     // 最后一条 assistant 在收口时可能是整轮聚合的噪音，故工具摘要必须排在它前面。
@@ -441,11 +455,11 @@ export function buildChildBriefs(db: Database.Database, parentId: string): strin
         const last = db.prepare(
           "SELECT content FROM wa_task_conversations WHERE task_id = ? AND role = 'assistant' ORDER BY created_at DESC LIMIT 1",
         ).get(k.id) as { content?: string } | undefined;
-        if (last?.content?.trim()) summary = normalizeSnippet(last.content.trim(), 80);
+        if (last?.content?.trim()) summary = plainTextSnippet(last.content.trim(), 80);
       } catch { /* 会话缺失则下走占位 */ }
     }
     if (!summary) summary = '(无完成摘要)';
-    if (sub?.summary) summary = normalizeSnippet(sub.summary, 80);
+    if (sub?.summary) summary = plainTextSnippet(sub.summary, 80);
 
     let delivs: Array<{ id: string; name: string; type: string; status: string; file_path?: string | null }> = [];
     try {
@@ -660,6 +674,23 @@ export function registerAiTaskHandlers(ctx: JobContext, scheduler: {
 }): void {
   const { db, memory } = ctx;
 
+  /**
+   * zx_20261110_2 B5「损」：**发后置账作业**（唯一入队口）。
+   *
+   * `finalContent` 随载荷走——完成通知的末级兜底要用它（主成果 > 产出物文件 > 摘要 > AI 输出），
+   * 后置作业不再持有执行体的内存上下文。只带前 4000 字符：通知兜底本身只截 800 字，
+   * 余量留给"摘要块读不到产出物"时的一两句铺陈，不必把整篇正文塞进 `wa_jobs.payload`。
+   */
+  const enqueuePostlude = (taskId: string, projectId: string, finalContent: string): void => {
+    try {
+      void scheduler.enqueue(POSTLUDE_JOB_TYPE, {
+        taskId, projectId,
+        finalContent: String(finalContent ?? '').slice(0, 4000),
+        source: 'run_completed',
+      }).catch(() => {});
+    } catch { /* 入队失败不影响收口本身（事件已发、状态已落；后置账少一次如实留在账上） */ }
+  };
+
   /** 构建智能完成通知内容：
    *  zx_20260909 Y1(空性·如实 / 少则得 / 维特根斯坦·可判定): im.completion_summary=true → 向 IM 报"主要成果摘要块"
    *  (📄 主成果名 vN（✓已验收 p/t）＋一句摘要), 不再向手机屏丢产出文件前 800 字半截 markdown; false → 回旧行为。
@@ -708,7 +739,8 @@ export function registerAiTaskHandlers(ctx: JobContext, scheduler: {
             version,
             accDesc,
             inDraft: pick.status !== 'completed',
-            snippet: snippet ? normalizeSnippet(snippet, 150) : undefined,
+            // zx_20261110_1 B6: 摘要正文走净化——markdown/SQL/代码不再原样上手机屏。
+            snippet: snippet ? plainTextSnippet(snippet, 150) : undefined,
             ...(unmet ? { title: '本轮产出' } : {}),
           });
           if (block) return withDetail(block);
@@ -853,16 +885,9 @@ export function registerAiTaskHandlers(ctx: JobContext, scheduler: {
         return;
       }
       // Phase 1.2: 实践反馈强化——成功（A2 实事求是：仅 status==='completed' 才算成功，failed/executing/preparing 不误强化）
+      // zx_20261110_2 B5：**强化与工作记忆提升已搬进 `task-postlude`**（见下方 `enqueuePostlude` 处注释）——
+      //   它们是"只要求迟早办到"的账，不再压在收口关键路径上。此处只读状态，决定要不要发后置作业。
       const statusRow = db.prepare('SELECT status FROM wa_tasks WHERE id = ?').get(taskId) as { status: string } | undefined;
-      if (statusRow?.status === 'completed' && memory) {
-        try {
-          const ctxJson = JSON.parse((db.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get(taskId) as { context_json: string })?.context_json || '{}');
-          const qualityScore = ctxJson.completion_quality?.score as number | undefined;
-          memory.reinforceMemories(taskId, projectId, true, qualityScore);
-          // A1 (2026-09-02): 工作记忆→长期记忆巩固门——成功任务的关键笔记沉淀为长期记忆（供后续相似任务召回）
-          try { memory.promoteWorkingMemory(taskId, projectId, true); } catch {}
-        } catch {}
-      }
       // zx_20260930 M5: 失败知识落库——**"无产出物"这条最常见的失败路走的正是这里**。
       //   `executeTask` 在 `agent-executor.ts:2589` 标了 `failed` 便**正常返回**（不抛），
       //   故本处理器的 `catch`（那里也写失败知识）根本不会执行；唯一能看见这次失败的就是这一行读回的终态。
@@ -913,17 +938,15 @@ export function registerAiTaskHandlers(ctx: JobContext, scheduler: {
         pauseTask(db, { taskId, reason: PAUSE_REASON_ABNORMAL_END });
         console.log(`[ai-task] 任务非正常结束，标记paused: ${taskId.slice(0, 8)}`);
       }
-      // F2: 任务完成 IM 通知（智能内容：产出物文件 > 摘要 > AI输出，暂停任务不发）
-      if (ctx.sendImNotification && task && statusRow?.status === 'completed') {
-        const smartContent = buildCompletionNotice(taskId, result.content);
-        ctx.sendImNotification(taskId, projectId, buildTaskNotice(db, taskId, 'completed', { detail: smartContent }).message);
-      }
-      // zx_20260924 M5: 完成通知之后再补**件本身**（文字说了"主成果是什么"，件得真到场才算交付）。
-      //   独立于上一条的 `task` 前置（推件只用 taskId 查库，不依赖标题已读到）。
-      if (ctx.sendImPrimaryDeliverables && statusRow?.status === 'completed') {
-        try { ctx.sendImPrimaryDeliverables(taskId, projectId); } catch { /* 推件失败不阻断收尾 */ }
-      }
-      // Phase 7.3: 记忆提取——storeText(对话摘要) + embed-memory(向量) + background-review(LLM提取)
+      // zx_20261110_2 B5「损」（损之又损 / 大野耐一）：**事已办成，账后置**——
+      //   IM 完成通知、主成果推件、记忆强化、工作记忆提升四笔**只要求"迟早办到"**的账，全部搬进
+      //   幂等的 `task-postlude` 作业：下一跳执行（`processPending` 每秒一跳，不占本作业的在途键）、
+      //   进程退出后随 `wa_jobs` 重放、同一 run 只办一次（`postlude.ts` 的去重口）。
+      //   `task.completed` 事件在 `executeTask` 内**先于**本处发出（exec-finalize / finalize 两出口），
+      //   故"事件先、账后"由代码顺序保证，不再靠时长碰运气。
+      if (statusRow?.status === 'completed') enqueuePostlude(taskId, projectId, result.content);
+      // Phase 7.3: 记忆提取——storeText(对话摘要) 仍是本路的**即时**账（一行 INSERT，几十微秒，
+      //   且失败/暂停路也各要它，故不进"仅完成才办"的后置作业）。
       try {
         if (memory && statusRow?.status !== 'paused') {
           memory.storeText({ project_id: projectId, task_id: taskId, content: `任务「${task?.title || ''}」执行结果: ${result.content.slice(0, 500)}`, source: 'task_execution' });
@@ -999,18 +1022,70 @@ export function registerAiTaskHandlers(ctx: JobContext, scheduler: {
         projectId = t0?.project_id || '';
       }
 
-      // 防重入：任务已在执行中→跳过，防止重复恢复
-      const curStatus = (db.prepare('SELECT status FROM wa_tasks WHERE id = ?').get(taskId) as { status: string } | undefined)?.status;
-      if (curStatus === 'executing' || curStatus === 'preparing' || curStatus === 'running') {
-        console.log(`[resume-ai-task] 任务已在执行(${curStatus})，跳过重复恢复: ${taskId.slice(0, 8)}`);
-        return;
-      }
-      // A1/A3 (2026-09-04): 终态任务不再复活（残留 resume 作业直接收尾，不产生"完成了还在跑"）
-      if (curStatus === 'completed' || curStatus === 'failed' || curStatus === 'archived') {
+      // 防重入：**只有真在跑才跳过**（zx_20261110_2 B3「恒」）。
+      //   病根（事故 339ef167）：此前只看状态词 `curStatus` 属 running 族就 return——而状态词可能是
+      //   **空词**（执行体永不返回、状态停在 executing）。用户点「恢复」得到"已在执行"，实则无人，
+      //   点了什么都不发生。现在改看**派生执行态**：`live` 才跳，`ghost` 照常往下走并留痕、有封顶。
+      //   `excludeRunning: 1` 摘掉**本处理器自己那条作业**——否则"有 1 条 running 作业"永远成立，
+      //   幽灵永远判不出来（见 `exec-state-read.ts` 的 opts 注记）。
+      const exec = readExecState(db as never, taskId, { excludeRunning: 1 });
+      const curStatus = exec.dbStatus;
+      const action = resumeAction(exec, exec.pendingExecJobs);
+      if (action === 'skip_terminal') {
         console.log(`[resume-ai-task] 任务已终态(${curStatus})，跳过恢复并收尾: ${taskId.slice(0, 8)}`);
         return;
       }
+      if (action === 'skip_live') {
+        console.log(`[resume-ai-task] 任务正在真实执行（${exec.reason}），跳过重复恢复: ${taskId.slice(0, 8)}`);
+        return;
+      }
+      if (action === 'yield_sibling') {
+        // `queued`：同任务还有**别的执行作业在排队**（本处理器自己那条已由 `excludeRunning` 摘掉）。
+        //   此时本次**让位**——本次是队列里靠前的那一条，排在后面的作业会紧接着接手；两条都跑不过是同一件事
+        //   做两遍，而更坏的是：若本次先跑，后面那条一起来就看见 `live` 被跳过，它携带的**更新的**用户指令
+        //   就进不了这一轮（消息虽在会话流里，本轮却读不到）。让位给后者 = 用最新的那句话。
+        //   `runningExecJobs` 那一路不在此列（`resumeAction` 只对 pending 数让位）：没有在途 run 却挂着
+        //   running 作业行，正是幽灵的另一面，须继续往下走由 CAS 兜住双跑。
+        console.log(`[resume-ai-task] 已有更新的恢复作业在排队（${exec.reason}），本次让位: ${taskId.slice(0, 8)}`);
+        return;
+      }
+      if (action === 'ghost') {
+        // 幽灵：状态词写着在跑，实则既无在途 run 也无在途作业。**不跳过**，但要有封顶——
+        //   否则"自动恢复"会变成永动的假动作（恢复→又成幽灵→再恢复）。
+        const ghostCount = bumpGhostRequeueCount(db, taskId);
+        console.log(`[resume-ai-task] 检测到幽灵执行态（${exec.reason}），第 ${ghostCount} 次自动接管: ${taskId.slice(0, 8)}`);
+        eventBus.emit('task.execution_signal', {
+          taskId, task_id: taskId, projectId, signal: 'ghost_requeue', attempt: ghostCount, reason: exec.reason,
+        }).catch(() => {});
+        if (ghostCapReached(ghostCount)) {
+          try {
+            db.prepare("INSERT INTO wa_task_conversations (id, task_id, role, content, token_count, created_at) VALUES (?, ?, 'system', ?, 0, datetime('now'))")
+              .run(crypto.randomUUID(), taskId, ghostSelfHealStopLine(GHOST_REQUEUE_CAP));
+          } catch { /* 上屏失败不阻断 */ }
+          pauseTask(db, { taskId, reason: PAUSE_REASON_GHOST_LOOP });
+          return;
+        }
+        // ⚠ `executing` **不在** `claimTaskForExecution` 的可抢占集（`pending/paused/preparing/running`）里，
+        //   而幽灵的现状恰恰就是"状态词写着 executing、无人跑" ⇒ 不先把状态词如实归位，下面 `executeTask`
+        //   的 CAS 必 0 行、被当 `cas_conflict` 认账收尾——用户点了恢复，还是**一次什么都没发生**。
+        //   归位用 CAS（只翻 `executing → pending`），并在翻之前复核一次"是不是刚有真 run 起来"，
+        //   把这个窗口缩到最小；翻不动（已被别人翻走/状态已变）就照常往下走，CAS 会如实拒。
+        if (curStatus === 'executing' && !hasTaskRun(taskId)) {
+          try {
+            const reclaimed = db.prepare(
+              "UPDATE wa_tasks SET status = 'pending', updated_at = datetime('now') WHERE id = ? AND status = 'executing'",
+            ).run(taskId).changes;
+            if (reclaimed > 0) {
+              eventBus.emit('task.status_changed', { taskId, task_id: taskId, projectId, newStatus: 'pending', new_status: 'pending' }).catch(() => {});
+            }
+          } catch { /* 归位失败不阻断：下面 CAS 会如实拒（不是静默冒充成功） */ }
+        }
+      }
 
+      // `queued`：同任务还有**别的执行作业在排队**（本处理器自己那条已由 `excludeRunning` 摘掉）。
+      //   此时本次**让位**——本次是队列里靠前的那一条，排在后面的作业会紧接着接手；两条都跑不过是同一件事
+      //   做两遍，而更坏的是：若本次先跑，后面那条一起来就看见 `live` 被跳过，它携带的**更新的**用户指令
+      //   就进不了这一轮（消息虽在会话流里，本轮却读不到）。让位给后者 = 用最新的那句话。
       // 6.5: 无对话历史的任务 → 转为全新执行（ai-task），不再直接拒绝
       const convCheck = (db.prepare('SELECT COUNT(*) as count FROM wa_task_conversations WHERE task_id = ?').get(taskId) as { count: number }).count;
       if (convCheck === 0) {
@@ -1204,10 +1279,8 @@ export function registerAiTaskHandlers(ctx: JobContext, scheduler: {
         return;
       }
       // Phase 1.2: 恢复执行成功后强化（A2 实事求是：仅 status==='completed' 才算成功）
+      // zx_20261110_2 B5：**强化已搬进 `task-postlude`**（与 `ai-task` 路同形）——此处只读状态决定发不发后置作业。
       const taskRow = db.prepare('SELECT project_id, title, status FROM wa_tasks WHERE id = ?').get(taskId) as { project_id: string; title: string; status: string } | undefined;
-      if (memory && taskRow && taskRow.status === 'completed') {
-        try { memory.reinforceMemories(taskId, taskRow.project_id, true); } catch {}
-      }
       // zx_20260930 M5: 恢复路同样补失败知识——与上方 `ai-task` 路**同形**（`executeTask` 标 `failed` 后正常返回
       //   的"无产出物"路在恢复途中一样会走到这里）。幂等由 `writeFailureKnowledge` 按任务自持，两条出口无重复之虞。
       if (memory && taskRow && taskRow.status === 'failed') {
@@ -1245,15 +1318,10 @@ export function registerAiTaskHandlers(ctx: JobContext, scheduler: {
           }
         } catch {}
       }
-      // F2: 恢复完成 IM 通知
-      if (ctx.sendImNotification && taskRow?.status === 'completed') {
-        const smartContent = buildCompletionNotice(taskId, result.content);
-        ctx.sendImNotification(taskId, taskRow.project_id, buildTaskNotice(db, taskId, 'completed', { detail: smartContent }).message);
-      }
-      // zx_20260924 M5: 恢复路的完成同样推件（与 `ai-task` 路同形，两条完成出口一把尺）。
-      if (ctx.sendImPrimaryDeliverables && taskRow?.status === 'completed') {
-        try { ctx.sendImPrimaryDeliverables(taskId, taskRow.project_id); } catch { /* 推件失败不阻断收尾 */ }
-      }
+      // zx_20261110_2 B5「损」：恢复完成同样**后置**（与 `ai-task` 路同形，两条完成出口一把尺）——
+      //   通知/推件/工作记忆提升都进 `task-postlude`；身份是按 run 的（`last_completed_run_id`），
+      //   故"续跑后再完成"仍是新的一笔、各自通知一次。
+      if (taskRow?.status === 'completed') enqueuePostlude(taskId, taskRow.project_id, result.content);
       // 后台记忆提取（zx_20260906 批2 终核补强: 与上方各步一致，仅**终态**才整批提；暂停/部分/未落盘走轻量沉淀，防整批重复读同一对话）
       // zx_20260930 M5: 守卫与 `ai-task` 路**同形**（含 `failed`）——两条出口一把尺，判据取自 `task-terminal.ts` 一处。
       if (taskRow && isReviewableStatus(taskRow.status)) { try { scheduler.enqueue('background-review', { taskId, projectId: taskRow.project_id }).catch(() => {}); } catch {} }
@@ -1279,6 +1347,61 @@ export function registerAiTaskHandlers(ctx: JobContext, scheduler: {
           if (task) memory.reinforceMemories(taskId, task.project_id, false);
         } catch {}
       }
+    }
+  });
+
+  /**
+   * zx_20261110_2 B5「损」：**后置账**——收口之后、只要求"迟早办到且只办一次"的那几笔。
+   *
+   * 病根（方案 §2 基线）：任务在 `executeTask` 里已标完成、`task.completed` 事件也已发出，
+   * 收口后的这四笔账（IM 完成通知 / 主成果推件 / 记忆强化 / 工作记忆提升）**仍串在作业尾巴上**，
+   * 收尾 21s 里有大半是"事已办成、账还没记完"。
+   *
+   * 判据与身份全在 `core/postlude.ts` 一处：`last_completed_run_id`（收口两出口同写）定身份，
+   *  `postlude_done_run` 定"同一 run 只办一次"。**不复用** `background_reviewed_at`：那个键按**终态**
+   *  去重，而"已完成→续跑→再完成"是本仓主形态（zx_20261103_1「续」）——复用它会把第二、三次完成的通知
+   *  静默吞掉（Ruling 见方案 §9.1）。
+   *
+   * 非 `completed` 终态 ⇒ 不办（通知/推件只属于"真成了"这一格）；缺收口身份（老任务/人工置完成）⇒
+   *  如实打一行日志后不办——**不猜**它是哪一次完成。
+   */
+  scheduler.register(POSTLUDE_JOB_TYPE, async (payload) => {
+    const taskId = String(payload.taskId ?? '').trim();
+    if (!taskId) return;
+    const projectId = String(payload.projectId ?? '').trim()
+      || ((db.prepare('SELECT project_id FROM wa_tasks WHERE id = ?').get(taskId) as { project_id?: string } | undefined)?.project_id ?? '');
+    const statusRow = db.prepare('SELECT status FROM wa_tasks WHERE id = ?').get(taskId) as { status?: string } | undefined;
+    if (statusRow?.status !== 'completed') return;
+    const due = postludeDue(db as never, taskId);
+    if (!due) {
+      // 无声不是错：要么没有收口身份，要么这次完成已经办过（重放/重复入队）。
+      return;
+    }
+    const finalContent = typeof payload.finalContent === 'string' ? payload.finalContent : '';
+    // ① 完成通知（智能内容：主成果摘要块 > 产出物文件 > 摘要 > AI 输出）
+    if (ctx.sendImNotification) {
+      try {
+        const smartContent = buildCompletionNotice(taskId, finalContent);
+        ctx.sendImNotification(taskId, projectId, buildTaskNotice(db, taskId, 'completed', { detail: smartContent }).message);
+      } catch { /* 通知失败不阻断后置账的其余笔 */ }
+    }
+    // ② 主成果推件（文字说了"主成果是什么"，件得真到场才算交付）
+    if (ctx.sendImPrimaryDeliverables) {
+      try { ctx.sendImPrimaryDeliverables(taskId, projectId); } catch { /* 推件失败不阻断 */ }
+    }
+    // ③ 记忆强化 + ④ 工作记忆提升（A2 实事求是：只有真完成才奖）
+    if (memory) {
+      try {
+        const ctxJson = JSON.parse((db.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get(taskId) as { context_json: string })?.context_json || '{}');
+        const qualityScore = ctxJson.completion_quality?.score as number | undefined;
+        memory.reinforceMemories(taskId, projectId, true, qualityScore);
+        // A1 (2026-09-02): 工作记忆→长期记忆巩固门——成功任务的关键笔记沉淀为长期记忆（供后续相似任务召回）
+        try { memory.promoteWorkingMemory(taskId, projectId, true); } catch {}
+      } catch {}
+    }
+    // 最后一笔记账：**办完才写**（写不进去 ⇒ 重放时重做一次，宁可多办一次也不静默丢）。
+    if (!markPostludeDone(db as never, taskId, due.runKey)) {
+      logger.warn({ taskId: taskId.slice(0, 8), runKey: due.runKey.slice(0, 8) }, '后置账已办但去重键未写成功——重放时可能重办一次');
     }
   });
 }

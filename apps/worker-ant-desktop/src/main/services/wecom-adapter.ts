@@ -107,18 +107,19 @@ export class WecomAdapter implements ImAdapter {
     const fromUser = (payload.FromUserName as string) || 'unknown';
     const chatType = String(payload.ToUserName || '').startsWith('chat_') ? 'group' : 'direct';
     // zx_20260914 M1-2(维特根斯坦·意义即使用): 非文本（image/voice/video/location/link…）不再
-    // 整条丢弃——转类型占位符如实到场。**只随非文本带 meta**：文本路径字节不变，
-    // `messageId` 也只在非文本时带出（占位符长得一样，按正文去重会吞掉第二张图）。
+    // 整条丢弃——转类型占位符如实到场（占位符长得一样，按正文去重会吞掉第二张图，故非文本必须带 id）。
     const isNonText = !!msgType && msgType !== 'text';
     if (!content && !isNonText) return;
     const text = content || nonTextPlaceholder(msgType, (payload.FileName as string) || undefined);
+    // zx_20261108_1 B3: 文本也带 `MsgId`（跨重启去重）；企业微信**不提供 mention 元数据**，
+    //   `mentionsBot` 保持 `undefined` ⇒ 群聊按未 @ 处理（fail-closed，只在查询/问候面放行）。
+    const messageId = (payload.MsgId as string) || undefined;
     let meta: ImMessageMeta | undefined;
+    if (messageId) meta = { messageId };
     if (isNonText) {
-      meta = { kind: msgType };
+      meta = { kind: msgType, ...(meta ?? {}) };
       const fileName = (payload.FileName as string) || undefined;
       if (fileName) meta.fileName = fileName;
-      const messageId = (payload.MsgId as string) || undefined;
-      if (messageId) meta.messageId = messageId;
       // 取件：标识字段是 **`MediaId`（PascalCase）**——自建应用的回调只有加密 XML 一种形态，
       //   字段名跟着 XML 走。`media_ids`/`media_id` 是**别的产品**（客服 sync_msg / 智能机器人）的形状，别混。
       const mediaId = (payload.MediaId as string) || undefined;

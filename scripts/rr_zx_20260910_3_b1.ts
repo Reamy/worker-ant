@@ -204,10 +204,11 @@ ok(describeAcceptance(undefined) === null, 'IM 徽标：无载荷 → null');
 console.log('\nS4 接线静态（覆巨型 handler / renderer 等测试触达不到处）');
 
 // 落账无条件：调用方不得在某个出口上"忘记落账"
-const fnStart = exe.indexOf('async function checkAcceptanceCriteria');
-// 边界取下一个函数声明（不靠 magic 偏移/易漂的注释串——前者随文件增删即失准，后者一删断言就静默失效）
-const fnEnd = exe.indexOf('async function checkGoalDeviation', fnStart);
-const fnBody = exe.slice(fnStart, fnEnd > fnStart ? fnEnd : undefined);
+// zx_20261109_1 B6 按符号重定向：判卷函数搬至 `exec-acceptance.ts`（该文件最后一个函数 ⇒ 体内到文件尾）。
+const acceptSrc = rd('apps/worker-ant-desktop/src/main/core/exec-acceptance.ts');
+const fnStart = acceptSrc.indexOf('async function checkAcceptanceCriteria');
+const fnEnd = acceptSrc.length;
+const fnBody = acceptSrc.slice(fnStart, fnEnd > fnStart ? fnEnd : undefined);
 ok(fnStart > -1 && fnEnd > fnStart, '切片定位成功（函数体边界以内，不越界到相邻函数）');
 ok(fnBody.includes('recordAcceptanceOutcome(db, taskId, decided)'), 'checkAcceptanceCriteria 经 recordAcceptanceOutcome 落账（四出口归一）');
 ok(/^\s{2}const payload = recordAcceptanceOutcome\(db, taskId, decided\);/m.test(fnBody), '落账调用**无条件**（缩进 2 空格、前面无 if——四出口共用一笔）');
@@ -235,8 +236,17 @@ ok(!/text\.match\(\/\\\[\[\\s\\S\]\*\\\]\/\)/.test(exe), '贪婪正则在 agent-
 const accImportLine = pip.split('\n').find((l) => l.includes("from '../core/acceptance-check.js'")) ?? '';
 ok(!!accImportLine && !/isAcceptanceVerified|parseAcceptance|buildAcceptanceCheckPayload|enforceEvidenceBoundChecks/.test(accImportLine),
   'project.ipc 不自带验收判据/解析（只取候选/重放助手；派生与解析仍收敛 core）', accImportLine.trim());
-ok((pip.match(/annotateAcceptance\(db, /g) || []).length === 3, '三个读点（list/digest 邻/抽屉+task:get）全经共享派生，不再各写各的',
-  `实测 annotateAcceptance(db, …) ${(pip.match(/annotateAcceptance\(db, /g) || []).length} 处`);
+// zx_20261108_1 B6：产出物列表查询解析整体下沉 `core/deliverable-query.ts`（list 读点随之迁出 project.ipc），
+//   旧钉「project.ipc 内三处」按符号重定向到新载体并钉更强形状：两个文件合计恰三处，且 list 那一处
+//   **必须**落在共享查询模块（不是把调用搬回来）。扫描面如实命名。
+const dq = rd('apps/worker-ant-desktop/src/main/core/deliverable-query.ts');
+const annIpc = (pip.match(/annotateAcceptance\(db, /g) || []).length;
+const annQuery = (dq.match(/annotateAcceptance\(db, /g) || []).length;
+// zx_20261111_3 B3：`deliverable:attention` 也经此共享函数 ⇒ ipc 侧由"恰 2"改为"≥2"；
+//   `deliverable-query.ts` 一处不变（那里没有新增读点）。
+ok(annIpc >= 2 && annQuery === 1,
+  '三处验收派生消费全经共享函数（扫描面：ipc/project.ipc.ts preview+task:get+attention；core/deliverable-query.ts list 一处）',
+  `实测 ipc ${annIpc} 处 / deliverable-query ${annQuery} 处`);
 // zx_20260915 P0-2(d): 解析处仍是**一处**，只是由 `verifiedAcceptanceMap` 下移一级到 `parseAcceptance`
 //   ——P0-2 要同出「未核验」视图，同一遍解析必须同时产两态（合成一个 Map 会诱使每个读点各判一次 verified）。
 //   故锚点由"`accMap.set` 那一行"改为"该唯一消费落在 `parseAcceptance` 体内"。
@@ -326,7 +336,7 @@ ok(parseAcceptanceChecks('[{"criterion":"A"') === null, '未闭合数组 → nul
 ok(decideAcceptanceOutcome({ kind: 'ok', text: '模型认为无法判断' }).outcome.ran === false, 'no_json 结局成立（下游落 verified:false/reason:no_json）');
 
 // 超时静态（本函数此前无 abortSignal，可无限挂起）
-const accFn = exe.slice(exe.indexOf('async function checkAcceptanceCriteria'), exe.indexOf('async function checkGoalDeviation'));
+const accFn = acceptSrc.slice(fnStart);
 ok(/abortSignal: AbortSignal\.timeout\(30_000\)/.test(accFn), '★补超时：checkAcceptanceCriteria 现带 abortSignal 30s（此前无，可无限挂起）');
 ok(/abortSignal: AbortSignal\.timeout\(15_000\)/.test(exe.slice(exe.indexOf('async function checkGoalDeviation'))), '对照：checkGoalDeviation 仍为 15s（未误改）');
 

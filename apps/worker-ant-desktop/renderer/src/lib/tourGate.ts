@@ -11,18 +11,19 @@
  *
  * 本模块只放**判定**，不放词表、不碰 DOM——词表在 `navConfig.ts`，落点是调用方（`DashboardPage`）。
  */
+import { parseTriState } from '../../../src/main/core/settings-bool.js';
 
 /** 一次性标记的键名（写读**同一常量**，杜绝字面量两处各写一遍）。 */
 export const TOUR_SETTING_KEY = 'onboarding.tour_done';
 
 /**
- * 落库值 → 是否已看过导览。`'1'` / `'true'` 为真；缺省与其它一律为假。
+ * 落库值 → 是否已看过导览。`'1'` / `'true'` / `'on'` 为真；缺省与其它一律为假。
  * 刻意**不**把"读不动/读成怪值"当成"看过"——宁可按没看过如实引导，也不静默吞掉整个导览。
+ * zx_20261108_1 B5：三写法解析收敛到 `settings-bool.parseTriState`（唯一一份，仍零依赖）。
  */
 export function parseTourDone(raw: unknown): boolean {
   if (raw == null) return false;
-  const v = String(raw).trim().toLowerCase();
-  return v === '1' || v === 'true';
+  return parseTriState(String(raw)) === 'true';
 }
 
 /** 是否该弹首启导览：未落库 ∧ 本次会话未跳过。 */

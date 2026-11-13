@@ -32,6 +32,15 @@ export interface ImMessageMeta {
   /** zx_20260920_1 M5: 落盘**失败的真因**（失败才有）。行照落、账照记，但**不许把"我丢了"说成"我收了"**——
    *  路由器据此写 `wa_im_conversations.last_error` 并如实回"没能落盘（原因）"。 */
   mediaError?: string;
+  /**
+   * zx_20261108_1 B3: 平台**证实**本条 @ 了机器人（`true`）/ 未 @（`false`）/ 平台不提供（`undefined`）。
+   *
+   * 判据只有一条：**只有 `true` 才在群聊里放行指令**（见 `core/im-intent.ts` 的 `decideImIntent`）。
+   * 微信/企微平台不给 mention 元数据 ⇒ 保持 `undefined`，群聊按未 @ 处理（fail-closed）。
+   */
+  mentionsBot?: boolean;
+  /** 本条消息里被 @ 的人（平台给了才有；含机器人本身）。只作诊断/展示，不参与指令判定。 */
+  mentions?: string[];
 }
 
 /** 非文本类型 → 人读标签（**一处真源**：五家适配器 + 入站媒体回执共用，各家只把自己的原始类型映射进来）。

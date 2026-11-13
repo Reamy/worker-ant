@@ -25,6 +25,9 @@ const eventBusSrc = read('src/main/core/event-bus.ts');
 const memoryMgr = read('src/main/core/memory-manager.ts');
 const notifSvc = read('src/main/core/notification-service.ts');
 const tdPage = read('renderer/src/pages/TaskDetailPage.tsx');
+// zx_20261107_1 B9：心跳 banner 的「长步骤」文案随进度块搬进 `TaskProgress` 组件——
+//   断言按符号重定向（页面仍持有 hbFresh 计算与 `heartbeatFresh={hbFresh}` 接线，组件持有文案）。
+const taskProgress = read('renderer/src/components/task/TaskProgress.tsx');
 const imPage = read('renderer/src/pages/IMPage.tsx');
 const memPage = read('renderer/src/pages/MemoriesPage.tsx');
 const toastLib = read('renderer/src/lib/toast.tsx');
@@ -48,8 +51,19 @@ eventBus.on('memory.changed', onMem as never);
 
 console.log('S2 (4a) IM 入站实时接线');
 // zx_20260911_2 M3: union 新增 im.message_outbound，原断言按"相邻字面"匹配过于脆弱——改为在 EventType 行内分别校验两成员在册。
-const eventTypeLine = eventBusSrc.split('\n').find(l => l.startsWith('export type EventType')) || '';
-ok(eventTypeLine.includes("'im.message_inbound'") && eventTypeLine.includes("'memory.changed'"), 'EventType union 含 im.message_inbound/memory.changed');
+// zx_20261110_2 收口：`export type EventType` 已是**多行**（B1/B2 增中止四笔账时在此处分行了），
+//   "只取首行"的写法在 union 一换行时就变成假红（实测本轮全量里这条红过）。
+//   改为按**声明块**取（到声明结束的分号为止）并解析出成员集合——判的是"这两成员在册"，不是"它们长在第几行"。
+const eventTypeBlock = (() => {
+  const start = eventBusSrc.indexOf('export type EventType');
+  if (start < 0) return '';
+  const rest = eventBusSrc.slice(start);
+  const end = rest.search(/;\s*(\n|$)/);
+  return end > 0 ? rest.slice(0, end) : rest;
+})();
+const eventTypeMembers = new Set(Array.from(eventTypeBlock.matchAll(/'([a-z][a-z0-9_.]*)'/g), (m) => m[1]));
+ok(eventTypeMembers.has('im.message_inbound') && eventTypeMembers.has('memory.changed'),
+  'EventType union 含 im.message_inbound/memory.changed', `成员 ${eventTypeMembers.size} 个`);
 ok(imRouter.includes("emitTransient('im.message_inbound'") && imRouter.includes("from_user_id: fromUser") && imRouter.includes("preview: text.slice(0, 60)"),
   'im-router 入站落库后发射 im.message_inbound（含 channelId/preview）');
 ok(indexSrc.includes("eventBus.on('im.message_inbound'") && indexSrc.includes("eventBus.on('memory.changed'"),
@@ -64,8 +78,9 @@ ok(electronTypes.includes('channelId?: string') && electronTypes.includes('chann
 console.log('S3 (4b) TaskDetail 心跳消费');
 ok(tdPage.includes("event.type === 'task.heartbeat'") && tdPage.includes('setHeartbeat(') && tdPage.includes('setHeartbeat(null)'),
   'TaskDetail 事件分支消费 task.heartbeat（活跃脉冲，无整表刷新 return 早退）');
-ok(tdPage.includes('hbFresh') && tdPage.includes('长步骤') && tdPage.includes('heartbeatElapsedSec'),
-  '长单步"伪冻结"补丁：hbFresh 计算 + 长步骤推进 banner（含心跳时长）');
+ok(tdPage.includes('hbFresh') && tdPage.includes('heartbeatElapsedSec')
+  && tdPage.includes('heartbeatFresh={hbFresh}') && taskProgress.includes('长步骤') && taskProgress.includes('heartbeatFresh'),
+  '长单步"伪冻结"补丁：hbFresh 计算（页面）+ 长步骤推进 banner（TaskProgress，含心跳时长）');
 
 console.log('S4 (4c) 通知归一 + 免打扰接线');
 ok(notifSvc.includes("if (focused) return;") && notifSvc.includes("ui_dnd") && notifSvc.includes('聚焦时主呈现=应用内 toast'),

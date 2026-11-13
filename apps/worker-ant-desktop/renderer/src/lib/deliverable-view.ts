@@ -9,6 +9,10 @@
 //   本模块**转出**以保持既有 import 路径不变（多页仍从 `./deliverable-view` 取 `parseDbTime`）。
 import { parseDbTime } from '../../../../../packages/shared-types/src/db-time.js';
 export { parseDbTime };
+// zx_20261107_1 B9: 通用时间/字节格式化已收口到 `lib/format.ts`（全站一把尺）——
+//   本模块**转出**以保持既有 import 路径不变；新代码请直接从 `./format` 取。
+import { formatDbTime, formatBytes } from './format';
+export { formatDbTime, formatBytes };
 
 export const DELIVERABLE_TYPE_LABEL: Record<string, string> = {
   mcp: 'MCP服务', a2a: 'A2A服务', ui: 'UI界面', doc: '文档', daemon: '守护进程', code: '代码',
@@ -20,31 +24,11 @@ export const DELIVERABLE_STATUS_LABEL: Record<string, string> = {
 };
 
 /**
- * 库内时间列 → 本地时区展示（标准样式，分钟精度）。
- * 不带时区的串直接喂 `new Date` 会被按本地时区解析 ⇒ 差 8 小时（`2026-09-25 02:00:00` 会显示成 02:00）。
- * 只用于**来自库**的时间列；本来就是 ISO（带 `Z`/偏移）的照原样按本地展示。
- * 空值与非法值返回 `''`（"没有这个时间"不伪造成某个时刻）。
+ * 本地绝对路径判据（展示层唯一真源）：POSIX 根、Windows 盘符、UNC 三形。
+ * 只决定"是否出打开类按钮"；授权仍在 main（`deliverable:open` 只收 id，路径由 main 从库内取并过围栏）。
+ * 此前列表页与抽屉各写一份，抽屉停在「只认 `/`」⇒ Windows 盘符恒假、按钮永不出——两处同源后才不再漂。
  */
-export function formatDbTime(s?: string | null, opts?: { dateOnly?: boolean; timeOnly?: boolean }): string {
-  const d = parseDbTime(s);
-  if (!d) return '';
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mm = String(d.getMinutes()).padStart(2, '0');
-  if (opts?.timeOnly) return `${hh}:${mm}`;
-  // 逐段拼 `Y/M/D H:MM`，**不用 `toLocaleString('zh-CN').slice(0,16)` 截断**：单数字月/日时该串只有
-  //   17–18 位，切到 16 会把秒前那个冒号留下（`2026/10/7 10:11:`）——每年 1–9 月、每月 1–9 日全犯。
-  const date = `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
-  return opts?.dateOnly ? date : `${date} ${hh}:${mm}`;
-}
-
-/** 字节数 → 人话。`null` 一律 `—`（不补 0）：文件不在与文件是空的，不是一回事。 */
-export function formatBytes(n: number | null | undefined): string {
-  if (n == null || !Number.isFinite(Number(n))) return '—';
-  const v = Number(n);
-  if (v < 1024) return `${v} B`;
-  if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KB`;
-  return `${(v / 1024 / 1024).toFixed(1)} MB`;
-}
+export const isLocalAbsolutePath = (p?: string | null): boolean => !!p && /^([a-zA-Z]:[\\/]|\\\\|\/)/.test(p);
 
 /** 字符串的 **UTF-8 真实字节数**（不是 `length`——`length` 数是码元，中文 1 字 = 3 字节）。 */
 function utf8Bytes(s: string | undefined | null): number | null {

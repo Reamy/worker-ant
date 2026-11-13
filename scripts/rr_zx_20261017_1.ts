@@ -583,7 +583,8 @@ async function main(): Promise<void> {
       'eligible', 'R-14i 旧调用方不给来由 ⇒ 不因新判据改变行为');
 
     // zx_20261023_5 批一：依赖准入由"一刀切 has-dependencies"细分三态，词表新增两员（逐成员枚举，旧项不删）。
-    const reasons = ['eligible', 'setting-off', 'team-locked', 'not-enrolled',
+    // zx_20261110_1 B3：项目显式关闭外派是最上游那道闸，词表再添一员。
+    const reasons = ['eligible', 'project-mode-off', 'setting-off', 'team-locked', 'not-enrolled',
       'parent-missing', 'parent-failed', 'parent-archived', 'parent-completed',
       'has-dependencies', 'dependencies-waiting', 'dependencies-dead',
       'has-attachments', 'has-working-dir', 'decomposed', 'local-capacity', 'no-category'];
@@ -1133,7 +1134,11 @@ async function main(): Promise<void> {
 
     const ipc = STRIPPED(`${A}/src/main/ipc/team.ipc.ts`);
     const handlers = ipc.split('ipcMain.handle(').slice(1);
-    eq(handlers.length, 4, 'R-35c 四个通道在册（items / share / import / delete）');
+    // zx_20261113_5 M2：通道数从「幻数计数」改为**逐成员枚举**——新增只读预览两通道后，
+    //   计数会红而枚举只问「实现是否覆盖已列成员」（与「改钉更强真源」的纪律一致）。
+    const channelNames = handlers.map((h) => (h.match(/'([^']+)'/) ?? [])[1] ?? '?').sort();
+    eq(channelNames, ['team:delete', 'team:import', 'team:items', 'team:localPreview', 'team:preview', 'team:share'],
+      'R-35c 通道逐成员在册（items / share / import / delete / localPreview / preview）');
     let networkBlocks = 0;
     for (const h of handlers) {
       const name = (h.match(/'([^']+)'/) ?? [])[1] ?? '?';
@@ -1405,13 +1410,16 @@ async function main(): Promise<void> {
     const dispatchAt = proj.indexOf('dispatchCreatedTask(');
     ok(replayAt >= 0 && dispatchAt > replayAt,
       'W-12 ★建单即派在 `client_request_id` 重放**早返回之后**（重放不再派一次）');
+    // zx_20261112_2 B1：准入事实收成**一处具名组装**（IPC 与 E2E 共用）⇒ 键钉扫那个载体，
+    //   并额外钉"建单路确实调了它"（只建函数不接，等于没做）。`hasWorkingDir` 已下沉为 `needsLocalWorkspace`。
+    const cd = STRIPPED(`${A}/src/main/core/collab-dispatch.ts`);
+    ok(/buildCreatedTaskDispatchFacts\(db,/.test(proj), 'W-13 建单路调用具名准入事实组装');
     for (const key of ['settingOn', 'teamUnlocked', 'enrolled', 'hasDependencies',
-      'hasAttachments', 'hasWorkingDir', 'decomposed', 'category']) {
-      // 键形或简写皆可（`decomposed,` 是简写）；只看事实对象里确有这么一格。
-      ok(new RegExp(`\\b${key}\\b\\s*[:,}]`).test(proj), `W-13 准入事实逐项组齐：${key}`);
+      'hasAttachments', 'needsLocalWorkspace', 'decomposed', 'category']) {
+      ok(new RegExp(`\\b${key}\\b\\s*[:,}]`).test(cd), `W-13 准入事实逐项组齐：${key}`);
     }
     // zx_20261104_3 M1：父状态由一处真源派生（不再在 IPC 里手写"有父即拒"的布尔）。
-    ok(/\.\.\.parentDispatchFacts\(db, parent_task_id\)/.test(proj),
+    ok(/\.\.\.parentDispatchFacts\(db, input\.parentTaskId\)/.test(cd),
       'W-13b ★父任务事实由 `parentDispatchFacts` 一处派生（暂停等待态不再被误拦）');
     ok(/teamFeatureRefusal\([^)]*'multi_node'/.test(proj), 'W-14 档位闸取 Team 词表真源（不另写档位判断）');
     ok(/decomposed\s*=\s*decomposedCount\s*>\s*0/.test(proj), 'W-15 拆解事实取**真实写入行数**（不是"命中模板"就算）');
@@ -1420,8 +1428,8 @@ async function main(): Promise<void> {
     const nIpc = STRIPPED(`${A}/src/main/ipc/nodes.ipc.ts`);
     ok(/'nodes:auto-dispatch'/.test(nIpc) && /'nodes:set-auto-dispatch'/.test(nIpc),
       'W-17 开关读/写 IPC 均在册（面板点得到、也能显示最近一次）');
-    ok(/set-auto-dispatch[\s\S]{0,800}typeof enabled !== 'boolean'/.test(nIpc),
-      'W-18 写口只认显式布尔（近似真值不落库）');
+    ok(/set-auto-dispatch[\s\S]{0,900}(typeof enabled !== 'boolean'|mode === 'off')/.test(nIpc),
+      'W-18 写口只认显式三态/布尔（近似真值不落库）');
 
     const rIpc = RD(`${A}/renderer/src/lib/ipc.ts`);
     ok(/autoDispatch:\s*\(\)/.test(rIpc) && /setAutoDispatch:\s*\(/.test(rIpc),
@@ -1430,7 +1438,7 @@ async function main(): Promise<void> {
     ok(/nodesApi\.autoDispatch\(\)/.test(settingsPage) && /nodesApi\.setAutoDispatch\(/.test(settingsPage),
       'W-20 设置页开关真读真写（不是只摆一个 `useState`）');
     const peersPage = RD(`${A}/renderer/src/pages/PeersPage.tsx`);
-    ok(/nodesApi\.autoDispatch\(\)/.test(peersPage) && /auto\.data\.last/.test(peersPage),
+    ok(/nodesApi\.autoDispatch\(\)/.test(peersPage) && /auto\.data!?\.last/.test(peersPage),
       'W-21 协同面板显示开/关与最近一次自动外派（读的是审计投影）');
 
     // ── 批四：改档权限 / 留痕 / 界面判据的接线 ──────────────────────────────────
@@ -1557,7 +1565,8 @@ async function main(): Promise<void> {
       'W-56 ★导出读整册并落盘（写口收在 core：IPC 只调编排口，取数与写盘都在 core）');
     ok(/knowledge:preview/.test(rIpc) && /knowledge:export/.test(rIpc), 'W-57 渲染层两通道齐（页面点得到）');
     const pdPage = RD(`${A}/renderer/src/pages/ProjectDetailPage.tsx`);
-    ok(/import KnowledgePackCard from/.test(pdPage) && /<KnowledgePackCard projectId=\{id!\}\s*\/>/.test(pdPage),
+    // zx_20261113_4 B4：卡片新增 `onChanged`（动作后刷新首屏状态），挂载形状允许额外 props。
+    ok(/import KnowledgePackCard from/.test(pdPage) && /<KnowledgePackCard projectId=\{id!\}.*\/>/.test(pdPage),
       'W-58 项目详情页真挂载知识包卡（不止建了组件）');
     const kCard = RD(`${A}/renderer/src/components/KnowledgePackCard.tsx`);
     ok(/knowledge\.preview\(/.test(kCard) && /knowledge\.export\(/.test(kCard), 'W-59 卡片真调两个出口');

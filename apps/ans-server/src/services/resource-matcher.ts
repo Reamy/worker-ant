@@ -20,6 +20,12 @@ interface MatchRequest {
    * 与能力门槛**取严**：`max(能力下限, 本值)`——请求方知道自己的任务体量，能力表只知道类别下限。
    */
   minContextWindow?: number;
+  /**
+   * zx_20261111_1 B2「择」: **远端优先**——排序完成后按"非本地在前、本地在后"稳定重排。
+   * 只影响选到谁，**不**参与过滤（漏斗与候选数不变）；池中无远端候选时仍回退本地，
+   * 并以 `usedLocalFallback` 如实标明。未传 ⇒ 行为与改动前逐字一致。
+   */
+  preferRemote?: boolean;
 }
 
 /**
@@ -67,6 +73,8 @@ export { capabilityContextFloor, effectiveContextFloor } from './model-context-f
 export interface EndpointRow {
   id: string;
   model_id: string;
+  /** zx_20261107_1 B6：端点所属供应商 id——币种/归因按它回查目录（此前回包无此身份）。 */
+  provider_id: string;
   url: string;
   api_key_ref: string;
   model_name: string;
@@ -155,11 +163,27 @@ interface MatchResult {
   capabilityMatch?: CapabilityMatchLevel;
   /** zx_20260921_1 M2: **仅在零命中时**填充（成功路不付这份只读聚合的钱）。纯追加字段。 */
   diagnostics?: MatchFailureDiagnostics;
+  /**
+   * zx_20261111_1 B2: 请求了 `preferRemote` 且**最终只能用本地端点**时为 `true`。
+   * 仅在请求带 `preferRemote` 时出现（旧调用方回包形状不变）；"选了远端"= `false`。
+   */
+  usedLocalFallback?: boolean;
 }
 
-/** P2修③: 判断端点是否为本地(localhost)——本地Ollama不稳定，不宜作为云故障备用 */
-function isLocalEndpoint(url: string): boolean {
-  return /localhost|127\.0\.0\.1|0\.0\.0\.0/.test(url || '');
+/**
+ * P2修③: 判断端点是否为本地(localhost)——本地Ollama不稳定，不宜作为云故障备用。
+ * zx_20261111_1 B2: 补 `[::1]`（IPv6 本机回环），否则 `preferRemote` 会把它当远端选进去。
+ */
+export function isLocalEndpoint(url: string): boolean {
+  return /localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]/i.test(url || '');
+}
+
+/** zx_20261111_1 B2: 稳定重排——远端在前、本地在后，组内保持原排序（不引入新随机性）。 */
+export function orderRemoteFirst<T extends { url: string }>(rows: T[]): T[] {
+  const remote: T[] = [];
+  const local: T[] = [];
+  for (const r of rows) (isLocalEndpoint(r.url) ? local : remote).push(r);
+  return [...remote, ...local];
 }
 
 /**
@@ -187,7 +211,7 @@ export function matchOptimalModel(db: Database.Database, req: MatchRequest, reso
   // 1. 获取所有活跃端点（含关联的模型信息）
   //    ⚠ 能力**不在**此查询里硬过滤（M14）：改为下面的两段式池划分。
   let query = `
-    SELECT e.id, e.model_id, e.url, e.api_key_ref, m.name as model_name, m.max_output_tokens, m.context_window, e.priority, e.weight, e.last_latency_ms,
+    SELECT e.id, e.model_id, m.provider_id, e.url, e.api_key_ref, m.name as model_name, m.max_output_tokens, m.context_window, e.priority, e.weight, e.last_latency_ms,
            COALESCE(m.input_price_per_1k, 0.005) as input_price_per_1k,
            COALESCE(m.output_price_per_1k, 0.015) as output_price_per_1k,
            COALESCE(m.capabilities, '[]') as capabilities
@@ -262,7 +286,10 @@ export function matchOptimalModel(db: Database.Database, req: MatchRequest, reso
   }
 
   // 5. 根据策略排序（P0.5: 加入实践验证质量权重）
-  const sorted = sortByStrategy(endpoints, strategy, db, undefined, hitOf);
+  const ranked = sortByStrategy(endpoints, strategy, db, undefined, hitOf);
+  // 5.1 zx_20261111_1 B2: 远端优先——只在**顺序**上重排，候选集与漏斗不变。
+  //     本地端点（Ollama 等）可能慢到数分钟，辅助路不该被随机洗牌点到它。
+  const sorted = req.preferRemote ? orderRemoteFirst(ranked) : ranked;
 
   const primary = sorted[0] ?? null;
 
@@ -331,7 +358,15 @@ export function matchOptimalModel(db: Database.Database, req: MatchRequest, reso
     },
     '三级资源匹配完成',
   );
-  return { primary, sameProviderFallback, crossProviderFallback, fallback: crossProviderFallback, capabilityMatch };
+  return {
+    primary,
+    sameProviderFallback,
+    crossProviderFallback,
+    fallback: crossProviderFallback,
+    capabilityMatch,
+    // zx_20261111_1 B2: 只在请求了 preferRemote 时回报——旧调用方回包形状逐字不变。
+    ...(req.preferRemote ? { usedLocalFallback: primary ? isLocalEndpoint(primary.url) : false } : {}),
+  };
 }
 
 /** 端点漏斗里"四重门槛全过"那一步的步名。零命中日志与桌面文案都按符号取它，不手抄字面量。 */

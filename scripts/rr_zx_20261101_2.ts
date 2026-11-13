@@ -1440,8 +1440,9 @@ async function main(): Promise<void> {
       VALUES ('a1', 'homeassistant', 'homeassistant@a1', 'ha')`).run();
     eq(countCloudAccounts(usageDb as unknown as Parameters<typeof countCloudAccounts>[0]), 1,
       'M17 计数 0→1（正面值，不以不抛代替）');
+    // 试用起算点用**相对当前时刻**：写死日期会在 14 天后到点引爆（本轮 2026-11-13 实测）。
     usageDb.prepare('INSERT INTO wa_settings (key, value) VALUES (?, ?)')
-      .run(LICENSE_SETTING_KEYS.trialStartedAt, '2026-10-30T02:00:00.000Z');
+      .run(LICENSE_SETTING_KEYS.trialStartedAt, new Date(Date.now() - 24 * 3600 * 1000).toISOString());
     const c1 = tierUsageCounts(usageDb as unknown as UsageDb, { ...opts, cpus: 4 });
     eq([c1.tier, c1.cloudAccounts.used, c1.cloudAccounts.limit, c1.cloudAccounts.minTierLabel],
       [tierCatalog().trial.grantsTier, 1, TIER_LIMITS.team.maxCloudAccounts, null],
@@ -1459,7 +1460,7 @@ async function main(): Promise<void> {
     const kdb = new DatabaseSync(':memory:');
     kdb.exec(TIER_USE_SCHEMA);
     kdb.prepare('INSERT INTO wa_settings (key, value) VALUES (?, ?)')
-      .run(LICENSE_SETTING_KEYS.trialStartedAt, '2026-10-30T02:00:00.000Z');
+      .run(LICENSE_SETTING_KEYS.trialStartedAt, new Date(Date.now() - 24 * 3600 * 1000).toISOString());
     const cardCount = () => (kdb.prepare('SELECT COUNT(*) AS c FROM wa_knowledge_cards').get() as { c: number }).c;
     const kdbAny = kdb as unknown as Parameters<typeof recordPitfallCandidate>[0];
     const first = recordPitfallCandidate(kdbAny, 'p1', { taskTitle: '甲', failedItems: '未覆盖尾注' });

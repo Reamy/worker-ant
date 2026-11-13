@@ -46,8 +46,13 @@ import { resolveLicenseState, type LicenseSettingDb, type LicenseState, type Res
  * `plugin_install`（zx_20261029_2 M6）的接线：`main/ipc-handlers.ts` 的 `ansCall`——
  *   仅拦 `POST /api/v1/plugins/<id>/install` 这一跳；**浏览/搜索/详情/卸载/启停不挂闸**
  *   （社区档照样能看整市场，只是装不进来；已装的插件降档后照常可用——与"闸只挡搬运"同一把尺）。
+ * `deliverable_export`（zx_20261108_1 B6）的接线：`ipc/project.ipc.ts` 的 `deliverable:exportCsv`
+ *   （批量导出这一跳）· `renderer DeliverablesPage` 的导出钮（先按 `license:pro_feature` 禁用）。
+ *   **单件打开/在文件夹中显示不挂闸**——闸只挡"整批搬运成表"，不挡看自己的一件成果。
+ * `position_transfer`（zx_20261113_1 B6）的接线：`ipc/positions.ipc.ts` 的 `positions:export` /
+ *   `positions:import` 两跳（**先闸后读/写**）。**本机生成/注入/晋升/画像不挂闸**——闸只挡"搬到另一台"。
  */
-export const PRO_FEATURES = ['knowledge_export', 'knowledge_import', 'image_vision', 'long_video', 'long_document', 'domain_pack', 'knowledge_cards', 'device_discovery', 'plugin_install'] as const;
+export const PRO_FEATURES = ['knowledge_export', 'knowledge_import', 'image_vision', 'long_video', 'long_document', 'domain_pack', 'knowledge_cards', 'device_discovery', 'plugin_install', 'deliverable_export', 'position_transfer'] as const;
 export type ProFeature = (typeof PRO_FEATURES)[number];
 
 /** 人话能力名（界面/拒因直接上屏用；键类型取 `ProFeature` ⇒ 漏一项是编译期错）。 */
@@ -71,6 +76,10 @@ export const PRO_FEATURE_LABEL: Record<ProFeature, string> = {
   device_discovery: '设备发现（只读台账）',
   // 只卖「安装」这一跳：浏览/搜索/详情对任何档位开放，已装的插件不受降档影响。
   plugin_install: '市场插件安装',
+  // 只卖「整批导出成表」这一跳：单件打开/定位与列表查看对任何档位开放（不把"看自己的成果"圈走）。
+  deliverable_export: '产出物清单批量导出（CSV）',
+  // zx_20261113_1 B6「商」: 只挡「搬运」两跳（导出/导入）——本机生成、注入、晋升、画像对任何档位开放。
+  position_transfer: '岗位知识包导出/导入（跨机带走经验）',
 };
 
 /** 软闸裁定（界面直接上屏 `detail`；`unlocked` 供动作层放手/拦下）。 */

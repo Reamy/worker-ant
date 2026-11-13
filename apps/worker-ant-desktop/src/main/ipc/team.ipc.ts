@@ -20,7 +20,7 @@ import { ansFailureNote, ansSignedRequest, resolveAnsCreds, type AnsSettingDb, t
 import { teamFeatureRefusal } from '../core/team-gate.js';
 import { refusalWithContext } from '../core/tier-usage.js';
 import type { LicenseSettingDb } from '../core/license.js';
-import { importItem, listLocalItems, shareItem, TeamLibraryError, type LocalCandidates, type TeamLibraryDb } from '../core/team-library.js';
+import { importItem, listLocalItems, previewLocalItem, previewTeamBody, shareItem, TeamLibraryError, type LocalCandidates, type TeamLibraryDb } from '../core/team-library.js';
 import { recordAudit, type AuditDb } from '../core/audit-log.js';
 import { ensureNodeIdentity } from '../core/node-identity.js';
 import { isTeamItemKind, type TeamItem, type TeamItemKind } from '@worker-ant/shared-types';
@@ -108,6 +108,39 @@ export function initTeamIpc(db: Database.Database): void {
           localNodeId,
         },
       };
+    } catch (e) {
+      return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } };
+    }
+  });
+
+  // zx_20261113_5 M2「见」：两条只读预览通道——本机候选与远端条目走**同一个** body 映射。
+  //   · `team:localPreview` 传 localId（main 读本机行，组装口径与 shareItem 同一次）；
+  //   · `team:preview` 传远端条目的 body（界面已拿到，不再多跑一次网络）。
+  ipcMain.handle('team:localPreview', async (_event, input?: { kind?: unknown; localId?: unknown }) => {
+    try {
+      const gate = gateError(db);
+      if (gate) return gate;
+      const kind = input?.kind;
+      const localId = typeof input?.localId === 'string' ? input.localId : '';
+      if (!isTeamItemKind(kind)) return { error: { code: 'INVALID_REQUEST', message: `未知的共享类型：${String(kind)}` } };
+      if (!localId) return { error: { code: 'INVALID_REQUEST', message: '缺少本地条目 id' } };
+      return { data: previewLocalItem(lib, kind, localId) };
+    } catch (e) {
+      return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } };
+    }
+  });
+
+  ipcMain.handle('team:preview', async (_event, input?: { kind?: unknown; title?: unknown; body?: unknown }) => {
+    try {
+      const gate = gateError(db);
+      if (gate) return gate;
+      const kind = input?.kind;
+      if (!isTeamItemKind(kind)) return { error: { code: 'INVALID_REQUEST', message: `未知的共享类型：${String(kind)}` } };
+      const body = input?.body;
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        return { error: { code: 'INVALID_REQUEST', message: '共享条目缺少可用的 body（ANS 行可能已损坏）' } };
+      }
+      return { data: previewTeamBody(kind, typeof input?.title === 'string' ? input.title : '', body as Record<string, unknown>) };
     } catch (e) {
       return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } };
     }

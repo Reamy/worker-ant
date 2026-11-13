@@ -33,6 +33,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { checkBuildPins, stripKeepingLines } from './lib/rr-pins.js';
+// zx_20261112_1 B2「任」: task:list 行带 `position_name`（JOIN `wa_positions` 现取）⇒ 夹具须有岗位表。
+//   引生产同一份 DDL（`core/positions.ts` 是单一真源），不自抄一份。
+import { POSITIONS_DDL } from '../apps/worker-ant-desktop/src/main/core/positions.js';
 import {
   MEM_SECTION_PRIORITY,
   buildMemoryContext,
@@ -390,6 +393,7 @@ CREATE TABLE wa_tasks (id TEXT PRIMARY KEY, project_id TEXT, title TEXT NOT NULL
   priority INTEGER DEFAULT 0,
   depends_on TEXT DEFAULT '', parent_task_id TEXT DEFAULT '', source TEXT DEFAULT 'user',
   acceptance_criteria TEXT DEFAULT '',
+  position_id TEXT NOT NULL DEFAULT '',
   created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')),
   aggregate_version INTEGER DEFAULT 0, quality_score REAL);
 CREATE TABLE wa_memories (id TEXT PRIMARY KEY, project_id TEXT, task_id TEXT, content TEXT NOT NULL,
@@ -430,6 +434,7 @@ CREATE TABLE wa_knowledge_triples (
   id TEXT PRIMARY KEY, project_id TEXT, subject TEXT NOT NULL, predicate TEXT NOT NULL, object TEXT NOT NULL,
   confidence REAL DEFAULT 0.5, source TEXT DEFAULT 'agent_extraction',
   created_at TEXT DEFAULT (datetime('now')));
+${POSITIONS_DDL}
 `;
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -1600,8 +1605,11 @@ CREATE TABLE wa_audit_events (
         'D′-6a 设置页引**同一处**设置键（不手抄字面量）');
       ok(/type="number"/.test(sp) && sp.includes('machineMaxConcurrency'),
         'D′-6b 有数字输入（type="number"）与受控状态');
+      // zx_20261108_1 B5：设置写口统一收敛为 `saveSetting`（失败回滚 + 红条），故两跳都钉：
+      //   ①失焦提交调 `saveSetting(…, MACHINE_CONCURRENCY_SETTING_KEY, …)`；②写口真发 `settings:set`。
       ok(sp.includes('commitMachineMaxConcurrency') &&
-        sp.includes("invoke('settings:set', MACHINE_CONCURRENCY_SETTING_KEY"),
+        /saveSetting\([^;]*MACHINE_CONCURRENCY_SETTING_KEY/s.test(sp) &&
+        sp.includes("invoke('settings:set', key, value)"),
         'D′-6c 失焦提交写 `machine_max_concurrency`（不是只显示不保存）');
 
       // 产物（minify 后标识符可能被压缩，用户可见中文串与设置键字面量仍在）。
@@ -1658,9 +1666,13 @@ CREATE TABLE wa_audit_events (
     // zx_20261028_2 M2：列表改**显式白名单**（不再 `SELECT t.*`，整份 ctx/workflow_config 不上列表），
     //   故锚点由 `SELECT t.*` 改钉列清单 + `context_digest`——形状更紧：既须是新白名单，
     //   又须真的带摘录键、且不带 `workflow_config`（旧 `t.*` 形在这里会直接不匹配）。
-    const mList = ipc.match(/SELECT t\.id, t\.project_id,[\s\S]*?FROM wa_tasks t WHERE t\.project_id = \?[\s\S]*?\$\{page\.sql\}/);
+    // zx_20261112_1 B2: 列表行 JOIN 岗位表现取名字（只存 position_id）。锚点随之放宽到 JOIN 形，
+    //   同时**正面**钉住「JOIN 在册 + `p.name AS position_name`」——不是放弃校验。
+    const mList = ipc.match(/SELECT t\.id, t\.project_id,[\s\S]*?FROM wa_tasks t(?:\s+LEFT JOIN wa_positions p ON p\.id = t\.position_id)?\s+WHERE t\.project_id = \?[\s\S]*?\$\{page\.sql\}/);
     ok(!!mList && mList[0].includes('context_digest') && !mList[0].includes('t.workflow_config'),
       'E-2a task:list 的生产 SQL 就地取出（显式白名单 + `context_digest`，不含 workflow_config；含 `${page.sql}` 分页片段）');
+    ok(!!mList && mList[0].includes('LEFT JOIN wa_positions p ON p.id = t.position_id') && mList[0].includes('p.name AS position_name'),
+      'E-2a2 列表 SQL 带岗位 JOIN 与 `p.name AS position_name`（岗位名读时现取，不在任务行冗余存）');
     const pageRows = (lim: unknown, off: unknown) => {
       const p = resolvePage(lim, off); // 生产函数 × 生产入参
       const sql = mList![0].replace('${page.sql}', p.sql);
@@ -1902,8 +1914,9 @@ CREATE TABLE wa_audit_events (
     // ── G-1 Pro 词表 + 三档对照（long_document）──
     // zx_20261029_2 M6：`device_discovery` 自 Team 移入本表（设备发现/只读台账归专业版），
     //   同轮再入册 `plugin_install`（市场插件安装归专业版）。
-    eq([...PRO_FEATURES], ['knowledge_export', 'knowledge_import', 'image_vision', 'long_video', 'long_document', 'domain_pack', 'knowledge_cards', 'device_discovery', 'plugin_install'],
-      'G-1a `PRO_FEATURES` 逐成员枚举（zx_20261023_5 批二 `knowledge_cards` 入册；M6 `device_discovery` / `plugin_install` 入册）');
+    // zx_20261113_1 B6：`position_transfer` 入册——逐成员枚举，新成员必须在这里露面。
+    eq([...PRO_FEATURES], ['knowledge_export', 'knowledge_import', 'image_vision', 'long_video', 'long_document', 'domain_pack', 'knowledge_cards', 'device_discovery', 'plugin_install', 'deliverable_export', 'position_transfer'],
+      'G-1a `PRO_FEATURES` 逐成员枚举（zx_20261023_5 批二 `knowledge_cards` 入册；M6 `device_discovery` / `plugin_install` 入册；zx_20261108_1 B6 `deliverable_export` 入册；zx_20261113_1 B6 `position_transfer` 入册）');
     eq([...new Set(PRO_FEATURES)].sort(), Object.keys(PRO_FEATURE_LABEL).sort(),
       'G-1a2 ★人话名词表与能力词表**同集**（由 `PRO_FEATURE_LABEL` 派生，加一项须两处同时加）');
     eq(PRO_FEATURE_LABEL.long_document, '长文档分段阅读（PDF 页窗口）',
@@ -2079,6 +2092,8 @@ CREATE TABLE wa_audit_events (
   // ═══════════════════════════════════════════════════════════════════
   {
     const page = noComment(`${A}/renderer/src/pages/TaskDetailPage.tsx`);
+    // zx_20261107_1 B9：实时窗摆法搬进 `TaskProgress`——H-12 的 StreamPane 判据按符号重定向到该组件。
+    const taskProgress = noComment(`${A}/renderer/src/components/task/TaskProgress.tsx`);
 
     // ── ① 状态动作同一把锁：同步 ref 挡第二击 + 提交期/700ms 冷却共用 actionLocked ──
     ok(page.includes('if (actionBusyRef.current) return false;'),
@@ -2095,30 +2110,34 @@ CREATE TABLE wa_audit_events (
         `H-4 ${fn} 走同一把锁（beginAction + endAction，含失败路径的 finally）`);
     }
 
-    // ── ② 固定槽位：暂停态在原坐标显示**禁用**「已暂停」，恢复在另一个槽位 ──
-    const barStart = page.indexOf('<ActionSlot>');
+    // ── ② 动作分层（zx_20261112_1 B4「诊」按符号重定向）：每个态至多一个主操作；
+    //    暂停态的主操作就是「恢复」，结构上不可能在同一坐标再点出「暂停」 ──
+    const actionsLib = noComment(`${A}/renderer/src/lib/task-actions.ts`);
+    const barStart = page.indexOf('data-task-action-bar');
     const barEnd = page.indexOf('{showInject && (task.status', barStart);
     ok(barStart >= 0 && barEnd > barStart, 'H-5 动作栏区域取自生产源码（不是手写片段）');
     const bar = barStart >= 0 && barEnd > barStart ? page.slice(barStart, barEnd) : '';
-    const pausedAt = bar.indexOf("task.status==='paused' && <button disabled");
-    const pausedBranchEnd = pausedAt >= 0 ? bar.indexOf('</button>}', pausedAt) : -1;
-    const pausedBranch = pausedAt >= 0 && pausedBranchEnd > pausedAt ? bar.slice(pausedAt, pausedBranchEnd) : '';
-    ok(pausedBranch.includes('已暂停') && !pausedBranch.includes('onClick'),
-      'H-6 ★暂停态在原槽位显示**禁用**的「已暂停」（同一坐标不可能点到「恢复」）');
-    const resumeAt = bar.indexOf("(task.status==='paused'||task.status==='failed') && <button onClick={() => handleResume");
-    ok(resumeAt > pausedAt && pausedAt >= 0,
-      'H-7 「恢复」在**另一个**槽位（且位于暂停槽之后），不与「暂停」共用坐标');
-    ok(bar.includes('title="任务已暂停——「恢复」在右侧独立按钮'), 'H-8 禁用按钮自带说明（用户知道恢复去了哪）');
-    ok((bar.match(/<ActionSlot>/g) || []).length >= 4,
-      'H-9 动作栏按固定槽位排布（空槽用等宽占位撑住，后续按钮不左移右移）');
+    ok(/else if \(s === 'paused'\) primary = 'resume';/.test(actionsLib)
+      && /else if \(RUNNING\.has\(s\)\) primary = 'pause';/.test(actionsLib),
+      'H-6 ★暂停态主操作=恢复（运行态=暂停，两侧各归其态，不会同态并存）');
+    ok(!bar.includes("task.status==='paused'") && bar.includes('actionLayout?.primary') && bar.includes('runTaskAction(k)'),
+      'H-7 动作栏只摆分层结果，不再按状态各写一遍按钮条件');
+    ok(bar.includes('data-task-action-danger') && bar.includes('bg-red-50 border border-red-200 text-red-600'),
+      'H-8 危险动作单独红色一组（与日常动作分排，误点成本可见）');
+    ok((bar.match(/data-task-action="primary"/g) || []).length === 1
+      && bar.includes('data-task-action-secondary') && !page.includes('<ActionSlot>'),
+      'H-9 主操作恰一个、次要动作进「更多操作」折叠（固定槽位已退场）');
 
     // ── ③ 流式块按内容撑开：D11 把实时块移到操作栏下方（I-7b），D13 取消块内限高/滚动 ──
     ok(!page.includes('h-40 text-xs text-indigo-700'),
       'H-10 思考块不再定高（随页撑开，不冒内滚动条）');
     eq((page.match(/h-28 text-xs text-blue-700/g) || []).length, 0,
       'H-11 两处生成块不再定高（首步横幅 + 执行中状态条）');
-    ok(!page.includes('el.scrollTop = el.scrollHeight') && /function StreamPane\(\{ className, title, children \}/.test(page),
-      'H-12 ★贴底滚动随定高窗一并退场（滚动只由页面承担）');
+    // zx_20261107_1 B9：`StreamPane` 随实时块整体搬进 `TaskProgress`——按符号重定向到新载体，
+    //   同时反钉旧载体不再留贴底滚动（两处都不得有）。
+    ok(!page.includes('el.scrollTop = el.scrollHeight') && !taskProgress.includes('el.scrollTop = el.scrollHeight')
+      && /function StreamPane\(\{ className, title, children \}/.test(taskProgress),
+      'H-12 ★贴底滚动随定高窗一并退场（滚动只由页面承担；StreamPane 已在 TaskProgress）');
     eq(page.includes('max-h-48 overflow-y-auto'), false, 'H-13 旧形态 `max-h-48` 流式块清零');
     eq(page.includes('max-h-36 overflow-y-auto'), false, 'H-14 旧形态 `max-h-36` 流式块清零');
 
@@ -2129,8 +2148,8 @@ CREATE TABLE wa_audit_events (
     ok(tchunks.length === 1, 'H-15 renderer 产物含 TaskDetailPage 独立 chunk（须先跑 renderer build）', tchunks.join(',') || '缺失');
     if (tchunks.length === 1) {
       const c = fs.readFileSync(path.join(assetsDir, tchunks[0]!), 'utf-8');
-      ok(c.includes('已暂停') && !c.includes('overscroll-contain'),
-        'H-16 ★产物里「已暂停」仍在，且不再带块内滚动样式（不是只改了源码）');
+      ok(c.includes('更多操作') && c.includes('本次运行未留证据') && !c.includes('overscroll-contain'),
+        'H-16 ★产物里「更多操作」「本次运行未留证据」在册，且不再带块内滚动样式（不是只改了源码）');
     }
   }
 
@@ -2140,6 +2159,9 @@ CREATE TABLE wa_audit_events (
   {
     const tasksPage = noComment(`${A}/renderer/src/pages/TasksPage.tsx`);
     const detailPage = noComment(`${A}/renderer/src/pages/TaskDetailPage.tsx`);
+    // zx_20261107_1 B9：实时窗（LivePane/StreamPane + 三块内容 + 空窗占位）搬进 `TaskProgress`。
+    //   I-5/I-6/I-8/I-9 按符号重定向到该组件；I-7/I-7b 在页面按**挂载位**（`<TaskProgress`）与操作栏相对位置判。
+    const progressPane = noComment(`${A}/renderer/src/components/task/TaskProgress.tsx`);
 
     // ── ① 折叠状态按项目各自保存（D8） ──
     ok(/const \[collapsedByPid, setCollapsedByPid\] = useState<Record<string, Set<string>>>\(\{\}\);/.test(tasksPage),
@@ -2156,31 +2178,37 @@ CREATE TABLE wa_audit_events (
       'I-4 渲染仍读当前项目的折叠集合（行为判据不变）');
 
     // ── ② 执行期实时块移到操作栏下方、随页自然撑开（D9→D11→D13） ──
-    ok(/function LivePane\(\{ children \}: \{ children: ReactNode \}\)/.test(detailPage)
-      && /<div className="mt-2 space-y-2">/.test(detailPage)
+    ok(/function LivePane\(\{ children \}: \{ children: ReactNode \}\)/.test(progressPane)
+      && /<div className="mt-2 space-y-2">/.test(progressPane)
       && !detailPage.includes('max-h-[260px]')
-      && !detailPage.includes('h-[300px]'),
-      'I-5 ★实时块不限高、不块内滚动（D13：随页撑开，滚动只有页面一条）');
-    const liveOpen = detailPage.indexOf('<LivePane>');
-    const liveClose = detailPage.indexOf('</LivePane>', liveOpen);
-    ok(liveOpen >= 0 && liveClose > liveOpen, 'I-7 实时块取自生产源码的实时窗（不是手写片段）');
-    // D11 核心：实时块在**操作栏之后**，且标题块之前不再有 LivePane ⇒ 高度变化不影响任何按钮坐标。
-    const actionBar = detailPage.indexOf('className="flex items-center gap-2 mt-3 pt-3 border-t"');
+      && !progressPane.includes('max-h-[260px]')
+      && !detailPage.includes('h-[300px]')
+      && !progressPane.includes('h-[300px]'),
+      'I-5 ★实时块不限高、不块内滚动（D13：随页撑开，滚动只有页面一条；LivePane 已在 TaskProgress）');
+    // zx_20261107_1 B9：`<LivePane>` 本体在组件内；页面以 `<TaskProgress` 挂载位代之。
+    const liveOpen = progressPane.indexOf('<LivePane>');
+    const liveClose = progressPane.indexOf('</LivePane>', liveOpen);
+    const mountAt = detailPage.indexOf('<TaskProgress');
+    ok(liveOpen >= 0 && liveClose > liveOpen && mountAt >= 0,
+      'I-7 实时块取自生产源码的实时窗（不是手写片段；页面经 `<TaskProgress` 挂载）');
+    // D11 核心：实时块在**操作栏之后**，且标题块之前不再有实时窗 ⇒ 高度变化不影响任何按钮坐标。
+    // zx_20261112_1 B4「诊」：操作栏改由分层真源驱动，挂 `data-task-action-bar` 稳定标记 ⇒ 按符号重定向。
+    const actionBar = detailPage.indexOf('data-task-action-bar');
     const titleBlock = detailPage.indexOf('<div className="flex items-start justify-between mb-3">');
-    ok(liveOpen > actionBar && titleBlock > 0 && titleBlock < actionBar,
+    ok(mountAt > actionBar && titleBlock > 0 && titleBlock < actionBar,
       'I-7b ★实时块排在操作栏**之后**（标题→元信息→按钮→实时块；按钮不再被顶走）');
-    const live = liveOpen >= 0 && liveClose > liveOpen ? detailPage.slice(liveOpen, liveClose) : '';
+    const live = liveOpen >= 0 && liveClose > liveOpen ? progressPane.slice(liveOpen, liveClose) : '';
     ok(live.length > 0 && !live.includes('overflow-y-auto') && !live.includes('h-40 ') && !live.includes('h-28 '),
       'I-6 实时窗内的思考/生成块无定高、无内滚动（不冒第二条滚动条）');
     for (const [label, needle] of [
       ['思考块', 'streamingReasoning &&'],
       ['首步流式横幅', 'streamingText && !liveStatus'],
-      ['执行中状态条', 'liveStatus && (task.status'],
-      ['心跳块', 'hbFresh && heartbeat'],
+      ['执行中状态条', 'liveStatus && <div'],
+      ['心跳块', 'heartbeatFresh && heartbeat'],
     ] as const) {
       ok(live.includes(needle), `I-8 ${label}确在实时窗内（位于操作栏下方）`);
     }
-    ok(detailPage.includes('等待执行输出'), 'I-9 空窗期有如实占位（不空白、不假装无输出）');
+    ok(progressPane.includes('等待执行输出'), 'I-9 空窗期有如实占位（不空白、不假装无输出；TaskProgress）');
 
     // ── ③ 产物核对：构建后真带上无限高窗与占位 ──
     const assetsDir2 = path.join(root, A, 'renderer/dist/assets');

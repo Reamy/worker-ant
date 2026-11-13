@@ -91,7 +91,9 @@ ok(/\)\.requirement_card && \(\s*$/.test(tdPage.split('zx_20260904_4 T1')[1]?.sp
   '需求理解卡无"仅执行中"状态条件（常驻可复盘）');
 
 console.log('S3 (3b/3e) 产出物↔任务 + retired 接线');
-ok(pjIpc.includes('t.title as task_title') && pjIpc.includes('LEFT JOIN wa_tasks t ON t.id = d.task_id'),
+// zx_20261108_1 B6：列表取数搬到 core/deliverable-query.ts（JOIN 原句随迁），按符号重定向。
+const dqSrc = read('src/main/core/deliverable-query.ts');
+ok(dqSrc.includes('t.title as task_title') && dqSrc.includes('LEFT JOIN wa_tasks t ON t.id = d.task_id'),
   'deliverable:list JOIN 补任务标题（产出物↔任务溯源）');
 // zx_20260913 M2-1: task:get 产出物改「本任务及子树」聚合(WHERE d.task_id IN ownerIds)——旧单任务
 // `SELECT * FROM wa_deliverables WHERE task_id = ?` 字面量已按方案删除。

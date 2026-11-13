@@ -167,18 +167,27 @@ export const AUX_LLM_STRATEGY = 'cost-optimal';
 export type AuxStrategy = typeof AUX_LLM_STRATEGY | 'balanced';
 
 /**
- * 辅助路的选型请求。**键序固定**（`capabilities, strategy, excludeCapabilities`）——
- * `rr_zx_20260921.ts` 按 `JSON.stringify` 与本函数逐字比对拆解请求，键序漂了就会红。
+ * 辅助路的选型请求。**键序固定**（`capabilities, strategy, excludeCapabilities, preferRemote`）——
+ * `rr_zx_20260924.ts` 的 M6-1 按 `JSON.stringify` 与本函数逐字比对，键序漂了就会红。
+ *
+ * zx_20261111_1 B2「择」: **辅助路一律远端优先**（`preferRemote: true`）——本地端点可能慢到
+ *   数分钟（实测 Ollama `qwen3.5:9b` 2 分 50 秒），辅助路不该被加权随机点到它。池中无远端时
+ *   ANS 仍回退本地并在回包带 `usedLocalFallback`，不报"无模型"。主执行路（`buildModelRequest`）
+ *   **不带**此键，作用域只到辅助路。
  */
-export function auxModelRequest(input: { strategy?: AuxStrategy } = {}): {
+export function auxModelRequest(input: { strategy?: AuxStrategy; allowReasoning?: boolean } = {}): {
   capabilities: ('chat')[];
   strategy: AuxStrategy;
   excludeCapabilities: ('reasoning')[];
+  preferRemote: true;
 } {
   return {
     capabilities: [...AUX_LLM_CAPABILITIES],
     strategy: input.strategy ?? AUX_LLM_STRATEGY,
-    excludeCapabilities: [...AUX_LLM_EXCLUDE_CAPABILITIES],
+    // zx_20261111_2 追加：排除 reasoning 是**缺省**口径（防思考吃光输出预算），不是铁律——
+    //   调用方明确要求放宽（池中只剩思考模型）时才传 true。缺省返回值与旧版逐字节相同。
+    excludeCapabilities: input.allowReasoning ? [] : [...AUX_LLM_EXCLUDE_CAPABILITIES],
+    preferRemote: true,
   };
 }
 

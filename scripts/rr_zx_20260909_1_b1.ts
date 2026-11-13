@@ -158,7 +158,17 @@ console.log('A1·agent 判定介入暂停 → pauseTask(note) → markPauseNeede
   // zx_20261104_1 M2「凭」: 再增 1 处——「预算/步数到顶且本轮无产出」不再把"续跑了一轮却没新东西"判好，
   //   按 `quality_below_bar` 置 paused 并带 note。这是**第 7 种**：与前 6 种并列，不得并进任何既有类。
   //   计数改 14。
-  ok(pauseCalls === 14, 'agent-executor 14 个暂停分支均经 pauseTask 带 note(即告知创建人)：6 个介入暂停(硬暂停级别2/无进展/产出多次未落盘/内容不充分/过早结束 + 补③ finalize partial 悬置) + 2 个等待子任务(finalize 收口闸/run_close 闸) + 1 个无产出证据(run_close，P0-1) + 1 个失败子未处置(blockFailedChildrenCompletion，P0-3c) + 1 个验收未通过(run_close 收口，zx_20260916_1 M1/A1) + 1 个验收未判成(run_close 收口，zx_20260923_1 M2) + 1 个 SDK 重试用尽(run 内，zx_20260923 M1-a/T1) + 1 个到顶且本轮无产出(run 收口，zx_20261104_1 M2)', `出现 ${pauseCalls} 处(期望14)`);
+  // zx_20261108_1 B5「诚」: 再增 1 处——Token/费用预算策略在**执行循环逐拍**按真实累计触发时置 paused
+  //   并带 note（`exec-step.ts` 的 `evaluateBudgetPolicies` 动作）。这是**第 8 种**：不是介入暂停、
+  //   不是等子、不是内容判据，而是"运行中成本越线"（此前成本条件以 `taskTokens: 0` 在执行前评 ⇒
+  //   永不触发；设置页却写着"上限"）。计数改 15，标签照例逐种分开说，不得并进任何既有类。
+  // zx_20261110_2 B6「核」: 再增 1 处——`score<20` 分支里"盘上有改动、步数达阈、却没登记产出物"不再落 failed，
+  //   改置 paused（`output_insufficient_but_changed`）等补登记。这是**第 9 种**：与"无产出证据"同族
+  //   （都是"账上没东西"），但判据相反（**盘上确有改动**）——合并即把"干了没记账"与"没干"混成一件事。
+  //   计数改 16，标签照例逐种分开说。
+  // zx_20261113_2 M4：收口段新增「用户侧动作请求」暂停口（`exec-finalize.ts`，awaiting_input）⇒ 16→17。
+  //   按新真源逐成员补入枚举，不是放宽为">=16"。
+  ok(pauseCalls === 17, 'agent-executor 17 个暂停分支均经 pauseTask 带 note(即告知创建人)：6 个介入暂停(硬暂停级别2/无进展/产出多次未落盘/内容不充分/过早结束 + 补③ finalize partial 悬置) + 2 个等待子任务(finalize 收口闸/run_close 闸) + 1 个无产出证据(run_close，P0-1) + 1 个失败子未处置(blockFailedChildrenCompletion，P0-3c) + 1 个验收未通过(run_close 收口，zx_20260916_1 M1/A1) + 1 个验收未判成(run_close 收口，zx_20260923_1 M2) + 1 个 SDK 重试用尽(run 内，zx_20260923 M1-a/T1) + 1 个到顶且本轮无产出(run 收口，zx_20261104_1 M2) + 1 个执行中预算策略触发(exec-step，zx_20261108_1 B5) + 1 个有改动但未登记产出物(score<20 且步数达阈，zx_20261110_2 B6) + 1 个收口用户侧动作(exec-finalize，zx_20261113_2 M4，awaiting_input)', `出现 ${pauseCalls} 处(期望17)`);
   ok(exe.includes('疑似工具循环') && exe.includes('疑似空转') && exe.includes('产出文件多次未落盘') && exe.includes('充分性校验') && exe.includes('分未达交付标准'),
     'agent-executor 各分支理由文字正确(工具循环/空转/未落盘/不充分/过早结束质量)');
   // 补③(§十三): finalize partial 悬置分支(置 paused + paused_partial)须通知创建人
@@ -218,7 +228,8 @@ console.log('A2/A1·共享助手接线(index pushImCompletion 收敛 / im.ipc �
   const setp = rd('apps/worker-ant-desktop/renderer/src/pages/SettingsPage.tsx');
   ok(setp.includes("key: 'notify_to_creator'") && setp.includes("key: 'notify_pause_needed'"),
     '补⑤ Settings 加「IM 通知」组两布尔开关行(notify_to_creator/notify_pause_needed)');
-  ok(setp.includes('toggleIm') && /settings:set', `im\.\$\{key\}`, on \? 'true' : 'false'/.test(setp),
+  // zx_20261108_1 B5：写口收敛到统一 `saveSetting`（写失败回滚 + 可见原因）。
+  ok(setp.includes('toggleIm') && /saveSetting\([^)]*`im\.\$\{key\}`, on \? 'true' : 'false'/.test(setp),
     '补⑤ im.* 布尔键写 true/false(与消费方 !==\'false\' 同口径, 非 0/1)');
   ok(setp.includes("commitOutboxMinutes") && setp.includes("'im.outbox_retry_min'"),
     '补⑤ 出站补发窗口(im.outbox_retry_min 分钟, 0=关)可视化编辑且钳位 0-1440');

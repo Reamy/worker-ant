@@ -54,8 +54,8 @@ const KEYWORDS = new Set(
     'select from where group by order having limit offset join left right inner outer full cross on as and or not null is in like glob ' +
     'between exists case when then else end union all distinct insert into values update set delete returning with recursive asc desc ' +
     'cast collate escape primary key unique index using natural default over partition rows range preceding following unbounded current ' +
-    'row filter window do conflict nothing matched excluded new old true false integer text real blob numeric begin commit transaction ' +
-    'replace ignore pragma vacuum analyze explain query plan temp match against rank'
+    'row filter window do conflict nothing matched excluded new old true false integer text real blob numeric begin commit rollback transaction ' +
+    'savepoint release replace ignore pragma vacuum analyze explain query plan temp match against rank'
   ).split(/\s+/).map((s) => s.toUpperCase()),
 );
 
@@ -122,23 +122,30 @@ export function buildSchemaFromSources(
   const db = new DatabaseSync(':memory:');
   const failed: string[] = [];
   const files = srcDirs.flatMap((d) => walkTs(d));
+  // **两遍**：先建齐所有 CREATE，再跑全部 ALTER。生产顺序本来就是「建表 → 迁移补列」，
+  //   而文件遍历顺序（如 `im-outbox.ts` 先于 `database.ts`）会让 ALTER 撞在 CREATE 之前，
+  //   报成"no such table"——那是判据自己的顺序缺陷，不是 DDL 缺陷。
+  const creates: Array<{ table: string; ddl: string }> = [];
+  const alters: Array<{ table: string; column: string; ddl: string }> = [];
   for (const f of files) {
     const src = fs.readFileSync(f, 'utf8');
-    for (const { table, ddl } of extractCreateStatements(src)) {
-      try {
-        db.exec(ddl);
-      } catch (err) {
-        failed.push(`${table}: ${(err as Error).message}`);
-      }
+    creates.push(...extractCreateStatements(src));
+    alters.push(...extractAlterAddColumns(src));
+  }
+  for (const { table, ddl } of creates) {
+    try {
+      db.exec(ddl);
+    } catch (err) {
+      failed.push(`${table}: ${(err as Error).message}`);
     }
-    for (const { table, ddl } of extractAlterAddColumns(src)) {
-      try {
-        db.exec(ddl);
-      } catch (err) {
-        // 同表在多文件/多处建列 ⇒ 后到的 ALTER 撞"duplicate column"——列已在，非缺陷。
-        if (!/duplicate column name/i.test((err as Error).message)) {
-          failed.push(`${table} (alter): ${(err as Error).message}`);
-        }
+  }
+  for (const { table, ddl } of alters) {
+    try {
+      db.exec(ddl);
+    } catch (err) {
+      // 同表在多文件/多处建列 ⇒ 后到的 ALTER 撞"duplicate column"——列已在，非缺陷。
+      if (!/duplicate column name/i.test((err as Error).message)) {
+        failed.push(`${table} (alter): ${(err as Error).message}`);
       }
     }
   }

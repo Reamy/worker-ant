@@ -18,6 +18,7 @@ import {
   createDomainPack,
   domainPackInjectionStats,
   listDomainPacks,
+  readDomainPackDetail,
   unapplyDomainPack,
 } from '../core/domain-pack.js';
 
@@ -52,6 +53,19 @@ export function initPacksIpc(db: Database.Database): void {
       });
       if (!outcome.ok) return fail(outcome.code, outcome.reason);
       return { data: { id: outcome.id, pack: outcome.pack } };
+    } catch (e) {
+      return fail('INTERNAL', (e as Error)?.message || String(e));
+    }
+  });
+
+  // zx_20261113_5 M3「口」：单包详情（只读，**不挂 Pro 闸**——看不是启用）。
+  ipcMain.handle('packs:detail', async (_event, input?: { packId?: unknown }) => {
+    try {
+      const packId = str(input?.packId);
+      if (!packId) return fail('INVALID_REQUEST', '缺少领域包 id');
+      const detail = readDomainPackDetail(db as never, packId);
+      if (!detail) return fail('NO_SUCH_PACK', `领域包不存在或包体已损坏：${packId}`);
+      return { data: detail };
     } catch (e) {
       return fail('INTERNAL', (e as Error)?.message || String(e));
     }

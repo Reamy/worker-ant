@@ -19,6 +19,7 @@ import { isNodeEnrolled } from './node-heartbeat.js';
 import { teamFeatureRefusal } from './team-gate.js';
 import type { LicenseSettingDb } from './license.js';
 import { dispatchNodeRequest, type DispatchEventSink, type DispatchIo } from './node-dispatcher.js';
+import { readProjectDispatchModeRaw } from './project-dispatch-mode.js';
 import {
   markRemoteAssigned,
   remoteAssignOf,
@@ -44,6 +45,7 @@ import {
 } from './task-accounting.js';
 import { taskDepState } from './task-dep-gate.js';
 import { routeCategoryForTask } from './task-routing.js';
+import { getPosition, positionDispatchSummary, type DispatchPosition, type PositionDb } from './positions.js';
 import { statusWord } from './task-notice.js';
 import { UPSTREAM_MAX_CHARS, UPSTREAM_MAX_ITEMS, type UpstreamSummaryItem } from './exec-prelude.js';
 import { createLogger } from './logger.js';
@@ -243,8 +245,17 @@ export interface CreateDispatchFacts extends ParentDispatchFacts {
   depState?: DepState;
   /** 有附件（附件落在本机盘上，他机读不到）。 */
   hasAttachments: boolean;
-  /** 项目有 `working_dir`（外派节点没有这个本机目录）。 */
-  hasWorkingDir: boolean;
+  /**
+   * **这个任务**是否需要本机工作目录（zx_20261112_2 B1）。
+   * 真源 `taskNeedsLocalWorkspace`：项目有 `working_dir` 时，只有「纯调研且题面无仓库信号」的任务判 `false`。
+   * 新调用方传这个；旧调用方只传 `hasWorkingDir` 时按旧语义（项目级）处理，行为不变。
+   */
+  needsLocalWorkspace?: boolean;
+  /**
+   * 项目有 `working_dir`（外派节点没有这个本机目录）。
+   * @deprecated 旧口径（项目级一刀切）。仅为兼容既有调用方保留；新调用方用 `needsLocalWorkspace`。
+   */
+  hasWorkingDir?: boolean;
   /** 本次建单触发了模板拆解（拆解后子任务才是工作单元）。 */
   decomposed: boolean;
   /** 任务形态路由出的类目；`null` = 对话/无法归类（不外派）。 */
@@ -255,10 +266,18 @@ export interface CreateDispatchFacts extends ParentDispatchFacts {
    * 缺省（无此键）不改变旧行为。
    */
   projectTargeted?: boolean;
+  /**
+   * zx_20261110_1 B3：项目**显式**把 `dispatch_mode` 设成 `off`。
+   *   缺省（无此键）不改变旧行为——全局缺省 off 只是"不自动扫拍"，与建单开关是两件事，
+   *   据此拦建单会把 Team 档缺省开一并打死（见方案 B3 实施注记）。
+   */
+  projectDispatchOff?: boolean;
 }
 
 export type CreateDispatchReason =
   | 'eligible'
+  /** zx_20261110_1 B3：项目显式关闭外派——比全局开关更具体，最先说。 */
+  | 'project-mode-off'
   | 'setting-off'
   | 'team-locked'
   | 'not-enrolled'
@@ -294,6 +313,7 @@ export interface CreateDispatchDecision {
  */
 export function decideCreateDispatch(f: CreateDispatchFacts): CreateDispatchDecision {
   const deny = (reason: CreateDispatchReason): CreateDispatchDecision => ({ eligible: false, reason, category: null });
+  if (f.projectDispatchOff === true) return deny('project-mode-off');
   if (!f.settingOn) return deny('setting-off');
   if (!f.teamUnlocked) return deny('team-locked');
   if (!f.enrolled) return deny('not-enrolled');
@@ -308,7 +328,10 @@ export function decideCreateDispatch(f: CreateDispatchFacts): CreateDispatchDeci
     if (f.depState === undefined) return deny('has-dependencies');
   }
   if (f.hasAttachments) return deny('has-attachments');
-  if (f.hasWorkingDir) return deny('has-working-dir');
+  // zx_20261112_2 B1：「项目有工作目录」一刀切下沉为「这个任务需不需要本机工作目录」。
+  //   新调用方给 `needsLocalWorkspace`；只给旧键的调用方按项目级旧语义（逐字节不变）。
+  const needsLocal = f.needsLocalWorkspace ?? f.hasWorkingDir;
+  if (needsLocal === true) return deny('has-working-dir');
   if (f.decomposed) return deny('decomposed');
   // zx_20261029_2 M7：「缺省开」不等于「无条件外派」——本机还有余力就先在本机跑，满负荷才溢出。
   //   显式开启（用户在设置里自己打的开关）不受此限：那是用户的主动选择，不是我们替他做的默认。
@@ -324,6 +347,7 @@ export function decideCreateDispatch(f: CreateDispatchFacts): CreateDispatchDeci
 /** 理由 → 人话（界面/回执直接上屏；机器码仍保留在 `reason` 里供程序判定）。 */
 export const CREATE_DISPATCH_REASON_LABEL: Record<CreateDispatchReason, string> = {
   eligible: '符合外派条件',
+  'project-mode-off': '项目已关闭外派（只在本机跑）',
   'setting-off': '自动外派开关未开',
   'team-locked': 'Team 档未解锁多机协同',
   'not-enrolled': '本机尚未入网',
@@ -335,7 +359,7 @@ export const CREATE_DISPATCH_REASON_LABEL: Record<CreateDispatchReason, string> 
   'dependencies-waiting': '前置尚未完成（完成后自动派发）',
   'dependencies-dead': '前置已失败/归档，不会自动解锁',
   'has-attachments': '任务带附件（附件在本机盘上）',
-  'has-working-dir': '项目指定了本机工作目录',
+  'has-working-dir': '任务需要本机工作目录（代码类或题面涉及本机仓库/文件）',
   decomposed: '已按模板拆解（工作单元是子任务）',
   'local-capacity': '本机尚有余力（满负荷才溢出到其他节点）',
   'no-category': '任务形态不明确（留在本机）',
@@ -405,6 +429,22 @@ function alreadyDispatched(db: Database.Database, taskId: string): boolean {
   return ctx !== undefined && remoteAssignOf(ctx) !== null;
 }
 
+/**
+ * 项目是否**显式**关闭外派（`wa_projects.context_json.dispatch_mode === 'off'`）。
+ * 读不到项目行/坏 JSON ⇒ `false`（不拦，交既有闸与 ANS 侧把关）。
+ */
+export function projectDispatchOff(db: Database.Database, projectId: string): boolean {
+  if (!projectId) return false;
+  try {
+    const row = db.prepare('SELECT context_json FROM wa_projects WHERE id = ?').get(projectId) as
+      | { context_json?: unknown }
+      | undefined;
+    return readProjectDispatchModeRaw(row?.context_json as string | null | undefined) === 'off';
+  } catch {
+    return false;
+  }
+}
+
 /** 任务所属项目 id（读不到 ⇒ `''`——空项目即"没有项目分工"）。 */
 export function projectIdOfTask(db: Database.Database, taskId: string): string {
   try {
@@ -439,6 +479,11 @@ export interface DispatchPayload {
   acceptance_criteria: string;
   /** 前置任务摘要（无依赖/读不到 ⇒ 不出现该键）。 */
   upstream?: DispatchUpstream[];
+  /**
+   * zx_20261112_1 B5：任务点名的岗位（`{id,name,version,summary}`，`summary` ≤600 且**不含知识与经验**）。
+   * 未指派岗位/岗位已删 ⇒ 不出现该键（旧载荷形状逐字节不变）。
+   */
+  position?: DispatchPosition;
 }
 
 /**
@@ -446,7 +491,11 @@ export interface DispatchPayload {
  * ⚠ 三项**不拼接、不加工**——远端要的是"用户写的那句话本身"（验收标准若被塞进描述里，
  *   远端就再也分不出哪是验收、哪是正文；判卷读的正是这个字段）。
  */
-export function buildDispatchPayload(task: CreatedTaskInput, upstream?: readonly DispatchUpstream[]): DispatchPayload {
+export function buildDispatchPayload(
+  task: CreatedTaskInput,
+  upstream?: readonly DispatchUpstream[],
+  position?: DispatchPosition | null,
+): DispatchPayload {
   const base: DispatchPayload = {
     prompt: buildDispatchPrompt(task),
     title: String(task.title ?? '').trim(),
@@ -454,7 +503,34 @@ export function buildDispatchPayload(task: CreatedTaskInput, upstream?: readonly
     acceptance_criteria: String(task.acceptanceCriteria ?? '').trim(),
   };
   const kept = (upstream ?? []).filter((u) => u && typeof u.id === 'string' && u.id !== '');
-  return kept.length > 0 ? { ...base, upstream: kept.slice(0, UPSTREAM_MAX_ITEMS) } : base;
+  // B5：无岗位 / 无上游时**不出现新键**——旧载荷形状与字节不变。
+  return {
+    ...base,
+    ...(kept.length > 0 ? { upstream: kept.slice(0, UPSTREAM_MAX_ITEMS) } : {}),
+    ...(position ? { position } : {}),
+  };
+}
+
+/**
+ * zx_20261112_1 B5：任务指派岗位 → 跨机派单里的 `position` 段（`null`＝未指派/岗位已删/读不到）。
+ * 摘要只取说明 + 至多 3 条规范（`positionDispatchSummary`）；**知识/经验不出本机**。
+ */
+export function dispatchPositionOfTask(db: Database.Database, taskId: string): DispatchPosition | null {
+  try {
+    const row = db.prepare('SELECT position_id FROM wa_tasks WHERE id = ?').get(taskId) as { position_id?: unknown } | undefined;
+    const positionId = String(row?.position_id ?? '').trim();
+    if (!positionId) return null;
+    const position = getPosition(db as unknown as PositionDb, positionId);
+    if (!position) return null;
+    return {
+      id: position.id,
+      name: position.name,
+      version: position.version,
+      summary: positionDispatchSummary(position),
+    };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -518,7 +594,9 @@ export async function dispatchCreatedTask(
   // zx_20261101_2 M3：项目分工由库现读（调用方不必逐处记着传）；显式给了以显式为准。
   const projectId = projectIdOfTask(db, task.id);
   const projectTargeted = facts.projectTargeted ?? (projectId !== '' && projectHasNodePolicy(db as unknown as ProjectNodePolicyDb, projectId));
-  const decision = decideCreateDispatch({ ...facts, projectTargeted });
+  // zx_20261110_1 B3：项目显式关闭外派 ⇒ 建单这一路也停（调用方无须再记着传）。
+  const dispatchOff = facts.projectDispatchOff ?? projectDispatchOff(db, projectId);
+  const decision = decideCreateDispatch({ ...facts, projectTargeted, projectDispatchOff: dispatchOff });
   if (!decision.eligible) return { attempted: false, ok: false, reason: decision.reason };
   const category = decision.category!;
 
@@ -563,13 +641,15 @@ export async function dispatchCreatedTask(
   // zx_20261023_5 批一：依赖已满足的任务，把"前置做完了什么"随单带走——远端没有本机依赖图，
   //   这份摘要是它唯一的上游依据（`exec-prelude` 渲染成上游块）。读不到 ⇒ 空数组，照常派。
   const upstream = collectUpstreamSummaries(db, task.id);
+  // B5：指派了岗位 ⇒ 随单带上「岗位名+说明+规范」摘要（≤600，不含知识与经验）；未指派 ⇒ 不出现该键。
+  const position = dispatchPositionOfTask(db, task.id);
   let result;
   try {
     result = await dispatchNodeRequest(
       db,
       {
         category,
-        payload: { ...buildDispatchPayload(task, upstream) },
+        payload: { ...buildDispatchPayload(task, upstream, position) },
         requireTarget: true,
         ...(policy ? { policy: toWireDispatchPolicy(policy) } : {}),
       },
@@ -601,6 +681,56 @@ export async function dispatchCreatedTask(
   clearOffer();
   if (!marked) return { attempted: true, ok: false, reason: 'assign-mark-failed' };
   return { attempted: true, ok: true, reason: '', nodeId: result.targetNodeId };
+}
+
+/**
+ * zx_20261112_2 B1 M4：把一次派发结局**只合并**进 `context_json.dispatch_decision`。
+ *
+ * 纪律（工蚁第三次踩过 JSON 列整体覆写的坑）：只覆盖这一个键，兄弟键逐字节保留；
+ *   解析失败/空 ⇒ 以 `{ dispatch_decision }` 起新对象并带 `_parse_error`，不假装原内容为空。
+ * 纯函数、不改库；写库由 `persistDispatchDecision` 一处做。
+ */
+export function mergeDispatchDecision(
+  rawCtx: unknown,
+  decision: { attempted: boolean; ok: boolean; reason: string; nodeId?: string; at: string },
+): { json: string; parsed: boolean } {
+  const s = rawCtx == null ? '' : Buffer.isBuffer(rawCtx) ? rawCtx.toString('utf-8') : String(rawCtx);
+  let obj: Record<string, unknown> = {};
+  let parsed = true;
+  if (s.trim()) {
+    try {
+      const o: unknown = JSON.parse(s);
+      if (o && typeof o === 'object' && !Array.isArray(o)) obj = o as Record<string, unknown>;
+      else parsed = false;
+    } catch { parsed = false; }
+  }
+  obj.dispatch_decision = decision;
+  if (!parsed) obj._parse_error = true;
+  return { json: JSON.stringify(obj), parsed };
+}
+
+/** 把派发结局落库（读-合并-写一处；永不抛）。 */
+export function persistDispatchDecision(
+  db: Database.Database,
+  taskId: string,
+  outcome: CreateDispatchOutcome,
+  atIso = new Date().toISOString(),
+): boolean {
+  try {
+    const raw = readTaskContextJson(db, taskId);
+    const { json } = mergeDispatchDecision(raw, {
+      attempted: outcome.attempted,
+      ok: outcome.ok,
+      reason: outcome.reason,
+      ...(outcome.nodeId ? { nodeId: outcome.nodeId } : {}),
+      at: atIso,
+    });
+    db.prepare('UPDATE wa_tasks SET context_json = ? WHERE id = ?').run(json, taskId);
+    return true;
+  } catch (e) {
+    logger.warn({ taskId, err: (e as Error)?.message }, '派发结局落库失败（不影响建单）');
+    return false;
+  }
 }
 
 /** context_json 各形态 → 对象；坏 JSON / 非对象一律 `{}`（不把"读不成"当成有值）。 */
@@ -688,6 +818,8 @@ export function buildExistingTaskDispatchFacts(db: Database.Database, taskId: st
   } catch {
     policy = { enabled: false, source: 'explicit', reason: '读不到开关设置，按关闭处理' };
   }
+  const category = routeCategoryForTask(row?.title, row?.description);
+  const hasAttachments = Array.isArray(ctx.attachments) && ctx.attachments.length > 0;
   return {
     settingOn: policy.enabled,
     autoDispatchSource: policy.source,
@@ -697,11 +829,20 @@ export function buildExistingTaskDispatchFacts(db: Database.Database, taskId: st
     ...parentFactsOfRow(row?.parent_task_id, row?.parent_id, row?.parent_status),
     hasDependencies: deps.length > 0,
     depState,
-    hasAttachments: Array.isArray(ctx.attachments) && ctx.attachments.length > 0,
-    hasWorkingDir: projectHasWorkingDir(db, String(row?.project_id ?? '')),
+    hasAttachments,
+    // zx_20261112_2 B1：与建单路同一把尺——任务级而非项目级。
+    needsLocalWorkspace: taskNeedsLocalWorkspace({
+      projectHasWorkingDir: projectHasWorkingDir(db, String(row?.project_id ?? '')),
+      category,
+      title: row?.title,
+      description: row?.description,
+      hasAttachments,
+    }),
     decomposed: ctx.auto_decomposed === true,
-    category: routeCategoryForTask(row?.title, row?.description),
+    category,
     projectTargeted: projectHasNodePolicy(db as unknown as ProjectNodePolicyDb, String(row?.project_id ?? '')),
+    // zx_20261110_1 B3：任务详情的「派单理由」与真派同一把尺——项目关了外派也照实说。
+    projectDispatchOff: projectDispatchOff(db, String(row?.project_id ?? '')),
   };
 }
 
@@ -1008,6 +1149,87 @@ export function localHasFreeSlot(db: Database.Database): boolean {
   } catch {
     return true;
   }
+}
+
+/**
+ * 题面里出现这些词，就认为任务要**碰本机仓库/文件**——保守：宁可留本机，不把读不到目录的活送出去。
+ * 单独成常量，rr 可直引；改词表须同步 `taskNeedsLocalWorkspace` 的两只反例标本。
+ */
+export const REPO_BOUND_TOKENS: readonly RegExp[] = [
+  /代码|仓库|代码库|工程|目录|文件|路径|提交|分支|合并|拉取|推送|依赖|编译|构建|测试|包管理/i,
+  /README|package\.json|pull request|\bPR\b|\bgit\b|\bcommit\b|\bpush\b|\bpull\b|\bmerge\b|\bbranch\b|\bbuild\b|\btest\b/i,
+];
+
+/**
+ * 「**这个任务**」是否需要本机工作目录（纯函数，零 IO）。
+ *
+ * 病根（zx_20261112_2 B1）：建单派发此前按**项目**一刀切——项目有 `working_dir` 就整项目不外派。
+ *   同一项目里「调研向量库选型」这种不碰仓库的活，也被一起钉在本机。
+ *
+ * 判「不需要」须**同时**满足（先假设需要，只有证据充分才放行）：
+ *   ① 项目确实有 `working_dir`（没有则本判据不适用 ⇒ `false`）；
+ *   ② 无附件（附件在本机盘上）；
+ *   ③ 外派类目是 `research`（`code`/`text`/`project_task`/`media`/`device`/`null` 一律留本机）；
+ *   ④ 题面不含任何 `REPO_BOUND_TOKENS`（`分析代码库` 会被判成 research，但它必须读本机仓库）。
+ * 任一不满足 ⇒ `true`（留本机）。远端失败/超时仍由 `node-remote-driver` 收回本机重跑。
+ */
+export function taskNeedsLocalWorkspace(input: {
+  projectHasWorkingDir: boolean;
+  category: NodeCardCategory | null;
+  title?: unknown;
+  description?: unknown;
+  hasAttachments?: boolean;
+}): boolean {
+  if (!input.projectHasWorkingDir) return false;
+  if (input.hasAttachments === true) return true;
+  if (input.category !== 'research') return true;
+  const text = `${String(input.title ?? '')} ${String(input.description ?? '')}`;
+  return REPO_BOUND_TOKENS.some((re) => re.test(text));
+}
+
+/**
+ * **建单路径**的准入事实组装（zx_20261112_2 B1）：IPC 与 E2E 共用一处，
+ * 不在调用点手拼（手拼两份即两把尺——本轮刚把工作目录判据收成一处）。
+ */
+export function buildCreatedTaskDispatchFacts(
+  db: Database.Database,
+  input: {
+    taskId: string;
+    title: unknown;
+    description: unknown;
+    parentTaskId?: unknown;
+    hasAttachments: boolean;
+    decomposed: boolean;
+    projectId: string;
+  },
+): CreateDispatchFacts {
+  const policy = autoDispatchPolicy(db as unknown as NodeSettingDb & LicenseSettingDb);
+  const category = routeCategoryForTask(input.title, input.description);
+  let dependsOn: unknown;
+  try {
+    dependsOn = (db.prepare('SELECT depends_on FROM wa_tasks WHERE id = ?').get(input.taskId) as { depends_on?: unknown } | undefined)?.depends_on;
+  } catch { dependsOn = undefined; }
+  return {
+    settingOn: policy.enabled,
+    autoDispatchSource: policy.source,
+    localHasFreeSlot: localHasFreeSlot(db),
+    teamUnlocked: teamFeatureRefusal(db as unknown as LicenseSettingDb, 'multi_node') === null,
+    enrolled: isNodeEnrolled(db as unknown as NodeSettingDb),
+    ...parentDispatchFacts(db, input.parentTaskId),
+    hasDependencies: taskHasDependencies(dependsOn),
+    hasAttachments: input.hasAttachments,
+    needsLocalWorkspace: taskNeedsLocalWorkspace({
+      projectHasWorkingDir: projectHasWorkingDir(db, input.projectId),
+      category,
+      title: input.title,
+      description: input.description,
+      hasAttachments: input.hasAttachments,
+    }),
+    decomposed: input.decomposed,
+    category,
+    projectTargeted: projectHasNodePolicy(db as unknown as ProjectNodePolicyDb, input.projectId),
+    projectDispatchOff: projectDispatchOff(db, input.projectId),
+  };
 }
 
 /** 供 IPC 组准入事实时共用：项目是否指定了本机工作目录。 */

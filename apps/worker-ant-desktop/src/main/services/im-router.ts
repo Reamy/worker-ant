@@ -30,9 +30,13 @@ import path from 'node:path';
 //   仍用同一条"直连 ANS"的取模型路（`makeEnvDecomposeDeps`），超时/请求体/默认模型一字未改。
 import { resolveChatCompletionsUrl } from '@worker-ant/ans-client';
 import { decomposeTask, makeEnvDecomposeDeps, planSubtasksFromTemplate, loadDecompositionPatterns, shortfallNotice, droppedDepsNotice, recordInferredDeps, acceptanceSourcesNotice } from '../core/task-decompose.js';
+// zx_20261107_1 B5：拆解预检（与引擎路同取数、同判据）。
+import { collectPreflightContext } from '../core/task-preflight.js';
 // zx_20260930 M9: 到 ANS 的请求收成一条出路（`ans-signed-request`）——本文件此前有两处裸 `fetch`：
 //   意图分类那处**零认证头**、拆解取模型那处只发 `x-api-key`，两条都恒 401 且静默。
 import { ansSignedRequest, ansFailureNote, resolveAnsCreds } from '../core/ans-signed-request.js';
+// zx_20261112_2 B2：辅助路选型只走这一档（排除 reasoning / 远端优先一处定义）。
+import { auxModelRequest } from '../core/model-request.js';
 import { alreadyDecomposed } from '../core/task-accounting.js';
 // zx_20261005 M7（管子·度量衡）: IM 侧两条建项目路（`@不存在项目名` / 无归属「IM对话项目」）与 GUI 两条
 //   共用**同一把尺**——达档位上限则不再新建，改落到最近的项目并如实回话（软闸：任务不丢、IM 不断）。
@@ -52,8 +56,38 @@ import { eventBus } from '../core/event-bus.js';
 import { formatOptions, matchApprovalReply, parseOptions } from '../core/im/options.js';
 import type { ApprovalReply } from '../core/im/options.js';
 // zx_20260924_1 M1: 内置指令的**唯一真源**——四条路由谓词 + 偏好谓词 + 帮助文案，都从这一处来。
-import { BUILTIN_IM_COMMANDS, CREATE_REGEX, HELP_REGEX, QUERY_REGEX, START_REGEX, matchRememberPreference } from './im-commands.js';
+// zx_20261112_1 B3「答」: 暂停/继续谓词、任务名解析与首聊欢迎文案也从同一张表派生。
+import { BUILTIN_IM_COMMANDS, START_REGEX, HELP_REGEX, matchRememberPreference, parseTaskPauseResume, buildWelcomeText } from './im-commands.js';
+// zx_20261112_1 B3「答」: 暂停/继续的目标解析与状态合法性在 core 一处判（路由不写第二套）。
+import {
+  buildDisambiguation, isDisambiguationExpired, pickDisambiguation, expiredDisambiguationText,
+  findActiveTasks, getTaskRow, pauseRefusal, resumeRefusal, disambiguationPrompt, noMatchText,
+  pausedText, resumedText, type PendingTaskDisambiguation, type TaskAction,
+} from '../core/im-task-target.js';
+import { pauseTask } from '../core/pause-task.js';
+import { PAUSE_REASON_USER_INTERRUPT } from '../core/pause-reason.js';
+import { abortTaskRun } from '../core/task-run-registry.js';
+// zx_20261108_1 B3（维特根斯坦·意义即使用）: 「这句话为什么被当成任务/查询/闲聊」的判定**只在一处**——
+//   纯函数、可直引受控回归；路由只执行判定结果，不再在分支里各写一条同义正则/字数判据。
+import {
+  decideImIntent, stripBotMention, withDecisionSource,
+  AMBIGUOUS_TEXT, GENERAL_CHAT_TEXT, GROUP_REFUSAL_TEXT,
+  type ImIntentDecision, type ImRoute,
+} from '../core/im-intent.js';
+// zx_20261110_1 B2: 模型输出**单 token 严格解析**（禁用 includes 子串猜意图）。
+import { classifyImText, parseIntentToken } from '../core/im-intent-rules.js';
+// zx_20261112_2 B2「识」: `@岗位` 解析与三种失败话术只在一处（纯读）。
+import { positionMentionRefusalText, resolvePositionMention } from '../core/position-mention.js';
+// zx_20261110_1 B2: 中置信建单/启动先请用户确认——确认词表/摘要/文案的纯判定在 core，路由只持有状态。
+import {
+  buildPendingIntent, confirmationKey, intentConfirmationPrompt,
+  parseConfirmationReply, type PendingIntentConfirmation, type PendingIntentKind,
+} from '../core/im-intent-confirmation.js';
 import { parsePairReply, resolvePairTarget, approveTerminal, rejectTerminal } from '../core/external-terminals.js';
+// zx_20261111_3「证」：IM 回执自证（「我理解成…」）与 10 分钟撤销——判定纯函数在 core，路由只持有状态。
+import { intentEcho, decideUndo, undoRefusalText, UNDO_COMMAND_RE, type UndoEntry } from '../core/im-echo.js';
+import { cleanupTaskExecutionJobs, supersedeExecutionJobs } from '../core/task-jobs.js';
+import { archiveTask } from '../core/task-archive.js';
 // zx_20261101_1 M1「授」: IM 授权台——命令解析/短码/待办组装/文案的**唯一一份**纯逻辑在 `core/im/approval-inbox.ts`。
 //   本文件只做"认领 + 真落库 + 回话"；不在这里另写一套正则（承"一处真源"纪律）。
 import {
@@ -69,7 +103,7 @@ import { teamFeatureRefusal } from '../core/team-gate.js';
 // zx_20261018_1 批一（维特根斯坦·意义即用法 / 罗尔斯·同一把尺）: IM 审批只回一句话，看不到勾选框 ⇒
 //   默认授予**意图控制**（本机解析、受安全闸约束），原始动作 `device_control` 仍须桌面**显式勾选**。
 import { DEFAULT_TERMINAL_CAPABILITIES } from '../core/external-calls.js';
-import { refreshImUnread } from '../core/im/im-unread.js';
+import { refreshImUnread, hasPriorInbound } from '../core/im/im-unread.js';
 import { enqueueJob } from '../core/job-enqueuer.js';
 import type { ImMessageMeta } from './im-adapter.js';
 import { mediaReceiptText } from './im-media.js';
@@ -134,6 +168,62 @@ function isDuplicate(key: string): boolean {
   return false;
 }
 
+/**
+ * zx_20261108_1 B3: 平台消息 id 的**持久**去重账（`wa_im_seen`）。
+ *
+ * 内存 Map 仍是快路径（重启后丢、30 秒窗），但它挡不住"平台在重启后重投"——重投会再落一行、
+ * 群里再答一次。本函数用主键 `(channel_id, external_user_id, platform_message_id)` 做**跨进程**判重：
+ * `INSERT OR IGNORE` 的 `changes === 0` 即"这条平台 id 以前见过"。
+ * ⚠ 表缺失（老库/自带 DDL 的夹具）⇒ `false`（不挡），绝不因去重账缺表把用户消息丢掉。
+ */
+function isSeenPlatformId(db: Database.Database, channelId: string, fromUser: string, platformId: string): boolean {
+  try {
+    const info = db.prepare(
+      'INSERT OR IGNORE INTO wa_im_seen (channel_id, external_user_id, platform_message_id, seen_at) VALUES (?, ?, ?, datetime(\'now\'))',
+    ).run(channelId, fromUser, platformId);
+    return info.changes === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * zx_20261108_1 B3: 把这次理解（意图/路由/理由）写回**入站那一行**——界面与审计都读它。缺列不阻断路由。
+ * zx_20261110_1 B2: 增写 `intent_confidence`，理由尾缀**来源**（规则/模型）。老库缺新列时
+ *   **降级回三列写入**——不能因为一个可选列把意图/路由/理由整行丢掉。
+ */
+function markInboundDecision(db: Database.Database, inboundId: string, decision: ImIntentDecision): void {
+  const reason = withDecisionSource(decision);
+  try {
+    db.prepare(
+      "UPDATE wa_im_conversations SET intent = ?, route = ?, route_reason = ?, intent_confidence = ? WHERE id = ? AND direction = 'inbound'",
+    ).run(decision.intent, decision.route, reason, decision.confidence, inboundId);
+  } catch {
+    try {
+      db.prepare(
+        "UPDATE wa_im_conversations SET intent = ?, route = ?, route_reason = ? WHERE id = ? AND direction = 'inbound'",
+      ).run(decision.intent, decision.route, reason, inboundId);
+    } catch { /* 老库缺列：理解结果仍已用于路由，只是这一行记不下 */ }
+  }
+}
+
+/** zx_20261108_1 B3: 命中了上下文分支（偏好/编号/审批/命令）时也留一条路由，理由说清是谁认领的。 */
+function markInboundRoute(db: Database.Database, inboundId: string, route: ImRoute, reason: string): void {
+  try {
+    db.prepare(
+      "UPDATE wa_im_conversations SET route = ?, route_reason = ? WHERE id = ? AND direction = 'inbound'",
+    ).run(route, reason, inboundId);
+  } catch { /* 同上：缺列不阻断 */ }
+}
+
+/** zx_20261108_1 B3: 建单/启动成功后把任务回写到入站行（"这句话最后落到了哪张任务上"）。 */
+function linkInboundTask(db: Database.Database, inboundId: string | undefined, taskId: string | undefined): void {
+  if (!inboundId || !taskId) return;
+  try {
+    db.prepare("UPDATE wa_im_conversations SET task_id = ? WHERE id = ? AND direction = 'inbound'").run(taskId, inboundId);
+  } catch { /* 缺列/缺行不阻断主流程 */ }
+}
+
 // 风暴判定（阈值/`StormState`/`stormVerdict`/`STORM_NOTICE`）已搬入 `core/im-storm-guard.ts`（zx_20261003 M9）。
 // 本文件只留**按用户记状态**的 `stormTracker`——那是调用方职责，不是纯判定的一部分。
 
@@ -175,7 +265,148 @@ setInterval(() => {
   // A7: 清理过期的项目选择候选
   const now = Date.now();
   for (const [k, sel] of pendingProjectSelections) { if (sel.expiresAt < now) pendingProjectSelections.delete(k); }
+  // zx_20261110_1 B2: 过期未确认的意图按**放弃**处理并留痕（问题在，但没人答）。
+  for (const [k, p] of pendingIntentConfirmations) {
+    if (p.expiresAt < now) {
+      pendingIntentConfirmations.delete(k);
+      imLogger.info({ key: k, kind: p.kind, summary: p.summary }, '[IMRouter] 待确认意图超时未答复——按放弃处理');
+    }
+  }
+  // zx_20261112_1 B3「答」: 任务候选澄清同族清理（过期即作废，用户下一条按新消息处理）。
+  for (const [k, p] of pendingTaskDisambiguations) {
+    if (p.expiresAt < now) pendingTaskDisambiguations.delete(k);
+  }
 }, 60_000).unref?.();
+
+// zx_20261110_1 B2: 中置信模型判定（建单/启动）的待确认项，key = "channelType:fromUser"。
+//   与项目编号候选同样的"按键+过期"，但 TTL 30 分钟（见 core/im-intent-confirmation.ts）。
+const pendingIntentConfirmations = new Map<string, PendingIntentConfirmation>();
+
+// zx_20261112_1 B3「答」: 暂停/继续的**任务候选澄清**，key = "channelType:fromUser"，TTL 5 分钟。
+//   与项目候选/意图确认各自独立：那是"选项目"，这是"选任务"，过期时间与失败回执都不同。
+const pendingTaskDisambiguations = new Map<string, PendingTaskDisambiguation>();
+
+// zx_20261111_3「证」: 最近一次**通过 IM 创建**的任务（撤销窗 10 分钟），key = "channelType:fromUser"。
+//   只记一条：撤销的语义是"刚才那条错了"，不是"回滚这个人的全部历史"。
+const lastCreatedImTask = new Map<string, UndoEntry>();
+
+/**
+ * 「撤销 / 撤回」——命中即认领，返回 `true`（调用方不再往下走）。
+ *
+ * 只撤**还没开跑**的（`pending` / `paused`）：先清掉排队作业再归档（`archived` 是终态，
+ *  引擎不会再拉起它；`pending` 的任务若只清作业不归档，下一拍调度还会重派）。
+ * 已在跑的**如实拒绝**并指路（不在这里做强杀——那是任务详情的"停止"职责）。
+ */
+async function handleUndo(ctx: ImContext, toUser: string, text: string): Promise<boolean> {
+  if (!UNDO_COMMAND_RE.test(text)) return false;
+  const key = `${ctx.channelType}:${toUser}`;
+  const verdict = decideUndo(lastCreatedImTask.get(key), Date.now());
+  if (!verdict.ok) {
+    if (verdict.reason === 'expired') lastCreatedImTask.delete(key);
+    await ctx.sendReply(toUser, undoRefusalText(verdict.reason));
+    return true;
+  }
+  const row = ctx.db.prepare('SELECT status FROM wa_tasks WHERE id = ?').get(verdict.taskId) as { status?: string } | undefined;
+  if (!row) {
+    lastCreatedImTask.delete(key);
+    await ctx.sendReply(toUser, undoRefusalText('gone'));
+    return true;
+  }
+  const st = String(row.status ?? '');
+  if (st !== 'pending' && st !== 'paused') {
+    await ctx.sendReply(toUser, undoRefusalText('running'));
+    return true;
+  }
+  try {
+    cleanupTaskExecutionJobs(ctx.db, verdict.taskId);
+    const r = archiveTask(ctx.db, { taskId: verdict.taskId, reason: 'IM 撤销（创建后 10 分钟内）', expectStatus: st });
+    lastCreatedImTask.delete(key);
+    if (r.rejected) {
+      imLogger.warn({ taskId: verdict.taskId, code: r.rejected.code }, '[IMRouter] 撤销被归档闸拒绝');
+      await ctx.sendReply(toUser, `没有撤销：${r.rejected.message}`);
+      return true;
+    }
+    await ctx.sendReply(toUser, '已撤销刚才创建的任务（已归档，不再执行）。');
+  } catch (err) {
+    imLogger.error({ error: (err as Error).message, taskId: verdict.taskId }, '[IMRouter] 撤销失败');
+    await ctx.sendReply(toUser, '撤销失败，请稍后重试。');
+  }
+  return true;
+}
+
+// ====== zx_20261112_1 B3「答」: 暂停 / 继续 ======
+
+/** 对**已判定合法**的任务执行暂停/继续——状态合法性已由 core 判过，这里只落动作与回执。 */
+async function executeTaskAction(
+  ctx: ImContext, toUser: string, action: TaskAction, taskId: string, inboundId?: string,
+): Promise<void> {
+  const row = getTaskRow(ctx.db, taskId);
+  if (!row) { await ctx.sendReply(toUser, '这条任务已经不在了。'); return; }
+  const refusal = action === 'pause' ? pauseRefusal(row.status) : resumeRefusal(row.status);
+  if (refusal) { await ctx.sendReply(toUser, `「${row.title.slice(0, 40)}」${refusal}`); return; }
+
+  if (action === 'pause') {
+    // 与 GUI「暂停」同一序列（`task:updateStatus`）：先作废残留作业 → 唯一写入口 `pauseTask` → 在途则断。
+    //   顺序不可换：先置 paused 再 abort，执行体的 catch 才认得出这是"中断"而非"失败"。
+    supersedeExecutionJobs(ctx.db, taskId, 'superseded_by_pause');
+    const inFlight = ['running', 'executing', 'preparing', 'planning'].includes(row.status);
+    pauseTask(ctx.db, { taskId, reason: PAUSE_REASON_USER_INTERRUPT });
+    const aborted = inFlight ? abortTaskRun(taskId, '被 IM 暂停中断') : false;
+    linkInboundTask(ctx.db, inboundId, taskId);
+    await ctx.sendReply(toUser, pausedText(row.title, aborted));
+    return;
+  }
+
+  resumeWithQuota(ctx.db, taskId);
+  enqueueJob(ctx.db, 'resume-ai-task', { taskId, source: 'im', channel: ctx.channelType, externalUser: toUser, initiator: 'user' });
+  linkInboundTask(ctx.db, inboundId, taskId);
+  await ctx.sendReply(toUser, resumedText(row.title));
+}
+
+/**
+ * 「暂停/继续 + 任务名」：0 命中列最近活跃任务，1 命中直接执行，多命中列编号并暂存 5 分钟。
+ * ⚠ 0 命中**不暂存编号选择**——用户没指名，不能把"随便挑一个"变成默认动作。
+ */
+async function handleTaskPauseResume(ctx: ImContext, fromUser: string, msgText: string, inboundId?: string): Promise<boolean> {
+  const parsed = parseTaskPauseResume(msgText);
+  if (!parsed) return false;
+  const { action, query } = parsed;
+  const claim = resolveProjectForUser(ctx.db, { externalUser: fromUser, channelType: ctx.channelType });
+  const projectId = claim?.id ?? null;
+  const rows = findActiveTasks(ctx.db, { projectId, query });
+  if (rows.length === 0) {
+    const recent = query ? findActiveTasks(ctx.db, { projectId, query: '' }) : [];
+    await ctx.sendReply(fromUser, noMatchText(action, query, recent));
+    return true;
+  }
+  if (rows.length === 1) {
+    await executeTaskAction(ctx, fromUser, action, rows[0]!.id, inboundId);
+    return true;
+  }
+  pendingTaskDisambiguations.set(`${ctx.channelType}:${fromUser}`, buildDisambiguation(action, rows.map((r) => r.id)));
+  await ctx.sendReply(fromUser, disambiguationPrompt(action, rows));
+  return true;
+}
+
+/** 候选澄清的编号答复：纯数字且在范围内才执行；其他文本作废并按新消息处理（不静默吞指令）。 */
+async function handleTaskDisambiguation(ctx: ImContext, fromUser: string, msgText: string, inboundId?: string): Promise<boolean> {
+  const key = `${ctx.channelType}:${fromUser}`;
+  const pending = pendingTaskDisambiguations.get(key);
+  if (!pending) return false;
+  if (isDisambiguationExpired(pending)) {
+    pendingTaskDisambiguations.delete(key);
+    if (/^\d{1,2}$/.test(msgText.trim())) {
+      await ctx.sendReply(fromUser, expiredDisambiguationText(pending.action));
+      return true;
+    }
+    return false;
+  }
+  const taskId = pickDisambiguation(pending, msgText);
+  pendingTaskDisambiguations.delete(key);
+  if (!taskId) return false;
+  await executeTaskAction(ctx, fromUser, pending.action, taskId, inboundId);
+  return true;
+}
 
 // A7: 待选项目列表（@项目名歧义后暂存，供编号回复选择），key = "channelType:fromUser"
 interface PendingProjectSelection {
@@ -405,7 +636,14 @@ function checkDbApprovalFallback(ctx: ImContext, fromUser: string, msgText: stri
 //   迁走的是**定义**，用法一字未改（仍是 `START_REGEX.test(msgText)` 这种形状）。
 
 // 指令类消息（不会被路由为Agent回复）
-const COMMAND_LIKE_REGEX = /^(开始|启动|执行|运行|请|创建|新建|查看|查询|进展|状态|情况|[?？]|run|start|go|status|list|help|帮助|\d+$)/i;
+const COMMAND_LIKE_REGEX = /^(开始|启动|执行|运行|暂停|停下|继续|恢复|取消|撤销|撤回|先别|别|不要|请|创建|新建|查看|查询|进展|状态|情况|[?？]|run|start|go|status|list|help|帮助|\d+$)/i;
+
+/**
+ * zx_20261112_2 B2：**模型补漏试过但失败**时的回话——与「没听懂」分开说。
+ * 两者对用户的意义不同：前者等服务恢复再发一次即可，后者要把话说清楚。
+ */
+export const LLM_UNAVAILABLE_TEXT =
+  '理解服务暂时不可用（取不到可用模型或请求失败），这条我没动——没有建任务。请稍后重发，或直接用「创建任务+标题」。';
 
 /**
  * 可恢复（paused/failed）任务清单的唯一真源——「列出编号」与「按编号选择」必须是同一份。
@@ -427,7 +665,7 @@ function listResumableTasks(db: Database.Database, channelType: string, fromUser
 }
 
 /** 编号选择：纯数字消息 → 优先项目选择(A7)，否则选择暂停任务列表中的第N个 */
-function handleNumberSelection(ctx: ImContext, fromUser: string, msgText: string): boolean {
+function handleNumberSelection(ctx: ImContext, fromUser: string, msgText: string, inboundId?: string): boolean {
   const num = parseInt(msgText, 10);
   if (isNaN(num) || num < 1 || num > 20) return false;
   if (!/^\d{1,2}$/.test(msgText.trim())) return false; // 纯1-2位数字
@@ -441,11 +679,15 @@ function handleNumberSelection(ctx: ImContext, fromUser: string, msgText: string
     pendingProjectSelections.delete(selKey);
     if (num <= pendingSel.projects.length) {
       const proj = pendingSel.projects[num - 1]!;
-      const title = pendingSel.taskText.replace(/@\S+/g, '').replace(/^(创建|新建|做一个|帮我|帮我做)\s*/i, '').trim().slice(0, 50) || '来自IM渠道的任务';
+      // zx_20261112_2 B2：标题切分**不再手写第二条脚手架正则**（旧的那条同样把 `创建一个任务：…` 切错）——
+      //   与建单主路共用 `splitTaskInput`。
+      const title = splitTaskInput(pendingSel.taskText.replace(/@\S+/g, '')).title.slice(0, 50) || '来自IM渠道的任务';
       const taskId = crypto.randomUUID();
-      db.prepare('INSERT INTO wa_tasks (id, project_id, title, description, priority, status, context_json) VALUES (?, ?, ?, ?, ?, ?, ?)')
-        .run(taskId, proj.id, title, pendingSel.taskText, 1, 'pending', JSON.stringify({ source: 'im', channel: ctx.channelType, externalUser: fromUser }));
+      db.prepare('INSERT INTO wa_tasks (id, project_id, title, description, priority, status, position_id, context_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(taskId, proj.id, title, pendingSel.taskText, 1, 'pending', '', JSON.stringify({ source: 'im', channel: ctx.channelType, externalUser: fromUser }));
       enqueueJob(db, 'ai-task', { taskId, projectId: proj.id, source: 'im', channel: ctx.channelType, externalUser: fromUser });
+      // zx_20261108_1 B3: 编号→建单也属于"这句话落到了哪张任务上"，回写入站行。
+      linkInboundTask(db, inboundId, taskId);
       void ctx.sendReply(fromUser, `已选择「${proj.name}」，任务「${title.slice(0, 20)}」已创建并自动执行。`);
       console.log(`[IMRouter] 编号选择→项目已定位: ${proj.name}`);
       return true;
@@ -472,7 +714,50 @@ function handleNumberSelection(ctx: ImContext, fromUser: string, msgText: string
   // P0-5(c): 但本次恢复确是人发起的 ⇒ 标 `initiator:'user'`（否则会被当成系统自恢复而误挂横幅）。
   resumeWithQuota(db, task.id);
   enqueueJob(db, 'resume-ai-task', { taskId: task.id, source: 'im', channel: ctx.channelType, externalUser: fromUser, initiator: 'user' });
+  // zx_20261108_1 B3: 编号启动成功 ⇒ 回写任务归属。
+  linkInboundTask(db, inboundId, task.id);
   void ctx.sendReply(fromUser, `✅ 已启动任务「${task.title}」`);
+  return true;
+}
+
+/**
+ * zx_20261110_1 B2: **中置信意图的确认答复**。
+ *
+ * 只有"上一条回话确实问过确认"时才认领（按键+TTL）。三种结局：
+ *   1. 回复「确认」⇒ 按**原话**执行待确认的建单/启动（不是按「确认」二字）；
+ *   2. 回复「取消」⇒ 丢弃，明确回「不会执行」；
+ *   3. 回复别的内容 / 已过期 ⇒ 这一问**作废**，交回主流程按新消息处理——
+ *      绝不静默吞掉用户的新指令（"没答确认"不等于"没说别的"）。
+ */
+async function handleIntentConfirmation(ctx: ImContext, fromUser: string, msgText: string, inboundId?: string): Promise<boolean> {
+  const key = confirmationKey(ctx.channelType, fromUser);
+  const pending = pendingIntentConfirmations.get(key);
+  if (!pending) return false;
+
+  if (pending.expiresAt <= Date.now()) {
+    pendingIntentConfirmations.delete(key);
+    imLogger.info({ channel: ctx.channelType, kind: pending.kind }, '[IMRouter] 待确认意图已过期——按放弃处理');
+    return false;
+  }
+
+  const verdict = parseConfirmationReply(msgText);
+  if (!verdict) {
+    pendingIntentConfirmations.delete(key);
+    imLogger.info({ channel: ctx.channelType, kind: pending.kind }, '[IMRouter] 未回复确认词——待确认意图作废，按新消息处理');
+    return false;
+  }
+
+  pendingIntentConfirmations.delete(key);
+  const action = pending.kind === 'create' ? '建单' : '启动';
+  if (verdict === 'cancel') {
+    if (inboundId) markInboundRoute(ctx.db, inboundId, 'confirmation', `回复「取消」——放弃待确认的${action}`);
+    await ctx.sendReply(fromUser, '好的，已取消，不会执行。');
+    return true;
+  }
+
+  if (inboundId) markInboundRoute(ctx.db, inboundId, 'confirmation', `回复「确认」——执行待确认的${action}`);
+  if (pending.kind === 'create') await handleCreateTask(ctx, fromUser, pending.text, inboundId);
+  else await handleStartTask(ctx, fromUser, pending.text, inboundId);
   return true;
 }
 
@@ -666,9 +951,32 @@ function handleAgentReply(ctx: ImContext, fromUser: string, msgText: string, inb
  *     新增一个值须穷举全部读取谓词（承 `feedback_enum_value_sweep_readers`）；为"少等 ≤5s"付这个代价不划算，
  *     如实登记而非悄悄塞一个新枚举值（与 `im.message_inbound` 那条"本来就有"的性质不同）。
  */
-function handleTerminalPairReply(ctx: ImContext, fromUser: string, msgText: string): boolean {
+/** 终端配对审批的尝试限流（模块内状态；不落库——它防的是短时误触/试探，不是长期账）。 */
+const PAIR_ATTEMPT_WINDOW_MS = 10 * 60_000;
+const PAIR_ATTEMPT_MAX = 5;
+const pairAttempts = new Map<string, number[]>();
+function pairAttemptRefusal(key: string, now = Date.now()): boolean {
+  const arr = (pairAttempts.get(key) ?? []).filter((t) => now - t < PAIR_ATTEMPT_WINDOW_MS);
+  if (arr.length >= PAIR_ATTEMPT_MAX) { pairAttempts.set(key, arr); return true; }
+  arr.push(now);
+  pairAttempts.set(key, arr);
+  return false;
+}
+
+function handleTerminalPairReply(ctx: ImContext, fromUser: string, msgText: string, chatType: string): boolean {
   const parsed = parsePairReply(msgText);
   if (!parsed) return false;
+  // zx_20261112_2 B3「安」：与设备授权台**同一把尺**——终端接入审批只在 1:1 私聊受理。
+  //   群聊里即便 @ 了机器人也办不了：无法确认发言人就是本机主人（罗尔斯·无知之幕）。
+  if (chatType !== 'direct') {
+    void ctx.sendReply(fromUser, '⚠️ 终端接入审批只在**与工蚁的 1:1 私聊**里受理：群聊里无法确认发言人就是本机主人，一律不办。');
+    return true;
+  }
+  // 尝试限流：同渠道同用户 10 分钟内最多 5 次（防连环试探/误触刷屏）。
+  if (pairAttemptRefusal(`${ctx.channelType}:${fromUser}`)) {
+    void ctx.sendReply(fromUser, '操作过于频繁（10 分钟内最多 5 次终端接入审批），请稍后再试。');
+    return true;
+  }
   const target = resolvePairTarget(ctx.db, parsed.code);
   if (target.kind === 'none') return false; // ① 没有待批申请 ⇒ 不认领（落回既有链路，不静默）
   if (target.kind === 'ambiguous') {
@@ -681,6 +989,11 @@ function handleTerminalPairReply(ctx: ImContext, fromUser: string, msgText: stri
   if (parsed.kind === 'approve') {
     const r = approveTerminal(ctx.db, p.id, [...DEFAULT_TERMINAL_CAPABILITIES]); // ③ 真落库 + 铸凭据；默认只给意图控制
     if (!r.ok) { void ctx.sendReply(fromUser, `⚠️ 未能允许「${p.name}」接入（${r.reason}）。`); return true; }
+    // zx_20261112_2 B3：放行留审计（设备授权台一直有，这里此前没有——同一件事两把尺）。
+    recordAudit(ctx.db, {
+      actorKind: 'local', actorRef: fromUser, action: 'terminal.approve', targetType: 'terminal', targetId: p.id,
+      detail: { via: 'im', channel: ctx.channelType, pair_code: p.pair_code, name: p.name },
+    });
     void ctx.sendReply(fromUser,
       `✅ 已允许「${p.name}」接入（核对码 ${p.pair_code}）。机器人会自行取回凭据。`
       + `\n本次授予「意图控制」（它说一句要做什么，由本机解析执行）；若还要它直发设备原始动作，`
@@ -689,6 +1002,10 @@ function handleTerminalPairReply(ctx: ImContext, fromUser: string, msgText: stri
   } else {
     const r = rejectTerminal(ctx.db, p.id);
     if (!r.ok) { void ctx.sendReply(fromUser, `⚠️ 未能拒绝「${p.name}」接入（${r.reason}）。`); return true; }
+    recordAudit(ctx.db, {
+      actorKind: 'local', actorRef: fromUser, action: 'terminal.reject', targetType: 'terminal', targetId: p.id,
+      detail: { via: 'im', channel: ctx.channelType, pair_code: p.pair_code, name: p.name },
+    });
     void ctx.sendReply(fromUser, `🚫 已拒绝「${p.name}」接入（核对码 ${p.pair_code}）。`);
     console.log(`[IMRouter] 配对审批（IM）：reject ${p.id.slice(0, 8)} code=${p.pair_code}`);
   }
@@ -801,6 +1118,11 @@ async function handleApprovalInbox(
   return true;
 }
 
+/** 消息里是否仍有 `@项目名`（机器人 mention 已剥离；判据与 `extractMentions` 同形）。 */
+function hasProjectMention(text: string): boolean {
+  return /@[^\s@，。,\.！!？?：:；;、]/.test(text);
+}
+
 // ====== 主入口 ======
 
 export async function routeImMessage(
@@ -809,21 +1131,34 @@ export async function routeImMessage(
 ): Promise<void> {
   const msgText = text.trim();
   if (!msgText) return;
+  // zx_20261108_1 B3: 匹配前剥离机器人 mention（平台占位符 / 开头那个 @称呼）；
+  //   项目 `@项目名` 原样保留给建单路。入库与回执仍用原文，只有判定与指令解析看 `routeText`。
+  const routeText = stripBotMention(msgText, meta?.mentionsBot);
 
   // zx_20260914 M1-2(维特根斯坦·意义即使用): 非文本消息（meta.kind 有值）**到此为止**——
   //   记录即已达成目的（用户发的图在对话里看得见），但**不进指令/建任务管道**：
   //   `[图片]` 恰 4 字会触发步骤3兜底回话、`[文件 x.pdf 1.2MB]` 长于 4 字会被当自由文本**建成任务**，
   //   两条都不是用户的本意（用户裁决 D3：默认不回，只如实记一条带类型标签的记录）。
   const isNonText = !!meta?.kind;
-  // 去重键：文本按正文（30s 窗，防平台 webhook 重放）；非文本无正文可辨，只能靠平台消息 id——
-  //   给了 id 就按 id 去重（重放仍被挡）；没给则**不猜**：宁可多记一行（可见的重复），
-  //   不可静默吞掉用户第二张图（不可见的丢失）——「消息到没到」不可倒向后者。
-  const dedupKey = meta?.messageId
-    ? `${ctx.channelType}:${fromUser}:id:${meta.messageId}`
+  // 去重键：有平台消息 id ⇒ 先查**持久**账（`wa_im_seen`，跨重启仍挡重投），内存 Map 再挡一层；
+  //   没 id：文本按正文（30s 窗，防平台 webhook 重放）；非文本无正文可辨，**不猜**——
+  //   宁可多记一行（可见的重复），不可静默吞掉用户第二张图（不可见的丢失）。
+  const platformId = meta?.messageId ? String(meta.messageId) : '';
+  if (platformId && isSeenPlatformId(ctx.db, ctx.channelId, fromUser, platformId)) {
+    console.log('[IMRouter] 重复消息（平台 id 已见过），跳过');
+    return;
+  }
+  const dedupKey = platformId
+    ? `${ctx.channelType}:${fromUser}:id:${platformId}`
     : isNonText
       ? ''
       : `${ctx.channelType}:${fromUser}:${msgText.slice(0, 80)}`;
   if (dedupKey && isDuplicate(dedupKey)) { console.log('[IMRouter] 重复消息，跳过'); return; }
+
+  // zx_20261112_1 B3「答」: 首聊判定必须在**当前行落库之前**读（当前行不能算"来过"）。
+  //   读失败按"来过"处理——宁可不发欢迎，也不向老用户刷屏。
+  let hadPrior = true;
+  try { hadPrior = hasPriorInbound(ctx.db, ctx.channelId, fromUser); } catch { hadPrior = true; }
 
   // 存储入站消息（非文本附加真类型/文件名/大小，**增量**写——既有字段一字不动）
   // zx_20260920_1 M5: 行 id 提到 try **之外**——非文本分支要按 id 回填 `last_error`（落盘失败的真因）。
@@ -928,95 +1263,178 @@ export async function routeImMessage(
     return;
   }
 
-  // ====== 步骤-3: 记住偏好/习惯指令 ======
-  if (handleRememberPreference(ctx, fromUser, msgText)) return;
+  // zx_20261112_1 B3「答」: 首条私聊的欢迎——**每渠道每用户终身一次**（会话行即标记，不新增列）。
+  //   媒体消息与风暴冷却在上面已 return（不欢迎）；群聊、首条就是「帮助」也不发（帮助本身即全表）。
+  //   欢迎先发、随后照常处理本条消息——用户既知道能说什么，也不丢这次的指令。
+  let welcomeSent = false;
+  if (!hadPrior && chatType !== 'group' && !HELP_REGEX.test(routeText)) {
+    welcomeSent = true;
+    await ctx.sendReply(fromUser, buildWelcomeText());
+  }
 
-  // ====== 步骤-2: 编号选择 ======
-  if (handleNumberSelection(ctx, fromUser, msgText)) return;
+  // zx_20261108_1 B3: 群聊里平台**未证实** @ 了机器人时，上下文分支（偏好/编号/终端配对/审批/回复/项目命令）
+  //   一律不认领——否则一句「2」会把暂停任务在群里启动、"记住：…"会写进记忆、审批答复会被群里旁人消费。
+  //   查询/帮助/问候仍可在下方判定里受理（它们不改世界）。
+  const inGroupNoMention = chatType === 'group' && meta?.mentionsBot !== true;
 
-  // ====== 步骤-1: 外部终端**配对审批**（步骤-2 之后、步骤0 之前——见 `handleTerminalPairReply` 头注）======
-  // zx_20261016_1 批三: 「同意接入 <核对码>」/「拒绝接入 <核对码>」走此路。
-  //   ⚠ 与任务审批**两把尺**：本路只认「(同意|拒绝)接入」句式（`parsePairReply` 锚定）；裸「同意」/「是」
-  //     仍归步骤0 的任务审批——两路语义不混（反证标本见 rr P-2）。
-  if (handleTerminalPairReply(ctx, fromUser, msgText)) return;
+  if (!inGroupNoMention) {
+    // ====== 步骤-4: 任务候选澄清答复（zx_20261112_1 B3）======
+    //   排在最前：上一条刚问过"回复编号暂停哪一个"，这个数字必须归那一问；
+    //   若晚于项目选择/暂停任务列表，编号会被别路吃掉（与意图确认同一种次序病）。
+    if (await handleTaskDisambiguation(ctx, fromUser, routeText, inboundId)) {
+      markInboundRoute(ctx.db, inboundId, 'command', '回复候选编号——按前一条澄清问句处理');
+      return;
+    }
 
-  // ====== 步骤-0.5: IM 授权台（设备授权 / 跨机问答 / 终端接入）======
-  // 语义与真源都不同于上面两路：配对读 `wa_external_terminals`，审批读暂停任务的回复队列；
-  //   本台读 `wa_devices`（设备授权）与 `wa_event_log` 的 `node_dispatch`（跨机问答）。
-  // 排在步骤0 之前：`回答 <码> …` 被当任务回复吃掉、`允许设备 <码>` 被建成任务，都是**同一种**次序病。
-  if (await handleApprovalInbox(ctx, fromUser, msgText, chatType)) return;
+    // ====== 步骤-3.9: 暂停 / 继续任务（zx_20261112_1 B3）======
+    if (await handleTaskPauseResume(ctx, fromUser, routeText, inboundId)) {
+      markInboundRoute(ctx.db, inboundId, 'command', '命中「暂停/继续+任务名」——按任务控制处理');
+      return;
+    }
 
-  // ====== 步骤0: 审批队列检查（须先于自由回复路由）======
-  // zx_20260911_2 M1(罗尔斯·同一规则 / 维特根斯坦·语言游戏): 次序倒置时，「是」/选项先被
-  // handleAgentReply 当普通回复吃掉——审批语义(记录"用户确认执行"、消费额度、"已确认"/"已取消"回执)永不生效，
-  // 多暂停任务时还按 updated_at 定向到错任务。checkPendingApproval 不匹配即 return false，故前移不牺牲自由回复。
-  if (checkPendingApproval(ctx, fromUser, msgText)) return;
-  // A5: 审批回退DB扫描（队列失效/丢失时，DB扫描paused+[等待用户输入]选项匹配）
-  if (checkDbApprovalFallback(ctx, fromUser, msgText)) return;
+    // ====== 步骤-3.5: 中置信意图的确认答复（zx_20261110_1 B2）======
+    //   排在最前：上一条回话刚问过「确认/取消」，这两个词该被那一问认领；
+    //   若排到审批之后，恰有任务审批时「是」会被审批吃掉，确认链就永远走不完。
+    if (await handleIntentConfirmation(ctx, fromUser, routeText, inboundId)) {
+      return;
+    }
 
-  // ====== 步骤1: Agent回复路由 ======
-  if (handleAgentReply(ctx, fromUser, msgText, inboundId)) return;
+    // ====== 步骤-3: 记住偏好/习惯指令 ======
+    if (handleRememberPreference(ctx, fromUser, routeText)) {
+      markInboundRoute(ctx.db, inboundId, 'preference', '命中偏好句式——记入记忆，不建任务');
+      return;
+    }
 
-  // ====== 步骤1: IM命令分发 ======
-  if (await tryImCommand(ctx, fromUser, msgText)) return;
+    // ====== 步骤-2: 编号选择 ======
+    if (handleNumberSelection(ctx, fromUser, routeText, inboundId)) {
+      markInboundRoute(ctx.db, inboundId, 'selection', '纯编号——按项目/任务/审批候选处理');
+      return;
+    }
 
-  // ====== 步骤1.2: 「帮助」(M3-1) ======
-  // 问候语(:563)与兜底(:578)都承诺「输入「帮助」查看可用指令」，但 QUERY_REGEX 把它并进
-  // handleSystemQuery，只回项目/任务计数——喊了不认(E7)。
-  // 必须**在问候之前**认领：「帮助」是两个汉字，会被步骤3 的 `^[一-龥]{1,3}$` 当问候吃掉
-  // （与 M1-6 同一教科书病例：分支写在被遮蔽的位置＝生产不可达）。
-  if (HELP_REGEX.test(msgText.trim())) { await handleHelp(ctx, fromUser); return; }
+    // ====== 步骤-1: 外部终端**配对审批**（步骤-2 之后、步骤0 之前——见 `handleTerminalPairReply` 头注）======
+    // zx_20261016_1 批三: 「同意接入 <核对码>」/「拒绝接入 <核对码>」走此路。
+    //   ⚠ 与任务审批**两把尺**：本路只认「(同意|拒绝)接入」句式（`parsePairReply` 锚定）；裸「同意」/「是」
+    //     仍归步骤0 的任务审批——两路语义不混（反证标本见 rr P-2）。
+    if (handleTerminalPairReply(ctx, fromUser, routeText, chatType)) {
+      markInboundRoute(ctx.db, inboundId, 'terminal_pair', '命中「同意/拒绝接入」——按终端配对审批处理');
+      return;
+    }
 
-  // 正则模式提前声明（供步骤1.5和步骤2/3共用）
-  const systemQueryPatterns = [/系统情况/, /系统状态/, /工蚁.*情况/, /工蚁.*状态/, /整体.*情况/, /运行.*状态/, /how.*system/i];
-  const greetPatterns = [/^(你好|hi|hello|谢谢|thanks|好的|ok|嗯|哦)[!！。.]*$/i, /^[一-龥]{1,3}$/];
+    // ====== 步骤-1.4: IM 撤销（zx_20261111_3「证」）======
+    // 只认「撤销 / 撤回」两个词（**不含「取消」**——那是对审批/确认问句的答复，抢了会改既有语义）。
+    // 排在这里：它是对"刚才那条指令"的回应，必须先于编号选择/审批/意图判定，否则会被别路吃掉。
+    if (await handleUndo(ctx, fromUser, routeText)) {
+      markInboundRoute(ctx.db, inboundId, 'command', '命中「撤销/撤回」——按 IM 建单撤销处理');
+      return;
+    }
 
-  // ====== 步骤1.5: LLM 意图分类（regex未匹配时） ======
-  const isRegexMatched = systemQueryPatterns.some(p => p.test(msgText))
-    || greetPatterns.some(p => p.test(msgText))
-    || START_REGEX.test(msgText)
-    || (QUERY_REGEX.test(msgText) && !CREATE_REGEX.test(msgText))
-    || CREATE_REGEX.test(msgText);
+    // ====== 步骤-0.5: IM 授权台（设备授权 / 跨机问答 / 终端接入）======
+    // 语义与真源都不同于上面两路：配对读 `wa_external_terminals`，审批读暂停任务的回复队列；
+    //   本台读 `wa_devices`（设备授权）与 `wa_event_log` 的 `node_dispatch`（跨机问答）。
+    // 排在步骤0 之前：`回答 <码> …` 被当任务回复吃掉、`允许设备 <码>` 被建成任务，都是**同一种**次序病。
+    if (await handleApprovalInbox(ctx, fromUser, routeText, chatType)) {
+      markInboundRoute(ctx.db, inboundId, 'approval', '命中 IM 授权台指令——按设备/问答审批处理');
+      return;
+    }
 
-  if (!isRegexMatched && msgText.length > 4) {
-    // zx_20260909 Y2a(少则得·断点回执): 将落入需 LLM 意图分类的耗时处理(正则未命中)→先回一次性 busy ack, 防"发消息后长时间无响应"的静默走廊;
-    // 后续真实回话(建任务/状态)仍照常; im.busy_ack=0 关闭。已在问候/命令等即时分支不回(少则得, 不重复轰炸)。
+    // ====== 步骤0: 审批队列检查（须先于自由回复路由）======
+    // zx_20260911_2 M1(罗尔斯·同一规则 / 维特根斯坦·语言游戏): 次序倒置时，「是」/选项先被
+    // handleAgentReply 当普通回复吃掉——审批语义(记录"用户确认执行"、消费额度、"已确认"/"已取消"回执)永不生效，
+    // 多暂停任务时还按 updated_at 定向到错任务。checkPendingApproval 不匹配即 return false，故前移不牺牲自由回复。
+    if (checkPendingApproval(ctx, fromUser, routeText)) {
+      markInboundRoute(ctx.db, inboundId, 'approval', '命中待审批答复——按审批处理');
+      return;
+    }
+    // A5: 审批回退DB扫描（队列失效/丢失时，DB扫描paused+[等待用户输入]选项匹配）
+    if (checkDbApprovalFallback(ctx, fromUser, routeText)) {
+      markInboundRoute(ctx.db, inboundId, 'approval', '命中暂停任务的 DB 审批回退——按审批处理');
+      return;
+    }
+
+    // ====== 步骤1: Agent回复路由 ======
+    if (handleAgentReply(ctx, fromUser, routeText, inboundId)) {
+      markInboundRoute(ctx.db, inboundId, 'agent_reply', '命中在途任务的用户答复——投给该 run，不建新任务');
+      return;
+    }
+
+    // ====== 步骤1: IM命令分发 ======
+    if (await tryImCommand(ctx, fromUser, routeText)) {
+      markInboundRoute(ctx.db, inboundId, 'command', '命中项目自配 IM 命令——直接执行');
+      return;
+    }
+  }
+
+  // ====== zx_20261108_1 B3: 意图判定（规则优先，LLM 只补规则未命中）======
+  const decide = (llmIntent: ImIntentDecision['intent'] | null = null): ImIntentDecision => decideImIntent({
+    text: routeText,
+    chatType,
+    ...(meta?.mentionsBot !== undefined ? { mentionsBot: meta.mentionsBot } : {}),
+    hasProjectMention: hasProjectMention(routeText),
+    ...(llmIntent ? { llmIntent } : {}),
+  });
+
+  let decision = decide();
+  /** zx_20261112_2 B2：模型补漏**试过但失败**要如实说，不能与「没听懂」共用一句话。 */
+  let llmFailed = false;
+
+  // LLM 只补「规则全不命中」的私聊/已 @ 消息。**长度是成本闸，不是建单依据**——
+  //   不再有 `msgText.length > 4 ⇒ 建任务` 那条路（那是本轮要治的病根）。
+  const LLM_INTENT_MIN_CHARS = 5;
+  if (decision.route === 'ambiguous' && routeText.length >= LLM_INTENT_MIN_CHARS) {
+    // zx_20260909 Y2a(少则得·断点回执): 落入耗时分类前先回一次性 busy ack，防"发消息后长时间无响应"的静默走廊。
     try {
       const busyRow = ctx.db.prepare("SELECT value FROM wa_settings WHERE key = 'im.busy_ack'").get() as { value?: string } | undefined;
       if (boolSetting(busyRow?.value)) await ctx.sendReply(fromUser, '⏳ 收到，正在理解你的消息…');
     } catch { /* busy ack 失败不阻断后续分类 */ }
-    const llmIntent = await classifyIntentWithLLM(ctx, msgText);
-    if (llmIntent) {
-      if (llmIntent === 'start_task') { await handleStartTask(ctx, fromUser, msgText); return; }
-      if (llmIntent === 'query_status') { await handleSystemQuery(ctx, fromUser); return; }
-      if (llmIntent === 'create_task') { await handleCreateTask(ctx, fromUser, msgText, inboundId); return; }
-    }
+    const llmResult = await classifyIntentWithLLM(ctx, routeText, fromUser);
+    llmFailed = llmResult.failed;
+    if (llmResult.intent) decision = decide(llmResult.intent);
   }
 
-  // ====== 步骤2: 系统状态查询 ======
-  if (systemQueryPatterns.some(p => p.test(msgText))) { await handleSystemQuery(ctx, fromUser); return; }
+  markInboundDecision(ctx.db, inboundId, decision);
 
-  // ====== 步骤3: 简单问候 ======
-  // zx_20260911_4 M1-6: 裸启动词（开始/启动/运行/执行，均 ≤3 字）会被 `^[一-龥]{1,3}$` 当问候吃掉，
-  // 于是 handleStartTask 的「请回复编号」列表分支在生产中永不触达——问侧从未发出，答侧便无从成立。
-  // 启动词让位给步骤4（问候文案本身承诺「输入「开始+任务名」启动暂停的任务」）。
-  if (!START_REGEX.test(msgText) && greetPatterns.some(p => p.test(msgText))) {
-    await ctx.sendReply(fromUser, '你好！我是工蚁 AI 助手。你可以：\n• 输入项目命令关键词（如「持仓」「信号」等）\n• 输入「创建任务+标题」新建任务\n• 输入「开始+任务名」启动暂停的任务\n• 输入「查看系统状态」了解运行情况');
+  if (decision.route === 'help') { await handleHelp(ctx, fromUser); return; }
+  if (decision.route === 'query') { await handleSystemQuery(ctx, fromUser); return; }
+  if (decision.route === 'start') { await handleStartTask(ctx, fromUser, routeText, inboundId); return; }
+  if (decision.route === 'create') { await handleCreateTask(ctx, fromUser, routeText, inboundId, intentEcho(decision)); return; }
+  if (decision.route === 'greeting') {
+    // zx_20261112_1 B3「答」: 首条已发过欢迎就不再重复问候（同一句话两遍＝刷屏）。
+    if (!welcomeSent) {
+      await ctx.sendReply(fromUser, '你好！我是工蚁 AI 助手。你可以：\n• 输入项目命令关键词（如「持仓」「信号」等）\n• 输入「创建任务+标题」新建任务\n• 输入「开始+任务名」启动暂停的任务\n• 输入「查看系统状态」了解运行情况');
+    }
+    return;
+  }
+  if (decision.route === 'group_gate') { await ctx.sendReply(fromUser, GROUP_REFUSAL_TEXT); return; }
+  if (decision.route === 'group_silent') {
+    console.log(`[IMRouter] 群聊未 @ 机器人，静默不处理: ${routeText.slice(0, 40)}`);
+    return;
+  }
+  if (decision.route === 'llm') {
+    // zx_20261110_1 B2: 模型判定是**中置信**——建单/启动有副作用，不直接执行，先请用户确认。
+    //   查询/闲聊无副作用，照旧执行。
+    if (decision.confidence === 'medium' && (decision.intent === 'create_task' || decision.intent === 'start_task')) {
+      const kind: PendingIntentKind = decision.intent === 'create_task' ? 'create' : 'start';
+      const pending = buildPendingIntent(kind, routeText, Date.now());
+      pendingIntentConfirmations.set(confirmationKey(ctx.channelType, fromUser), pending);
+      // 这一行的"理解"改记为确认分支（意图/置信仍留着），审计看得出"模型判了但没动手"。
+      markInboundDecision(ctx.db, inboundId, {
+        ...decision,
+        route: 'confirmation',
+        reason: `模型判定为中置信${kind === 'create' ? '建单' : '启动'}——先请用户确认，不直接执行`,
+      });
+      await ctx.sendReply(fromUser, intentConfirmationPrompt(kind, pending.summary));
+      return;
+    }
+    if (decision.intent === 'start_task') { await handleStartTask(ctx, fromUser, routeText, inboundId); return; }
+    if (decision.intent === 'query_status') { await handleSystemQuery(ctx, fromUser); return; }
+    if (decision.intent === 'create_task') { await handleCreateTask(ctx, fromUser, routeText, inboundId, intentEcho(decision)); return; }
+    await ctx.sendReply(fromUser, GENERAL_CHAT_TEXT);
     return;
   }
 
-  // ====== 步骤4: 启动任务 ======
-  if (START_REGEX.test(msgText)) { await handleStartTask(ctx, fromUser, msgText); return; }
-
-  // ====== 步骤5: 系统查询 ======
-  if (QUERY_REGEX.test(msgText) && !CREATE_REGEX.test(msgText)) { await handleSystemQuery(ctx, fromUser); return; }
-
-  // ====== 步骤6: 创建任务 ======
-  const isCreate = CREATE_REGEX.test(msgText) || msgText.length > 4;
-  if (isCreate) { await handleCreateTask(ctx, fromUser, msgText, inboundId); return; }
-
-  // ====== 兜底 ======
-  await ctx.sendReply(fromUser, '收到。如需帮助，输入「帮助」查看可用指令。');
+  // ====== 兜底：规则与模型都没给出可靠结论——**不建任务**，反问一句并给例子 ======
+  // zx_20261112_2 B2：模型补漏**试过但失败**与「没听懂」分开说——前者是服务不可用，后者是话没说明白。
+  await ctx.sendReply(fromUser, llmFailed ? LLM_UNAVAILABLE_TEXT : AMBIGUOUS_TEXT);
 }
 
 // ====== IM 命令分发（通道A） ======
@@ -1269,17 +1687,26 @@ async function handleSystemQuery(ctx: ImContext, toUser: string): Promise<void> 
 
 // ====== 启动任务 ======
 
-async function handleStartTask(ctx: ImContext, toUser: string, msgText: string): Promise<void> {
+async function handleStartTask(ctx: ImContext, toUser: string, msgText: string, inboundId?: string): Promise<void> {
   let taskName = msgText.replace(START_REGEX, '').replace(/@\S+/g, '').trim();
   const quotedMatch = msgText.match(/[""「」]([^""「」]+)[""「」]/);
   if (quotedMatch) taskName = quotedMatch[1]!;
 
   try {
     if (taskName) {
-      const task = ctx.db.prepare(
-        "SELECT id, title, status FROM wa_tasks WHERE title LIKE ? AND status IN ('paused','failed') LIMIT 1"
-      ).get(`%${taskName}%`) as { id: string; title: string; status: string } | undefined;
-      if (task) {
+      // zx_20261112_2 B2：**多命中不再闷头挑一条**——此前全库 `LIKE + LIMIT 1` 无排序、跨项目跨用户，
+      //   同名的两张任务会随机选一张去启动。现在按最近更新排序取 5 条：1 条直接启动；多条列编号
+      //   （复用暂停/继续的 5 分钟澄清机制，回复编号即启动）；0 条再走"列出可启动任务"。
+      // 作用域与本渠道可恢复清单同源：只认**本用户**的任务或无 externalUser 的（GUI 建的），
+      //   不跨用户命中（旧查询是全库 LIKE）。
+      const candidates = ctx.db.prepare(
+        `SELECT id, title, status FROM wa_tasks
+          WHERE title LIKE ? AND status IN ('paused','failed')
+            AND (json_extract(context_json,'$.externalUser') = ? OR json_extract(context_json,'$.externalUser') IS NULL)
+          ORDER BY datetime(updated_at) DESC, rowid DESC LIMIT 5`,
+      ).all(`%${taskName}%`, toUser) as Array<{ id: string; title: string; status: string }>;
+      if (candidates.length === 1) {
+        const task = candidates[0]!;
         // A9: 防WeChat重投——30s内已启动过的任务跳过（**不再静默**，见文件头 M8-d）
         // ⚠ 窗口须 `datetime(updated_at)` 归一（见文件头「时刻列纪律」）：裸比较下**同 UTC 日的 ISO 行恒为真**
         //   ⇒ 一条今晨暂停的任务会被当成「刚启动过」而吞掉用户的启动指令。
@@ -1294,7 +1721,17 @@ async function handleStartTask(ctx: ImContext, toUser: string, msgText: string):
         // zx_20260910_3 M2d-a: IM 启动指令＝人工介入 → 恢复并返还目标偏离额度
         resumeWithQuota(ctx.db, task.id);
         enqueueJob(ctx.db, 'ai-task', { taskId: task.id, source: 'im', channel: ctx.channelType, externalUser: toUser });
+        // zx_20261108_1 B3: 启动成功 ⇒ 入站行记下它启动的是哪张任务。
+        linkInboundTask(ctx.db, inboundId, task.id);
         await ctx.sendReply(toUser, `✅ 已启动任务「${task.title}」`);
+        return;
+      }
+      if (candidates.length > 1) {
+        pendingTaskDisambiguations.set(
+          `${ctx.channelType}:${toUser}`,
+          buildDisambiguation('resume', candidates.map((r) => r.id)),
+        );
+        await ctx.sendReply(toUser, disambiguationPrompt('resume', candidates));
         return;
       }
     }
@@ -1314,6 +1751,7 @@ async function handleStartTask(ctx: ImContext, toUser: string, msgText: string):
       // zx_20260910_3 M2d-a: IM 启动指令（唯一任务自动启动）＝人工介入 → 恢复并返还目标偏离额度
       resumeWithQuota(ctx.db, t.id);
       enqueueJob(ctx.db, 'ai-task', { taskId: t.id, source: 'im', channel: ctx.channelType, externalUser: toUser });
+      linkInboundTask(ctx.db, inboundId, t.id);
       await ctx.sendReply(toUser, `✅ 已自动启动「${t.title}」`);
       return;
     }
@@ -1328,30 +1766,82 @@ async function handleStartTask(ctx: ImContext, toUser: string, msgText: string):
 
 // ====== LLM 意图分类 ======
 
-async function classifyIntentWithLLM(ctx: ImContext, msgText: string): Promise<'start_task' | 'query_status' | 'create_task' | null> {
+/** 模型补漏的结局。`attempted`/`failed` 让路由能区分「没听懂」与「理解服务不可用」。 */
+interface LlmIntentResult {
+  intent: 'start_task' | 'query_status' | 'create_task' | 'general_chat' | null;
+  attempted: boolean;
+  failed: boolean;
+  note: string;
+}
+
+/** 模型提示里的**有界上下文**（≤600 字）：项目名 / 可启动任务 / 上一条原话。 */
+function buildLlmContext(ctx: ImContext, toUser: string): string {
+  const lines: string[] = [];
+  try {
+    const projects = ctx.db.prepare(
+      "SELECT name FROM wa_projects WHERE status = 'active' ORDER BY COALESCE(datetime(updated_at), datetime(created_at)) DESC LIMIT 5",
+    ).all() as Array<{ name?: string }>;
+    const names = projects.map((p) => String(p.name ?? '')).filter(Boolean);
+    if (names.length) lines.push(`当前项目：${names.join('、')}`);
+  } catch { /* 读不到项目就不带 */ }
+  try {
+    const resumable = listResumableTasks(ctx.db, ctx.channelType, toUser).slice(0, 5);
+    if (resumable.length) lines.push(`可启动任务：${resumable.map((t) => t.title).join('、')}`);
+  } catch { /* 读不到任务就不带 */ }
+  try {
+    const rows = ctx.db.prepare(
+      "SELECT message_json FROM wa_im_conversations WHERE direction = 'inbound' AND external_user_id = ? ORDER BY rowid DESC LIMIT 2",
+    ).all(toUser) as Array<{ message_json?: string }>;
+    const prev = rows[1]?.message_json;
+    if (prev) {
+      const parsed = JSON.parse(prev) as { text?: unknown };
+      const t = typeof parsed.text === 'string' ? parsed.text.trim() : '';
+      if (t) lines.push(`上一条消息：${t.slice(0, 120)}`);
+    }
+  } catch { /* 读不到上文就不带 */ }
+  return lines.join('\n').slice(0, 600);
+}
+
+async function classifyIntentWithLLM(ctx: ImContext, msgText: string, toUser: string): Promise<LlmIntentResult> {
+  const fail = (note: string): LlmIntentResult => ({ intent: null, attempted: true, failed: true, note });
   try {
     // zx_20260930 M9: 此前**零认证头** + 只读 env（桌面不加载 `.env`）⇒ 恒 401；且 401 不抛、
     //   `if (!resp.ok) return null` 又把它咽掉 ⇒ 用户侧只是"不分类"，日志里连一行都没有。
     //   现走签名出路：身份 DB→env→缺省（`resolveAnsCreds` 一处真源），失败带 status 留痕。
+    // zx_20261112_2 B2：排除 reasoning——思考模型会把 10 个输出 token 全用在思考上，回包为空。
     const r = await ansSignedRequest(resolveAnsCreds(ctx.db), '/api/v1/models/optimal', {
       method: 'POST',
-      body: { capabilities: ['chat'], strategy: 'cost-optimal' },
+      // 辅助路选型**只走这一档**（`auxModelRequest`）——排除 reasoning / 远端优先都由它一处定义，
+      //   不在调用点手写 `excludeCapabilities`（否则同一件事两处各记一份）。
+      body: auxModelRequest(),
       timeoutMs: 5000,
     });
     if (!r.ok) {
-      imLogger.warn({ detail: ansFailureNote(r) }, '[IMRouter] 取模型失败（ANS）— 意图分类放弃');
-      return null;
+      const note = ansFailureNote(r);
+      imLogger.warn({ detail: note }, '[IMRouter] 取模型失败（ANS）— 意图分类放弃');
+      return fail(`取模型失败：${note}`);
     }
     const modelData = await r.response!.json() as { url?: string; api_key?: string; model_name?: string };
-    if (!modelData.url || !modelData.api_key) return null;
+    // zx_20261110_1 B2: 缺 `model_name` 不再回落 `'gpt-3.5-turbo'`——那是**猜一个模型名**去请求：
+    //   模型池里没有它就 404，而用户侧只看到"没理解"，真因（缺字段/回落名不可用）被同一个 null 盖住。
+    if (!modelData.url || !modelData.api_key || !modelData.model_name) {
+      imLogger.warn(
+        { hasUrl: !!modelData.url, hasKey: !!modelData.api_key, hasModel: !!modelData.model_name },
+        '[IMRouter] 模型条目缺 url/api_key/model_name——意图分类放弃（不回落默认模型名）',
+      );
+      return fail('模型条目缺字段');
+    }
 
+    const ctxText = buildLlmContext(ctx, toUser);
+    const systemPrompt = '只输出一个词，不要解释、不要标点、不要引号：start_task(启动/恢复已有任务)、query_status(查询状态/进展)、create_task(明确要求新建任务/产出东西)、general_chat(闲聊/问候/天气/情绪/随口一说)。规则：只是随口聊聊或评论现状→general_chat，不要判成 create_task；只在用户明确要求开始做某件新事→create_task；只问进度状态→query_status'
+      + (ctxText ? `\n已知上下文（只用于消歧，不要复述）：\n${ctxText}` : '');
     const classifyResp = await fetch(resolveChatCompletionsUrl(modelData.url), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${modelData.api_key}` },
       body: JSON.stringify({
-        model: modelData.model_name || 'gpt-3.5-turbo',
+        model: modelData.model_name,
         messages: [
-          { role: 'system', content: '输出一个单词分类用户意图：start_task(启动/开始任务)、query_status(查询状态/进展)、create_task(创建新任务/完成工作)、general_chat(闲聊/问候)。规则：请求信息或完成工作→create_task；只问进度状态→query_status' },
+          { role: 'system', content: systemPrompt },
           { role: 'user', content: msgText },
         ],
         max_tokens: 10,
@@ -1359,14 +1849,23 @@ async function classifyIntentWithLLM(ctx: ImContext, msgText: string): Promise<'
       }),
       signal: AbortSignal.timeout(8000),
     });
-    if (!classifyResp.ok) return null;
+    if (!classifyResp.ok) {
+      imLogger.warn({ status: classifyResp.status }, '[IMRouter] 意图分类请求失败——按无结论处理');
+      return fail(`分类请求失败（HTTP ${classifyResp.status}）`);
+    }
     const classifyData = await classifyResp.json() as { choices?: Array<{ message?: { content?: string } }> };
-    const intent = classifyData.choices?.[0]?.message?.content?.trim().toLowerCase() || '';
-    if (intent.includes('start_task')) return 'start_task';
-    if (intent.includes('query_status')) return 'query_status';
-    if (intent.includes('create_task')) return 'create_task';
-    return null;
-  } catch (e) { imLogger.warn({ error: (e as Error)?.message }, '[IMRouter] 意图分类异常'); return null; }
+    // zx_20261110_1 B2: **严格单 token**——`create_task, but maybe query_status` 这类回包一律不认。
+    const raw = classifyData.choices?.[0]?.message?.content ?? '';
+    const intent = parseIntentToken(raw);
+    if (!intent) {
+      imLogger.warn({ raw: raw.trim().slice(0, 80) }, '[IMRouter] 模型输出不是单一意图词——按无结论处理（不猜）');
+      return fail('模型回包不是单一意图词');
+    }
+    return { intent, attempted: true, failed: false, note: '' };
+  } catch (e) {
+    imLogger.warn({ error: (e as Error)?.message }, '[IMRouter] 意图分类异常');
+    return fail((e as Error)?.message || String(e));
+  }
 }
 
 // ====== 创建任务 ======
@@ -1487,7 +1986,7 @@ export function shouldAutoDecomposeIm(db: Database.Database, parentTaskId: strin
   return bigEnough && !alreadyDecomposed(db as never, parentTaskId);
 }
 
-async function handleCreateTask(ctx: ImContext, toUser: string, msgText: string, inboundId?: string): Promise<void> {
+async function handleCreateTask(ctx: ImContext, toUser: string, msgText: string, inboundId?: string, echo?: string | null): Promise<void> {
   try {
     // zx_20261031_1 M1（名亦既有，夫亦将知止）: 标题/描述的清洗与切分**只此一处**（`core/im/task-input.ts`）——
     // 旧内联正则把任何空白当句界，中文夹英文时标题被切在半句（真标本：`把这周本仓库的 git 提交…`
@@ -1496,39 +1995,70 @@ async function handleCreateTask(ctx: ImContext, toUser: string, msgText: string,
     if (!title) { await ctx.sendReply(toUser, '请输入任务内容。'); return; }
 
     // A8/A10: @项目名解析 + isCreateProject（@不存在的项目名则创建新项目）
+    // zx_20261112_2 B2「识」：提及先分三类——项目（优先）/ 岗位 / 未归位；不再只看 mentions[0]。
     const { mentions } = extractMentions(msgText);
-    const mentionName = mentions[0] ?? '';
     let projectId: string | undefined;
     let projectName = '';
+    let positionId = '';
+    let positionName = '';
+    const unresolvedMentions: string[] = [];
     /** zx_20261005 M7: 「为什么没按你的 @ 建新项目」的如实说明（并入最终回话，不静默改落点）。 */
     let quotaNote = '';
-    if (mentionName) {
-      const matched = resolveProject(ctx.db, mentionName);
+    for (const m of mentions) {
+      const matched = resolveProject(ctx.db, m);
       if (matched) {
-        projectId = matched.id; projectName = matched.name;
-      } else if (matched === undefined) {
-        // isCreateProject：@的项目名不存在 → 创建新项目
-        // zx_20261005 M7: 档位项目数配额——达上限则**不再新建**，改落到最近的项目并如实说明
-        //   （软闸方向：任务不丢、IM 不断；被锁的只是"@X 新建"这一条）。
-        const refusal = projectQuotaRefusal(ctx.db);
-        const fallback = refusal
-          ? (ctx.db.prepare("SELECT id, name FROM wa_projects WHERE status = 'active' ORDER BY created_at DESC LIMIT 1").get() as { id: string; name: string } | undefined)
-          : undefined;
-        if (refusal && fallback) {
-          projectId = fallback.id; projectName = fallback.name;
-          quotaNote = `（未新建「${mentionName}」：${refusalWithContext(ctx.db, refusal, { requiredTier: PROJECT_QUOTA_UNLOCK_TIER }).replace(/\n/g, '')}本条落在项目「${fallback.name}」）`;
-        } else {
-          projectId = crypto.randomUUID();
-          ctx.db.prepare("INSERT INTO wa_projects (id, name, description, status, owner_id) VALUES (?, ?, ?, 'active', ?)").run(projectId, mentionName, `通过IM创建的项目（@${mentionName}）`, resolveProjectOwnerId(ctx.db));
-          projectName = mentionName;
-        }
-      } else {
+        if (!projectId) { projectId = matched.id; projectName = matched.name; }
+        continue;
+      }
+      if (matched === null) {
         // 模糊匹配有多个结果 → 让用户选择（A7: 暂存候选列表供编号回复）
-        const fuzzy = ctx.db.prepare("SELECT id, name FROM wa_projects WHERE status = 'active' AND name LIKE ? ORDER BY created_at DESC").all(`%${mentionName}%`) as Array<{ id: string; name: string }>;
+        const fuzzy = ctx.db.prepare("SELECT id, name FROM wa_projects WHERE status = 'active' AND name LIKE ? ORDER BY created_at DESC").all(`%${m}%`) as Array<{ id: string; name: string }>;
         pendingProjectSelections.set(`${ctx.channelType}:${toUser}`, { projects: fuzzy, taskText: msgText, expiresAt: Date.now() + 5 * 60_000 });
         const list = fuzzy.map((p, i) => `${i + 1}. ${p.name}`).join('\n');
-        await ctx.sendReply(toUser, `"@${mentionName}" 匹配到多个项目：\n${list}\n\n请回复编号选择目标项目。`);
+        await ctx.sendReply(toUser, `"@${m}" 匹配到多个项目：\n${list}\n\n请回复编号选择目标项目。`);
         return;
+      }
+      // 不是项目 ⇒ 看是不是岗位（岗位只认精确名；项目优先，同名不抢）。
+      const pos = resolvePositionMention(ctx.db, m, '');
+      if (pos.kind !== 'none') {
+        if (!positionId) { positionId = pos.id; positionName = pos.name; }
+        continue;
+      }
+      unresolvedMentions.push(m);
+    }
+
+    // zx_20261112_2 B2：**@ 打错不再静默建项目**。
+    //   ① 句子里有强建单动词（「创建/新建/做一个…」）⇒ 用户就是要一个以它为名的新项目，照建（回执说清）；
+    //   ② 否则列最近 3 个 active 项目让用户选；要新建就再发一句带强建单动词的（不新增命令词）。
+    if (!projectId && unresolvedMentions.length > 0) {
+      const missName = unresolvedMentions[0]!;
+      const strongCreate = classifyImText(msgText).kind === 'create';
+      if (!strongCreate) {
+        const recent = ctx.db.prepare(
+          "SELECT id, name FROM wa_projects WHERE status = 'active' ORDER BY COALESCE(datetime(updated_at), datetime(created_at)) DESC LIMIT 3",
+        ).all() as Array<{ id: string; name: string }>;
+        if (recent.length > 0) {
+          pendingProjectSelections.set(`${ctx.channelType}:${toUser}`, { projects: recent, taskText: msgText, expiresAt: Date.now() + 5 * 60_000 });
+          const list = recent.map((p, i) => `${i + 1}. ${p.name}`).join('\n');
+          await ctx.sendReply(toUser,
+            `没找到项目「${missName}」。最近的项目：\n${list}\n\n请回复编号选择；若要新建，请用「创建任务 … @${missName}」再发一次。`);
+          return;
+        }
+        // 一个项目都没有 ⇒ 仍按建新处理（否则用户无路可走）。
+      }
+      // 强建单（或压根没有项目可落）⇒ 建新项目，但**回执明说新建了什么**。
+      const refusal = projectQuotaRefusal(ctx.db);
+      const fallback = refusal
+        ? (ctx.db.prepare("SELECT id, name FROM wa_projects WHERE status = 'active' ORDER BY created_at DESC LIMIT 1").get() as { id: string; name: string } | undefined)
+        : undefined;
+      if (refusal && fallback) {
+        projectId = fallback.id; projectName = fallback.name;
+        quotaNote = `（未新建「${missName}」：${refusalWithContext(ctx.db, refusal, { requiredTier: PROJECT_QUOTA_UNLOCK_TIER }).replace(/\n/g, '')}本条落在项目「${fallback.name}」）`;
+      } else {
+        projectId = crypto.randomUUID();
+        ctx.db.prepare("INSERT INTO wa_projects (id, name, description, status, owner_id) VALUES (?, ?, ?, 'active', ?)").run(projectId, missName, `通过IM创建的项目（@${missName}）`, resolveProjectOwnerId(ctx.db));
+        projectName = missName;
+        quotaNote = `（已新建项目「${missName}」）`;
       }
     }
 
@@ -1555,7 +2085,20 @@ async function handleCreateTask(ctx: ImContext, toUser: string, msgText: string,
         }
       }
     }
+    // zx_20261112_2 B2：项目定下来后再问一次岗位（是否在本项目启用）——三种失败各自说清，不静默丢。
+    if (positionId) {
+      const check = resolvePositionMention(ctx.db, positionName, projectId ?? '');
+      if (check.kind !== 'ok') {
+        await ctx.sendReply(toUser, positionMentionRefusalText(check));
+        return;
+      }
+      positionId = check.id;
+    }
     const basisNote = projectBasisNote(basis);
+    // zx_20261112_2 B2：指了岗位就在回执里点名（用户能核对「派给谁」）。
+    const positionNote = positionId ? ` · 岗位: ${positionName}` : '';
+    // zx_20261111_3「证」：回执自证那一行（「我理解成…」+ 撤销指引）。空则不占行。
+    const echoLine = echo ? `\n${echo}` : '';
 
     const taskId = crypto.randomUUID();
     const isShortMessage = msgText.length <= 10;
@@ -1563,8 +2106,12 @@ async function handleCreateTask(ctx: ImContext, toUser: string, msgText: string,
 
     const taskCtx: Record<string, unknown> = { source: 'im', channel: ctx.channelType, externalUser: toUser };
     ctx.db.prepare(
-      'INSERT INTO wa_tasks (id, project_id, title, description, priority, status, context_json) VALUES (?, ?, ?, ?, ?, ?, ?)'
-    ).run(taskId, projectId, title, desc, 1, status, JSON.stringify(taskCtx));
+      'INSERT INTO wa_tasks (id, project_id, title, description, priority, status, position_id, context_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(taskId, projectId, title, desc, 1, status, positionId, JSON.stringify(taskCtx));
+    // zx_20261108_1 B3: 建单成功 ⇒ 入站行记下它落到了哪张任务（界面据此可跳任务）。
+    linkInboundTask(ctx.db, inboundId, taskId);
+    // zx_20261111_3「证」：记下"刚才这条"——撤销窗 10 分钟（窗口与判定在 `core/im-echo.ts`）。
+    lastCreatedImTask.set(`${ctx.channelType}:${toUser}`, { taskId, at: Date.now() });
 
     // zx_20260921 M1 / zx_20260924 §2e: **把刚收到的那一件挂上来**（"先发图、再说话"）。
     //   位置刻意压到 INSERT **之后**：取件是**取即消费**的，放在任何一条早退（@项目名对不上、编号选择）之前，
@@ -1577,6 +2124,8 @@ async function handleCreateTask(ctx: ImContext, toUser: string, msgText: string,
     });
     if (pendingMedia) console.log(`[IMRouter] 附件已挂到新任务: task=${taskId.slice(0, 8)} file=${pendingMedia.fileName ?? pendingMedia.path}`);
 
+    // zx_20261107_1 B5：拆解未成（预检/闸）时的如实说明——挂到下面那条单任务回执上，不另发一条。
+    let decomposeNote = '';
     // V3: 天下大事必作于细——大任务自动拆解（长消息或含搭建/构建/迁移等关键词）
     // zx_20260924_1 M3-b（J-7）：入口判据收成 `shouldAutoDecomposeIm` 一处——**补上了此前缺的那一层**
     //   「这个父任务是不是已经有在途子任务」（`alreadyDecomposed`，全仓唯一实现，判据 = 在途子数 > 0）。
@@ -1610,45 +2159,61 @@ async function handleCreateTask(ctx: ImContext, toUser: string, msgText: string,
           //   落行三件守卫（深度闸 `MAX_TASK_DEPTH` / 广度闸 `childBreadthRefusal` / 自环过滤
           //   `resolveIndexDeps(..., selfId)`）现全部由那**一份**承担；`depth: 0` ⇒ 子任务深度 = 1（旧硬编码值）。
           //   ⚠ 父任务的状态与拆解标记仍由本路自己写（见下），「不重写状态」这一既有约束不变。
-          const { created, planned, noDepCount, droppedDepNotes, inferredDeps } = planSubtasksFromTemplate(ctx.db, {
+          // zx_20261107_1 B5：与引擎路同取数、同判据；取不到预检环境 ⇒ 不预检（旧行为）。
+          const preflight = await collectPreflightContext(ctx.db, { projectId });
+          const r = planSubtasksFromTemplate(ctx.db, {
             parentTaskId: taskId, projectId, template, depth: 0, source: 'auto-decompose',
             contextExtra: { source: 'im', channel: ctx.channelType, externalUser: toUser },
+            ...(preflight ? { preflight } : {}),
           });
-          // zx_20260913 M3-1: 父**留在** `pending`——原写 `planning`，而 planning 只由 30 分钟超时收割转 paused
-          // ⇒ 父永不动工。父由上面的 INSERT 已落 `pending`（本分支仅 `status === 'pending'` 时进入），故此处
-          // 只补拆解标记，**不重写状态**：同值写无意义，且 IM 侧「恢复必返还额度」的既有约束要求
-          // 一切 `status = 'pending'` 写点都走 resumeWithQuota（本处非恢复，亦不该冒充）。
-          ctx.db.prepare("UPDATE wa_tasks SET context_json = json_set(COALESCE(context_json,'{}'), '$.auto_decomposed', json('true')), updated_at = datetime('now') WHERE id = ?").run(taskId);
-          recordInferredDeps(ctx.db, taskId, inferredDeps);
-          const childList = template.slice(0, created).map((t, i) => `${i + 1}. ${t.title}`).join('\n');
-          // zx_20261013_2 批三: 没拆满时**明说**——那句话由 `shortfallNotice` 一处产出（与引擎路同源，
-          //   不在此另写一份）；此前这里只落"其余未建"= **死路**，没说还能怎么补。
-          const shortfall = shortfallNotice(planned, created);
-          // zx_20261106_1 M3：判据有派生/缺失时如实报数（IM 路父任务通常无判据 ⇒ 多为自动派生）。
-          const builtTemplate = template.slice(0, created);
-          const derivedAcceptance = builtTemplate.filter((t) => t.acceptance_source === 'derived_parent' || t.acceptance_source === 'derived_generic').length;
-          const missingAcceptance = builtTemplate.filter((t) => t.acceptance_source === 'missing').length;
-          ctx.db.prepare('INSERT INTO wa_task_conversations (id, task_id, role, content) VALUES (?, ?, ?, ?)').run(
-            crypto.randomUUID(), taskId, 'system',
-            `[智能拆解] 任务较大，已自动拆分为${created}个子任务（状态 pending；无前置者可立即执行，有前置者待前置完成后自动启动）：\n${childList}`
-            + (shortfall ? `\n（未建满：${shortfall}）` : '')
-            // zx_20261018_3 批二: 被丢的成环边**点名**（同一句由 `droppedDepsNotice` 一处产出）。
-            + droppedDepsNotice(droppedDepNotes)
-            + acceptanceSourcesNotice(derivedAcceptance, missingAcceptance),
-          );
-          // zx_20260916_3 M1: 报数取**真实建出数**（created），截断时如实说明。
-          const truncated = shortfall ? `（未建满：${shortfall}）` : '';
-          await ctx.sendReply(toUser, `✅ 已创建任务「${title}」并自动拆解为${created}个子任务（项目: ${projectName}）${basisNote}${quotaNote}${truncated}。子任务已置为待执行：其中 ${noDepCount} 个无前置可立即动工，其余待前置完成后自动启动。`);
-          return;
+          if (r.created === 0) {
+            // zx_20261107_1 B5：预检/闸未通过 ⇒ **不落子任务、不写拆解标记**，如实说因并按单任务执行。
+            //   此前此处对 `created===0` 毫无分支 ⇒ 会回"已拆分为 0 个子任务"并 `return`，
+            //   父任务留在 pending 却**从未入队**（死单）。预检抬高了这条路的可见度，必须一并堵上。
+            const why = r.preflight?.reason ?? r.refusal ?? '未能建出子任务';
+            ctx.db.prepare('INSERT INTO wa_task_conversations (id, task_id, role, content) VALUES (?, ?, ?, ?)').run(
+              crypto.randomUUID(), taskId, 'system',
+              `[智能拆解] 未能拆分（${why}），本任务按单任务执行。`,
+            );
+            decomposeNote = `（未能拆分：${why}；已按单任务执行）`;
+          } else {
+            const { created, planned, noDepCount, droppedDepNotes, inferredDeps } = r;
+            // zx_20260913 M3-1: 父**留在** `pending`——原写 `planning`，而 planning 只由 30 分钟超时收割转 paused
+            // ⇒ 父永不动工。父由上面的 INSERT 已落 `pending`（本分支仅 `status === 'pending'` 时进入），故此处
+            // 只补拆解标记，**不重写状态**：同值写无意义，且 IM 侧「恢复必返还额度」的既有约束要求
+            // 一切 `status = 'pending'` 写点都走 resumeWithQuota（本处非恢复，亦不该冒充）。
+            ctx.db.prepare("UPDATE wa_tasks SET context_json = json_set(COALESCE(context_json,'{}'), '$.auto_decomposed', json('true')), updated_at = datetime('now') WHERE id = ?").run(taskId);
+            recordInferredDeps(ctx.db, taskId, inferredDeps);
+            const childList = template.slice(0, created).map((t, i) => `${i + 1}. ${t.title}`).join('\n');
+            // zx_20261013_2 批三: 没拆满时**明说**——那句话由 `shortfallNotice` 一处产出（与引擎路同源，
+            //   不在此另写一份）；此前这里只落"其余未建"= **死路**，没说还能怎么补。
+            const shortfall = shortfallNotice(planned, created);
+            // zx_20261106_1 M3：判据有派生/缺失时如实报数（IM 路父任务通常无判据 ⇒ 多为自动派生）。
+            const builtTemplate = template.slice(0, created);
+            const derivedAcceptance = builtTemplate.filter((t) => t.acceptance_source === 'derived_parent' || t.acceptance_source === 'derived_generic').length;
+            const missingAcceptance = builtTemplate.filter((t) => t.acceptance_source === 'missing').length;
+            ctx.db.prepare('INSERT INTO wa_task_conversations (id, task_id, role, content) VALUES (?, ?, ?, ?)').run(
+              crypto.randomUUID(), taskId, 'system',
+              `[智能拆解] 任务较大，已自动拆分为${created}个子任务（状态 pending；无前置者可立即执行，有前置者待前置完成后自动启动）：\n${childList}`
+              + (shortfall ? `\n（未建满：${shortfall}）` : '')
+              // zx_20261018_3 批二: 被丢的成环边**点名**（同一句由 `droppedDepsNotice` 一处产出）。
+              + droppedDepsNotice(droppedDepNotes)
+              + acceptanceSourcesNotice(derivedAcceptance, missingAcceptance),
+            );
+            // zx_20260916_3 M1: 报数取**真实建出数**（created），截断时如实说明。
+            const truncated = shortfall ? `（未建满：${shortfall}）` : '';
+            await ctx.sendReply(toUser, `✅ 已创建任务「${title}」并自动拆解为${created}个子任务（项目: ${projectName}${positionNote}）${basisNote}${quotaNote}${truncated}。子任务已置为待执行：其中 ${noDepCount} 个无前置可立即动工，其余待前置完成后自动启动。${echoLine}`);
+            return;
+          }
         }
       } catch { /* 拆解失败则按普通任务执行 */ }
     }
 
     if (status === 'pending') {
       enqueueJob(ctx.db, 'ai-task', { taskId, projectId, source: 'im', channel: ctx.channelType, externalUser: toUser });
-      await ctx.sendReply(toUser, `✅ 已创建任务「${title}」并自动执行（项目: ${projectName}）${basisNote}${quotaNote}`);
+      await ctx.sendReply(toUser, `✅ 已创建任务「${title}」并自动执行（项目: ${projectName}${positionNote}）${basisNote}${quotaNote}${decomposeNote}${echoLine}`);
     } else {
-      await ctx.sendReply(toUser, `📝 已创建任务「${title}」（项目: ${projectName}）${basisNote}${quotaNote}。输入「开始」启动执行。`);
+      await ctx.sendReply(toUser, `📝 已创建任务「${title}」（项目: ${projectName}${positionNote}）${basisNote}${quotaNote}${decomposeNote}。输入「开始」启动执行。${echoLine}`);
     }
   } catch (err) {
     // zx_20260929 M8-b: 同「获取系统状态」——回执只用用户话术，真因入日志（理由见该处注释）。

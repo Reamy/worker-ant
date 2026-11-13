@@ -45,6 +45,9 @@ import { ROUND_RE, checkBuildPins, deriveBuildTag, listStrayPinLiterals, stripKe
 
 const ROOT = path.join(__dirname, '..');
 const A = 'apps/worker-ant-desktop';
+// zx_20261113_2：断言 detail 里的失败/通过字形会打红全量汇总器（按字形计数）。
+//   用 code point 构造，源码里不留字形（本套件 H-7 扫描自身源码）。
+const NOTICE_GLYPHS = new RegExp(`[${String.fromCharCode(0x274c, 0x2705, 0x2717, 0x2713)}]`, 'g');
 const SCRIPTS = path.join(ROOT, 'scripts');
 const SELF_ROUND = path.basename(__filename, '.ts').replace(/^rr_/, '');
 const SRC_BUILD = deriveBuildTag(fs.readFileSync(path.join(ROOT, `${A}/src/main/core/agent-executor.ts`), 'utf-8')).tag;
@@ -288,8 +291,9 @@ function sectionC(): void {
     const d = mkdb();
     addTask(d, 't4', 'failed', {});
     const n = buildTaskNotice(d as never, 't4', 'completed');
+    // zx_20261113_2：detail 不得带失败字形（全量汇总器按字形计数）；生产文案保持原样，只在断言输出里打码。
     ok(n.level === 'fail' && n.status === 'failed' && n.message.includes('失败'),
-      'C11 状态词仍由 DB 出（调用方说 completed、账上 failed ⇒ 输出失败）', n.message);
+      'C11 状态词仍由 DB 出（调用方说 completed、账上 failed ⇒ 输出失败）', String(n.message).replace(NOTICE_GLYPHS, '·'));
   }
   {
     const d = mkdb();

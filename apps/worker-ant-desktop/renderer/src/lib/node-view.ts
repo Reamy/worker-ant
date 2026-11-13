@@ -9,10 +9,11 @@
  *   （"面板可派的对端"与"编排器愿意派的对端"必须同一把尺）；本模块转出以保取数口不变。
  */
 import {
-  NODE_OFFLINE_SEC, REMOTE_PROGRESS_STALE_SEC, canDispatch, isNodeCardCategory, isNodeRole,
+  NODE_CARD_CATEGORIES, NODE_CARD_CATEGORY_LABEL, NODE_OFFLINE_SEC, REMOTE_PROGRESS_STALE_SEC,
+  canDispatch, isNodeCardCategory, isNodeRole,
   type AnsNode, type NodeCardCategory, type NodeRequestProgress, type NodeRole,
 } from '../../../../../packages/shared-types/src/nodes.js';
-import { parseDbTime } from './deliverable-view';
+import { formatBytes, parseDbTime } from './deliverable-view';
 // zx_20261011_4 M3: 在线判据的实现已上移共享真源（main 侧编排预查与面板 D2 **同一把尺**）——
 //   此处**转出**（re-export）以保持 `PeersPage` 的 `from '../lib/node-view'` 取数口不变（一处实现）。
 export { isNodeOnline } from '../../../../../packages/shared-types/src/nodes.js';
@@ -22,6 +23,11 @@ import type { NodeCallRecord } from '../../../src/main/core/node-call-log.js';
 import type { NodeDispatchRecord } from '../../../src/main/core/node-dispatch-log.js';
 // zx_20261030_1 M4：回执措辞真源（pure、零 IO ⇒ 渲染层可直引；与 `settings-bool.js` 同范式）。
 import { receiptNote, type RemoteReceipt } from '../../../src/main/core/node-receipt.js';
+// zx_20261108_1 B2：角色建议的瓶颈人话名与样本下限——与 main 侧**同一处**（无第二份词表/阈值）。
+import { BOTTLENECK_LABEL, type AdviceBottleneck } from '../../../src/main/core/node-role-advice.js';
+import { MIN_RELIABILITY_SAMPLES, type NodeReliability } from '../../../src/main/core/node-match.js';
+// 四源余量快照的形状取自 main 真源（`node-heartbeat.ts`）——仅类型引用，打包期擦除。
+import type { NodeCapacityBasis } from '../../../src/main/core/node-heartbeat.js';
 
 /** 一条调用记录的结局 → 人话标签（**一处映射**，行内与徽标共用；枚举取自 `NodeCallRecord['status']` 不手抄）。 */
 export const CALL_STATUS_LABEL: Record<NodeCallRecord['status'], string> = {
@@ -49,6 +55,39 @@ export function nodeCategories(node: Pick<AnsNode, 'card'>): NodeCardCategory[] 
   return raw.filter(isNodeCardCategory);
 }
 
+/**
+ * zx_20261112_1 B5：节点卡上的岗位（只 id/名称/版本）。
+ *   `reported=false` ⇒ 旧版心跳没有该字段＝**未上报**（与「已上报但没有岗位」是两件事）。
+ *   坏条目逐条丢弃；名称/版本坏的条目也算坏（宁可少报一条，不编岗位）。
+ */
+export function nodePositions(node: Pick<AnsNode, 'card'>): { reported: boolean; items: Array<{ id: string; name: string; version: number }> } {
+  const raw = (node.card as { positions?: unknown } | null | undefined)?.positions;
+  if (!Array.isArray(raw)) return { reported: false, items: [] };
+  const items: Array<{ id: string; name: string; version: number }> = [];
+  for (const x of raw) {
+    if (!x || typeof x !== 'object') continue;
+    const o = x as Record<string, unknown>;
+    const id = typeof o.id === 'string' ? o.id.trim() : '';
+    const name = typeof o.name === 'string' ? o.name.trim() : '';
+    const version = typeof o.version === 'number' && Number.isFinite(o.version) ? o.version : null;
+    if (!id || !name || version == null) continue;
+    items.push({ id, name, version });
+  }
+  return { reported: true, items };
+}
+
+/**
+ * zx_20261112_1 B5：六类目在飞数——**按 `NODE_CARD_CATEGORIES` 顺序**逐类出（不按数值排序，
+ * 免得面板次序随手跳动）。无快照/旧快照 ⇒ 每类 `running=null`，面板说「未知」。
+ */
+export function classLoadView(env: NodeEnvView | null): Array<{ category: NodeCardCategory; label: string; running: number | null }> {
+  return NODE_CARD_CATEGORIES.map((category) => ({
+    category,
+    label: NODE_CARD_CATEGORY_LABEL[category],
+    running: env?.class_running?.[category] ?? null,
+  }));
+}
+
 /** 环境快照的**展示投影**——字段齐全但全部可空（"不知道"不许伪造成 0）。 */
 export interface NodeEnvView {
   platform: string;
@@ -74,8 +113,16 @@ export interface NodeEnvView {
   dispatch_fill_ratio: number | null;
   /** zx_20261022_3 批一：机器槽位填充率 = running_tasks / machine_limit（与执行闸同一把尺）。 */
   slot_fill_ratio: number | null;
-  /** zx_20261007 M2：机器余力（0–1，三源取严）；不可知 ⇒ null。 */
+  /** zx_20261007 M2：机器余力（0–1，四源取严；B1 补磁盘）；不可知 ⇒ null。 */
   capacity_free_ratio: number | null;
+  /** zx_20261108_1 B2：四源余量与瓶颈（取严来源）；旧版快照无此字段 ⇒ null（不猜）。 */
+  capacity_basis: NodeCapacityBasis | null;
+  /** zx_20261108_1 B2：OS 版本（`os.release()`）；旧快照/取不到 ⇒ null。 */
+  os_release: string | null;
+  /** zx_20261108_1 B2：CPU 型号；旧快照/取不到 ⇒ null。 */
+  cpu_model: string | null;
+  /** zx_20261108_1 B2：磁盘余量（0–1，可用/总量）；未知 ⇒ null。 */
+  disk_spare: number | null;
   collected_at: string | null;
   /**
    * zx_20261007 M3：**断网缺口起点**（ISO）——本机上报失败期间由心跳捎进载荷（`node-heartbeat.ts`
@@ -83,6 +130,11 @@ export interface NodeEnvView {
    * 后经 `toNode()` 原样回来。**不另存一份**——它只有 `status` 这一个来源。
    */
   stale_since: string | null;
+  /**
+   * zx_20261112_1 B5「衡」：按类目的在飞任务数（六类**齐全**才认；缺/坏 ⇒ `null`＝未上报，
+   * 界面须说「未知」，不拿 0 冒充「都闲着」）。
+   */
+  class_running: Record<NodeCardCategory, number> | null;
 }
 
 function num(v: unknown): number | null {
@@ -93,6 +145,31 @@ function str(v: unknown): string {
   return typeof v === 'string' ? v : '';
 }
 
+const BOTTLENECKS: readonly AdviceBottleneck[] = ['cpu', 'mem', 'slot', 'disk'];
+
+/** zx_20261112_1 B5：`class_running` 坏值/旧快照 ⇒ `null`（六类缺一即不认，不拿半截当齐全）。 */
+function classRunningOf(v: unknown): Record<NodeCardCategory, number> | null {
+  if (!v || typeof v !== 'object') return null;
+  const o = v as Record<string, unknown>;
+  const out = {} as Record<NodeCardCategory, number>;
+  for (const c of NODE_CARD_CATEGORIES) {
+    const n = num(o[c]);
+    if (n == null || n < 0) return null;
+    out[c] = n;
+  }
+  return out;
+}
+
+/** `capacity_basis` 坏值/旧快照 ⇒ `null`（不抛、不拿半截对象冒充完整四源）。 */
+function capacityBasis(v: unknown): NodeCapacityBasis | null {
+  if (!v || typeof v !== 'object') return null;
+  const o = v as Record<string, unknown>;
+  const raw = o.bottleneck;
+  const bottleneck = typeof raw === 'string' && (BOTTLENECKS as readonly string[]).includes(raw)
+    ? (raw as AdviceBottleneck) : null;
+  return { cpu: num(o.cpu), mem: num(o.mem), slot: num(o.slot), disk: num(o.disk), bottleneck };
+}
+
 /** `status` JSON 列 → 展示投影。从未心跳过（`null`）返回 `null`——"没有快照"与"快照全 0"不是一回事。 */
 export function readNodeEnv(node: Pick<AnsNode, 'status'>): NodeEnvView | null {
   const s = node.status;
@@ -101,6 +178,8 @@ export function readNodeEnv(node: Pick<AnsNode, 'status'>): NodeEnvView | null {
     platform: str(s.platform),
     arch: str(s.arch),
     hostname: str(s.hostname),
+    os_release: str(s.os_release) || null,
+    cpu_model: str(s.cpu_model) || null,
     cpu_count: num(s.cpu_count),
     cpu_usage_percent: num(s.cpu_usage_percent),
     load_avg1: num(s.load_avg1),
@@ -108,6 +187,7 @@ export function readNodeEnv(node: Pick<AnsNode, 'status'>): NodeEnvView | null {
     free_mem: num(s.free_mem),
     disk_free: num(s.disk_free),
     disk_total: num(s.disk_total),
+    disk_spare: num(s.disk_spare),
     jobs_running: num(s.jobs_running),
     machine_limit: num(s.machine_limit),
     running_tasks: num(s.running_tasks),
@@ -116,8 +196,10 @@ export function readNodeEnv(node: Pick<AnsNode, 'status'>): NodeEnvView | null {
     dispatch_fill_ratio: num(s.dispatch_fill_ratio),
     slot_fill_ratio: num(s.slot_fill_ratio),
     capacity_free_ratio: num(s.capacity_free_ratio),
+    capacity_basis: capacityBasis(s.capacity_basis),
     collected_at: str(s.collected_at) || null,
     stale_since: str(s.stale_since) || null,
+    class_running: classRunningOf(s.class_running),
   };
 }
 
@@ -237,6 +319,52 @@ export function capacityColor(ratio: number | null): string {
   if (ratio < 0.2) return 'bg-red-500';
   if (ratio < 0.5) return 'bg-amber-500';
   return 'bg-emerald-500';
+}
+
+/**
+ * zx_20261108_1 B2：**磁盘呈现**——已用/总量 + 可用百分比（总量未知时只报可用% 或"未知"）。
+ * 余量优先读新心跳的 `disk_spare`，旧快照则由 `disk_free/disk_total` 派生（同一口径，不另算一份）。
+ */
+export function diskUsageView(env: NodeEnvView | null): { label: string; ratio: number | null } {
+  if (!env) return { label: '未知', ratio: null };
+  const total = env.disk_total;
+  const free = env.disk_free;
+  const spare = env.disk_spare
+    ?? (total != null && total > 0 && free != null ? Math.max(0, Math.min(1, free / total)) : null);
+  if (total != null && total > 0 && free != null) {
+    const used = Math.max(0, total - free);
+    return {
+      label: `${formatBytes(used)} / ${formatBytes(total)}（可用 ${spare != null ? `${Math.round(spare * 100)}%` : '未知'}）`,
+      ratio: spare,
+    };
+  }
+  if (spare != null) return { label: `可用 ${Math.round(spare * 100)}%`, ratio: spare };
+  return { label: '未知', ratio: null };
+}
+
+/**
+ * zx_20261108_1 B2：**余力瓶颈一句话**（取严来源 + 该项余量）——无快照/无瓶颈 ⇒ `null`（不编）。
+ * 人话名取自 `node-role-advice.ts` 的单表，与角色建议同词。
+ */
+export function bottleneckView(env: NodeEnvView | null): string | null {
+  const basis = env?.capacity_basis;
+  if (!basis || !basis.bottleneck) return null;
+  const label = BOTTLENECK_LABEL[basis.bottleneck];
+  const value = basis[basis.bottleneck];
+  return value != null
+    ? `余力瓶颈：${label}（该项余量 ${Math.round(value * 100)}%）`
+    : `余力瓶颈：${label}`;
+}
+
+/**
+ * zx_20261108_1 B2：集群行 → 角色建议用的可靠性画像。
+ * 样本数低于派发侧的 `MIN_RELIABILITY_SAMPLES` ⇒ `null`（与 `matchNode` 同一把尺，不拿两三单定生死）。
+ */
+export function adviceReliabilityOf(
+  row: { successRate: number | null; latency: number | null; successSamples: number } | null | undefined,
+): NodeReliability | null {
+  if (!row || row.successRate == null || row.successSamples < MIN_RELIABILITY_SAMPLES) return null;
+  return { successRate: row.successRate, avgLatencyMs: row.latency, samples: row.successSamples };
 }
 
 /**

@@ -23,7 +23,7 @@ interface UnabsorbedView {
   lastEventAt: string;
 }
 
-export default function KnowledgeInboxCard({ projectId }: { projectId: string }) {
+export default function KnowledgeInboxCard({ projectId, onChanged }: { projectId: string; onChanged?: () => void }) {
   const navigate = useNavigate();
   const [unabsorbed, setUnabsorbed] = useState<UnabsorbedView | null>(null);
   const [similar, setSimilar] = useState<SimilarProject[]>([]);
@@ -59,6 +59,8 @@ export default function KnowledgeInboxCard({ projectId }: { projectId: string })
       const msg = await fn();
       if (msg) setNotice(msg);
       setError(null);
+      // zx_20261113_4 B4：启用/忽略/吸收后，首屏「业务知识」行即时刷新。
+      onChanged?.();
     } catch (e) {
       if (e instanceof IpcError && e.code === 'FEATURE_REQUIRED') setLocked(e.message);
       else setError((e as Error).message);
@@ -66,7 +68,7 @@ export default function KnowledgeInboxCard({ projectId }: { projectId: string })
       setBusy(null);
       await load();
     }
-  }, [load]);
+  }, [load, onChanged]);
 
   const absorb = useCallback(() => run('absorb', async () => {
     const r: KnowledgeAbsorbReceipt = await knowledgeApi.absorbNow(projectId);
@@ -165,6 +167,28 @@ export default function KnowledgeInboxCard({ projectId }: { projectId: string })
                     </span>
                   </p>
                   {p.description && <p className="mt-0.5 text-[11px] text-gray-500">{p.description}</p>}
+                  {/* zx_20261113_4 B2「荐」：为什么推荐——与「相似项目」同一套分数与理由 */}
+                  {p.similarity ? (
+                    <p className="mt-0.5 text-[11px] text-teal-700">
+                      相似度 {Math.round(p.similarity.score * 100)}% · {p.similarity.reasons.join('；')}
+                    </p>
+                  ) : (
+                    <p className="mt-0.5 text-[11px] text-gray-400">来源项目与当前项目无相似依据（仍可启用）</p>
+                  )}
+                  {/* 内容预览：最多 3 节，默认收起，不占屏 */}
+                  {p.preview && p.preview.length > 0 && (
+                    <details className="mt-1">
+                      <summary className="cursor-pointer select-none text-[11px] text-gray-400">看内容预览</summary>
+                      <div className="mt-1 space-y-1">
+                        {p.preview.map((s) => (
+                          <p key={s.section} className="text-[11px] text-gray-500">
+                            <span className="text-gray-400">{s.label}：</span>
+                            {s.snippet}
+                          </p>
+                        ))}
+                      </div>
+                    </details>
+                  )}
                 </div>
                 <div className="shrink-0 flex items-center gap-1.5">
                   <button

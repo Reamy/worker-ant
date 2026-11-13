@@ -22,6 +22,7 @@ import {
   type EndpointRow,
   type MatchStrategy,
 } from '../services/resource-matcher.js';
+import { getRecommendedConfig, providerCurrencyOf } from '../services/recommended-config.js';
 import { decryptApiKey } from '../utils/security.js';
 
 /** 请求体（与路由的 `t.Object` 校验同形；此处只管类型，不重复校验）。 */
@@ -33,6 +34,8 @@ export interface OptimalModelBody {
   excludeCapabilities?: string[];
   /** zx_20261018_3 批四「度」: 请求侧最小上下文窗口（tokens）；与能力下限取严，未给则不设此闸。 */
   minContextWindow?: number;
+  /** zx_20261111_1 B2: 远端优先；未传 ⇒ 排序与改动前逐字一致。 */
+  preferRemote?: boolean;
 }
 
 /** 降级链上的一跳（已解密）。 */
@@ -58,6 +61,12 @@ export interface OptimalModelEndpoint {
    * 与"没这个键"不是一回事：前者可供比对，后者只能"无从比对"。
    */
   capabilities: string[];
+  /**
+   * zx_20261107_1 B6: **纯追加**——本跳所属供应商 id 与其币种（目录 JSON 的 `provider_currency`）。
+   * 币种取不到 ⇒ `null`（用户自建 provider 不在目录里，不臆造）。旧调用方不读不受影响。
+   */
+  provider_id?: string;
+  provider_currency?: string | null;
 }
 
 /** 出不来模型时的如实回话。`diagnostics` 为**纯追加**（zx_20260921_1 M2）。 */
@@ -89,10 +98,18 @@ export interface OptimalModelSuccess {
    * ⚠ 旧 ANS 不带本键 ⇒ 读到 `undefined`，按 `'full'` 语义（与改动前一致）处理。
    */
   capabilityMatch: 'full' | 'partial';
+  /** zx_20261107_1 B6: **纯追加**——主模型所属供应商 id 与币种（同上，取不到为 `null`）。 */
+  provider_id?: string;
+  provider_currency?: string | null;
   sameProviderFallback: OptimalModelEndpoint | null;
   crossProviderFallback: OptimalModelEndpoint | null;
   /** @deprecated 保留兼容，等同 `crossProviderFallback` */
   fallback: OptimalModelEndpoint | null;
+  /**
+   * zx_20261111_1 B2: **纯追加**——请求带 `preferRemote` 时才有本键。
+   * `true` = 池中没有远端候选，只能用本地端点（如实降级，不是"无模型"）。
+   */
+  usedLocalFallback?: boolean;
 }
 
 /** 降级链一跳的解密。解不开返回 `null`（一跳坏不该把整条回包打掉）。 */
@@ -110,6 +127,9 @@ function decryptEndpoint(e: EndpointRow | null): OptimalModelEndpoint | null {
       output_price_per_1k: e.output_price_per_1k ?? 0.015,
       // zx_20260929 M6-1a: 与 `resolveOptimalModel` 的主模型同口径（同一函数、同一字段）。
       capabilities: parseModelCapabilities(e.capabilities),
+      // zx_20261107_1 B6：随跳带出供应商身份与币种（调用方换到备用后费用不再按首选价归因）。
+      provider_id: e.provider_id,
+      provider_currency: providerCurrencyOf(getRecommendedConfig(), e.provider_id),
     };
   } catch {
     return null;
@@ -134,6 +154,7 @@ export function resolveOptimalModel(
       preferredProvider: body.preferredProvider,
       excludeCapabilities: body.excludeCapabilities,
       minContextWindow: body.minContextWindow,
+      preferRemote: body.preferRemote,
     },
     resourceGroups,
   );
@@ -155,10 +176,14 @@ export function resolveOptimalModel(
       capabilities: parseModelCapabilities(result.primary.capabilities),
       // zx_20261002 M14: 主模型的满足度（`'partial'` = 降级选型）。主模型在场则该项必在场。
       capabilityMatch: result.capabilityMatch ?? 'full',
+      provider_id: result.primary.provider_id,
+      provider_currency: providerCurrencyOf(getRecommendedConfig(), result.primary.provider_id),
       // 8.4: 三级降级链
       sameProviderFallback: decryptEndpoint(result.sameProviderFallback),
       crossProviderFallback: decryptEndpoint(result.crossProviderFallback),
       fallback: decryptEndpoint(result.crossProviderFallback), // 向后兼容
+      // zx_20261111_1 B2: 只在请求了 preferRemote 时回报，旧调用方回包形状不变。
+      ...(body.preferRemote ? { usedLocalFallback: result.usedLocalFallback === true } : {}),
     };
   } catch {
     return { error: { code: 'DECRYPT_FAILED', message: 'API Key解密失败' } };

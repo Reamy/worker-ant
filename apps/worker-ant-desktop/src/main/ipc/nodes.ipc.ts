@@ -161,6 +161,8 @@ export function initNodesIpc(db: Database.Database): void {
         if (patch.participate !== undefined) {
           const v = node.participate ? '1' : '0';
           writeNodeSetting(settingDb, NODE_SETTING_KEYS.participate, v);
+          // zx_20261112_2 B1：用户手关标 `user`（永不自动恢复）；手开则清标记。
+          writeNodeSetting(settingDb, NODE_SETTING_KEYS.participateOffReason, node.participate ? '' : 'user');
           broadcastSetting(NODE_SETTING_KEYS.participate, v);
         }
         // zx_20261011 M8（追加批）: 也镜像 `name`——镜像值取 ANS 回传的**收窄后**结果（与上三键同范式）。
@@ -352,16 +354,26 @@ export function initNodesIpc(db: Database.Database): void {
     }
   });
 
-  // 写口：只认**显式布尔**（`'1'`/`'0'`）；写失败如实报，成功广播热更。
-  ipcMain.handle('nodes:set-auto-dispatch', (_event, { enabled }: { enabled?: unknown }) => {
+  // 写口：**三态**（zx_20261112_2 B1）——`off` / `default`（满负荷才溢出）/ `always`。
+  //   旧的 `enabled: boolean` 仍认（映射 off/always），既有设置页开关不受影响。
+  //   `default` 写空串：`decideAutoDispatchPolicy` 已把空串当「未配置」⇒ 回落三态缺省。
+  ipcMain.handle('nodes:set-auto-dispatch', (_event, { enabled, mode }: { enabled?: unknown; mode?: unknown }) => {
     try {
-      if (typeof enabled !== 'boolean') return { error: { code: 'INVALID', message: '参数 enabled 须为布尔值' } };
-      const value = enabled ? '1' : '0';
+      let value: string;
+      if (mode === 'off' || mode === 'default' || mode === 'always') {
+        value = mode === 'off' ? '0' : mode === 'always' ? '1' : '';
+      } else if (typeof enabled === 'boolean') {
+        value = enabled ? '1' : '0';
+      } else {
+        return { error: { code: 'INVALID', message: '参数须为 mode=off|default|always 或 enabled 布尔值' } };
+      }
       if (!writeNodeSetting(settingDb, NODE_SETTING_KEYS.autoDispatchOnCreate, value)) {
         return { error: { code: 'INTERNAL', message: '写入建单即派设置失败（查 wa_settings 写权限）' } };
       }
       broadcastSetting(NODE_SETTING_KEYS.autoDispatchOnCreate, value);
-      return { data: { enabled } };
+      // 回**生效后**的三态（空串时生效与否取决于档位/入网，不能只把写入值当结果）。
+      const policy = autoDispatchPolicy(db as unknown as NodeSettingDb & LicenseSettingDb);
+      return { data: { enabled: policy.enabled, source: policy.source, reason: policy.reason } };
     } catch (e) {
       return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } };
     }

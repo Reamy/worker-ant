@@ -24,7 +24,28 @@ export const DISPATCH_REQUIREMENTS_KEY = 'dispatch_requirements';
 
 export type RequirementsSource = 'rule' | 'decompose' | 'merged';
 
-/** 一件任务的外派需求。`categories` 为空 ＝ 不满足任何能力面（对话/判不出），调用方不得据此外派。 */
+/**
+ * zx_20261107_1 B5：拆解预检的**结局码**（落 `dispatch_requirements.preflight`）。
+ *   - `ok`：依赖（成环边已丢）、能力、预算、节点可用四关都过；
+ *   - `no-capable-node`：本机与台账里**没有任何**节点具备该子任务要求的类目/意图/设备品类；
+ *   - `nodes-offline`：有节点具备，但**全部离线或权重为 0**（"会做"但此刻"派不到"）；
+ *   - `budget-impossible`：项目级每任务 Token 预算**显式**低于最小原型默认。
+ */
+export type DispatchPreflightVerdict = 'ok' | 'no-capable-node' | 'nodes-offline' | 'budget-impossible';
+
+export interface DispatchPreflightRecord {
+  verdict: DispatchPreflightVerdict;
+  /** 非 `ok` 时的人话原因；`ok` 省略（不写空串冒充"有话说"）。 */
+  reason?: string;
+  /** 判定时对端台账是否读到——`false` 表示**只按本机**判了能力覆盖（远端未知，不装已核）。 */
+  peersKnown: boolean;
+  /** 参与判定的节点数（本机计入）——供界面核对"凭几台机器判的"。 */
+  nodeCount: number;
+}
+
+/**
+ * 一件任务的外派需求。`categories` 为空 ＝ 不满足任何能力面（对话/判不出），调用方不得据此外派。
+ */
 export interface DispatchRequirements {
   categories: NodeCardCategory[];
   intents: string[];
@@ -32,6 +53,13 @@ export interface DispatchRequirements {
   /** 0..1；规则派生有类目 0.6、无类目 0.2；拆解声明 0.85。 */
   confidence: number;
   source: RequirementsSource;
+  /** B5：拆解预检结果（仅拆解落库的子任务带；旧账/规则派生无此键）。 */
+  preflight?: DispatchPreflightRecord;
+  /**
+   * zx_20261112_1 B5：任务点名的**岗位 id**（能力面之外的一件事——"由这个岗位来做"）。
+   * 仅用于匹配加成与跨机公示，不参与三面词表校验；缺省＝未点名。
+   */
+  positionId?: string;
 }
 
 const REQUIREMENT_SOURCES: readonly RequirementsSource[] = ['rule', 'decompose', 'merged'];
@@ -46,6 +74,30 @@ function unique<T>(arr: readonly T[]): T[] {
 
 function isStringArray(v: unknown): v is string[] {
   return Array.isArray(v) && v.every((x) => typeof x === 'string');
+}
+
+const PREFLIGHT_VERDICTS: readonly DispatchPreflightVerdict[] = ['ok', 'no-capable-node', 'nodes-offline', 'budget-impossible'];
+
+/**
+ * 预检记录洗形：坏形状 ⇒ `null`（丢弃**该字段**，不连带作废整块需求）。
+ *
+ * 与三面词表"任一非法即整块作废"不同——那三面是**模型声明**，错一个词说明这段声明不可信；
+ * 预检是**引擎自己写**的旁注，坏掉只说明这条旁注不可读，需求本身仍可据以派发
+ * （若连需求一起作废，派发会静默退化成规则派生，反而更不可信）。
+ */
+function sanitizePreflight(raw: unknown): DispatchPreflightRecord | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const o = raw as Record<string, unknown>;
+  if (typeof o.verdict !== 'string' || !(PREFLIGHT_VERDICTS as readonly string[]).includes(o.verdict)) return null;
+  if (typeof o.peersKnown !== 'boolean') return null;
+  if (typeof o.nodeCount !== 'number' || !Number.isFinite(o.nodeCount) || o.nodeCount < 0) return null;
+  if (o.reason !== undefined && typeof o.reason !== 'string') return null;
+  return {
+    verdict: o.verdict as DispatchPreflightVerdict,
+    ...(typeof o.reason === 'string' && o.reason ? { reason: o.reason } : {}),
+    peersKnown: o.peersKnown,
+    nodeCount: o.nodeCount,
+  };
 }
 
 /**
@@ -64,12 +116,17 @@ export function sanitizeDispatchRequirements(raw: unknown): DispatchRequirements
     : null;
   if (confidence === null) return null;
   if (typeof o.source !== 'string' || !(REQUIREMENT_SOURCES as readonly string[]).includes(o.source)) return null;
+  const preflight = o.preflight === undefined ? null : sanitizePreflight(o.preflight);
+  // B5：岗位 id 是旁注——坏值**只丢该字段**（与 preflight 同理），不连带作废三面需求。
+  const positionId = typeof o.positionId === 'string' && o.positionId.trim() !== '' ? o.positionId : null;
   return {
     categories: unique(o.categories as NodeCardCategory[]),
     intents: unique(o.intents),
     deviceClasses: unique(o.deviceClasses as DeviceKindClass[]),
     confidence,
     source: o.source as RequirementsSource,
+    ...(preflight ? { preflight } : {}),
+    ...(positionId ? { positionId } : {}),
   };
 }
 
@@ -122,11 +179,16 @@ export function requirementsFromCapabilityWords(words: unknown): DispatchRequire
   };
 }
 
-/** 由任务行（标题/描述/已存需求）取需求：合法存档优先，否则规则派生。 */
+/**
+ * 由任务行（标题/描述/已存需求）取需求：合法存档优先，否则规则派生。
+ * `positionId`（任务行的 `position_id`）**显式给了就以它为准**——它是本机指派的事实，
+ *   不随 `dispatch_requirements` 的旧存档漂移；没给则沿用存档里的那份（若有）。
+ */
 export function requirementsForTask(input: {
   title?: unknown;
   description?: unknown;
   contextJson?: string | Buffer | null;
+  positionId?: unknown;
 }): DispatchRequirements {
   let ctx: Record<string, unknown> = {};
   try {
@@ -135,7 +197,10 @@ export function requirementsForTask(input: {
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) ctx = parsed as Record<string, unknown>;
   } catch { /* 坏 JSON 按无存档处理 */ }
   const stored = sanitizeDispatchRequirements(ctx[DISPATCH_REQUIREMENTS_KEY]);
-  return stored ?? deriveTaskRequirements({ title: input.title, description: input.description });
+  const req = stored ?? deriveTaskRequirements({ title: input.title, description: input.description });
+  const explicit = typeof input.positionId === 'string' && input.positionId.trim() !== '' ? input.positionId : null;
+  if (!explicit) return req;
+  return { ...req, positionId: explicit };
 }
 
 /**

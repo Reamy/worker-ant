@@ -542,11 +542,12 @@ async function main(): Promise<void> {
     ok(/TEAM_ITEM_KINDS\.map\(/.test(tl), 'H-5 ★共享库列由 `TEAM_ITEM_KINDS` 派生（不手抄四类）');
     ok(/domainPacks/.test(tl), 'H-6 领域包候选真有取数映射');
 
-    // IPC：五个通道在册，且启动时真注册。
+    // IPC：通道逐成员枚举，且启动时真注册。
+    // zx_20261113_5 M3「口」：新增只读 `packs:detail`（看不是启用，不挂 Pro 闸）——按符号补进枚举。
     const ipc = CODE(`${A}/src/main/ipc/packs.ipc.ts`);
     const channels = [...ipc.matchAll(/ipcMain\.handle\('([^']+)'/g)].map((m) => m[1]!);
-    eq(channels.sort(), ['packs:apply', 'packs:derive', 'packs:list', 'packs:stats', 'packs:unapply'],
-      'H-7 ★五个通道逐成员枚举');
+    eq(channels.sort(), ['packs:apply', 'packs:derive', 'packs:detail', 'packs:list', 'packs:stats', 'packs:unapply'],
+      'H-7 ★通道逐成员枚举（含只读 detail）');
     ok(/proFeatureRefusal|FEATURE_REQUIRED/.test(ipc), 'H-8 闸拒走 `FEATURE_REQUIRED`（与知识导出同形）');
     const idx = CODE(`${A}/src/main/index.ts`);
     ok(/import \{ initPacksIpc \}/.test(idx) && /initPacksIpc\(db\)/.test(idx),

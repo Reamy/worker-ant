@@ -216,6 +216,8 @@ CREATE TABLE wa_tasks (
   status TEXT DEFAULT 'pending', context_json TEXT DEFAULT '{}', workflow_config TEXT DEFAULT '{}',
   priority INTEGER DEFAULT 0, depends_on TEXT DEFAULT '', parent_task_id TEXT DEFAULT '',
   source TEXT DEFAULT 'user', acceptance_criteria TEXT DEFAULT '', aggregate_version INTEGER DEFAULT 0,
+  -- zx_20261112_2: 生产迁移列（IM 建单会写它）；夹具不许比生产窄。
+  position_id TEXT NOT NULL DEFAULT '',
   created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now'))
 );
 CREATE TABLE wa_task_conversations (
@@ -237,6 +239,9 @@ async function routeOnce(db: AnyDb, user: string, text = '查看系统状态'): 
     db, channelId: 'ch-demo', channelType: 'wechat',
     sendReply: async (_to: string, t: string) => { replies.push(t); },
   };
+  // zx_20261112_1 B3: 以回访用户入参（先落一条该用户历史 inbound），使首聊欢迎不占 replies[0]。
+  db.prepare("INSERT INTO wa_im_conversations (id, channel_id, external_user_id, message_json, direction) VALUES (?, 'ch-demo', ?, '{\"seed\":true}', 'inbound')")
+    .run(`seed-${Math.random().toString(36).slice(2)}`, user);
   await routeImMessage(ctx as never, user, text, 'private', '');
   return replies;
 }
@@ -1148,16 +1153,19 @@ async function main(): Promise<void> {
       //     真源取**，并要求路由仍**引**它（换成"路由内就地声明"才是本轮要拦的回归，见上方反证）。
       const cmdsQr = strip(path.join(MAIN, 'services/im-commands.ts'));
       const qrSrc = /export const QUERY_REGEX\s*=\s*(\/.*\/[a-z]*)/.exec(cmdsQr)?.[1] ?? '';
-      crit('M6', qrSrc.length > 0 && imr.includes('QUERY_REGEX'),
+      crit('M6', qrSrc.length > 0,
         '★ C14 正向：`QUERY_REGEX` 仍是**具名常量**（新增触发词须在**一处**改，不得散落成字面量）——真源在 `im-commands.ts`',
         qrSrc ? qrSrc.slice(0, 70) : '未找到具名正则');
-      // 穷举读点：声明 1 + `routeImMessage` 内 2（步骤1.5 的 `isRegexMatched` / 步骤5）。
-      //   ⚠ 这条**会随新增读点变红**，且这正是它的用处——本轮的病根之一就是"加了个取值却没回头扫读点"。
-      //     红了不等于写错了：把新读点也一并登记（并想清楚它与既有两处**同尺**）后再改这个数。
-      const qrHits = imr.split('\n').filter(t => t.includes('QUERY_REGEX'));
-      crit('M6', qrHits.length === 3,
-        '★ C14 `QUERY_REGEX` 的命中点**已穷举**（声明 1 + `routeImMessage` 内 2；**新增读点须来此处登记**）',
-        `${qrHits.length} 处：${qrHits.map(t => t.trim().slice(0, 46)).join(' ｜ ')}`);
+      // 穷举读点。⚠ zx_20261108_1 B3：查询判定的消费面已从路由迁入 `core/im-intent.ts`
+      //   （路由对该谓词**零活读**，只剩注释提及）。按符号重定向到新真源（非放宽）：
+      //   ①真源：声明 1 + 同文件 `match` 1；②判定：import 1 + `test` 1；③路由无活读。
+      //   ⚠ 这条**会随新增读点变红**，这正是它的用处——加取值须回头扫读点并在此登记。
+      const intentSrc = strip(path.join(MAIN, 'core/im-intent.ts'));
+      const cmdsHits = cmdsQr.split('\n').filter(t => t.includes('QUERY_REGEX'));
+      const intentHits = intentSrc.split('\n').filter(t => t.includes('QUERY_REGEX'));
+      crit('M6', !imr.includes('QUERY_REGEX') && cmdsHits.length === 2 && intentHits.length === 2,
+        '★ C14 `QUERY_REGEX` 的命中点**已穷举**（真源：声明 1 + `match` 1；判定：import 1 + `test` 1；路由无活读）',
+        `路由 ${imr.split('\n').filter(t => t.includes('QUERY_REGEX')).length} 处 ｜ im-commands ${cmdsHits.length} 处 ｜ im-intent ${intentHits.length} 处`);
     }
 
     // ── M7 · C15/C17 记忆写读刻度同源（C16 反向已上移【R】R-5）────────────────

@@ -116,6 +116,47 @@ export const MEM_TYPE_LABEL: Record<string, string> = {
   [MEM_TYPE_DELETED]: '墓碑',
 };
 
+/**
+ * 记忆**来源**（`wa_memories.source` 列取值）的人话名——**唯一一份**。
+ *
+ * zx_20261108_1 B4「忆」：此前记忆页直接上屏英文原值（`agent_execution` / `user_correction`…），
+ *   用户看不出"这条是谁写的"。词表放在与 `MEM_TYPE_LABEL` 同一处（同属记忆列的取值），
+ *   renderer 直引，不手抄第二份。词表外历史值如实以原键显示（不猜、不丢）。
+ * `manual` = 用户在记忆页手动新增（本轮 B4 新写口）。
+ */
+export const MEM_SOURCE_MANUAL = 'manual';
+
+export const MEM_SOURCE_LABEL: Record<string, string> = {
+  agent_execution: '代理执行',
+  background_review: '后台复盘',
+  task_execution: '任务执行',
+  pattern_extraction: '模式提炼',
+  auto_extract: '自动提取',
+  user_instruction: '用户指令',
+  user_correction: '用户纠正',
+  user_manual: '手动录入',
+  user_onboarding: '引导录入',
+  [MEM_SOURCE_MANUAL]: '手动新增',
+  sample: '示例项目',
+  // 以下为本仓库既有写口的取值（真库实测存在），不译则页面上屏英文原键。
+  retrospective: '任务复盘',
+  outcome_exemplar: '验收成果配方',
+  acceptance_check: '验收核查',
+  task_failure: '任务失败',
+  synthesis: '全景综合',
+  abstraction: '规则抽象',
+};
+
+/** `working_memory:<任务前8位>:<哈希>` 是**按任务动态生成**的来源键，只能按前缀认。 */
+const MEM_SOURCE_WORKING_PREFIX = 'working_memory:';
+
+export function memSourceLabel(source: string | null | undefined): string {
+  const s = String(source ?? '').trim();
+  if (!s) return '未知来源';
+  if (s.startsWith(MEM_SOURCE_WORKING_PREFIX)) return '工作记忆（任务临时）';
+  return MEM_SOURCE_LABEL[s] ?? s;
+}
+
 /** 冷却期（天）：距"最后一次被取用（无则创建）"超过此天数 ⇒ 判「冷却」。同一时刻只此一个数。 */
 export const MEM_COOLING_AFTER_DAYS = 30;
 

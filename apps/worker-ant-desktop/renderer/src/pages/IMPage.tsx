@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { im, invoke } from '../lib/ipc';
+import type { IntentAuditRow } from '../../../src/main/core/im/im-intent-audit.js';
 import { consumeImOutboxRequest } from '../lib/uiIntent';
 import { messageViewOf } from '../lib/messageView';
 import { formatDbTime, parseDbTime } from '../lib/deliverable-view';
@@ -21,7 +23,24 @@ import { Plus, Play, Square, Trash2, MessageSquare, RefreshCw, QrCode, X, Stetho
 interface Channel { id: string; channel_type: string; name: string; config: string; status: string; created_at: string; }
 // zx_20260912 M2-4: seq = 会话行 rowid（main 侧 `SELECT rowid AS seq`）——分页游标与稳定次序同一把尺。
 // zx_20260913 M1-4: status/last_error/outbox_id —— 出站送达态写在事本身的行上（未送达也到场）。
-interface Conversation { id: string; seq: number; external_user_id: string; message_json: string; direction: string; created_at: string; status?: string; last_error?: string; outbox_id?: string; task_id?: string; task_title?: string; }
+// zx_20261108_1 B3: 入站行多三列——「理解结果」（intent/route）与一句路由理由，供界面核对。
+interface Conversation { id: string; seq: number; external_user_id: string; message_json: string; direction: string; created_at: string; status?: string; last_error?: string; outbox_id?: string; task_id?: string; task_title?: string; intent?: string; route?: string; route_reason?: string; }
+/** B3: 意图/路由的词只作**展示投影**——判定真源在 main `core/im-intent.ts`，此处不另写规则。 */
+const INTENT_LABEL: Record<string, string> = {
+  start_task: '启动', create_task: '建任务', query_status: '查询', general_chat: '闲聊', ambiguous: '待澄清',
+};
+const INTENT_TONE: Record<string, string> = {
+  start_task: 'bg-green-100 text-green-700',
+  create_task: 'bg-blue-100 text-blue-700',
+  query_status: 'bg-cyan-100 text-cyan-700',
+  general_chat: 'bg-gray-200 text-gray-600',
+  ambiguous: 'bg-amber-100 text-amber-700',
+};
+const ROUTE_LABEL: Record<string, string> = {
+  help: '帮助', query: '查询', start: '启动', create: '建单', greeting: '问候', llm: '模型判定',
+  ambiguous: '待澄清', group_gate: '群聊拒绝', group_silent: '群聊静默', preference: '偏好记忆',
+  selection: '编号选择', terminal_pair: '终端配对', approval: '审批', agent_reply: '代理回复', command: '项目指令',
+};
 /** zx_20260930 M2: `message_json` 里的正文（认不出就是空串）——用来判"刚按下发送的那一行，
  *  是不是**真的**已经在服务端返回的这一屏里"。手发的两条路写进库的都是这一串：手发文字＝用户原文，
  *  手发件＝`📎 件名`（失败行由 `im-outbox.entryPreview` 写同一串，故成/败两支同一把尺）。 */
@@ -91,15 +110,17 @@ interface OptimisticSend {
 // zx_20260930 M4-3(一处真源): `byStatus` = main 侧**未折叠**的逐状态计数，与上面五档同出一次 `GROUP BY status`。
 //   折叠档答"共有多少条没送达"，它答"哪几态、各几条"——分组表按**它**出组与"共 M 条"，
 //   否则"显示得下的"会被当成"总共有的"（账 >200 条时用户数得到、翻不着）。
-interface OutboxStats { pending:number; blocked_quota:number; dead:number; sent:number; other:number; byStatus?:Record<string,number> }
+interface OutboxStats { pending:number; blocked_quota:number; dead:number; sent:number; dismissed:number; other:number; byStatus?:Record<string,number> }
 // zx_20260912 M3(管子·度量衡): 逐条记因——last_error=最近一次失败的真原因(null ⇒ 如实说"原因未记录"，不回填猜测)。
 // zx_20260924_1 M8(一处真源): channel_type/media_* 是补发路与界面判"这是不是一条件"的键；
 //   `media_unsupported`/`media_unsupported_reason` 由 main 侧 `listOutbox` **派生好一起返回**
 //   （渲染层拿不到能力表，自己拼一句同义文案就是第二份真源）⇒ 这里只照抄，不自判、不手抄文案。
-interface OutboxRow { id:string; channel_id:string|null; channel_name:string|null; channel_type:string|null; external_user_id:string|null; task_id:string|null; task_title:string|null; kind:string; message:string; media_path:string|null; media_kind:string|null; media_unsupported:boolean; media_unsupported_reason:string; attempts:number; status:string; created_at:string|null; next_retry_at:number|null; last_error:string|null; last_attempt_at:string|null }
+interface OutboxRow { id:string; channel_id:string|null; channel_name:string|null; channel_type:string|null; external_user_id:string|null; task_id:string|null; task_title:string|null; kind:string; message:string; media_path:string|null; media_kind:string|null; media_unsupported:boolean; media_unsupported_reason:string; attempts:number; status:string; created_at:string|null; next_retry_at:number|null; last_error:string|null; last_attempt_at:string|null; dismissed_at:string|null; dismiss_reason:string|null }
 // zx_20260924_1 M8(终态说终态): `unsupported_media` 是**第三类结果**——"通道结构上发不了件"，
 //   与 pending("还没成，会再试")、dead("试过了，已放弃") 各不相同，界面上必须各说各的。
-const OUTBOX_GROUP_LABEL: Record<string,string> = { pending:'待补发', blocked_quota:'等待条件恢复（配额/登录态恢复后自动重试）', unsupported_media:'不会送达（重试无效；原因见该行"失败原因"）', dead:'最终未送达（已放弃：超窗/超次）', sent:'已送达' };
+const OUTBOX_GROUP_LABEL: Record<string,string> = { pending:'待补发', blocked_quota:'等待条件恢复（配额/登录态恢复后自动重试）', unsupported_media:'不会送达（重试无效；原因见该行"失败原因"）', dead:'最终未送达（已放弃：超窗/超次）', sent:'已送达', dismissed:'已关闭（用户主动关闭，不再补发）' };
+/** zx_20261110_1 B7: 可关闭三态——与 main 侧 `OUTBOX_DISMISSABLE` 同集合（渲染层只是第二处载体，不另造判据）。 */
+const OUTBOX_DISMISSABLE = new Set(['dead','unsupported_media','blocked_quota']);
 /** zx_20260930 M4-3: 分组**次序**表——只定先后，**不定成员**（成员由 `byStatus` 定，未知态照样出场，
  *  否则"新态"会被这张表筛掉，行在账里、在页上整段不显示）。 */
 const OUTBOX_GROUP_ORDER = ['pending','blocked_quota','unsupported_media','dead','sent'];
@@ -179,6 +200,7 @@ const UNKNOWN_STATUS_META: ChannelStatusMeta = { label:'未知状态', cls:'bg-g
 const statusMeta = (s: string): ChannelStatusMeta => CH_STATUS_META[s as ChannelStatus] ?? UNKNOWN_STATUS_META;
 
 export default function IMPage() {
+  const navigate = useNavigate();
   const [channels, setChannels] = useState<Channel[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -207,7 +229,7 @@ export default function IMPage() {
   const [resending, setResending] = useState<Set<string>>(new Set());
   // zx_20260911_2 M3(如实): 出站补发账只读统计——pending=待补发, dead=超窗/超次已放弃
   // zx_20260911_5 M1(得鱼忘筌/知行合一): 补四态(含 blocked_quota) + 逐条明细 + 单条手动补发
-  const [outbox, setOutbox] = useState<OutboxStats>({pending:0,blocked_quota:0,dead:0,sent:0,other:0,byStatus:{}});
+  const [outbox, setOutbox] = useState<OutboxStats>({pending:0,blocked_quota:0,dead:0,sent:0,dismissed:0,other:0,byStatus:{}});
   const [outboxOpen, setOutboxOpen] = useState(false);
   const [outboxRows, setOutboxRows] = useState<OutboxRow[]>([]);
   const [outboxBusy, setOutboxBusy] = useState<Set<string>>(new Set());
@@ -248,6 +270,14 @@ export default function IMPage() {
   //   不猜、也不提供裸 id 输入口，守用户裁定"仅已有会话上回话"）。
   const [sendText, setSendText] = useState('');
   const [sendMsg, setSendMsg] = useState<{ok:boolean;text:string}|null>(null);
+  // zx_20261108_1 B3: 理解审计账——每条入站消息「为什么被当成任务/查询/闲聊」的只读明细。
+  //   与通知账各开各的折叠；打开时才取，未取过不报条数（不拿"0 条"冒充"库里没有"）。
+  const [auditOpen, setAuditOpen] = useState(false);
+  const [auditRows, setAuditRows] = useState<IntentAuditRow[]>([]);
+  const [auditTotal, setAuditTotal] = useState(0);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditError, setAuditError] = useState('');
+  const [auditMsg, setAuditMsg] = useState<{ok:boolean;text:string}|null>(null);
 
   useEffect(() => {
     loadChannels(); void loadOutbox(); void refreshUnreadByChannel();
@@ -268,7 +298,7 @@ export default function IMPage() {
    * 取不到不打断页面（红点缺省即"无未读"，不假装有、也不把整页弄红）。
    */
   async function refreshUnreadByChannel() { try { const d=await im.unreadByChannel() as unknown as {byChannel?:Record<string,number>}|null; setUnreadByChannel(d?.byChannel||{}); } catch(e){ void e; } }
-  async function loadOutbox() { try { const d=await invoke('im:outboxStats') as unknown as OutboxStats|null; if(d) setOutbox({pending:d.pending||0,blocked_quota:d.blocked_quota||0,dead:d.dead||0,sent:d.sent||0,other:d.other||0,byStatus:d.byStatus||{}}); } catch(e){ setError(`读取补发账统计失败：${(e as Error).message}`); } }
+  async function loadOutbox() { try { const d=await invoke('im:outboxStats') as unknown as OutboxStats|null; if(d) setOutbox({pending:d.pending||0,blocked_quota:d.blocked_quota||0,dead:d.dead||0,sent:d.sent||0,dismissed:d.dismissed||0,other:d.other||0,byStatus:d.byStatus||{}}); } catch(e){ setError(`读取补发账统计失败：${(e as Error).message}`); } }
   // zx_20260930 M4-3(得鱼忘筌): 首屏取第 0 页——此前写死 `limit:200` 且**没有下一页**，
   //   于是账超过 200 条时，多出来的行在界面上**根本不可达**（统计数得到、明细取不着）。
   async function loadOutboxRows() { try { const d=await invoke('im:outboxList',{limit:OUTBOX_PAGE, offset:0}) as unknown as OutboxRow[]|null; const rows=Array.isArray(d)?d:[]; setOutboxRows(rows); setOutboxExhausted(rows.length<OUTBOX_PAGE); } catch(e){ setError(`读取补发账明细失败：${(e as Error).message}`); } }
@@ -297,6 +327,28 @@ export default function IMPage() {
     finally { setNotifyLoading(false); }
   }
   function toggleNotify() { const next=!notifyOpen; setNotifyOpen(next); if(next) void loadNotifyLog(); }
+  /** B3: 取理解审计账（只读）。锁定档位由 main 回 `TEAM_REQUIRED`——如实说"团队版能力"，不显示空表。 */
+  async function loadIntentAudit() {
+    setAuditLoading(true); setAuditError(''); setAuditMsg(null);
+    try {
+      const r = await im.intentAudit({ ...(convChannel ? { channelId: convChannel } : {}), limit: 100 });
+      setAuditRows(r.rows); setAuditTotal(r.total);
+    } catch(e) {
+      const msg = (e as Error).message || '读取理解账失败';
+      setAuditError((e as {code?:string}).code === 'TEAM_REQUIRED' ? `审计视图属于团队版能力：${msg}` : `读取理解账失败：${msg}`);
+    } finally { setAuditLoading(false); }
+  }
+  function toggleIntentAudit() { const next=!auditOpen; setAuditOpen(next); if(next) void loadIntentAudit(); }
+  async function handleIntentAuditExport() {
+    setAuditMsg(null);
+    try {
+      const r = await im.intentAuditExport({ ...(convChannel ? { channelId: convChannel } : {}) });
+      setAuditMsg({ ok: true, text: `已导出 ${r.rows} 条到 ${r.savedTo}` });
+    } catch(e) {
+      const msg = (e as Error).message || '导出失败';
+      setAuditMsg({ ok: false, text: (e as {code?:string}).code === 'TEAM_REQUIRED' ? `审计导出属于团队版能力：${msg}` : `导出失败：${msg}` });
+    }
+  }
   async function handleOutboxRetry(id: string) {
     // zx_20260911_5 M1-4: 二次确认 + 明示配额口径（与 im:resend 同尺）——不静默消耗配额
     if (!confirm('确认补发这条消息？\n\n手动补发走主动推送，会计入当日推送配额；配额耗尽时将无法送达。')) return;
@@ -318,6 +370,28 @@ export default function IMPage() {
       setOutboxMsg({ ok: !!r?.ok, text: `${text}${r?.note?`（${r.note}）`:''}` });
     } catch(e) { setOutboxMsg({ok:false,text:(e as Error).message||'补发失败'}); }
     finally { setOutboxBusy(s=>{const n=new Set(s);n.delete(id);return n;}); await loadOutbox(); if(outboxOpen) await loadOutboxRows(); }
+  }
+  // zx_20261110_1 B7: 终态行用户可主动关闭——关闭后不再补发，但记录保留可查。
+  async function handleOutboxDismiss(id: string) {
+    if (!confirm('确认关闭这条记录？\n\n关闭后不再补发，记录保留仍可查看；此操作不可撤销。')) return;
+    setOutboxBusy(s=>new Set(s).add(id)); setOutboxMsg(null);
+    try {
+      const r = await invoke('im:outboxDismiss', id, '用户关闭') as unknown as {ok:boolean;status?:string;error?:string};
+      setOutboxMsg(r?.ok ? {ok:true,text:'已关闭，该条不再补发。'} : {ok:false,text:r?.error||'关闭失败'});
+    } catch(e) { setOutboxMsg({ok:false,text:(e as Error).message||'关闭失败'}); }
+    finally { setOutboxBusy(s=>{const n=new Set(s);n.delete(id);return n;}); await loadOutbox(); if(outboxOpen) await loadOutboxRows(); }
+  }
+  // 批量关闭只针对三态白名单——按钮上的数字即将被关闭的条数，不做"无过滤全清"。
+  async function handleOutboxDismissTerminal() {
+    const statuses = Array.from(OUTBOX_DISMISSABLE).filter(s=>(outboxCounts[s]||0)>0);
+    const total = statuses.reduce((a,s)=>a+(outboxCounts[s]||0),0);
+    if (total===0) { setOutboxMsg({ok:false,text:'当前没有可关闭的记录。'}); return; }
+    if (!confirm(`确认关闭全部 ${total} 条不会送达的记录？\n\n仅关闭「最终未送达 / 不会送达 / 等待条件恢复」三类；待补发与已送达不受影响。关闭后不再补发，记录保留可查。`)) return;
+    try {
+      const r = await invoke('im:outboxDismissTerminal', statuses, '用户批量关闭') as unknown as {dismissed:number};
+      setOutboxMsg({ok:true,text:`已关闭 ${r?.dismissed||0} 条。`});
+    } catch(e) { setOutboxMsg({ok:false,text:(e as Error).message||'批量关闭失败'}); }
+    finally { await loadOutbox(); if(outboxOpen) await loadOutboxRows(); }
   }
   // zx_20260905 批6: IM 渠道页实时——channel.started/stopped 事件驱动刷新（main 已转发，此前页面零订阅仅操作时手动 reload）
   // zx_20260906 批4 (4a): 入站消息实时——main 在 im-router 落库后发 im.message_inbound；正在查看该渠道则即时刷新新对话
@@ -729,6 +803,13 @@ export default function IMPage() {
         </div>
         {outboxOpen&&<div className="border-t border-current/20 px-3 py-2 max-h-96 overflow-y-auto">
           {outboxMsg&&<p className={`mb-2 text-xs ${outboxMsg.ok?'text-green-700':'text-red-700'}`}>{outboxMsg.ok?'✅':'❌'} {outboxMsg.text}</p>}
+          {/* zx_20261110_1 B7: 账头批量出口——「不会再送达的」一次性清掉，但只限三态白名单。 */}
+          {(() => {
+            const n = Array.from(OUTBOX_DISMISSABLE).reduce((a,s)=>a+(outboxCounts[s]||0),0);
+            return n>0 ? <div className="flex justify-end mb-2">
+              <button onClick={()=>void handleOutboxDismissTerminal()} className="text-xs px-2 py-0.5 rounded border border-current/30 hover:bg-white">关闭全部无法补发项（{n}）</button>
+            </div> : null;
+          })()}
           {/* M8: 分组表与 `OUTBOX_GROUP_LABEL` 同尺——新态漏在这张表里，行就整段不显示(账翻不开)。
               M4-3: 组**成员**改由统计（`outboxGroupKeys`）定，不再由这张次序表筛；每组标题写
               「显示 K / 共 M」——M 是全量口径，故"还有几条没取到"不必让用户自己按剩余行数去猜。 */}
@@ -746,10 +827,13 @@ export default function IMPage() {
                     {/* zx_20260924_1 M8(V-10 用户裁定「禁用并给 title 说明」): 本通道发不了件的媒体行，
                         补发钮**置灰但仍在**——用户有权知道它为什么点不动，藏起来就成了"这页什么也没说"。
                         理由串取自 main 侧派生的 `media_unsupported_reason`（真源在能力表），此处不另写一句。 */}
-                    {r.status!=='sent'&&<button onClick={()=>handleOutboxRetry(r.id)} disabled={outboxBusy.has(r.id)||r.media_unsupported} title={r.media_unsupported?`补发钮已置灰：${r.media_unsupported_reason}（本渠道没有发件能力，重试多少次都不会送达；请改用支持发件的渠道）`:'手动补发：计入当日推送配额；失败按 1/2/4 分钟退避、满 3 次转「最终未送达」'} className="shrink-0 px-2 py-0.5 rounded border border-current/30 hover:bg-white disabled:opacity-50">{outboxBusy.has(r.id)?'补发中…':'补发'}</button>}
+                    {r.status!=='sent'&&r.status!=='dismissed'&&<button onClick={()=>handleOutboxRetry(r.id)} disabled={outboxBusy.has(r.id)||r.media_unsupported} title={r.media_unsupported?`补发钮已置灰：${r.media_unsupported_reason}（本渠道没有发件能力，重试多少次都不会送达；请改用支持发件的渠道）`:'手动补发：计入当日推送配额；失败按 1/2/4 分钟退避、满 3 次转「最终未送达」'} className="shrink-0 px-2 py-0.5 rounded border border-current/30 hover:bg-white disabled:opacity-50">{outboxBusy.has(r.id)?'补发中…':'补发'}</button>}
+                    {/* zx_20261110_1 B7: 终态行给「关闭」出口——不会再送达的记录不能永远挂在账上。 */}
+                    {OUTBOX_DISMISSABLE.has(r.status)&&<button onClick={()=>handleOutboxDismiss(r.id)} disabled={outboxBusy.has(r.id)} title="关闭这条记录：不再补发，记录保留可查（不可撤销）" className="shrink-0 px-2 py-0.5 rounded border border-current/30 hover:bg-white disabled:opacity-50">关闭</button>}
                   </div>
                   {/* zx_20260912 M3(管子·度量衡): 「未送达」必须答得出「为什么」——逐条显示真原因，无则如实说无。 */}
-                  {r.status!=='sent'&&<p className="mt-1 break-words"><span className="opacity-70">失败原因：</span>{outboxReason(r)}</p>}
+                  {r.status!=='sent'&&r.status!=='dismissed'&&<p className="mt-1 break-words"><span className="opacity-70">失败原因：</span>{outboxReason(r)}</p>}
+                  {r.status==='dismissed'&&<p className="mt-1 break-words"><span className="opacity-70">关闭：</span>{r.dismissed_at?formatDbTime(r.dismissed_at):'已关闭'}{r.dismiss_reason?`（${r.dismiss_reason}）`:''} · 原失败原因：{outboxReason(r)}</p>}
                   {/* zx_20260913 M1-5(上手状态): 已声明却从未渲染的 `next_retry_at` 现在如实显示——"什么时候会再试"是用户等得下去的关键。 */}
                   {r.status==='pending'&&r.next_retry_at&&<p className="opacity-60 mt-0.5">下次重试：{new Date(r.next_retry_at).toLocaleTimeString('zh-CN',{hour12:false}).slice(0,5)}</p>}
                   {r.last_attempt_at&&<p className="opacity-60 mt-0.5">最近尝试：{formatDbTime(r.last_attempt_at)}</p>}
@@ -801,6 +885,35 @@ export default function IMPage() {
         </div>}
       </div>
 
+      {/* zx_20261108_1 B3(维特根斯坦·意义即使用 / 管子·度量衡): **理解账**——每条入站消息为什么被当成
+          任务/查询/闲聊、走的是哪条路由，连同理由一并可核对；只读，团队版 `audit_view` / `audit_export` 闸。
+          与上面的通知账各开各的折叠：一个问"理解对不对"，一个问"通知发没发"。 */}
+      <div className="mb-4 rounded-lg border border-gray-200 bg-white text-sm">
+        <div className="p-3 flex items-center flex-wrap gap-x-2 gap-y-1">
+          <span className="text-gray-700">{!auditOpen?'理解账（每条消息为何被当成任务/查询/闲聊）':auditLoading&&!auditRows.length?'理解账：读取中…':`理解账：最近 ${auditRows.length} 条${auditTotal>auditRows.length?`（共 ${auditTotal} 条）`:''}`}</span>
+          <button onClick={toggleIntentAudit} className="text-blue-600 underline hover:no-underline">{auditOpen?'收起':'查看'}</button>
+          {auditOpen&&<button onClick={()=>void loadIntentAudit()} disabled={auditLoading} className="text-blue-600 underline hover:no-underline disabled:opacity-50">刷新</button>}
+          {auditOpen&&<button onClick={()=>void handleIntentAuditExport()} className="text-blue-600 underline hover:no-underline">导出 CSV</button>}
+          {auditOpen&&convChannel&&<span className="text-xs text-gray-400">仅当前渠道</span>}
+          {auditMsg&&<span className={`text-xs ${auditMsg.ok?'text-green-700':'text-red-600'}`}>{auditMsg.text}</span>}
+        </div>
+        {auditOpen&&<div className="border-t border-gray-100 px-3 py-2 max-h-96 overflow-y-auto">
+          {auditError?<p className="text-xs text-red-600 py-2">{auditError}</p>
+            :auditLoading?<p className="text-xs text-gray-400 py-2">加载中…</p>
+            :auditRows.length===0?<p className="text-xs text-gray-400 py-2">没有入站消息的理解记录。</p>
+            :<div className="space-y-1.5">{auditRows.map(r=>(
+              <div key={r.id} className="bg-gray-50 rounded p-2 text-xs">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <span className="text-gray-600">{formatDbTime(r.createdAt)} · {r.channelName||r.channelId.slice(0,8)} · {userLabel(r.externalUserId)} · <span className={`px-1 rounded ${INTENT_TONE[r.intent]||'bg-gray-200 text-gray-600'}`}>{INTENT_LABEL[r.intent]||r.intent||'未判定'}</span> · {ROUTE_LABEL[r.route]||r.route||'未记录'}</span>
+                  {r.taskId&&<button type="button" onClick={()=>navigate(`/tasks/${r.taskId}`)} className="shrink-0 px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 hover:bg-blue-100" title={`前往任务：${r.taskId}`}>前往任务</button>}
+                </div>
+                {r.routeReason&&<p className="text-gray-500 mt-0.5 break-words">理由：{r.routeReason}</p>}
+                {r.text&&<p className="text-gray-400 mt-0.5 break-words">{r.text}</p>}
+              </div>
+            ))}</div>}
+        </div>}
+      </div>
+
       {channels.length===0?<div className="bg-white rounded-lg border p-12 text-center text-gray-400"><MessageSquare className="w-12 h-12 mx-auto mb-3 opacity-30"/><p className="text-lg mb-2">暂无 IM 渠道</p></div>:<div className="space-y-3">{channels.map(ch=>{const sm=statusMeta(ch.status);const cfgSum=configSummary(ch.channel_type,ch.config);const un=unreadByChannel[ch.id]||0;return(<div key={ch.id} className="bg-white rounded-lg border p-4"><div className="flex items-center justify-between"><div><div className="flex items-center gap-2 mb-1"><h3 className="font-semibold">{ch.name||typeLabel(ch.channel_type)}</h3>{/* zx_20261003 M12: 逐渠道未读红点——数来自 main（`im.unreadByChannel`），界面不自算。 */}{un>0&&<span className="px-1.5 py-0.5 rounded-full bg-red-500 text-white text-xs leading-none" title={`${un} 条未读`}>{un>99?'99+':un}</span>}<span className="text-xs text-gray-400">{typeLabel(ch.channel_type)}</span>{ch.channel_type==='wecom'&&<span className="text-xs px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700" title="企业微信无入站通道：能发出通知，收不到用户回复">仅出站</span>}<span className={`text-xs px-1.5 py-0.5 rounded-full ${sm.cls}`}>{sm.label}</span></div>{/* M1-3(庄子·得鱼忘筌): 不再裸奔 uuid——显示渠道名/类型之外只给**非密钥**配置摘要；原 id 移入 title(悬停可看)。 */}<p className="text-xs text-gray-400 font-mono select-all" title={`渠道 ID：${ch.id}`}>{cfgSum||(ch.channel_type==='wechat-personal'?'扫码登录（无附加配置）':'—')}</p>{statusDetail[ch.id]&&<p className={`text-xs mt-0.5 ${sm.alarm?'text-orange-600':'text-gray-500'}`}>{statusDetail[ch.id]}</p>}</div><div className="flex items-center gap-1">
         {ch.channel_type==='wechat-personal'&&<button onClick={()=>showQr(ch)} className="p-1.5 hover:bg-blue-50 rounded" title="二维码"><QrCode className="w-4 h-4 text-blue-500"/></button>}
         <button onClick={()=>showConvs(ch.id)} className="p-1.5 hover:bg-gray-100 rounded" title="对话"><MessageSquare className="w-4 h-4 text-gray-400"/></button>
@@ -818,9 +931,13 @@ export default function IMPage() {
       {convChannel && <div className="mt-6 bg-white rounded-lg border p-4"><div className="flex items-center justify-between mb-3"><h3 className="font-semibold text-sm">最近对话{/* zx_20261002 M4: 会话流恒为**倒序**（`rowid DESC` ⇒ 最新在上）——用户从「新消息提示条」的箭头方向看不出这条约定，故**显式标注**，不再让方向靠猜。 */}
 <span className="ml-2 font-normal text-gray-400 text-xs" title="会话按时间倒序：最新一条在最上，往下是更早的">最新在上 · 往下更早</span></h3><button onClick={()=>{setConvChannel(null);setConvs([]);setReplyPeer(null);setResendMsg(null);setConvQ('');setConvDirection('');}} className="p-1 hover:bg-gray-100 rounded"><X className="w-4 h-4"/></button></div>{/* zx_20260913 M1-5(上手状态): 搜索 + 方向筛选——服务端过滤(与游标同 WHERE), 7004 条里找一条。 */}<div className="flex items-center gap-2 mb-3"><input value={convQ} onChange={e=>setConvQ(e.target.value)} placeholder="搜索消息内容…" className="flex-1 px-3 py-1.5 border rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"/><select value={convDirection} onChange={e=>setConvDirection(e.target.value as ''|'inbound'|'outbound')} className="px-2 py-1.5 border rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"><option value="">全部方向</option><option value="inbound">仅收到</option><option value="outbound">仅发送</option></select></div>{resendMsg&&<p className={`text-xs mb-2 ${resendMsg.ok?'text-green-700':'text-red-600'}`}>{resendMsg.ok?'✅':'❌'} {resendMsg.text}</p>}{copyTip&&<p className="text-xs mb-2 text-gray-500">{copyTip}</p>}{/* zx_20260914 M1-3(海德格尔·在场·不打断): 新消息提示条——只提示、不抢位置，点击才回到最新。 */}{newOnTop>0&&<button onClick={backToTop} className="w-full mb-2 py-1 rounded-lg bg-blue-50 text-blue-700 text-xs hover:bg-blue-100">↑ {newOnTop} 条新消息 · 点击回到最新</button>}{/* M1-3: 固定高度（加入输入框后不再随消息数伸缩）；滚动位置由上方 effect 统一决定 */}<div ref={convScrollRef} onScroll={e=>{atTopRef.current = e.currentTarget.scrollTop<=24;}} className="space-y-2 h-[55vh] min-h-[20rem] overflow-y-auto">{/* zx_20260920 M3-b: 已按下发送、真行未回的那几条——**不属于任何一天**，故排在按日分组之外（也不进 seq 账）。 */}{optimistic.filter(o=>o.channelId===convChannel).map(o=>(<div key={o.key} className={`p-2 rounded text-sm ${o.failed?(o.sent?'bg-amber-50':'bg-red-50'):'bg-gray-50'}`}><div className="flex items-center justify-between mb-0.5"><p className="text-xs text-gray-400">→ 发送 · <span title={`用户：${o.externalUserId}`}>{userLabel(o.externalUserId)}</span> · {formatDbTime(o.at)}{/* zx_20260930 M2: 两种话分开说——"没送达"与"发出了但这屏还没取到"不是一件事，混说就是假话。 */}{o.failed?<span className={o.sent?'text-amber-600':'text-red-600'}> · {o.sent?'已发出，真行未见':'未送达'} · {o.failed}（此条仅存于当前页面）</span>:<span className="text-amber-600"> · 发送中…</span>}</p></div>{o.media?<ImMediaBubble media={o.media} onNotice={(t,ok)=>setSendMsg({ok,text:t})}/>:<ClampText text={o.text} textClassName="text-gray-700" />}</div>))}{/* zx_20260920 M3-c: 打开会话的在途态——此前那段空档只能说「暂无对话」，一句在没数据时也为真的话，被读成"这渠道没消息"。 */}{convLoading&&convs.length===0?<p className="text-sm text-gray-400 text-center py-4">加载中…</p>:convs.length===0&&optimistic.filter(o=>o.channelId===convChannel).length===0?<p className="text-sm text-gray-400 text-center py-4">{convQ||convDirection?'没有符合条件的对话':'暂无对话'}</p>:(()=>{/* M1-5: 按自然日分组——分组不改条目总数, 只加小标题。 */const groups:Array<[string,Conversation[]]>=[];for(const c of convs){const l=dayLabel(c.created_at);const last=groups[groups.length-1];if(last&&last[0]===l)last[1].push(c);else groups.push([l,[c]]);}return groups.map(([label,items])=>(<div key={label}><p className="text-xs font-semibold text-gray-400 mb-1 mt-2 first:mt-0">{label}（{items.length}）</p>{items.map(c=>{/* zx_20260920 M3-d(海德格尔·上手状态): 在途态与送达态**一处判**（`convDeliveryOf`）——
    此前"正在补发"与"没人补发"长得一模一样，用户点完补发只能等；现在它有个看得见的形状（琥珀色「补发中…」），
-   上次失败的原因移进 title，屏上不啰嗦。 */const busy=convBusyOf(c,{resending,retryingOutbox:outboxBusy});const dv=convDeliveryOf(c,busy);return (<div key={c.id} className={`p-2 rounded text-sm ${c.direction==='inbound'?'bg-blue-50':'bg-gray-50'}`}><div className="flex items-center justify-between mb-0.5"><p className="text-xs text-gray-400">{c.direction==='inbound'?'← 收到':'→ 发送'} · <span title={c.external_user_id?`用户：${c.external_user_id}`:''}>{userLabel(c.external_user_id)}</span> · {formatDbTime(c.created_at)}{dv&&<span className={DELIVERY_TONE_CLS[dv.tone]} title={dv.reason?`上次失败：${dv.reason}`:undefined}> · {dv.label}</span>}{/* zx_20260930 M2-c(维特根斯坦·意义即使用 / 一实一名): 「这句属于哪个任务」的小标牌。
+   上次失败的原因移进 title，屏上不啰嗦。 */const busy=convBusyOf(c,{resending,retryingOutbox:outboxBusy});const dv=convDeliveryOf(c,busy);return (<div key={c.id} className={`p-2 rounded text-sm ${c.direction==='inbound'?'bg-blue-50':'bg-gray-50'}`}><div className="flex items-center justify-between mb-0.5"><p className="text-xs text-gray-400">{c.direction==='inbound'?'← 收到':'→ 发送'} · <span title={c.external_user_id?`用户：${c.external_user_id}`:''}>{userLabel(c.external_user_id)}</span> · {formatDbTime(c.created_at)}{/* zx_20261108_1 B3(维特根斯坦·意义即使用): 入站「理解结果」徽标 + 一句路由理由——
+   用户能看到这条被当成什么、为什么；理由取库内 `route_reason`（main 一处判定），界面不重算规则。 */}
+{c.direction==='inbound'&&c.intent&&<span className={`ml-1 px-1 rounded ${INTENT_TONE[c.intent]||'bg-gray-200 text-gray-600'}`} title={c.route_reason||`路由：${ROUTE_LABEL[c.route||'']||c.route||'未记录'}`}>{INTENT_LABEL[c.intent]||c.intent}</span>}
+{c.direction==='inbound'&&c.route_reason&&<span className="ml-1 text-gray-400" title={`路由：${ROUTE_LABEL[c.route||'']||c.route||'未记录'}`}>{c.route_reason}</span>}{dv&&<span className={DELIVERY_TONE_CLS[dv.tone]} title={dv.reason?`上次失败：${dv.reason}`:undefined}> · {dv.label}</span>}{/* zx_20260930 M2-c(维特根斯坦·意义即使用 / 一实一名): 「这句属于哪个任务」的小标牌。
    只在 main **真标了** `task_id` 的行上出现——空串=无归属，界面上就什么都不说（**不替它编一个**）；
-   任务名取不到（已删/查无）时正文只说"属于任务"，完整 id 退进 title，不拿 id 冒充标题。 */}{c.task_id&&<span className="ml-1 px-1 rounded bg-gray-200 text-gray-600" title={`本条归属于任务：${c.task_title||c.task_id}`}>属于任务{c.task_title?`「${c.task_title}」`:''}</span>}</p><div className="flex items-center gap-1 shrink-0">{/* zx_20261002 M3: 每条会话都能**指定回话对象**——此前整页只有一个"发给最新一条"的口，想回某个稍旧对象无从下手。 */}
+   任务名取不到（已删/查无）时正文只说"属于任务"，完整 id 退进 title，不拿 id 冒充标题。
+   zx_20261108_1 B3: 改为可点击——看得见归属就要跳得到任务。 */}{c.task_id&&<button type="button" onClick={()=>navigate(`/tasks/${c.task_id}`)} className="ml-1 px-1 rounded bg-gray-200 text-gray-600 hover:bg-blue-100 hover:text-blue-700" title={`查看任务：${c.task_title||c.task_id}`}>属于任务{c.task_title?`「${c.task_title}」`:''}</button>}</p><div className="flex items-center gap-1 shrink-0">{/* zx_20261002 M3: 每条会话都能**指定回话对象**——此前整页只有一个"发给最新一条"的口，想回某个稍旧对象无从下手。 */}
     {!!c.external_user_id&&<button onClick={()=>setReplyPeer(c.external_user_id)} disabled={(replyPeer||'')===c.external_user_id} className="text-gray-400 hover:text-blue-600 disabled:opacity-40 disabled:cursor-default" title={(replyPeer||'')===c.external_user_id?'当前回话对象就是此人':`回话给 ${userLabel(c.external_user_id)}`}><CornerUpLeft className="w-3 h-3"/></button>}
     {c.direction==='outbound'&&<button onClick={()=>{ if(c.status==='failed'&&c.outbox_id) void handleOutboxRetry(c.outbox_id); else void handleResend(c.id); }} disabled={busy!=='idle'} className="text-gray-400 hover:text-blue-600 disabled:opacity-50" title={busy!=='idle'?'正在处理这条消息…':c.status==='failed'?'补发这条未送达的消息（走补发账同一套语义）':c.status==='blocked_quota'?'重发（此前发送条件缺失未送达；条件恢复前仍会失败）':'重发'}>{busy!=='idle'?<Loader2 className="w-3 h-3 animate-spin"/>:<Send className="w-3 h-3"/>}</button>}</div></div>{(()=>{/* zx_20260914 M1-4(维特根斯坦·意义即使用): 渲染判定收进 `messageViewOf`（纯函数，rr 可跑真实现）——
    非文本挂类型图标 + label 作 title（正文仍是 main 一处产出的占位符，屏上不重复显示标签）；文本保留纯文本 + 复制。 */

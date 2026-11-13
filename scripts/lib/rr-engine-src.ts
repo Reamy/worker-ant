@@ -31,7 +31,9 @@ const EXECUTOR = 'apps/worker-ant-desktop/src/main/core/agent-executor.ts';
 const CORE_DIR = 'apps/worker-ant-desktop/src/main/core';
 const TOOLS_DIR = 'apps/worker-ant-desktop/src/main/core/tools';
 /** 迁出模块中**不以 `exec-` 命名**者（命名约定由 `readDir` 的过滤式给不出，故显式列出）。 */
-const CORE_EXTRA_FILES = ['memory-context.ts'];
+// zx_20261110_2 B5: 上下文压缩（含"压缩前净化 `sanitizeLoneSurrogates`"）从执行体搬进 `context-compaction-run.ts`
+//   ——文件名不带 `exec-` 前缀，不并入则 `rr_zx_20260911_3` 的"压缩前净化接线在案"切到空块（假红）。
+const CORE_EXTRA_FILES = ['memory-context.ts', 'context-compaction-run.ts'];
 
 /**
  * 执行体源码 ∪ `core/exec-*.ts`（M8 拆出模块） ∪ 全部工具模块源码

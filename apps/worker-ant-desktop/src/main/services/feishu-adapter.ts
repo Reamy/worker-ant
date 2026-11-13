@@ -131,8 +131,28 @@ export class FeishuAdapter implements ImAdapter {
     // zx_20260914 M1-2(维特根斯坦·意义即使用): 非文本(`message_type !== 'text'`)不再整条丢弃——
     // 转成类型占位符，让"收到过一条图/文件"如实到场。`content` 里的 file_name/file_size 有就带上（真值）。
     const messageType = (message.message_type as string) || '';
+    const messageId = (message.message_id as string) || undefined;
+    const chatType = message.chat_type === 'p2p' ? 'direct' : 'group';
+    // zx_20261108_1 B3: 飞书群机器人只会收到**被 @** 的消息；`message.mentions` 非空即证实地 @ 了。
+    //   正文里的 `@_user_N` 占位符由 `stripBotMention` 统一剥离，不在这里动正文。
+    const rawMentions = Array.isArray(message.mentions) ? message.mentions as Array<Record<string, unknown>> : [];
+    const mentions = rawMentions
+      .map((m) => {
+        if (!m || typeof m !== 'object') return '';
+        const id = m.id as Record<string, unknown> | undefined;
+        return String((m.name as string) ?? (id?.open_id as string) ?? '');
+      })
+      .filter((s): s is string => s.length > 0);
     let text = '';
     let meta: ImMessageMeta | undefined;
+    if (messageId || mentions.length > 0) {
+      meta = {};
+      if (messageId) meta.messageId = messageId;
+      if (mentions.length > 0) {
+        meta.mentions = mentions;
+        if (chatType === 'group') meta.mentionsBot = true;
+      }
+    }
     if (messageType && messageType !== 'text') {
       let fileName: string | undefined;
       let sizeBytes: number | undefined;
@@ -144,12 +164,7 @@ export class FeishuAdapter implements ImAdapter {
         if (typeof sz === 'number' && Number.isFinite(sz)) sizeBytes = sz;
       } catch { /* content 非 JSON 不影响"到场"，只是没有附注 */ }
       text = nonTextPlaceholder(messageType, fileName, sizeBytes);
-      meta = { kind: messageType, ...(fileName ? { fileName } : {}), ...(sizeBytes !== undefined ? { sizeBytes } : {}) };
-      // 平台消息 id：供路由侧去重（非文本占位符长得一样，按正文去重会吞掉第二张图）。
-      // **只随非文本带出**——文本消息的去重语义（按正文）保持原样，不给既有路径改行为。
-      // M3 起它还多一个用处：**资源地址的路径段**（`/messages/{message_id}/resources/…`），故提前取。
-      const messageId = (message.message_id as string) || undefined;
-      if (messageId) meta.messageId = messageId;
+      meta = { kind: messageType, ...(fileName ? { fileName } : {}), ...(sizeBytes !== undefined ? { sizeBytes } : {}), ...(meta ?? {}) };
       // 取件标识：**图片是 `image_key`，其余（文件/音频/视频）是 `file_key`**——两个字段名对应两种 `type`
       //   实参（官方文档：`type=image` 对应消息中的图片，`type=file` 对应文件、音频、视频）。别混用。
       const fileKey = (parsed.file_key as string) || (parsed.image_key as string) || undefined;
@@ -170,7 +185,6 @@ export class FeishuAdapter implements ImAdapter {
     }
     const senderType = sender.sender_type as string | undefined;
     if (senderType !== 'user') return;
-    const chatType = message.chat_type === 'p2p' ? 'direct' : 'group';
     const senderId = ((sender.sender_id as Record<string, unknown>)?.open_id as string) || (message.chat_id as string) || 'unknown';
 
     console.log(`[IM:feishu] 收到消息 from=${senderId.slice(0, 8)} text="${text.slice(0, 50)}"`);

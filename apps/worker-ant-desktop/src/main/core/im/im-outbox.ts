@@ -223,6 +223,9 @@ export interface OutboxRow {
   last_error: string | null;
   /** zx_20260912 M3: 最近一次尝试时刻(UTC 秒级, 与 created_at 同口径)。 */
   last_attempt_at: string | null;
+  /** zx_20261110_1 B7: 用户关闭时刻与理由（未关闭为 null）。 */
+  dismissed_at: string | null;
+  dismiss_reason: string | null;
 }
 
 /**
@@ -245,9 +248,13 @@ export function listOutbox(db: DB, opts?: { status?: string; limit?: number; off
   const mediaCols = hasColumn(db, 'wa_im_outbox', 'media_path')
     ? 'o.media_path, o.media_kind'
     : 'NULL AS media_path, NULL AS media_kind';
+  // B7 同理：关闭两列由 migrations 补；旧库/旧夹具缺列时退让成 NULL，不让整张明细在旧库上翻不开。
+  const dismissCols = hasColumn(db, 'wa_im_outbox', 'dismissed_at')
+    ? 'o.dismissed_at, o.dismiss_reason'
+    : 'NULL AS dismissed_at, NULL AS dismiss_reason';
   const sql = `SELECT o.id, o.channel_id, c.name AS channel_name, c.channel_type AS channel_type,
                       o.external_user_id, o.task_id, t.title AS task_title,
-                      ${mediaCols},
+                      ${mediaCols}, ${dismissCols},
                       o.kind, o.message, o.attempts, o.status, o.created_at, o.next_retry_at, o.last_error, o.last_attempt_at
                FROM wa_im_outbox o
                LEFT JOIN wa_im_channels c ON c.id = o.channel_id
@@ -264,7 +271,7 @@ export function listOutbox(db: DB, opts?: { status?: string; limit?: number; off
   });
 }
 
-export interface OutboxStats { pending: number; blocked_quota: number; dead: number; sent: number; other: number }
+export interface OutboxStats { pending: number; blocked_quota: number; dead: number; sent: number; dismissed: number; other: number }
 
 /**
  * zx_20260930 M4-3(一处真源): **逐状态原始计数**——`GROUP BY status` 的**唯一**一次落点。
@@ -288,15 +295,109 @@ export function outboxStatusCounts(db: DB): Record<string, number> {
  *   （既有整对象断言散在 rr 里；加键是在改判据的强弱，不是在改事实）。
  */
 export function outboxStats(db: DB): OutboxStats {
-  const stats: OutboxStats = { pending: 0, blocked_quota: 0, dead: 0, sent: 0, other: 0 };
+  const stats: OutboxStats = { pending: 0, blocked_quota: 0, dead: 0, sent: 0, dismissed: 0, other: 0 };
   for (const [status, n] of Object.entries(outboxStatusCounts(db))) {
     if (status === 'pending') stats.pending = n;
     else if (status === 'blocked_quota') stats.blocked_quota = n;
     else if (status === 'dead') stats.dead = n;
     else if (status === 'sent') stats.sent = n;
+    // zx_20261110_1 B7: 用户主动关闭的行**不是待处理**——归入单独一档，
+    //   否则「其它状态 N 条」永远清不掉，横幅看着像还有事没做完。
+    else if (status === 'dismissed') stats.dismissed = n;
     else stats.other += n;
   }
   return stats;
+}
+
+/**
+ * zx_20261110_1 B7（维特根斯坦·意义即使用 / 少则得）: 补发账里**永不会再变**的行，用户要有出口。
+ *
+ * 病根：`dead`（超窗/超次）与 `unsupported_media`（通道结构上发不了件）在自动补发里是终态，
+ *   但它们会**永远**留在账上；界面上"待处理"的数字和横幅也就永远不归零。用户看得到、点不动、
+ *   也清不掉——账成了只会变长的东西。修法：允许用户**关闭**这三态（`blocked_quota` 同属
+ *   "现在发不了"，用户也可能明确放弃），置 `dismissed`；`pending`（还在退避中）与 `sent`
+ *   （已送达的事实）**不允许**改。关闭只改状态、不物理删除——账仍可查。
+ */
+export const OUTBOX_DISMISSABLE = ['dead', 'unsupported_media', 'blocked_quota'] as const;
+
+function isDismissable(status: string): boolean {
+  return (OUTBOX_DISMISSABLE as readonly string[]).includes(status);
+}
+
+/** 两列由 migrations/CREATE 补；旧库/旧夹具缺列时就地补，补不上也不阻断（状态与原因二选一如实降级）。 */
+function ensureDismissColumns(db: DB): void {
+  for (const ddl of [
+    'ALTER TABLE wa_im_outbox ADD COLUMN dismissed_at TEXT',
+    'ALTER TABLE wa_im_outbox ADD COLUMN dismiss_reason TEXT',
+  ]) {
+    try { db.prepare(ddl).run(); } catch { /* 列已存在 */ }
+  }
+}
+
+/** `ImDb` 刻意不含 `transaction`；这里用显式 BEGIN/COMMIT，已在事务里则直接串行执行。 */
+function inTx(db: DB, fn: () => void): void {
+  let began = false;
+  try { db.prepare('BEGIN').run(); began = true; } catch { /* 外层已有事务 */ }
+  try {
+    fn();
+    if (began) db.prepare('COMMIT').run();
+  } catch (e) {
+    if (began) { try { db.prepare('ROLLBACK').run(); } catch { /* 回滚失败不掩盖原错 */ } }
+    throw e;
+  }
+}
+
+export interface DismissOutcome {
+  ok: boolean;
+  /** 关闭后的状态（成功时恒为 `dismissed`；失败时为原状态，不存在则空） */
+  status?: string;
+  code?: 'not_found' | 'not_dismissable';
+  error?: string;
+}
+
+/**
+ * 关闭**单条**补发账。仅 `dead`/`unsupported_media`/`blocked_quota` 可关；`sent`/`pending` 拒绝。
+ * 关联对话行的 `outbox_id` 同事务置空——否则界面还挂着一个指向"已关闭"记录的补发入口。
+ */
+export function dismissOutboxEntry(db: DB, id: string, reason?: string): DismissOutcome {
+  const row = db.prepare('SELECT status FROM wa_im_outbox WHERE id = ?').get(id) as { status?: string } | undefined;
+  if (!row) return { ok: false, code: 'not_found', error: '补发记录不存在' };
+  const status = String(row.status || '');
+  if (!isDismissable(status)) {
+    return { ok: false, status, code: 'not_dismissable', error: `当前状态不可关闭（${status}）` };
+  }
+  ensureDismissColumns(db);
+  const why = (reason || '').trim();
+  inTx(db, () => {
+    db.prepare(
+      "UPDATE wa_im_outbox SET status = 'dismissed', dismissed_at = datetime('now'), dismiss_reason = ? WHERE id = ? AND status IN ('dead','unsupported_media','blocked_quota')",
+    ).run(why, id);
+    db.prepare("UPDATE wa_im_conversations SET outbox_id = '' WHERE outbox_id = ?").run(id);
+  });
+  return { ok: true, status: 'dismissed' };
+}
+
+/**
+ * 批量关闭**终态**补发账。`statuses` 必须显式给出且为本函数白名单的子集——
+ * 不做"无过滤全清"，也不接受上游塞来的未知状态。返回实际关闭行数。
+ */
+export function dismissAllTerminal(db: DB, statuses: string[], reason?: string): number {
+  const wanted = Array.isArray(statuses) ? statuses.filter((s) => isDismissable(String(s))) : [];
+  if (wanted.length === 0) return 0;
+  ensureDismissColumns(db);
+  const why = (reason || '').trim();
+  const marks = wanted.map(() => '?').join(',');
+  let changed = 0;
+  inTx(db, () => {
+    const r = db.prepare(
+      `UPDATE wa_im_outbox SET status = 'dismissed', dismissed_at = datetime('now'), dismiss_reason = ? WHERE status IN (${marks})`,
+    ).run(why, ...wanted);
+    changed = Number(r.changes) || 0;
+    db.prepare(
+      "UPDATE wa_im_conversations SET outbox_id = '' WHERE outbox_id IN (SELECT id FROM wa_im_outbox WHERE status = 'dismissed')",
+    ).run();
+  });
+  return changed;
 }
 
 export interface RetryOutcome { ok: boolean; status: string; attempts: number; quota?: boolean; error?: string }

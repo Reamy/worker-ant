@@ -439,7 +439,9 @@ async function groupB(): Promise<void> {
     + '能绕过它自己走池内兜底常量（用户把 ANS 配到别处就列错机器）');
   ok(resSrc.includes('listMcpTools(name, { endpointResolver: resolveEndpoint })'),
     'B-24b ★该唯一探点**确实**按**配置的** `ans_server_url` 解析端点（按调用传参，非进程级全局）');
-  ok(/callMcpTool\(args\.serverName, args\.toolName, parsedArgs, \{\s*\n\s*endpointResolver: async \(serverName: string\)/.test(resSrc),
+  // zx_20261113_3 B2：前置把 `args.serverName` 先 trim 成局部量 `serverName`（同一实参，形状变了）。
+  //   按符号重定向到新载体；仍要求“调用时传 endpointResolver”这一跳，不放宽为“文件里出现过”。
+  ok(/callMcpTool\(serverName, args\.toolName, parsedArgs, \{\s*\n\s*endpointResolver: async \(serverName: string\)/.test(resSrc),
     'B-25 `call_mcp_tool` 同样按调用传参（两工具同尺）');
   eq((resSrc.match(/服务未运行，跳过工具列表/g) ?? []).length, 0,
     'B-26 ★旧的静默 `catch {}` 注释已撤（"服务没起"与"零工具"不再同形）');
@@ -836,7 +838,13 @@ async function groupC(): Promise<void> {
   ok(/const transcribeTmp = transcribeTmpDirFor\(taskId\)/.test(aeC)
     && (aeC.match(/transcribeTmpDirFor\(/g) ?? []).length === 1,
     'C-27 ★目录**一处派生**（`finally` 里用的是同一个值，不重算——重算就成了两处派生）');
-  ok(/finally\s*\{[\s\S]{0,400}cleanTranscribeTmp\(transcribeTmp\)/.test(aeC)
+  // zx_20261109_1 B6 按符号重定向（非放宽）：`finally {` 与收尾调用之间现在夹着 B2 的注释（>400 字窗口失准），
+  //   改为**同一 finally 块的符号边界**——从 `} finally {` 到块内 `unregisterTaskRun(taskId, controller)`
+  //   这一段必须包含清理调用（两个锚点都是生产符号，不靠 magic 偏移）。
+  const iFin = aeC.indexOf('} finally {');
+  const iUnreg = aeC.indexOf('unregisterTaskRun(taskId, controller)', iFin);
+  const finBlock = iFin >= 0 && iUnreg > iFin ? aeC.slice(iFin, iUnreg) : '';
+  ok(finBlock.includes('cleanTranscribeTmp(transcribeTmp)')
     && (aeC.match(/cleanTranscribeTmp\(/g) ?? []).length === 1,
     'C-28 ★★收口挂在 `finally` 上：达标收尾 / 三个早退口 / 抛错**三条出口都收**——挂在 return 前就只有一条出口收到');
 

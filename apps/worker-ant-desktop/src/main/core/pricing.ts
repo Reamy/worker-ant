@@ -97,6 +97,12 @@ export const PRICING: Record<LicenseTier, TierPricing> = {
       capacityBenefit('任务模板', TIER_LIMITS.pro.maxTaskTemplates, '套'),
       // zx_20261029_2 M6：只卖「安装」这一跳（`plugin_install` 真闸在 `ansCall`）；浏览市场不限档位。
       '市场插件安装（浏览不限）',
+      // zx_20261108_1 B6：产出物**整批**导出成表归 Pro（`deliverable_export` 真闸在 `deliverable:exportCsv`）；
+      //   单件打开/定位与列表查看对任何档位开放——只卖"整批搬运"，不把"看自己的成果"圈走。
+      '产出物批量导出（CSV；单件打开不限档）',
+      // zx_20261113_1 B6「商」：只卖「搬走」这一跳（岗位知识包导出/导入）；
+      //   本机生成/注入/晋升/画像对社区档常开（括号外不写"岗位全功能"）。
+      '岗位知识包导出/导入（跨机带走经验）',
       '优先支持',
     ],
   },

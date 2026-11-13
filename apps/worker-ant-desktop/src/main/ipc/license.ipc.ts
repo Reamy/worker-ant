@@ -129,6 +129,11 @@ export function initLicenseIpc(db: Database.Database): void {
         targetId: res.state.tier,
         detail: { tier: res.state.tier, kind: res.state.kind, expiresAt: res.state.expiresAt },
       });
+      // zx_20261112_2 B1：许可**在运行中**恢复的时刻——把「当初由许可关掉的参与」回补一次
+      //   （启动对账之外的第二跳；不等下次重启）。失败只记日志，不影响激活结果。
+      void import('../core/node-heartbeat.js')
+        .then(({ reconcileNodeParticipation }) => reconcileNodeParticipation(db as never))
+        .catch((e: unknown) => console.warn('[license] 参与回补未成：', (e as Error)?.message || String(e)));
       // 激活后档位可能变了（席位上限随之变）⇒ 与 `license:status` 同一组合返回，界面不必再拉一次。
       const payload: LicenseStatusPayload = { ...res.state, seats: seatUsage(db, resolveLicenseTier(db)), deviceCap: licenseDeviceCap(res.state.tier) };
       return { data: payload };

@@ -11,6 +11,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { buildAcceptanceCheckPayload } from '../apps/worker-ant-desktop/src/main/core/agent-executor.js';
+import { engineSrc } from './lib/rr-engine-src.js';
 
 let pass = 0; let fail = 0;
 function ok(cond: boolean, label: string, detail?: string): void {
@@ -19,7 +20,9 @@ function ok(cond: boolean, label: string, detail?: string): void {
 }
 
 const ROOT = path.join(__dirname, '..');
-const exe = fs.readFileSync(path.join(ROOT, 'apps/worker-ant-desktop/src/main/core/agent-executor.ts'), 'utf-8');
+// zx_20261109_1 B6 按符号重定向（改钉更强的扫描面，非放宽）：验收判卷搬至 `exec-acceptance.ts`，
+//   扫描面随真源扩为引擎全量（`engineSrc()` = 执行体 ∪ `core/exec-*.ts` ∪ 工具面）。
+const exe = engineSrc();
 const tdp = fs.readFileSync(path.join(ROOT, 'apps/worker-ant-desktop/renderer/src/pages/TaskDetailPage.tsx'), 'utf-8');
 
 console.log('S1 2a buildAcceptanceCheckPayload 行为');
@@ -46,9 +49,10 @@ ok(trim.failed.length === 1 && trim.failed[0].criterion === '未命名' && trim.
 
 console.log('S2 2a 静态(旧语义不回归 · 单点已收敛到 acceptance-check.ts)');
 const acc = fs.readFileSync(path.join(ROOT, 'apps/worker-ant-desktop/src/main/core/acceptance-check.ts'), 'utf-8');
-const fnStart = exe.indexOf('async function checkAcceptanceCriteria');
-const fnEnd = exe.indexOf('async function checkGoalDeviation', fnStart);
-const fnBody = exe.slice(fnStart, fnEnd > fnStart ? fnEnd : undefined);
+const acceptSrc = fs.readFileSync(path.join(ROOT, 'apps/worker-ant-desktop/src/main/core/exec-acceptance.ts'), 'utf-8');
+const fnStart = acceptSrc.indexOf('async function checkAcceptanceCriteria');
+// 收敛后的真源函数在 `exec-acceptance.ts` 且为该文件最后一个函数 ⇒ 体内取到文件尾（不跨相邻函数）。
+const fnBody = acceptSrc.slice(fnStart);
 ok(fnBody.includes('recordAcceptanceOutcome(db, taskId, decided)'), '验收证据经 recordAcceptanceOutcome 落库(四出口共用一笔)');
 ok(/^\s{2}const payload = recordAcceptanceOutcome\(db, taskId, decided\);/m.test(fnBody), '落库调用无条件(不再只有"通过"那一支落库 ⇒ 台账恒 0 的病根已除)');
 ok(acc.includes('const failed = checks.filter((c) => c.passed === false);'), '先算 failed 再定夺(通过/拒收同一处判定)');

@@ -37,6 +37,8 @@ import {
 import { classifyChildCompletion, childCompletionCheckLabel } from '../apps/worker-ant-desktop/src/main/core/task-accounting.js';
 import { collectEvidence } from '../apps/worker-ant-desktop/src/main/core/exec-evidence.js';
 import { BOOL_SETTING_KEYS } from '../apps/worker-ant-desktop/src/main/core/settings-bool.js';
+// zx_20261112_1 B2: task:list JOIN `wa_positions` 取岗位名 ⇒ 夹具引生产同一份 DDL。
+import { POSITIONS_DDL } from '../apps/worker-ant-desktop/src/main/core/positions.js';
 
 let pass = 0;
 let fail = 0;
@@ -69,8 +71,10 @@ function makeDb(opts: { sideTable?: boolean } = {}): DatabaseSync {
       id TEXT PRIMARY KEY, project_id TEXT, title TEXT, description TEXT, status TEXT,
       priority INTEGER DEFAULT 0, depends_on TEXT DEFAULT '', parent_task_id TEXT DEFAULT '',
       source TEXT DEFAULT 'user', acceptance_criteria TEXT DEFAULT '', aggregate_version INTEGER DEFAULT 0,
+      position_id TEXT NOT NULL DEFAULT '',
       quality_score REAL, context_json TEXT, created_at TEXT, updated_at TEXT
     );
+    ${POSITIONS_DDL}
     CREATE TABLE wa_projects (id TEXT PRIMARY KEY, name TEXT, working_dir TEXT DEFAULT '');
     CREATE TABLE wa_deliverables (
       id TEXT PRIMARY KEY, project_id TEXT, task_id TEXT, name TEXT, type TEXT, status TEXT,
@@ -246,19 +250,32 @@ console.log('\n【C】M3：内容校验成批、有界、三态如实');
 {
   const src = stripComments(readSrc('apps/worker-ant-desktop/src/main/core/output-validator.ts'));
   ok(!/30_000/.test(src), 'C-1 旧 30s 上限零命中（判据里不再残留旧值）');
+  // zx_20261109_1 B3 就地改钉（非放宽）：真正的 AbortSignal 等待值改为由"单份上限 ∧ 本批剩余预算"
+  //   派生的 `waitMs`；按旧的 `AbortSignal.timeout(LLM_VALIDATION_TIMEOUT_MS)` 字面比对必红。
+  //   改钉更强：单份上限与批次总预算各自一处真源，且两者经 `Math.min` 合流后才喂给 AbortSignal。
   ok((src.match(/LLM_VALIDATION_TIMEOUT_MS\s*=\s*12_000/g) || []).length === 1
-    && (src.match(/AbortSignal\.timeout\(LLM_VALIDATION_TIMEOUT_MS\)/g) || []).length === 1,
-    'C-1b 超时上限一处真源且被真正喂给 `AbortSignal`（不是只声明不使用）');
+    && (src.match(/LLM_VALIDATION_BUDGET_MS\s*=\s*12_000/g) || []).length === 1
+    && /const waitMs = Math\.max\(1, Math\.min\(LLM_VALIDATION_TIMEOUT_MS, remainingMs\)\)/.test(src)
+    && (src.match(/AbortSignal\.timeout\(waitMs\)/g) || []).length === 1,
+    'C-1b 单份上限与批次总预算各一处真源，实际等待由两者合流后的 `waitMs` 喂给 `AbortSignal`（不是只声明不使用）');
   ok((src.match(/VALIDATION_CONCURRENCY\s*=\s*3/g) || []).length === 1
     && /Math\.min\(VALIDATION_CONCURRENCY, targets\.length\)/.test(src),
     'C-1c 并发上限一处真源且池宽由它派生（不另写一个数字）');
   const fin = stripComments(readSrc('apps/worker-ant-desktop/src/main/core/tools/control-finalize.ts'));
   const exe = stripComments(readSrc('apps/worker-ant-desktop/src/main/core/exec-close.ts'));
-  ok(/validateOutputs\(ansClient as never, targets\)/.test(fin) && !/validateOutput\(ansClient as never, abs/.test(fin),
-    'C-1d 收口门只剩批量调用一处（逐文件直呼零残留）');
-  ok(/validateOutputs\(ansClient as never, missTargets\)/.test(exe) && !/validateOutput\(ansClient as never, abs/.test(exe),
-    'C-1e 执行侧收口同样走批量（缓存命中在循环内、未命中的成批问一次）');
-  ok(/\[INFO\] 内容充分性未核/.test(fin), 'C-1f finalize 对"未核"追加 [INFO]（不阻断，但看得见）');
+  ok(/validateOutputs\(ansClient as never, targets, \{ breaker: deps\.sufficiencyBreaker, budgetMs: LLM_VALIDATION_BUDGET_MS \}\)/.test(fin)
+    && !/validateOutput\(ansClient as never, abs/.test(fin),
+    'C-1d finalize 门只剩批量调用一处，且总预算/run 级熔断器齐传（逐文件直呼零残留）');
+  ok(/validateOutputs\(ansClient as never, missTargets, \{ breaker: sufficiencyBreaker, budgetMs: LLM_VALIDATION_BUDGET_MS \}\)/.test(exe)
+    && !/validateOutput\(ansClient as never, abs/.test(exe),
+    'C-1e 执行侧收口同样走批量，且与 finalize 门**共用**同一份熔断器（缓存命中在循环内、未命中的成批问一次）');
+  // zx_20261109_1 B3：`[INFO] 内容充分性未核` 的唯一构造处已收进 `summarizeUnverified`（两门共用一份文案）。
+  ok(/function summarizeUnverified\(/.test(src) && (src.match(/\[INFO\] 内容充分性未核/g) || []).length === 1,
+    'C-1f "未核"文案一处真源（`summarizeUnverified`），两门不再各写一句');
+  ok(/summarizeUnverified\(results, deps\.sufficiencyBreaker\)/.test(fin)
+    && /summarizeUnverified\(results, sufficiencyBreaker\)/.test(exe)
+    && !/\[INFO\] 内容充分性未核/.test(fin) && !/\[INFO\] 内容充分性未核/.test(exe),
+    'C-1f2 finalize 门与收口门都改走共享助手（两处字面文案零残留——只能经同一函数产出）');
 }
 
 function tmpDoc(bits: string): string {
@@ -294,8 +311,11 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
   };
   const r = (await validateOutputs(fakeTimeout as never, [{ file, archetype: 'document' }]))[0]!;
   const secs = Math.round(LLM_VALIDATION_TIMEOUT_MS / 1000);
-  ok(r.status === 'unknown' && String(r.reason).includes(`${secs}s 内无结论`),
-    'C-3 超时与"不可用"分开说：未核原因写明等待上限（由生产常量派生，不手抄秒数）', String(r.reason));
+  // zx_20261109_1 B6 按语义重定向（非放宽）：假模型 0ms 就抛 TimeoutError ⇒ 未等满等待上限，
+  //   原因须写明该上限（由生产常量派生）且**不得冒充"总预算用尽"**；等满上限的那一句仍由 C-1b 的结构钉着。
+  ok(r.status === 'unknown' && String(r.reason).includes(`${secs}s`) && String(r.reason).includes('超时')
+    && !String(r.reason).includes('总预算'),
+    'C-3 超时与"不可用"分开说：未核原因写明等待上限（由生产常量派生，不手抄秒数；提前超时不得冒充预算用尽）', String(r.reason));
 
   const fakeDown = { getOptimalModel: async () => { throw new Error('down'); } };
   const r2 = (await validateOutputs(fakeDown as never, [{ file, archetype: 'document' }]))[0]!;
@@ -392,8 +412,10 @@ console.log('\n【D】M4：模板匹配加闸 + 子任务如实记账');
 
 {
   const page = stripComments(fs.readFileSync(path.join(RENDERER, 'pages/SettingsPage.tsx'), 'utf-8'));
+  // zx_20261108_1 B5：写口收敛到统一 `saveSetting`——键仍绑定本开关，`settings:set` 只在写口内发出。
   ok(/boolSetting\(all\['engine\.plan_auto_decompose'\]\)/.test(page)
-    && /invoke\('settings:set', 'engine\.plan_auto_decompose'/.test(page)
+    && /saveSetting\('计划自动拆解', 'engine\.plan_auto_decompose'/.test(page)
+    && page.includes("invoke('settings:set', key, value)")
     && /togglePlanAutoDecompose/.test(page),
     'D-5 开关有**读写两条腿**（此前键只在白名单里、主进程在读，用户点不到——"装好了没人能上电"）');
   ok(BOOL_SETTING_KEYS.includes('engine.plan_auto_decompose'),

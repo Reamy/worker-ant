@@ -7,7 +7,8 @@
  *        「failed 对话行恰两处写者」这条不变量撑破（`rr_zx_20260913.ts:238`）。
  *   M1-2 非文本消息（图/文件/语音/视频）在**五家适配器**里一律 `return` 整条丢弃：
  *        用户以为"发了"，系统以为"没发"——两边都不知道对方不知道。更要命的是占位符若直接进
- *        指令管道，`[图片]`（恰 4 字）会触发兜底回话、长占位符（>4 字）会被**当自由文本建成任务**。
+ *        指令管道，`[图片]`（恰 4 字）会触发兜底回话、长占位符历史上会被**当自由文本建成任务**
+ *        （zx_20261108_1 B3 起 `length > 4` 建单判据已删，判定改走 `core/im-intent.ts`）。
  *
  * ── 本文件怎么证的（承 feedback「rr 夹具须按生产初始化顺序」「往返须在生产入参上证」）──
  *   §S1 不是重写一遍 `im:send`，而是把**生产源码切片**取出来、用 `new Function` 挂上真库与**真
@@ -37,6 +38,9 @@ import { sendManualImMessage, IM_SEND_TEXT_LIMIT } from '../apps/worker-ant-desk
 // zx_20260930 M2-d：出站长文本的**唯一发落点**——本脚本期望值由它派生（不抄常数）
 import { fitOutboundText } from '../apps/worker-ant-desktop/src/main/core/im/im-text.js';
 import { nonTextPlaceholder } from '../apps/worker-ant-desktop/src/main/services/im-adapter.js';
+// zx_20261108_1 B3：判定**一处真源**——旧套件里"长占位符够长就会被建成任务"的反证，
+//   改钉到 decideImIntent 上（按符号重定向到更强的新载体，不是放宽）。
+import { decideImIntent } from '../apps/worker-ant-desktop/src/main/core/im-intent.js';
 import { routeImMessage } from '../apps/worker-ant-desktop/src/main/services/im-router.js';
 import { FeishuAdapter } from '../apps/worker-ant-desktop/src/main/services/feishu-adapter.js';
 import { DingtalkAdapter } from '../apps/worker-ant-desktop/src/main/services/dingtalk-adapter.js';
@@ -188,7 +192,13 @@ function sendCall(db: AnyDb, adapters: Map<string, unknown>, emitted: Array<Reco
     );
 }
 
-const convRows = (db: AnyDb) => db.prepare('SELECT id, direction, status, message_json, last_error FROM wa_im_conversations').all() as Array<Record<string, unknown>>;
+/** 回访种子行（B3 首聊欢迎抑制用）在 message_json 上打标记，不计入标本行数。 */
+const SEED_JSON = '{"seed":true}';
+const convRows = (db: AnyDb) => db.prepare('SELECT id, direction, status, message_json, last_error FROM wa_im_conversations WHERE COALESCE(message_json, \'\') <> ?').all(SEED_JSON) as Array<Record<string, unknown>>;
+/** zx_20261112_1 B3: 让它成为「回访用户」，使首聊欢迎不介入本套标本（欢迎由 rr_zx_20261112_1 专测）。 */
+const seedPriorInbound = (db: AnyDb, channelId: string, from: string) => db.prepare(
+  'INSERT INTO wa_im_conversations (id, channel_id, external_user_id, message_json, direction) VALUES (?,?,?,?,\'inbound\')',
+).run(`seed-${Math.random().toString(36).slice(2)}`, channelId, from, SEED_JSON);
 const outboxRows = (db: AnyDb) => db.prepare('SELECT id, status, last_error, kind, task_id FROM wa_im_outbox').all() as Array<Record<string, unknown>>;
 const errCode = (r: unknown) => (r as { error?: { code?: string } }).error?.code;
 
@@ -706,13 +716,21 @@ async function s2(): Promise<void> {
   {
     const db = mkImDb();
     const w = wire(db, 'ch-x', 'feishu');
+    // 回访用户入参：本标本测"占位符被当普通文本 ⇒ 触发自动回话"，不是测首聊欢迎。
+    seedPriorInbound(db, 'ch-x', 'ux');
     // 不带 meta（= 旧行为）：[图片] 恰 4 字 ⇒ 落「简单问候/兜底」分支 ⇒ 触发自动回话
     await w.handler('ux', nonTextPlaceholder('image'), 'direct', '');
     eq(convRows(db).length, 1, '不带 meta：仍入列 1 行');
     eq(w.replies.length, 1, '不带 meta：触发了自动回话 ⇒ 这正是"必须止步"的理由');
-    // 长占位符（>4 字）命中 router 的建任务判据——此处只证判据成立（建任务需 wa_tasks，超本夹具范围）
-    ok(nonTextPlaceholder('file', 'report.pdf', 1258291).length > 4,
-      '长占位符 >4 字 ⇒ 命中 `msgText.length > 4` 建任务判据（不带 meta 就会被建成任务）');
+    // zx_20261108_1 B3（改钉**更强的新真源**，非放宽）：`msgText.length > 4` 建任务判据已删除。
+    //   "长占位符够长就会被建成任务"这一病根不再存在；反证改为直跑判定真源——
+    //   同一串长占位符只落 ambiguous（不建单），而显式建单句才落 create。
+    const longPlaceholder = nonTextPlaceholder('file', 'report.pdf', 1258291);
+    ok(longPlaceholder.length > 4, '长占位符确实长于 4 字（标本前提成立）', `${longPlaceholder.length} 字`);
+    ok(decideImIntent({ text: longPlaceholder }).route !== 'create',
+      '长占位符不再因"长度"被判成建单（旧判据已删，判定真源不再看字数）');
+    eq(decideImIntent({ text: '创建任务 写脚本' }).route, 'create',
+      '显式建单句才落 create（同一判定真源）');
   }
   {
     const db = mkImDb();
@@ -1244,9 +1262,15 @@ function s9SameYardstick(): void {
   eq(runCount(), 2, '反证：**无关任务**的退休项不被计入（同集但不是全集）');
 
   console.log('\n[S9-③ M2-3③ `task:get` 的 acceptance 与列表**同一函数派生**]');
-  ok((ipcNoCmt2.match(/annotateAcceptance\(db, /g) || []).length >= 3,
-    '`annotateAcceptance` 在 project.ipc 里被**三处**消费（list / preview / task:get）',
-    String((ipcNoCmt2.match(/annotateAcceptance\(db, /g) || []).length));
+  // zx_20261108_1 B6：list 读点随产出物查询下沉 `core/deliverable-query.ts`，旧钉「project.ipc 内三处」
+  //   按符号重定向：两个文件合计仍恰三处，且 list 那一处**必须**在共享查询模块。扫描面如实命名。
+  const annIpc = (ipcNoCmt2.match(/annotateAcceptance\(db, /g) || []).length;
+  const annQuery = (stripComments(app('src/main/core/deliverable-query.ts')).match(/annotateAcceptance\(db, /g) || []).length;
+  // zx_20261111_3 B3：`deliverable:attention` 也经此共享函数 ⇒ ipc 侧由"恰 2"改为"≥2"；
+  //   `deliverable-query.ts` 一处不变。
+  ok(annIpc >= 2 && annQuery === 1,
+    '`annotateAcceptance` 三处消费全经共享函数（扫描面：project.ipc preview+task:get+attention；core/deliverable-query.ts list 一处）',
+    `ipc ${annIpc} + deliverable-query ${annQuery}`);
   // zx_20260930 就地订正（**改钉真契约，非放宽**）：原式把返回体**逐字**写成
   //   `{ task, conversations, deliverables, retrospective, retiredCount }`。M4-2 给任务详情加真分页，
   //   返回体**新增** `conversationsTotal`/`deliverablesTotal` ⇒ 逐字式恒红。改钉**不变量**：
@@ -1290,7 +1314,10 @@ function s9SameYardstick(): void {
   // 消费方：两条打标入口(markDoc…/markDeliverable…)仍走 `verifiedAcceptanceMap`；
   //   `annotateAcceptance` P0-2 起改走 `parseAcceptance`（它要的正是**两态**，只看已核验那一半就答不了"没验"）。
   const vamUses = lc.match(/verifiedAcceptanceMap\(db, /g) || [];
-  eq(vamUses.length, 2, '`verifiedAcceptanceMap` 被恰两处调用（markDocAcceptanceVerified / markDeliverableAcceptanceVerified）');
+  // zx_20261110_2 B6: 第三处是 `markTaskVerifiedVia`——它只按"任务级**已核验**"这一个事实决定要不要
+  //   按跨任务证据回写 `verified_via`（要的正是"验过没有"，与 `annotateAcceptance` 的两态视图相反），
+  //   故仍走同一个已核验视图，不是另起一条解析路。
+  eq(vamUses.length, 3, '`verifiedAcceptanceMap` 被恰三处调用（markDoc / markDeliverable / markTaskVerifiedVia）');
   ok(/parseAcceptance\(db, \[/.test(lc.slice(lc.indexOf('export function annotateAcceptance'), lc.indexOf('export function verifiedAcceptanceMap'))),
     '`annotateAcceptance` 改取两态视图 `parseAcceptance`（同一解析处，未核验那一半由它下发 `task_acceptance`）');
   const annBody = lc.slice(lc.indexOf('export function annotateAcceptance'), lc.indexOf('export function verifiedAcceptanceMap'));

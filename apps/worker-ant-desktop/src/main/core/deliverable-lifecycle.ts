@@ -586,13 +586,63 @@ export function markDocAcceptanceVerified(db: Database.Database, taskId: string)
  * （**doc 之外全放行**）是**两条不同判据**，不是同一条的宽窄版本 ⇒ 不复用 range 真源。
  * @returns 实际改动的行数(0 = 无一行满足条件，调用方据此如实回报)。
  */
-function markVerifiedWhere(db: Database.Database, whereSql: string, params: unknown[]): number {
+function markVerifiedWhere(
+  db: Database.Database,
+  whereSql: string,
+  params: unknown[],
+  opts?: {
+    /** zx_20261110_2 B6：显式证据（如 `criteria:<ref>`）。给了才写 `verified_via`，不给则该列保持原样。 */
+    via?: string;
+  },
+): number {
   const t = typeIn('', ACCEPTANCE_TYPES);
+  const viaSql = opts?.via ? ', verified_via = ?' : '';
+  const viaParams = opts?.via ? [opts.via] : [];
   const r = db.prepare(
-    `UPDATE wa_deliverables SET acceptance_verified = 1, updated_at = datetime('now')
+    `UPDATE wa_deliverables SET acceptance_verified = 1, updated_at = datetime('now')${viaSql}
      WHERE ${whereSql} AND status != 'retired' AND ${t.sql} AND ${docNotProbe('')} AND COALESCE(acceptance_verified, 0) = 0`,
-  ).run(...params, ...t.params);
+  ).run(...viaParams, ...params, ...t.params);
   return Number(r.changes) || 0;
+}
+
+/** `markTaskVerifiedVia` 的证据项：判据引用 + 解析来源（`project_deliverable:<taskId>`）。 */
+export interface TaskVerifiedViaEvidence {
+  ref: string;
+  resolvedFrom: string;
+}
+
+/**
+ * zx_20261110_2 B6（毛选·反对本本主义「没有调查，没有发言权」）：**子任务账的回写口**。
+ *
+ * 病根（事故 `68c0a607`）：子任务的两份产出物 `acceptance_verified=0`，而判据引用的文件确实存在——
+ * 只是登记在**父任务**名下。判据经"同项目其他任务登记"解析成功、判卷也通过后，若不做这一步，
+ * 子任务自己的成果卡永远不显示 ✓（父替子持账、子替父背锅，两边都不算数）。
+ *
+ * 与 `markDocAcceptanceVerified` 的关系：那个仍是**任务级**口径（本任务自己那笔验收账成立 ⇒ 本任务行打标），
+ * 本函数是它的**显式证据补充入口**——只有当调用方拿出了"这条判据靠别的任务的登记才解析成功"的
+ * 具体条目时才动作。①"算不算验过"仍走同一处 `verifiedAcceptanceMap`（不另立判据）；
+ * ②"改哪些行"仍走唯一 UPDATE `markVerifiedWhere`（不写第二条打标 SQL）；③只动**本任务**的行
+ * （`whereSql = 'task_id = ?'`），不跨任务乱标——父任务的成果不因子的判据成立而被标 ✓。
+ *
+ * @returns `changed` = 真改了几行；`skipped` 说明一行未动的成因（不抛、不编）。
+ */
+export function markTaskVerifiedVia(
+  db: Database.Database,
+  taskId: string,
+  evidence: readonly TaskVerifiedViaEvidence[],
+): { changed: number; skipped?: 'no_evidence' | 'not_verified' | 'error' } {
+  try {
+    const cross = evidence.filter((e) => e && String(e.resolvedFrom ?? '').startsWith('project_deliverable:')
+      && String(e.ref ?? '').trim());
+    if (cross.length === 0) return { changed: 0, skipped: 'no_evidence' };
+    if (!verifiedAcceptanceMap(db, [taskId]).has(taskId)) return { changed: 0, skipped: 'not_verified' };
+    // 证据串：`criteria:<ref1>;<ref2>`——可回查到**是哪条判据**、靠谁登记解析（来源本身不写进该列，
+    //   它是 `acceptance_check.criteria_path_resolved` 的职责；两处各说一件事，不混名）。
+    const via = `criteria:${[...new Set(cross.map((e) => e.ref.trim()))].join(';')}`.slice(0, 500);
+    return { changed: markVerifiedWhere(db, 'task_id = ?', [taskId], { via }) };
+  } catch {
+    return { changed: 0, skipped: 'error' };
+  }
 }
 
 /** `deliverable:accept` 的如实回执：`changed=1` 才是真改了库；`0` 附 `reason` 说明为何一行未动。 */

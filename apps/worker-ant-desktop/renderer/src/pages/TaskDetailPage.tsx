@@ -1,9 +1,9 @@
-import { useState, useEffect, useRef, Fragment, type ReactNode } from 'react';
+import { useState, useEffect, useRef, Fragment, type ReactElement } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { tasks, projects, admin, nodes, invoke, IpcError, newClientRequestId, type DispatchReasonView } from '../lib/ipc';
 import { useSettings } from '../lib/settingsStore';
 import { useDeliverableDrawer } from '../lib/deliverableDrawer';
-import { ArrowLeft, Play, Pause, RotateCcw, Plus, RefreshCw, GitBranch, Package as PackageIcon, MessageSquare, TrendingUp, Clock, AlertTriangle, History, Activity, Brain, Edit, Check, Trash2, FileText, Target, Eye, X, Star, ChevronDown, ChevronRight, Paperclip, Folder, Archive, Terminal, CopyPlus } from 'lucide-react';
+import { ArrowLeft, Play, Pause, RotateCcw, Plus, RefreshCw, GitBranch, MessageSquare, TrendingUp, AlertTriangle, History, Brain, Edit, Check, Trash2, FileText, Target, X, ChevronDown, ChevronRight, Paperclip, Archive, Terminal, CopyPlus, Users } from 'lucide-react';
 // zx_20260910_3 M3(G3): 布尔 setting 判据**两侧共用同一文件**——渲染层不再自带第二份写法
 import { boolSetting } from '../../../src/main/core/settings-bool.js';
 // zx_20260913 M2-6(G8 教训): 类型集合判据跨 root 引**同一份代码**——此前本页 `d.type==='doc'` 手抄 2 处
@@ -16,7 +16,9 @@ import { UNVERIFIED_REASON_LABEL, isUnjudgedReason, type AcceptanceCheckLike } f
 // zx_20260917 M2: 另二十个码的人话也同源——`pauseReasonLabel` 是词表唯一一处，`recordedPauseReason`
 // 是"读出账上因由原文"的唯一读点；此前横幅只认得 `no_output`，其余一律显示"已暂停"，用户在 GUI 同样读不到因。
 // zx_20261028_1 M5: 暂停附注（`$.pause_note`）的读点同源——渲染层不手抄键名，有才显示。
-import { PAUSE_REASON_NO_OUTPUT, pauseReasonLabel, recordedPauseReason, recordedPauseNote } from '../../../src/main/core/pause-reason.js';
+import { pauseReasonLabel, recordedPauseReason, recordedPauseNote } from '../../../src/main/core/pause-reason.js';
+// zx_20261113_2 M14：暂停横幅的标题/下一步按因由分型（验收未过要说未达条数并指向验收块）。
+import { pausedBannerHeadline, pausedBannerHint } from '../lib/pause-banner';
 // zx_20260914 M2-1(王阳明·知行合一): 正文「读得动」——本页预览块与列表页/抽屉共用同一渲染器
 import MarkdownSubset from '../lib/markdown-subset';
 // zx_20260913 M3-5/M3-4: 前置阻塞态判据与"序号→id"映射的**唯一真源**（renderer 是词表的第二个落点，故跨 root 引同一份代码）
@@ -29,15 +31,27 @@ import { isEngineDraftedTurn } from '../../../src/main/core/turn-authorship.js';
 //   件与原因**原样展示**（`reason` 是各支路当场给出的真因，如 `cid_unsupported：可读字符占比 1.7% < 60%`），
 //   任何"归一成几个大类"的加工都会磨掉用户据以判断"这份 PDF 还能不能救"的那句话，且必然是第二份词表。
 import { parseAttachmentOutcomeViews, ATTACHMENT_STATUS_LABEL, type AttachmentOutcomeStatus } from '../../../src/main/core/attachment-outcome.js';
-// zx_20260924 §2c UI-3: 产出物按盘上路径分目录层级展示——**树构建是 main 侧零依赖模块**（同上一行范式），
-//   本页只负责"摆"。（它承载两条规则：公共前缀要剥、没有路径的件不许塞进假目录；规则须可被 rr 两侧标本钉住。）
-import { buildDeliverableTree, type DeliverableTreeChild } from '../../../src/main/core/deliverable-tree.js';
 // zx_20260930 M3-e: 「[等待用户输入] … [选项: A / B]」的**解析**跨 root 引真源——本页此前自带第二份
 //   split（只认 `,`/`|`），与 IM/门禁侧的六种分隔不是同一套 ⇒ 同一条消息两处读出不同的选项个数。
 import { OPTION_BLOCK_RE, parseOptions } from '../../../src/main/core/im/options.js';
-import { formatDbTime, DELIVERABLE_STATUS_LABEL } from '../lib/deliverable-view';
 // zx_20260930 M4-4: 任务状态词表**唯一真源**（本页此前手抄一份——investigating 只有本页有）
-import { TASK_STATUS_LABEL, statusText } from '../lib/status-view';
+// zx_20261107_1 B9: 状态章色调同源（`TASK_STATUS_TONE` 一处穷举，页面不再自带 12 键副本）
+import { TASK_STATUS_LABEL, statusText, taskStatusPill } from '../lib/status-view';
+// zx_20261110_2 B7「见」: 执行态徽标与「最后进展 / 已卡多久」的展示词表只有一处（`exec-view.ts`）。
+//   四态由 main 的 `task:get.execState` 派生回传，本页不自己判"跑没跑"——状态词与实况两回事，
+//   事故形态是"状态写着 running、实则无执行体"（`339ef167`），故徽标要能与状态词**并排**显示。
+import { execBadge, execStateLine, ageMsOf } from '../lib/exec-view';
+// zx_20261111_3「显」：第一行的唯一真源在 main 纯模块（页面只说事实，不自己排优先级）。
+import NextActionBar from '../components/NextActionBar';
+import { nextActionForTask, type NextActionId } from '../../../src/main/core/next-action.js';
+// zx_20261107_1 B9: 格式化单源——本页此前的 `formatToken`/`formatTime`/`formatDuration` 与看板/列表各写一份且已漂开
+import { formatTokens, formatTimeOrRaw, formatMoney } from '../lib/format';
+// zx_20261107_1 B9（庄子·庖丁解牛）：任务详情按关节抽成五个只负责"摆"的组件，页面保留全部判据与状态。
+import TaskHeader from '../components/task/TaskHeader';
+import TaskProgress from '../components/task/TaskProgress';
+import TaskArtifacts from '../components/task/TaskArtifacts';
+import TaskCost from '../components/task/TaskCost';
+import TaskLogs from '../components/task/TaskLogs';
 // zx_20260930 M4-2: 列表**批次大小**与"这一批之后还有没有下一页"的判据，与成果页/项目详情页**同一份**
 //   （renderer 是词表的第二个落点，故不得在本页再写一遍 `rows.length < 100`）。
 import { LIST_PAGE_SIZE, pageExhausted } from '../lib/list-page';
@@ -50,13 +64,21 @@ import type { NodeRequestProgress } from '../../../../../packages/shared-types/s
 import { fourCauseOf } from '../../../src/main/core/four-causes.js';
 // M4「四个账说清」：来路人话与列表页同引一份；终态集合取 main 的唯一真源（零 import，可跨端引）
 import { taskSourceLabel } from '../lib/task-source';
-import { isTerminalStatus } from '../../../src/main/core/task-jobs.js';
+// zx_20261111_3「显」：改从**零依赖**的 `status-terms.ts` 取（原引 `task-jobs.ts` 会连带 `logger.ts`
+//   在模块求值期读 `process.env` ⇒ 渲染进程整页白屏；判据仍是同一份实现，`task-jobs` 原样转出）。
+import { isTerminalStatus } from '../../../src/main/core/status-terms.js';
+// zx_20261112_1 B4「诊」：动作分层与子任务树的判据都在**零依赖纯模块**（页面只画，不自己写第二套状态判断）。
+import { ACTION_LABEL, actionTitle, taskActionLayout, type TaskActionKey } from '../lib/task-actions';
+import { buildTaskTree, flattenTaskTree, familyProgress } from '../lib/task-tree';
 // zx_20261030_2 M7「示」: 形态来源/覆盖与 core 同键。仅引类型（编译期擦除）——`task-archetype.ts`
 //   运行时依赖 logger/tool-registry（pino/fs），不可拉进 renderer。
 import type { ArchetypeSource, TaskArchetype } from '../../../src/main/core/task-archetype.js';
 // zx_20261106_1 M7: 判据来源与 core 同键。仅引类型（编译期擦除）——`task-decompose.ts` 运行时要 fs/logger/ANS，
 //   不可拉进 renderer；词表本身在此落一份，键域由类型强制（新增态漏译 ⇒ 编译期报错）。
 import type { AcceptanceSource } from '../../../src/main/core/task-decompose.js';
+// zx_20261107_1 B6: 本次执行的选型记录（main 由 `model_selection` 洗形后回传）；来源词表取同一份，
+//   页面不解析 context_json、不拼第二句理由。
+import { PIN_SOURCE_LABEL, type ModelSelection } from '../../../src/main/core/model-selection.js';
 
 // zx_20261105_1 M4: 子任务行可带子代理结构化结论（main 的 `tasks:children` 投影，renderer 不解析 context_json）。
 interface SubagentResultView {
@@ -94,7 +116,6 @@ interface RuntimeEvidenceView {
   deny_reason: string | null; output_tail: string | null; created_at: string;
 }
 
-const STATUS_COLOR: Record<string, string> = { pending:'bg-gray-100 text-gray-600', preparing:'bg-blue-100 text-blue-600', executing:'bg-yellow-100 text-yellow-700', running:'bg-yellow-100 text-yellow-700', completed:'bg-green-100 text-green-700', failed:'bg-red-100 text-red-600', paused:'bg-orange-100 text-orange-600', /* zx_20260930 M11-5: `stabilizing` 原无档 ⇒ 徽标落灰底(与"不认识的态"混同)；帛色与"暂停/待确认"同族但更浅 */ stabilizing:'bg-amber-50 text-amber-700', /* zx_20261012_2 批二: `archived`（归档/放弃）同落灰底——与 failed 的红底刻意区分：弃 ≠ 败 */ archived:'bg-gray-200 text-gray-600' };
 const PRIORITY_LABEL: Record<number, string> = { 0:'普通', 1:'优先', 2:'紧急', 3:'最高' };
 // zx_20260910_1 M1: 等待输入的决策类型标签（原 DecisionCard 的 TYPE_LABEL 上移，随卡片一并成为横幅的能力）
 const AWAIT_TYPE_LABEL: Record<string, string> = { ask_user:'询问', path_approval:'路径审批', privilege_approval:'特权审批', pending_confirmation:'待确认事项' };
@@ -142,13 +163,6 @@ function reusedSubagentOf(c: { role: string; content?: string }): { taskId: stri
   } catch { return null; }
 }
 
-function formatToken(n: number | undefined | null): string { if (!n) return '0'; if (n>=1_000_000) return (n/1_000_000).toFixed(2)+'M'; if (n>=1_000) return (n/1_000).toFixed(1)+'K'; return String(n); }
-function formatTime(s: string | undefined | null): string {
-  // 库内时间列是 UTC 且不带 Z——补 Z 的写法只此一份（在 lib/deliverable-view 里），本页不再另抄
-  if (!s) return '-';
-  return formatDbTime(s) || s;
-}
-function formatDuration(ms: number): string { if (!ms || ms <= 0) return '-'; if (ms < 1000) return `${ms}ms`; const s = ms / 1000; if (s < 60) return `${s.toFixed(1)}s`; return `${Math.floor(s / 60)}m${Math.round(s % 60)}s`; }
 function toolNamesFromStr(s: string): string[] { const names: string[] = []; const re = /([a-z][a-z0-9_]*)\s*\(/g; let m: RegExpExecArray | null; while ((m = re.exec(s)) !== null && names.length < 4) { const n = m[1]!; if (!names.includes(n)) names.push(n); } return names; }
 
 // zx_20260910_3 M1: 验收未核验成因码 → 人可读短语
@@ -178,22 +192,43 @@ function digestLineText(d: { status: string; steps: number; deviations: number; 
   return parts.join(' · ');
 }
 
-// zx_20261018_3 D7（组2 实机照出）: 操作栏「同一坐标换成反向动作」的两条治法。
-//   1) 固定槽位：空槽也用等宽占位撑住——状态一翻，按钮不会左移右移，手停在原坐标上。
-//   2) 定高流式块：思考/生成内容一直增长会把下方操作栏顶走——当时用定高 + 内容贴底滚动。
-function ActionSlot({ children }: { children?: ReactNode }) {
-  return <span className="inline-flex shrink-0 items-center justify-center w-[92px]">{children}</span>;
-}
-function StreamPane({ className, title, children }: { className: string; title?: string; children: ReactNode }) {
-  return <div className={className} title={title}>{children}</div>;
-}
-// zx_20261018_3 D9（组5 实机照出）: 思考/实时状态/心跳三个块是**整块挂载/卸载**的，块内定高管不住
-//   外层位移——操作栏仍被反复顶走。D11（组6 实机反馈）: 该块已移到操作栏**下方**，高度变化不再影响
-//   任何按钮坐标。D13（组6 二次实机反馈）: 既然按钮在它上面，就**不再限高、不再块内滚动**——
-//   思考/生成内容随页面自然撑开，滚动只有页面这一条（原先 max-h 260px 仍会在思考时冒出内滚动条）。
-function LivePane({ children }: { children: ReactNode }) {
-  return <div className="mt-2 space-y-2">{children}</div>;
-}
+// zx_20261112_1 B4「诊」: 操作栏由 `taskActionLayout(status)` 派生主/次/危险三层——
+//   每个状态至多一个主操作，"同一坐标换成反向动作"从结构上不再可能（暂停态的主操作就是「恢复」）。
+//   D11/D13 的布局结论不变：实时块在操作栏**下方**，不限高、不块内滚动，随页面自然撑开。
+// 动作键 → 图标/主按钮配色（只影响画法，不改任何 handler 语义）。
+const ACTION_ICON: Record<TaskActionKey, ReactElement> = {
+  attach: <Paperclip className="w-3 h-3" />,
+  execute: <Play className="w-3 h-3" />,
+  pause: <Pause className="w-3 h-3" />,
+  interrupt: <AlertTriangle className="w-3 h-3" />,
+  resume: <RotateCcw className="w-3 h-3" />,
+  requeue: <Play className="w-3 h-3" />,
+  reply: <MessageSquare className="w-3 h-3" />,
+  inject: <MessageSquare className="w-3 h-3" />,
+  retry: <RefreshCw className="w-3 h-3" />,
+  rerun: <RotateCcw className="w-3 h-3" />,
+  complete: <Check className="w-3 h-3" />,
+  archive: <Archive className="w-3 h-3" />,
+  delete: <Trash2 className="w-3 h-3" />,
+  create_from_original: <CopyPlus className="w-3 h-3" />,
+};
+const PRIMARY_TONE: Partial<Record<TaskActionKey, string>> = {
+  execute: 'bg-green-600 hover:bg-green-700',
+  pause: 'bg-orange-500 hover:bg-orange-600',
+  resume: 'bg-blue-600 hover:bg-blue-700',
+  retry: 'bg-indigo-600 hover:bg-indigo-700',
+  requeue: 'bg-amber-600 hover:bg-amber-700',
+  inject: 'bg-cyan-600 hover:bg-cyan-700',
+};
+
+/** 岗位注入条目类型的人话名（与 `core/positions.ts` 的 `POSITION_BLOCK_ITEM_KINDS` 同词）。 */
+const POSITION_INJECT_KIND_LABEL: Record<string, string> = {
+  description: '说明',
+  rule: '规范',
+  skill: '技能',
+  knowledge: '知识',
+  lesson: '经验',
+};
 
 export default function TaskDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -210,6 +245,8 @@ export default function TaskDetailPage() {
   const [taskList, setTaskList] = useState<TaskItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [task, setTask] = useState<TaskItem | null>(null);
+  // zx_20261107_1 B6: 「为什么选它」——`task:get` 回传的本次选型记录（旧任务无此键 ⇒ null，不渲染）。
+  const [modelSelection, setModelSelection] = useState<ModelSelection | null>(null);
   // zx_20261105_1 M3: 归档时的判卷底账（`task:get` 从 `task-archive.ts` 唯一读点回传；非归档态不使用）。
   const [archivedSnap, setArchivedSnap] = useState<ArchivedSnapshotView | null>(null);
   // zx_20261105_1 M9: 归档因由与时刻——同一读点回传；无理由如实显示「未填写理由」，不编造。
@@ -231,10 +268,19 @@ export default function TaskDetailPage() {
   const [retiredCount, setRetiredCount] = useState(0);
   // zx_20261023_5 批一: 派单理由三行（读不到就整块不显示，不猜"能不能派"）。
   const [dispatchView, setDispatchView] = useState<DispatchReasonView | null>(null);
+  // zx_20261112_2 B1：本次建单的派发结局（已派/未派/外派未成）；旧任务无此键 ⇒ null，不显示。
+  const [dispatchDecision, setDispatchDecision] = useState<{ attempted: boolean; ok: boolean; reason: string; label: string; nodeId?: string; at: string } | null>(null);
   // zx_20261106_3 B5「见」: 本任务若已外派，远端进度快照（只在读回时抄，收口后不装活）。
   const [selfRemoteProgress, setSelfRemoteProgress] = useState<NodeRequestProgress | null>(null);
   // 「没读到」与「对端没上报」是两件事——前者须如实说"尚未读回"，不得混成"没有进度"。
   const [selfRemotePulled, setSelfRemotePulled] = useState(false);
+  // zx_20261110_2 B7「见」: 执行态四态 + 最后进展/已卡时长（都由 main 派生，随 `task:get` 回传）。
+  const [execState, setExecState] = useState<{ state: string; reason: string } | null>(null);
+  const [lastProgressAt, setLastProgressAt] = useState<string | null>(null);
+  const [stuckMs, setStuckMs] = useState<number | null>(null);
+  const [pendingJobAgeMs, setPendingJobAgeMs] = useState<number | null>(null);
+  // zx_20261112_1 B2「任」: 指派岗位（main 读时派生 id/name/enabled）；未指派即为 null，头部写「未指派岗位」。
+  const [positionView, setPositionView] = useState<{ id: string; name: string; enabled: boolean; missing?: boolean } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [showCreate, setShowCreate] = useState(false);
@@ -304,6 +350,9 @@ export default function TaskDetailPage() {
   useEffect(() => () => { if (cooldownTimerRef.current !== undefined) window.clearTimeout(cooldownTimerRef.current); }, []);
   const [showInject, setShowInject] = useState(false);
   const [injectText, setInjectText] = useState('');
+  // zx_20261112_1 B4「诊」: 「更多操作」折叠（次要动作仍可达）+ 子任务树的折叠集合。
+  const [showActionMenu, setShowActionMenu] = useState(false);
+  const [collapsedChildren, setCollapsedChildren] = useState<Set<string>>(new Set());
   const [fileStream, setFileStream] = useState<Array<Record<string, unknown>>>([]);
   const [stepStream, setStepStream] = useState<Array<Record<string, unknown>>>([]);
   const [liveStatus, setLiveStatus] = useState<Record<string, unknown> | null>(null);
@@ -318,7 +367,8 @@ export default function TaskDetailPage() {
   const [planTick, setPlanTick] = useState(0);
   // C2 (2026-09-04): 子任务族验收（父任务视角：全子状态/质量/token）
   // zx_20261011_4 M4: 每子可带 `remote`（已外派 = 派给谁 · 相位 · 回传摘要）；键名/判据真源在 main。
-  const [familyChildren, setFamilyChildren] = useState<Array<{ id: string; title: string; status: string; score?: number | null; tokens?: number | null; acceptanceSource?: AcceptanceSource | null; remote?: RemoteTaskBadge | null; isSubagent?: boolean; subagentResult?: SubagentResultView | null; archiveReason?: string | null; archivedAt?: string | null }>>([]);
+  // zx_20261112_1 B4「诊」: `parent_task_id` 随 `tasks:children` 回传（已是整棵子树），用于成树。
+  const [familyChildren, setFamilyChildren] = useState<Array<{ id: string; title: string; status: string; parent_task_id?: string | null; score?: number | null; tokens?: number | null; acceptanceSource?: AcceptanceSource | null; remote?: RemoteTaskBadge | null; isSubagent?: boolean; subagentResult?: SubagentResultView | null; archiveReason?: string | null; archivedAt?: string | null }>>([]);
   // zx_20261011_4 M4: 外派徽标下钻（展开哪一子的远端摘要）+ 节点名解析表（台账一次取，取不到回落 nodeId 前 8 位）。
   const [openRemote, setOpenRemote] = useState<string | null>(null);
   const [nodeNames, setNodeNames] = useState<Record<string, string>>({});
@@ -330,7 +380,6 @@ export default function TaskDetailPage() {
   const [ownMs, setOwnMs] = useState<Array<{ plan_task_id: string; milestone: string; status: string }>>([]);
   const [goalInfo, setGoalInfo] = useState<{ goal: string; success_criteria: string; investigate: string[]; principalContradiction: string } | null>(null);
   const [signalStream, setSignalStream] = useState<Array<Record<string, unknown>>>([]);
-  const stepStreamRef = useRef<HTMLDivElement>(null);
   // zx_20260911_2 M4b(Q2): 预览载荷补 file_exists/version——磁盘文件缺失时不得用快照冒充"当前内容"（与抽屉同口径）
   const [delivPreview, setDelivPreview] = useState<{ name: string; type: string; content: string; filePath?: string; fileExists?: boolean; version?: number } | null>(null);
   const [retrospective, setRetrospective] = useState<Array<{ content: string; created_at: string; structured?: { plan?: string; delta?: string; lesson?: string; action?: string; reusable?: boolean } }>>([]);
@@ -344,16 +393,46 @@ export default function TaskDetailPage() {
   const [streamingText, setStreamingText] = useState('');
   // CoT (2026-09-03): 推理模型思考过程缓冲（reasoningDelta 累积，step_finished 清空）
   const [streamingReasoning, setStreamingReasoning] = useState('');
+  // zx_20261107_1 B7: 流式**合批**——逐 token `setState` 会把 React 压满（高频渲染、主线程抖动）。
+  //   事件只写入 ref 缓冲，~100ms 落一次展示态；step_finished / 状态切换 / 卸载时清缓冲与定时器。
+  //   上限仍是 4000 / 8000 字符（与改前同一口径）。
+  const streamTextBufRef = useRef('');
+  const streamReasoningBufRef = useRef('');
+  const streamFlushTimerRef = useRef<number | undefined>(undefined);
+  const flushStreamBuf = () => {
+    streamFlushTimerRef.current = undefined;
+    if (streamTextBufRef.current) {
+      const t = streamTextBufRef.current;
+      streamTextBufRef.current = '';
+      setStreamingText(prev => (prev + t).slice(-4000));
+    }
+    if (streamReasoningBufRef.current) {
+      const r = streamReasoningBufRef.current;
+      streamReasoningBufRef.current = '';
+      setStreamingReasoning(prev => (prev + r).slice(-8000));
+    }
+  };
+  const clearStreamBuf = () => {
+    streamTextBufRef.current = '';
+    streamReasoningBufRef.current = '';
+    if (streamFlushTimerRef.current !== undefined) {
+      window.clearTimeout(streamFlushTimerRef.current);
+      streamFlushTimerRef.current = undefined;
+    }
+  };
+  useEffect(() => () => clearStreamBuf(), []); // eslint-disable-line react-hooks/exhaustive-deps
   const [showThinking, setShowThinking] = useState(true); // CoT: 思考块默认展开
   // zx_20260923_1 M3: 「产出物」「对话历史」默认折叠（道德经·四十八章「为道日损」——详情页 15 个区块全铺开，
   //   用户每次都要长距滚动）。**只改默认可见性，不删功能**；两块各自独立，不互相牵连。
-  const [showDelivs, setShowDelivs] = useState(false);
+  // zx_20261107_1 B9: 产出物的折叠态随块搬进 `TaskArtifacts`（块内私有）；对话历史的仍在本页。
   const [showConvs, setShowConvs] = useState(false);
   // zx_20260924 M7: 「本次附件」同属"默认折叠"一族（同上 M3 的由头）。
   const [showAtts, setShowAtts] = useState(false);
   // zx_20260924 §2c（用户点名）: 「记忆注入」「事件时间线」并入同一族——理由与 M3 一字不差：
   //   详情页区块全铺开时用户每次都要长距滚动。**只改默认可见性，块内逐字不动**。
   const [showMem, setShowMem] = useState(false);
+  // zx_20261113_1 B3「用」: 岗位注入明细（本次上下文真带了哪几条岗位知识）。
+  const [showPosInject, setShowPosInject] = useState(false);
   const [showEvents, setShowEvents] = useState(false);
   // zx_20261105_1 M6: 运行证据默认折叠（与上族同由头），头部常显「共 N 条 · 被拒 M 条」——
   //   验证者若在结论里写"无 shell"，人可在此逐条对照真实拒绝原因。
@@ -361,11 +440,6 @@ export default function TaskDetailPage() {
   const [showRunEvidence, setShowRunEvidence] = useState(false);
 
   useEffect(() => { if (id) loadProject(); }, [id]);
-
-  // 实时执行流自动滚动到底部（让用户看到最新步骤）
-  useEffect(() => {
-    if (stepStreamRef.current) stepStreamRef.current.scrollTop = stepStreamRef.current.scrollHeight;
-  }, [stepStream]);
 
   // D1: 执行中每秒刷新时钟，驱动「AI 思考中…」耗时指示
   useEffect(() => {
@@ -418,6 +492,7 @@ export default function TaskDetailPage() {
           setSignalStream([]);
           setHeartbeat(null);
           setThinkingSince(Date.now());
+          clearStreamBuf();
           setStreamingText('');
           setStreamingReasoning('');
         }
@@ -432,17 +507,21 @@ export default function TaskDetailPage() {
           const ns = String(event.newStatus || event.new_status || '');
           if (ns) {
             setTask(prev => prev && prev.id === activeTaskId ? { ...prev, status: ns } : prev);
-            // 离开执行态（完成/失败/暂停）→ 清空实时流式缓冲
-            if (ns !== 'executing' && ns !== 'running') { setStreamingText(''); setStreamingReasoning(''); }
+            // 离开执行态（完成/失败/暂停）→ 清空实时流式缓冲（含未落地的合批尾巴）
+            if (ns !== 'executing' && ns !== 'running') { clearStreamBuf(); setStreamingText(''); setStreamingReasoning(''); }
           }
         }
-        // D3 (2026-09-02): token 级流式——逐 token 累积到当前步实时缓冲（不触发整表刷新）
+        // D3 (2026-09-02): token 级流式——累积到当前步实时缓冲（不触发整表刷新）。
+        // zx_20261107_1 B7: 不再逐 token setState；写 ref 缓冲，~100ms 合批落一次展示态。
         if (event.type === 'task.step_streaming') {
           const delta = String(event.textDelta || '');
-          if (delta) setStreamingText(prev => (prev + delta).slice(-4000));
+          if (delta) streamTextBufRef.current = (streamTextBufRef.current + delta).slice(-4000);
           // CoT: 推理思考过程增量（与输出文本分缓冲累积）
           const rdelta = String(event.reasoningDelta || '');
-          if (rdelta) setStreamingReasoning(prev => (prev + rdelta).slice(-8000));
+          if (rdelta) streamReasoningBufRef.current = (streamReasoningBufRef.current + rdelta).slice(-8000);
+          if (streamFlushTimerRef.current === undefined) {
+            streamFlushTimerRef.current = window.setTimeout(flushStreamBuf, 100);
+          }
           return;
         }
         // 文件变更事件：实时累积到活动流；zx_20260906 批1——携带 deliverableId 的文件事件（产出物落库）
@@ -458,6 +537,7 @@ export default function TaskDetailPage() {
           // E1 (2026-09-04_2): 附累计预算 band/ratio——驱动预算带"质变点"脉冲
           setLiveStatus({ step: event.step, totalTokens: event.totalTokens, toolCalls: event.toolCalls, text: event.text, duration_ms: event.duration_ms, token_delta: event.token_delta, toolOk: event.toolOk, budgetRatio: event.budgetRatio, budgetBand: event.budgetBand, budgetMaxTokens: event.budgetMaxTokens, contextWaterPct: event.contextWaterPct, estBiasPct: event.estBiasPct });
           setThinkingSince(Date.now());
+          clearStreamBuf();  // 本步已完成：未落地的合批尾巴一并丢弃（其文本已落库）
           setStreamingText('');  // 本步已完成，其实时文本已落库，清空流式缓冲（下一步生成前界面回落思考中态）
           setStreamingReasoning('');  // CoT: 本步思考已结束，清空思考缓冲
           return;
@@ -499,7 +579,7 @@ export default function TaskDetailPage() {
         timer = setTimeout(() => loadProject(), 300);
       }
     });
-    return () => { if (timer) clearTimeout(timer); unsubscribe(); };
+    return () => { if (timer) clearTimeout(timer); clearStreamBuf(); unsubscribe(); };
   }, [activeTaskId]);
 
   // B2 (2026-09-03): 执行事件回放——非运行态任务刷新后从 wa_event_log 恢复步骤/健康信号（防"刷新即丢"）
@@ -519,7 +599,7 @@ export default function TaskDetailPage() {
           setSignalStream(r.signals.map((s) => ({ type: s.type, signalType: s.signalType || '', level: s.level || 'info', message: s.message, ts: Date.now() })));
         }
       })
-      .catch(() => {});
+      .catch((e) => { if (!cancelled) reportLoad('步骤回放', e); });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [task?.id, task?.status, stepStream.length]);
@@ -565,7 +645,7 @@ export default function TaskDetailPage() {
     let cancelled = false;
     invoke<{ milestones: Array<{ milestone: string; status: string; implemented_by_task_id: string | null; implemented_title?: string | null; updated_at: string }> }>('plan:milestones', { planTaskId: task.id })
       .then((r) => { if (!cancelled && r) setPlanMilestones(Array.isArray(r.milestones) ? r.milestones : []); })
-      .catch(() => {});
+      .catch((e) => { if (!cancelled) reportLoad('方案里程碑', e); });
     return () => { cancelled = true; };
   }, [task?.id, planTick]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -574,14 +654,14 @@ export default function TaskDetailPage() {
     if (!task?.project_id) return;
     let cancelled = false;
     invoke<{ plans: Array<{ id: string; title: string; status: string }> }>('plan:projectPlans', { projectId: task.project_id })
-      .then((r) => { if (!cancelled && r) setProjPlans(Array.isArray(r.plans) ? r.plans : []); }).catch(() => {});
+      .then((r) => { if (!cancelled && r) setProjPlans(Array.isArray(r.plans) ? r.plans : []); }).catch((e) => { if (!cancelled) reportLoad('关联方案候选', e); });
     return () => { cancelled = true; };
   }, [task?.project_id]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!task?.id || planMilestones.length === 0) return;
     let cancelled = false;
     invoke<{ tasks: Array<{ id: string; title: string; status: string }> }>('plan:projectTasks', { planTaskId: task.id })
-      .then((r) => { if (!cancelled && r) setProjTasks(Array.isArray(r.tasks) ? r.tasks : []); }).catch(() => {});
+      .then((r) => { if (!cancelled && r) setProjTasks(Array.isArray(r.tasks) ? r.tasks : []); }).catch((e) => { if (!cancelled) reportLoad('落地任务候选', e); });
     return () => { cancelled = true; };
   }, [task?.id, planMilestones.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -607,9 +687,9 @@ export default function TaskDetailPage() {
   const refreshChildren = async () => {
     if (!task?.id) return;
     try {
-      const r = await invoke<{ children: Array<{ id: string; title: string; status: string; score?: number | null; tokens?: number | null; acceptanceSource?: AcceptanceSource | null; remote?: RemoteTaskBadge | null; isSubagent?: boolean; subagentResult?: SubagentResultView | null; archiveReason?: string | null; archivedAt?: string | null }> }>('tasks:children', { id: task.id });
+      const r = await invoke<{ children: Array<{ id: string; title: string; status: string; parent_task_id?: string | null; score?: number | null; tokens?: number | null; acceptanceSource?: AcceptanceSource | null; remote?: RemoteTaskBadge | null; isSubagent?: boolean; subagentResult?: SubagentResultView | null; archiveReason?: string | null; archivedAt?: string | null }> }>('tasks:children', { id: task.id });
       setFamilyChildren(Array.isArray(r?.children) ? r.children : []);
-    } catch { /* ignore */ }
+    } catch (e) { reportLoad('子任务', e); }
   };
   useEffect(() => { refreshChildren(); }, [task?.id]); // eslint-disable-line react-hooks/exhaustive-deps
   // zx_20261011_4 M4: 外派徽标的**节点名解析**——一次取现有台账（失败静默 ⇒ `nameOf` 回落 nodeId 前 8 位，
@@ -634,21 +714,32 @@ export default function TaskDetailPage() {
   // zx_20261012_2 批二: 子任务「放弃」走归档专用通道（弃 ≠ 败）。
   // zx_20261105_1 M2: 归档闸只由后端判（`archiveDecision`）——前端不抄第二份条件；
   //   收到 `archive_reason_required` 时就地问理由再重试一次，其余错误照旧上报。
-  async function archiveWithReason(cid: string): Promise<boolean> {
-    try { await tasks.archive(cid); return true; }
+  // zx_20261110_1 B5：理由输入从 `window.prompt` 换成页内输入框——原生弹窗会挂起渲染进程，
+  //   无窗口/沙箱环境还会直接回 null（理由永远为空、归档永远失败），"问理由"成了哑门。
+  const [archivePrompt, setArchivePrompt] = useState<{ cid: string; reason: string; onDone: () => void } | null>(null);
+  async function archiveWithReason(cid: string, reason?: string): Promise<'done' | 'need_reason' | 'failed'> {
+    try { await tasks.archive(cid, reason); return 'done'; }
     catch (e) {
-      if (e instanceof IpcError && e.code === 'archive_reason_required') {
-        const typed = window.prompt('该子任务停在「验收未判 / 验收失败」，归档须写明放弃理由（会显示在任务详情）：', '') ?? '';
-        if (!typed.trim()) { reportAction(e); return false; }
-        try { await tasks.archive(cid, typed.trim()); return true; }
-        catch (e2) { reportAction(e2); return false; }
-      }
+      if (e instanceof IpcError && e.code === 'archive_reason_required' && !reason) return 'need_reason';
       reportAction(e);
-      return false;
+      return 'failed';
     }
   }
+  const confirmArchivePrompt = async () => {
+    const p = archivePrompt;
+    if (!p || !p.reason.trim()) return;
+    setArchivePrompt(null);
+    if (!beginAction()) return;
+    try {
+      if ((await archiveWithReason(p.cid, p.reason.trim())) === 'done') p.onDone();
+    } finally { endAction(); }
+  };
   const childArchive = async (cid: string) => {
-    await archiveWithReason(cid);
+    const outcome = await archiveWithReason(cid);
+    if (outcome === 'need_reason') {
+      setArchivePrompt({ cid, reason: '', onDone: () => { void refreshChildren(); } });
+      return;
+    }
     refreshChildren();
   };
 
@@ -707,6 +798,18 @@ export default function TaskDetailPage() {
     refreshChildren();
   };
 
+  /**
+   * zx_20261110_2 B7「见」：把 `task:get` 回传的派生量收进页面状态（刷新/切换任务共用一处）。
+   * 三态各自如实：`execState` 取不到 ⇒ `null`（面板不画，而不是画成"空闲"——
+   * "不知道"与"没在跑"不是一件事）；`stuckMs`/`pendingJobAgeMs` 非数 ⇒ `null`（不编 0）。
+   */
+  function applyExecState(d: { execState?: { state: string; reason: string } | null; lastProgressAt?: string | null; stuckMs?: number | null; pendingJobAgeMs?: number | null }) {
+    setExecState(d.execState ?? null);
+    setLastProgressAt(d.lastProgressAt ?? null);
+    setStuckMs(typeof d.stuckMs === 'number' ? d.stuckMs : null);
+    setPendingJobAgeMs(typeof d.pendingJobAgeMs === 'number' ? d.pendingJobAgeMs : null);
+  }
+
   async function loadProject() {
     try {
       // zx_20260916_2 M4: **只在没有数据时**才置 loading。
@@ -716,9 +819,13 @@ export default function TaskDetailPage() {
       // 先尝试以 taskId 加载
       // zx_20260930 M4-2: 显式取第 0 页（两个列表各一批）——刷新/切换=回到首页，
       //   不按"当前已加载多少"续取（那会让"刷新"变成一个语义不明的动作）。
-      const taskData = await tasks.get(id!, { convLimit: LIST_PAGE_SIZE, convOffset: 0, delivLimit: LIST_PAGE_SIZE, delivOffset: 0 }) as unknown as { task: TaskItem; conversations: ConvItem[]; conversationsTotal?: number; deliverables: DelivItem[]; deliverablesTotal?: number; retiredCount?: number; archivedSnapshot?: ArchivedSnapshotView | null; archiveReason?: string | null; archivedAt?: string | null; runtimeEvidence?: RuntimeEvidenceView[]; suggestedCriteria?: string[]; retrospective?: Array<{ content: string; created_at: string; structured?: { plan?: string; delta?: string; lesson?: string; action?: string; reusable?: boolean } }> };
+      const taskData = await tasks.get(id!, { convLimit: LIST_PAGE_SIZE, convOffset: 0, delivLimit: LIST_PAGE_SIZE, delivOffset: 0 }) as unknown as { task: TaskItem; conversations: ConvItem[]; conversationsTotal?: number; deliverables: DelivItem[]; deliverablesTotal?: number; retiredCount?: number; archivedSnapshot?: ArchivedSnapshotView | null; archiveReason?: string | null; archivedAt?: string | null; runtimeEvidence?: RuntimeEvidenceView[]; suggestedCriteria?: string[]; retrospective?: Array<{ content: string; created_at: string; structured?: { plan?: string; delta?: string; lesson?: string; action?: string; reusable?: boolean } }>; modelSelection?: ModelSelection | null; execState?: { state: string; reason: string } | null; lastProgressAt?: string | null; stuckMs?: number | null; pendingJobAgeMs?: number | null; position?: { id: string; name: string; enabled: boolean } | null; dispatchDecision?: { attempted: boolean; ok: boolean; reason: string; label: string; nodeId?: string; at: string } | null };
       if (taskData.task) {
         setTask(taskData.task);
+        applyExecState(taskData);
+        setModelSelection(taskData.modelSelection ?? null);
+        setDispatchDecision(taskData.dispatchDecision ?? null);
+        setPositionView(taskData.position ?? null);
         setArchivedSnap(taskData.archivedSnapshot ?? null);
         setArchiveReason(taskData.archiveReason ?? null);
         setArchivedAt(taskData.archivedAt ?? null);
@@ -753,9 +860,12 @@ export default function TaskDetailPage() {
         // zx_20261018_3 批五「显」: 详情页要用**全项目**任务做父/前置标题与前置候选——按页取完（每次受硬上限约束）。
         const allTasks = await tasks.listAll(taskData.task.project_id) as unknown as TaskItem[];
         setTaskList(allTasks);
-        try { const ev = await tasks.events(taskData.task.id); setEvents((ev as Array<Record<string, unknown>>) || []); } catch { setEvents([]); }
-        try { const ctx = await tasks.context(taskData.task.id) as Record<string, unknown>; setCtxForm({ max_tokens_per_task: String(ctx.max_tokens_per_task || ''), max_cost_usd_per_task: String(ctx.max_cost_usd_per_task || '') }); } catch {}
-        try { const sim = await tasks.similar(taskData.task.id, taskData.task.project_id); setSimilarTasks((sim as Array<Record<string, unknown>>) || []); } catch { setSimilarTasks([]); }
+        try { const ev = await tasks.events(taskData.task.id); setEvents((ev as Array<Record<string, unknown>>) || []); }
+        catch (e) { setEvents([]); reportLoad('运行事件', e); }
+        try { const ctx = await tasks.context(taskData.task.id) as Record<string, unknown>; setCtxForm({ max_tokens_per_task: String(ctx.max_tokens_per_task || ''), max_cost_usd_per_task: String(ctx.max_cost_usd_per_task || '') }); }
+        catch (e) { reportLoad('运行参数', e); }
+        try { const sim = await tasks.similar(taskData.task.id, taskData.task.project_id); setSimilarTasks((sim as Array<Record<string, unknown>>) || []); }
+        catch (e) { setSimilarTasks([]); reportLoad('相似任务', e); }
       }
     } catch (e) { setError((e as Error).message); } finally { setLoading(false); }
   }
@@ -769,14 +879,25 @@ export default function TaskDetailPage() {
     if (actionTimerRef.current !== undefined) window.clearTimeout(actionTimerRef.current);
     actionTimerRef.current = window.setTimeout(() => setActionMsg(''), 6000);
   };
+  /**
+   * zx_20261108_1 B5：**读失败**也要出声——面板空着时用户分不清"没有"与"没取到"。
+   * 与 `reportAction` 同一提示位（同一计时器），只是文案承认这是读不到，而非动作没成。
+   */
+  const reportLoad = (what: string, e: unknown): void => {
+    const m = e instanceof Error ? e.message : String(e);
+    setActionMsg(`${what}加载失败${m ? ` · ${m}` : ''}`);
+    if (actionTimerRef.current !== undefined) window.clearTimeout(actionTimerRef.current);
+    actionTimerRef.current = window.setTimeout(() => setActionMsg(''), 6000);
+  };
   useEffect(() => () => { if (actionTimerRef.current !== undefined) window.clearTimeout(actionTimerRef.current); }, []);
 
   async function selectTask(taskId: string) {
     setSelectedId(taskId);
     try {
       // zx_20260930 M4-2: 与 `loadProject` 同尺——切任务也是取第 0 页 + 服务端总数
-      const data = await tasks.get(taskId, { convLimit: LIST_PAGE_SIZE, convOffset: 0, delivLimit: LIST_PAGE_SIZE, delivOffset: 0 }) as unknown as { task: TaskItem; conversations: ConvItem[]; conversationsTotal?: number; deliverables: DelivItem[]; deliverablesTotal?: number; retiredCount?: number; archivedSnapshot?: ArchivedSnapshotView | null; archiveReason?: string | null; archivedAt?: string | null; runtimeEvidence?: RuntimeEvidenceView[]; suggestedCriteria?: string[] };
-      setTask(data.task); setConvs(data.conversations||[]); setDelivs(data.deliverables||[]); setRetiredCount(Number(data.retiredCount)||0);
+      const data = await tasks.get(taskId, { convLimit: LIST_PAGE_SIZE, convOffset: 0, delivLimit: LIST_PAGE_SIZE, delivOffset: 0 }) as unknown as { task: TaskItem; conversations: ConvItem[]; conversationsTotal?: number; deliverables: DelivItem[]; deliverablesTotal?: number; retiredCount?: number; archivedSnapshot?: ArchivedSnapshotView | null; archiveReason?: string | null; archivedAt?: string | null; runtimeEvidence?: RuntimeEvidenceView[]; suggestedCriteria?: string[]; modelSelection?: ModelSelection | null; execState?: { state: string; reason: string } | null; lastProgressAt?: string | null; stuckMs?: number | null; pendingJobAgeMs?: number | null; position?: { id: string; name: string; enabled: boolean } | null; dispatchDecision?: { attempted: boolean; ok: boolean; reason: string; label: string; nodeId?: string; at: string } | null };
+      setTask(data.task); setModelSelection(data.modelSelection ?? null); setDispatchDecision(data.dispatchDecision ?? null); setPositionView(data.position ?? null); setConvs(data.conversations||[]); setDelivs(data.deliverables||[]); setRetiredCount(Number(data.retiredCount)||0);
+      applyExecState(data);
       setArchivedSnap(data.archivedSnapshot ?? null);
       setArchiveReason(data.archiveReason ?? null);
       setArchivedAt(data.archivedAt ?? null);
@@ -786,9 +907,11 @@ export default function TaskDetailPage() {
       setDelivTotal(Number(data.deliverablesTotal) || 0);
       setConvExhausted(pageExhausted((data.conversations||[]).length, Number(data.conversationsTotal) || 0));
       setDelivExhausted(pageExhausted((data.deliverables||[]).length, Number(data.deliverablesTotal) || 0));
-      try { const ev = await tasks.events(taskId); setEvents((ev as Array<Record<string, unknown>>)||[]); } catch { setEvents([]); }
-      try { const ctx = await tasks.context(taskId) as Record<string, unknown>; setCtxForm({ max_tokens_per_task: String(ctx.max_tokens_per_task || ''), max_cost_usd_per_task: String(ctx.max_cost_usd_per_task || '') }); } catch {}
-    } catch {}
+      try { const ev = await tasks.events(taskId); setEvents((ev as Array<Record<string, unknown>>)||[]); }
+      catch (e) { setEvents([]); reportLoad('运行事件', e); }
+      try { const ctx = await tasks.context(taskId) as Record<string, unknown>; setCtxForm({ max_tokens_per_task: String(ctx.max_tokens_per_task || ''), max_cost_usd_per_task: String(ctx.max_cost_usd_per_task || '') }); }
+      catch (e) { reportLoad('运行参数', e); }
+    } catch (e) { reportAction(e); }
   }
 
   // zx_20260930 M4-2: 两个列表的「加载更多」——偏移量取**已列出的条数**，按 id 去重合并。
@@ -805,7 +928,7 @@ export default function TaskDetailPage() {
       const total = Number(d.conversationsTotal) || 0;
       setConvTotal(total);
       setConvExhausted(pageExhausted(convs.length + more.length, total));
-    } catch {}
+    } catch (e) { reportAction(e); }
     setConvMoreBusy(false);
   }
   async function loadMoreDelivs() {
@@ -818,7 +941,7 @@ export default function TaskDetailPage() {
       const total = Number(d.deliverablesTotal) || 0;
       setDelivTotal(total);
       setDelivExhausted(pageExhausted(delivs.length + more.length, total));
-    } catch {}
+    } catch (e) { reportAction(e); }
     setDelivMoreBusy(false);
   }
   // zx_20261018_3 D7: 状态动作共一把锁——同步 ref 挡第二击 + 提交期/700ms 冷却内全栏禁用。
@@ -838,15 +961,34 @@ export default function TaskDetailPage() {
     if (!beginAction()) return;
     try {
       // zx_20261105_1 M2: 验收类暂停的子任务，后端要求理由——就地问一次再重试；错误不吞。
-      if (await archiveWithReason(taskId)) {
+      // zx_20261110_1 B5: 三态返回——`done` 才重载；`need_reason` 打开页内输入框。
+      const outcome = await archiveWithReason(taskId);
+      if (outcome === 'done') {
         await loadProject();
         if (taskId===selectedId) await selectTask(taskId);
+      } else if (outcome === 'need_reason') {
+        setArchivePrompt({ cid: taskId, reason: '', onDone: () => { void loadProject(); if (taskId===selectedId) void selectTask(taskId); } });
       }
     } finally { endAction(); }
   }
   async function handleRetry(taskId: string) {
     if (!beginAction()) return;
     try { await tasks.retry(taskId); await loadProject(); } catch (e) { reportAction(e); } finally { endAction(); }
+  }
+  // zx_20261110_2 B7「见」: 幽灵态（状态写着在跑、实则无执行体）的**人工出口**。
+  //   一条动作做两件事：先真断（中止残留执行 + 收掉 in-flight 与未跑完的作业），再把任务放回 pending 重排。
+  //   界面只在 `ghost` 时给出按钮；后端再判一次（前端这道只是防误点的第一道，不是唯一一道）。
+  async function handleReleaseAndRequeue(taskId: string) {
+    if (!confirm('此任务状态写着在跑，但实际没有执行体在跑。\n「释放并重排」会先中止残留执行、清掉卡住的作业，再把任务放回待执行队列重跑。是否继续？')) return;
+    if (!beginAction()) return;
+    try {
+      const r = await tasks.releaseAndRequeue(taskId);
+      setActionMsg(`已释放并重排 · 清理 ${r.released} 条残留作业${r.aborted ? ' · 已中止残留执行' : ''}`);
+      if (actionTimerRef.current !== undefined) window.clearTimeout(actionTimerRef.current);
+      actionTimerRef.current = window.setTimeout(() => setActionMsg(''), 6000);
+      await loadProject();
+      if (taskId === selectedId) await selectTask(taskId);
+    } catch (e) { reportAction(e); } finally { endAction(); }
   }
   // zx_20260910_1 M4: 应答/恢复类操作统一护栏——置「提交中」(按钮禁用防连点)、成功后统一重载；
   // main 侧幂等重复码 ALREADY_RESPONDED 视同成功静默收口（不弹"操作未生效"，仅重载对齐界面）。
@@ -867,8 +1009,8 @@ export default function TaskDetailPage() {
   async function handleResumeWithNote(taskId: string) { const text = bannerReply.trim(); if (!text) return; await submitPauseOp(async () => { await tasks.resume(taskId, text); setBannerReply(''); }); }
   // zx_20260910_1 M1: 审批类（路径/特权）唯一入口——必须走 task:respond（只有它写 wa_approvals 指纹，task:resume 不写）
   async function handleDecision(taskId: string, decision: 'allow' | 'deny' | 'option', value?: string) { await submitPauseOp(() => tasks.respond(taskId, decision, value)); }
-  async function handleDownweightMemory(memId: string) { try { await admin.downweightMemory(memId); setMemoryInjection(prev => prev.filter(m => m.id !== memId)); } catch {} }
-  async function handleDeleteMemory(memId: string) { if (!confirm('确定删除此记忆？')) return; try { await admin.deleteMemory(memId); setMemoryInjection(prev => prev.filter(m => m.id !== memId)); } catch {} }
+  async function handleDownweightMemory(memId: string) { try { await admin.downweightMemory(memId); setMemoryInjection(prev => prev.filter(m => m.id !== memId)); } catch (e) { reportAction(e); } }
+  async function handleDeleteMemory(memId: string) { if (!confirm('确定删除此记忆？')) return; try { await admin.deleteMemory(memId); setMemoryInjection(prev => prev.filter(m => m.id !== memId)); } catch (e) { reportAction(e); } }
   async function handleInterrupt(taskId: string) {
     if (!confirm('确定中止此任务的当前执行？')) return;
     if (!beginAction()) return;
@@ -901,7 +1043,7 @@ export default function TaskDetailPage() {
   //   挂上后**下一次执行/回复**即被装配进上下文（无需立刻重跑）；逐件独立成败如实回报（成功件数 + 失败逐条带真因）。
   async function handleAttachFiles(taskId: string) {
     let picked: string[] = [];
-    try { picked = (await window.electronAPI?.openFilesDialog()) ?? []; } catch { return; }
+    try { picked = (await window.electronAPI?.openFilesDialog()) ?? []; } catch (e) { reportAction(e); return; }
     if (!Array.isArray(picked) || picked.length === 0) return;
     try {
       const r = await tasks.attachFiles(taskId, picked);
@@ -963,7 +1105,7 @@ export default function TaskDetailPage() {
       await selectTask(id);
     } catch (e) { reportAction(e); }
   }
-  async function handlePreviewDeliv(d: DelivItem) { try { const r = await invoke<Record<string, unknown>>('deliverable:preview', d.id); const rd = r as unknown as Record<string, unknown>; const content = String(rd.content_snapshot || rd.content || ''); const filePath = rd.file_path as string | undefined; setDelivPreview({ name: d.name, type: d.type, content, filePath, fileExists: rd.file_exists === true, version: Number(rd.version) || undefined }); } catch {} }
+  async function handlePreviewDeliv(d: DelivItem) { try { const r = await invoke<Record<string, unknown>>('deliverable:preview', d.id); const rd = r as unknown as Record<string, unknown>; const content = String(rd.content_snapshot || rd.content || ''); const filePath = rd.file_path as string | undefined; setDelivPreview({ name: d.name, type: d.type, content, filePath, fileExists: rd.file_exists === true, version: Number(rd.version) || undefined }); } catch (e) { reportAction(e); } }
 
   const ctx = (() => { try { return JSON.parse(task?.context_json||'{}'); } catch { return {}; } })();
   // zx_20260904_4 T5 (2026-09-04): 上下文水位（T2 context_watermark）——running 实时带展示；优先 step 实时值、回退首部估算
@@ -1158,8 +1300,6 @@ export default function TaskDetailPage() {
     return hits.length > 0 ? (hits[hits.length - 1]!.content || '') : '';
   })();
   const awaitingInput = task?.status === 'paused' && (!!awaitStruct?.question || !!awaitMarker);
-  // zx_20260915 P0-1: 暂停成因（reason 码取 main 侧同一常量，不在此手抄字面量）
-  const pausedNoOutput = task?.status === 'paused' && (ctx as { pause_reason?: string } | undefined)?.pause_reason === PAUSE_REASON_NO_OUTPUT;
   // zx_20260917 M2 ②: 因由**原文**与**人话**都走 main 的真源（读点 `recordedPauseReason` / 词表 `pauseReasonLabel`）。
   // 空串 = 账上未记因由（M1 收口前的存量直写点）——此时**如实说"因未记录"**，不静默留白、不编一个原因。
   const pauseReasonCode = task?.status === 'paused' ? recordedPauseReason(task.context_json) : '';
@@ -1202,6 +1342,9 @@ export default function TaskDetailPage() {
       : '任务已完成：可"重新执行"复核，或查看本次扬弃小结与产出物。';
   // D1: 「AI 思考中」指示——基于最近步骤事件时间 + 每秒时钟
   const thinkingSec = thinkingSince ? Math.max(0, Math.round((nowTick - thinkingSince) / 1000)) : 0;
+  // zx_20261110_2 B7「见」: 徽标与「最后进展/已卡多久」一次算出（`nowTick` 每秒走，卡住时长跟着走）。
+  const execBadgeView = execBadge(execState?.state);
+  const execLine = execStateLine({ state: execState?.state, lastProgressAt, stuckMs, pendingJobAgeMs, nowMs: nowTick });
   const liveToolNames = liveStatus?.toolCalls ? toolNamesFromStr(String(liveStatus.toolCalls)) : [];
   // D5: 预算/token 实时显示——执行中优先用实时 totalTokens，非执行用 context_json
   const executingNow = task?.status === 'executing' || task?.status === 'running';
@@ -1249,6 +1392,52 @@ export default function TaskDetailPage() {
     (id) => taskNameOf(id),
     (id) => taskList.find((t) => t.id === id)?.context_digest,
   );
+  // zx_20261111_3「显」：第一行——只喂**已算好的事实**，优先级由 `core/next-action.ts` 一处定。
+  //   `depState` 只在确有前置时才有意义（无前置 ⇒ `met`，免得"没有前置"被当成"还没满足"）。
+  const taskNextAction = nextActionForTask({
+    status: task?.status ?? null,
+    awaitingInput,
+    awaitingQuestion: awaitQ || null,
+    depState: depInfo.total > 0 ? depInfo.state : 'met',
+    depText: depInfo.text || null,
+    execState: execState?.state ?? null,
+    progressAgeMs: ageMsOf(lastProgressAt, nowTick),
+    pauseReason: pauseReasonText || pauseNote || null,
+  });
+  function handleTaskNextAction(aid: NextActionId): void {
+    if (!task) return;
+    if (aid === 'answer_task') setShowReply(true);
+    else if (aid === 'start_task') void handleResume(task.id);
+  }
+  // zx_20261112_1 B4「诊」: 操作分层与子任务树——判据全在纯模块，页面只负责画与转调用。
+  const actionLayout = task ? taskActionLayout(task.status) : null;
+  const familyTree = buildTaskTree(familyChildren, task?.id ?? null);
+  const familyRows = flattenTaskTree(familyTree, collapsedChildren);
+  const famProgress = familyProgress(familyChildren);
+  const toggleChildCollapse = (cid: string): void => setCollapsedChildren((prev) => {
+    const next = new Set(prev);
+    if (next.has(cid)) next.delete(cid); else next.add(cid);
+    return next;
+  });
+  function runTaskAction(key: TaskActionKey): void {
+    if (!task) return;
+    switch (key) {
+      case 'attach': void handleAttachFiles(task.id); break;
+      case 'execute': void handleStatus(task.id, 'running'); break;
+      case 'pause': void handleStatus(task.id, 'paused'); break;
+      case 'interrupt': void handleInterrupt(task.id); break;
+      case 'resume': void handleResume(task.id); break;
+      case 'requeue': void handleStatus(task.id, 'pending'); break;
+      case 'reply': setReplyText(''); setShowReply(true); break;
+      case 'inject': setInjectText(''); setShowInject((v) => !v); break;
+      case 'retry': void handleRetry(task.id); break;
+      case 'rerun': void handleRetry(task.id); break;
+      case 'complete': void handleStatus(task.id, 'completed'); break;
+      case 'archive': void handleArchive(task.id); break;
+      case 'delete': void handleDelete(task.id); break;
+      case 'create_from_original': void handleArchiveDraft(); break;
+    }
+  }
   // M3-4: 前置可编辑——候选=同项目、非自身、非归档、且未在前置内
   const depCandidates = taskList.filter((t) => t.project_id === task?.project_id && t.id !== task?.id && t.status !== 'archived' && !depIds.includes(t.id));
   const [depPickerOpen, setDepPickerOpen] = useState(false);
@@ -1268,10 +1457,15 @@ export default function TaskDetailPage() {
   // 所有 hook 均已在上方执行完毕，此后可安全提前返回（防"加载后 hook 数量变化"白页）
   if (loading) return <div className="flex justify-center py-12"><div className="animate-spin h-8 w-8 border-2 border-blue-500 border-t-transparent rounded-full"/></div>;
   if (!task) {
+    // zx_20261110_1 B5: 一读失败 ≠ 真不存在——给「重试」；「返回列表」保留原路。
     return (
       <div className="bg-white rounded-lg border p-10 text-center">
         <p className="text-gray-500 mb-3">任务不存在或已删除（可能来自过期通知）</p>
-        <button onClick={() => navigate('/tasks')} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700">返回任务列表</button>
+        {error && <p className="text-red-500 text-xs mb-3 break-words">{error}</p>}
+        <div className="flex items-center justify-center gap-2">
+          <button onClick={() => navigate('/tasks')} className="px-4 py-2 border border-gray-200 text-gray-600 rounded-lg text-sm hover:bg-gray-50">返回任务列表</button>
+          <button onClick={() => void loadProject()} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700">重试</button>
+        </div>
       </div>
     );
   }
@@ -1298,6 +1492,38 @@ export default function TaskDetailPage() {
         <span className="text-[10px] font-normal text-gray-400">（{memoryInjection.length} 条）</span>
       </button>
       {showMem && <div className="space-y-1.5 max-h-72 overflow-y-auto mt-2">{memoryInjection.map((m,i)=>(<div key={i} className="flex items-start justify-between gap-2 text-sm py-1.5 px-2 hover:bg-gray-50 rounded border-b last:border-0"><div className="flex-1 min-w-0"><div className="flex items-center gap-1.5 flex-wrap"><span className="text-xs px-1.5 py-0.5 rounded bg-violet-50 text-violet-600">{String(m.type)}</span><span className="text-xs text-gray-400">可信度 {Number(m.confidence)}%</span>{m.tag ? <span className="text-[10px] text-gray-400">{String(m.tag).slice(0, 40)}</span> : null}{m.reason ? <span className="text-[10px] text-blue-500 max-w-[40%] truncate" title={String(m.reason)}>召回:{String(m.reason).slice(0, 30)}</span> : null}</div><p className="text-xs text-gray-600 truncate mt-0.5" title={String(m.content)}>{String(m.content)}</p></div><div className="flex gap-1 shrink-0"><button onClick={()=>handleDownweightMemory(String(m.id))} className="text-[10px] px-1.5 py-0.5 bg-gray-100 rounded hover:bg-gray-200 text-gray-600">降权</button><button onClick={()=>handleDeleteMemory(String(m.id))} className="text-[10px] px-1.5 py-0.5 bg-red-50 rounded hover:bg-red-100 text-red-500">删除</button></div></div>))}</div>}
+    </div>
+  );
+
+  // zx_20261113_1 B3「用」: 岗位注入——**本次上下文真带了哪几条岗位知识**（说明/规范/技能/知识/可迁移经验）。
+  //   数据来自执行体写下的 `context_json.injected_position` 快照；旧任务无此键 ⇒ 整块不渲染（不编）。
+  const posInjected = (() => {
+    const raw = (ctx as { injected_position?: unknown }).injected_position;
+    if (!Array.isArray(raw)) return [] as Array<{ kind: string; refId: string; chars: number; preview: string }>;
+    return raw
+      .filter((r): r is Record<string, unknown> => !!r && typeof r === 'object')
+      .map((r) => ({
+        kind: String(r.kind ?? ''),
+        refId: String(r.refId ?? ''),
+        chars: Number(r.chars) || 0,
+        preview: String(r.preview ?? ''),
+      }))
+      .filter((r) => r.preview.trim() !== '');
+  })();
+  const posInjectBlock = posInjected.length > 0 && (
+    <div className="bg-white rounded-lg border p-4">
+      <button type="button" onClick={() => setShowPosInject((v) => !v)} className="w-full text-left font-medium text-sm flex items-center gap-1">
+        {showPosInject ? <ChevronDown className="w-4 h-4 text-gray-400 shrink-0" /> : <ChevronRight className="w-4 h-4 text-gray-400 shrink-0" />}
+        <Users className="w-4 h-4 text-emerald-600 shrink-0" />岗位注入
+        <span className="text-[10px] font-normal text-gray-400">（{posInjected.length} 条 · 本次上下文真带了哪几条岗位知识）</span>
+      </button>
+      {showPosInject && <div className="space-y-1 mt-2">{posInjected.map((p, i) => (
+        <div key={`${p.refId}:${i}`} className="flex items-start gap-2 text-sm py-1 px-2 hover:bg-gray-50 rounded">
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 shrink-0">{POSITION_INJECT_KIND_LABEL[p.kind] ?? p.kind}</span>
+          <span className="text-xs text-gray-600 flex-1 min-w-0 truncate" title={p.preview}>{p.preview}</span>
+          <span className="text-[10px] text-gray-400 shrink-0">{p.chars} 字</span>
+        </div>
+      ))}</div>}
     </div>
   );
 
@@ -1330,67 +1556,32 @@ export default function TaskDetailPage() {
     </div>
   );
 
-  // zx_20260924 §2c UI-3（用户 2026-09-24 点名）: 产出物**按盘上路径的目录层级**展示——一维平铺看不出
-  //   "是哪些目录下的哪些件"（真库里 `参考项目/example-suite/payment/…` 一族十几条挤在一起）。
-  //   树由 main 侧**零依赖纯函数** `buildDeliverableTree` 建（两条规则见该模块头注释），本页只负责"摆"。
-  // ⚠ **这是摆法不是筛选**：展平后逐条与改前相等（件数不变、不重不漏，由 rr 【UI】束④钉住）。
-  const delivTree = buildDeliverableTree(delivs);
-  // 叶子行——**逐字保留**改前那一行的全部标注（类型 / ★主要成果 / 子任务归属 / ✓已验收 / 另有写过 /
-  //   status / 预览 / 版本流抽屉）。抽成函数只为让**目录树与「无盘上路径」桶共用同一行**：
-  //   两处各写一份迟早分叉（本仓 G8 老病）。`depth` 只决定缩进（`px-2` 的左内边距由行内样式接管）。
-  //   标题**仍是 `d.name`，不是 basename**：真库 399 条里 72 条的 `name` 是**人写标题**
-  //   （`TrendRadar UI Dashboard` 的文件是 `index.html`、`两新关键位买入时机监控` 的是
-  //   `intraday_alert_daemon.py`）⇒ 换 basename 会把这 72 条唯一可读的名字换成文件名。
-  //   目录层级由**树的位置**给（= `file_path` 的目录段），与 `name` **互补不重叠**。
-  const delivRow = (d: DelivItem, depth: number) => (
-    <div key={d.id} className="flex items-center justify-between text-sm py-1 px-2 hover:bg-gray-50 rounded" style={{ paddingLeft: `${8 + depth * 14}px` }}><span className="flex items-center gap-2 min-w-0"><span className="text-xs font-mono text-gray-400 shrink-0">{d.type}</span>{d.is_primary===1&&<span title="主要成果" className="shrink-0"><Star className="w-3.5 h-3.5 text-amber-500 fill-amber-400"/></span>}<span className="truncate" title={d.file_path||undefined}>{d.name}</span>{/* zx_20260913 M2-1: 清单含子任务产出——逐条标明归属，防把子任务的成果误读成本任务的 */}{d.owner_task_id&&d.owner_task_id!==task.id&&<button type="button" onClick={()=>navigate(`/tasks/${d.owner_task_id}`)} title={`来自子任务：${d.owner_task_title||'未知任务'}（点击跳转）`} className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full bg-teal-50 text-teal-700 hover:bg-teal-100">子任务 {d.owner_task_title||'未知任务'}</button>}{showAccD&&d.acceptance_verified===1&&<span title="该成果已通过验收核验（doc/code 级如实）" className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full bg-green-100 text-green-700 font-medium">✓已验收</span>}{/* zx_20260913 M2-2: 归属只认首次写出者；后写者如实透出（由版本行 changed_by 派生，非夺走归属） */}{!!d.other_writers?.length&&<span className="shrink-0 text-[10px] text-gray-400" title={d.other_writers.map(w=>`${w.title}（${w.id}）`).join('\n')}>另有 {d.other_writers.map(w=>w.title).join('、')} 写过</span>}</span><span className="flex items-center gap-1 shrink-0"><span className={`text-xs px-1.5 py-0.5 rounded-full ${d.status==='running'?'bg-green-100 text-green-700':'bg-gray-100'}`}>{statusText(DELIVERABLE_STATUS_LABEL, d.status)}</span>{/* zx_20260913 M2-6: 判据由手抄 `type==='doc'` 换成共享 isPreviewType（doc/code）——与列表页同一份代码 */}{isPreviewType(d.type)&&<button onClick={()=>handlePreviewDeliv(d)} title="预览" className="p-0.5 hover:bg-blue-50 rounded"><Eye className="w-3.5 h-3.5 text-blue-500"/></button>}{isPreviewType(d.type)&&drawerOn&&<button onClick={()=>openDeliv(d.id)} title="版本流详情(抽屉)" className="p-0.5 hover:bg-amber-50 rounded"><History className="w-3.5 h-3.5 text-amber-500"/></button>}</span></div>
-  );
-  // 树 → 行：目录行给**段名 + 其后代件数**（缩进时靠它看出分量），叶子交给上面的共用行。
-  const renderDelivTree = (children: DeliverableTreeChild<DelivItem>[], depth: number): ReactNode =>
-    children.map((c) => c.kind === 'dir' ? (
-      <div key={`dir:${c.name}`}>
-        <div className="flex items-center gap-1.5 text-sm py-1 px-2 text-gray-600" style={{ paddingLeft: `${8 + depth * 14}px` }}>
-          <Folder className="w-3.5 h-3.5 text-amber-500 shrink-0" />
-          <span className="font-medium truncate" title={c.name}>{c.name}</span>
-          <span className="text-[10px] text-gray-400 shrink-0">{c.count} 件</span>
-        </div>
-        {renderDelivTree(c.children, depth + 1)}
-      </div>
-    ) : delivRow(c.item, depth));
-
-  const delivsBlock = delivs.length > 0 && (
-    <div className="bg-white rounded-lg border p-4">
-      <button type="button" onClick={() => setShowDelivs((v) => !v)} className="w-full text-left font-medium text-sm flex items-center gap-1">
-        {showDelivs ? <ChevronDown className="w-4 h-4 text-gray-400 shrink-0" /> : <ChevronRight className="w-4 h-4 text-gray-400 shrink-0" />}
-        <PackageIcon className="w-4 h-4 text-purple-500 shrink-0" />产出物
-        {/* zx_20260930 M4-2: 计数取**服务端全量口径**（`deliverablesTotal`）——印 `delivs.length` 会把
-            "这一批 100 条"说成"一共就 100 条"，与下方「加载更多」自相矛盾。 */}
-        <span className="text-[10px] font-normal text-gray-400">本任务（含子任务）{delivTotal} 条</span>
-      </button>
-      {showDelivs && <div className="mt-2">
-        {/* 如实说明"相对哪个根"——不写这句，用户会以为这些件就住在只有一两层的目录里 */}
-        {delivTree.commonPrefix.length > 0 && <p className="text-[10px] text-gray-400 px-2 mb-1">相对根：{delivTree.commonPrefix.join('/')}/</p>}
-        {renderDelivTree(delivTree.root, 0)}
-        {/* 没有盘上路径的件**如实单列**，不塞进任何假目录（塞了就是编造"它在哪"） */}
-        {delivTree.noPath.length > 0 && (
-          <div className="mt-2 pt-2 border-t border-gray-100">
-            <p className="text-[10px] text-gray-400 px-2">（无盘上路径 · {delivTree.noPath.length} 条）</p>
-            {delivTree.noPath.map((d) => delivRow(d, 0))}
-          </div>
-        )}
-      </div>}
-      {showDelivs && !delivExhausted && (
-        <div className="flex items-center justify-between gap-3 border-t mt-2 pt-2 text-[11px] text-gray-500">
-          <span>已加载 {delivs.length} / 共 {delivTotal} 条</span>
-          <button onClick={loadMoreDelivs} disabled={delivMoreBusy}
-            className="px-2 py-1 border rounded hover:bg-gray-50 disabled:opacity-50">{delivMoreBusy ? '加载中…' : '加载更多'}</button>
-        </div>
-      )}
-    </div>
-  );
+  // zx_20261107_1 B9: 产出物的树构建/折叠/分页摆法已整体搬进 `TaskArtifacts`（渲染点见下方）；
+  //   判据仍在本页——`delivs`/`delivTotal`/`delivExhausted`/`delivMoreBusy` 与两个开关按 props 传入。
 
   return (
     <div>
+      {/* zx_20261110_1 B5: 归档理由内嵌输入（替代 window.prompt）——顶层归档与子任务「放弃」共用一块 */}
+      {archivePrompt && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4" role="dialog" aria-modal="true">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-4 space-y-3">
+            <p className="text-sm font-medium">归档须写明放弃理由</p>
+            <p className="text-xs text-gray-500">该子任务停在「验收未判 / 验收失败」。理由会显示在任务详情里，供之后回看。</p>
+            <textarea
+              autoFocus
+              rows={3}
+              value={archivePrompt.reason}
+              onChange={(e) => setArchivePrompt((p) => (p ? { ...p, reason: e.target.value } : p))}
+              placeholder="例如：判据与任务目标无关，已由人工新开任务重做"
+              className="w-full border rounded-lg p-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-200"
+            />
+            <div className="flex justify-end gap-2">
+              <button type="button" onClick={() => setArchivePrompt(null)} className="px-3 py-1.5 text-sm border rounded-lg text-gray-600 hover:bg-gray-50">取消</button>
+              <button type="button" onClick={() => void confirmArchivePrompt()} disabled={!archivePrompt.reason.trim()} className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50">确认归档</button>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="flex items-center gap-3 mb-6">
         <button onClick={() => navigate('/tasks')} className="p-1 hover:bg-gray-100 rounded"><ArrowLeft className="w-5 h-5"/></button>
         <h2 className="text-xl font-bold">{projectName}</h2>
@@ -1425,11 +1616,15 @@ export default function TaskDetailPage() {
                 <div className="mb-3 p-2 bg-gray-50 border border-gray-200 rounded-lg flex flex-wrap items-center gap-2">
                   <span className="text-xs text-gray-600 flex-1 min-w-0">{suggestText}</span>
                   {task?.status === 'failed' && <button type="button" onClick={() => handleResume(task!.id)} disabled={actionLocked} className="text-xs px-2 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">恢复（保留对话）</button>}
+                  {/* zx_20261112_1 B4「诊」: 失败块直达运行证据；无证据行时滚到「本次运行未留证据」，不假装有。 */}
+                  {task?.status === 'failed' && <button type="button" onClick={() => { setShowRunEvidence(true); document.getElementById('run-evidence')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }} className="text-xs px-2 py-1 bg-slate-600 text-white rounded hover:bg-slate-700">查看运行证据</button>}
                   <button type="button" onClick={() => handleRetry(task!.id)} disabled={actionLocked} className="text-xs px-2 py-1 bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed">重试（清空重跑）</button>
                 </div>
               )}
               {/* 任务头部 + 统计卡片 */}
               <div className="bg-white rounded-lg border p-4">
+                {/* zx_20261111_3「显」：第一行——此刻是什么 / 凭什么 / 下一步点哪个 */}
+                <div className="mb-3"><NextActionBar action={taskNextAction} onAction={handleTaskNextAction} /></div>
                 {awaitingInput && <div className="p-2 mb-3 bg-amber-50 border border-amber-300 rounded-lg">
                   <div className="flex items-center gap-2 flex-wrap"><span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse shrink-0"/><span className="text-sm font-medium text-amber-800">等待你的回复</span>{awaitType !== 'ask_user' && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-200/70 text-amber-800">{AWAIT_TYPE_LABEL[awaitType] || awaitType}</span>}</div>
                   {awaitQ && <p className="mt-1 text-xs text-amber-900 whitespace-pre-wrap break-words">{awaitQ}</p>}
@@ -1450,7 +1645,7 @@ export default function TaskDetailPage() {
                 {/* zx_20260915 P0-1(§10.3-5 renderer 是词表第二落点): 暂停横幅按 `pause_reason` **分型**——
                     先前只有一句话「执行已挂起，可恢复继续」，而「收口无产出证据」是**事实**判定（不是可
                     随手续跑的挂起），用户据此无从知道该补产出还是该点完成。 */}
-                {task.status==='paused' && !awaitingInput && <div className="p-2 mb-3 bg-orange-50 border border-orange-300 rounded-lg"><div className="flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-orange-500 animate-pulse"/><span className="text-sm text-orange-800 font-medium">{pausedNoOutput ? '未达交付（无产出证据）' : (pauseReasonText ? `已暂停：${pauseReasonText}` : '已暂停（因未记录）')}</span><span className="text-xs text-orange-600">{pausedNoOutput ? '收口时未发现任何真实产出证据（无落盘成果、无交付物登记、无写入类工具调用）——已暂停而非标完成。若确有产出，请核验后「恢复」；若确认无需产出，可点「完成」。' : '执行已挂起，可恢复继续'}</span><button onClick={()=>handleResume(task.id)} disabled={actionLocked} className="ml-auto flex items-center gap-1 px-2 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"><RotateCcw className="w-3 h-3"/>恢复</button></div>
+                {task.status==='paused' && !awaitingInput && <div className="p-2 mb-3 bg-orange-50 border border-orange-300 rounded-lg"><div className="flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-orange-500 animate-pulse"/><span className="text-sm text-orange-800 font-medium">{pausedBannerHeadline({ reason: pauseReasonCode, reasonLabel: pauseReasonText, failed: (acceptanceCheck?.failed ?? []).length, total: acceptanceCheck?.criteria_total ?? 0 })}</span><span className="text-xs text-orange-600">{pausedBannerHint(pauseReasonCode)}</span>{acceptanceFailed && <button type="button" onClick={() => document.getElementById('acceptance-check')?.scrollIntoView({ behavior: 'smooth', block: 'start' })} className="text-xs px-2 py-1 bg-white border border-orange-300 text-orange-700 rounded hover:bg-orange-100">查看验收块</button>}<button onClick={()=>handleResume(task.id)} disabled={actionLocked} className="ml-auto flex items-center gap-1 px-2 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"><RotateCcw className="w-3 h-3"/>恢复</button></div>
                   {/* zx_20260923 M7-c（G15）: 横幅内联附言——承 G15 口径订正，「附言」此前只在动作栏那处模态框可达，
                       本批补的是**横幅里这一处缺口**。走的是既有的那个恢复方法，后端零改动。 */}
                   {/* zx_20261028_1 M5「停」：暂停附注（停摆说明含逐子停因与三条处置）——有才显示，原样换行。 */}
@@ -1458,7 +1653,7 @@ export default function TaskDetailPage() {
                   <div className="flex items-center gap-2 mt-2"><input value={bannerReply} onChange={e=>setBannerReply(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')handleResumeWithNote(task.id);}} className="flex-1 px-2 py-1 border border-orange-200 rounded text-xs bg-white" placeholder="附言（可选）：告诉它恢复后要注意什么，随本次恢复注入执行"/><button onClick={()=>handleResumeWithNote(task.id)} disabled={!bannerReply.trim()||actionLocked} className="shrink-0 px-2 py-1 bg-teal-600 text-white rounded text-xs hover:bg-teal-700 disabled:opacity-50 disabled:cursor-not-allowed">附言并恢复</button></div></div>}
                 <div className="flex items-start justify-between mb-3">
                   <div>
-                    <div className="flex items-center gap-2 mb-1 flex-wrap"><h3 className="font-semibold text-lg">{task.title}</h3><button type="button" onClick={(e) => { e.stopPropagation(); navigate(`/activity?obj=${task.id}`); }} title="该任务活动时间线" className="shrink-0 p-0.5 text-gray-400 hover:text-blue-500"><History className="w-4 h-4" /></button>{ownMs[0]?<button type="button" onClick={(e)=>{e.stopPropagation();navigate(`/tasks/${String(ownMs[0].plan_task_id)}`);}} className="text-[10px] px-1.5 py-0.5 rounded bg-teal-50 text-teal-700 hover:bg-teal-100 shrink-0" title={`所属方案里程碑 ${ownMs[0].milestone}：${ownMs[0].status}`}>方案 {ownMs[0].milestone}: {ownMs[0].status==='done'?'已落地':ownMs[0].status==='doing'?'进行中':'待实施'}</button>:null}<span className={`text-xs px-2 py-0.5 rounded-full ${STATUS_COLOR[task.status]||'bg-gray-100'}`}>{statusText(TASK_STATUS_LABEL, task.status)}</span>{acceptanceFailed && <span title={`账上验收有 ${(acceptanceCheck!.failed ?? []).length} 条判据未达成（共 ${acceptanceCheck!.criteria_total ?? 0} 条）——「已完成」不等于「已验收」，详见下方验收块`} className="cursor-help text-[10px] px-1.5 py-0.5 rounded-full border border-red-200 bg-red-50 text-red-600 font-medium">✗ 验收 {(acceptanceCheck!.failed ?? []).length} 条未达</span>}{archetypeLabel&&<span className="text-xs px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600 cursor-help" title={[`形态：${archetypeLabel}`, archetypeSourceLabel&&`来源：${archetypeSourceLabel}`, archetypeReason&&`依据：${archetypeReason}`].filter(Boolean).join('\n')}>形态：{archetypeLabel}{archetypeSourceLabel?` · ${archetypeSourceLabel}`:''}</span>}{archetypeReason&&<span className="text-xs text-gray-400 max-w-[260px] truncate" title={archetypeReason}>依据：{archetypeReason}</span>}{archetypeSource === 'fallback' && (task.status === 'paused' || task.status === 'failed') && <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700">形态由长度兜底判定，可能偏窄<button type="button" onClick={() => setShowContext(true)} className="ml-1 underline text-blue-600">切换任务形态</button><span className="text-amber-500/80">（仅影响后续运行，不改历史账）</span></span>}{taskEstimate?.basedOn ? <span title={`基于 ${taskEstimate.basedOn} 个相似历史任务预估`} className="text-xs px-1.5 py-0.5 rounded-full bg-cyan-50 text-cyan-600">预估 {formatToken(taskEstimate.tokens)} / {taskEstimate.steps}步</span> : null}{PRIORITY_LABEL[task.priority] && <span className="text-xs text-orange-500 font-medium">{PRIORITY_LABEL[task.priority]}</span>}{completionQuality&&<span title={(snapshotActive ? '归档时快照 · ' : '') + (completionQuality.feedback||'')} className={`cursor-help text-xs px-1.5 py-0.5 rounded-full font-medium ${(completionQuality.score||0)>=80?'bg-green-100 text-green-700':(completionQuality.score||0)>=60?'bg-yellow-100 text-yellow-700':(completionQuality.score||0)>=40?'bg-orange-100 text-orange-700':'bg-red-100 text-red-600'}`}>★{completionQuality.score}分</span>}{autoCompletedNoOutput && <span title="该任务被直接标记完成但未产出真实成果（update_task_status 工具），未经 finalize 成果门禁——请人工复核" className="cursor-help text-[10px] px-1.5 py-0.5 rounded-full border border-red-200 bg-red-50 text-red-600 font-medium">⚠ 未达成果门禁</span>}{budgetUsage!=null&&<span className={`text-xs px-1.5 py-0.5 rounded-full ${budgetUsage>=0.95?'bg-red-100 text-red-700':budgetUsage>=0.7?'bg-yellow-100 text-yellow-700':'bg-blue-100 text-blue-700'}`}>{Math.round(budgetUsage*100)}%预算</span>}{displayTokens!=null&&<span className="text-xs text-gray-400">{displayTokens>=1000?(displayTokens/1000).toFixed(1)+'K':String(displayTokens)} tokens</span>}{costEstimate?.cost!=null&&<span title={`本次执行成本估算（¥）${costEstimate.cost>0?'':'· 所选模型单价为 0/未计费'}${costEstimate.model?` · 模型 ${costEstimate.model}`:''}`} className="text-xs text-gray-500">💰{costEstimate.cost>0?`¥${costEstimate.cost.toFixed(4)}`:`¥0${costEstimate.model?`(${costEstimate.model})`:''}`}</span>}{preludeTokens!=null&&<span className="text-xs text-purple-400" title="任务开始前的需求理解预读消耗（主要矛盾+立志+需求卡「三调合一」单次预读），不计入步进 token"> · 预读~{formatToken(preludeTokens)}</span>}{sideTokensCe!=null&&sideTokensCe>0&&<span className="text-xs text-amber-500" title="本次执行内旁路子 LLM（验收/内容校验/目标偏离核对）的估算 token，已并入上方总 token（账实相符）"> · 旁路~{formatToken(sideTokensCe)}</span>}{bgReviewTokens!=null&&bgReviewTokens>0&&<span className="text-xs text-purple-300" title="任务完成后后台复盘（background-review：三元组+记忆提取+复盘+行动转化）的估算 token，独立于执行预算"> · 复盘~{formatToken(bgReviewTokens)}</span>}</div>
+                    <div className="flex items-center gap-2 mb-1 flex-wrap"><h3 className="font-semibold text-lg">{task.title}</h3><button type="button" onClick={(e) => { e.stopPropagation(); navigate(`/activity?obj=${task.id}`); }} title="该任务活动时间线" className="shrink-0 p-0.5 text-gray-400 hover:text-blue-500"><History className="w-4 h-4" /></button>{positionView ? (positionView.missing ? <span title={`原指派岗位 ${positionView.id} 已被删除——执行时不注入岗位知识与经验`} className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full border border-red-200 bg-red-50 text-red-600">岗位：已删除</span> : <span title={positionView.enabled ? `指派岗位：${positionView.name}` : '岗位已停用——执行时不注入岗位知识与经验，重新启用后恢复'} className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded-full border ${positionView.enabled ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-gray-300 bg-gray-50 text-gray-500'}`}>岗位：{positionView.name}{positionView.enabled ? '' : '（已停用）'}</span>) : <span title="该任务未指派岗位——执行时不注入岗位知识与经验" className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full border border-dashed border-gray-300 bg-white text-gray-400">未指派岗位</span>}{ownMs[0]?<button type="button" onClick={(e)=>{e.stopPropagation();navigate(`/tasks/${String(ownMs[0].plan_task_id)}`);}} className="text-[10px] px-1.5 py-0.5 rounded bg-teal-50 text-teal-700 hover:bg-teal-100 shrink-0" title={`所属方案里程碑 ${ownMs[0].milestone}：${ownMs[0].status}`}>方案 {ownMs[0].milestone}: {ownMs[0].status==='done'?'已落地':ownMs[0].status==='doing'?'进行中':'待实施'}</button>:null}<span className={`text-xs px-2 py-0.5 rounded-full ${taskStatusPill(task.status)}`}>{statusText(TASK_STATUS_LABEL, task.status)}</span>{execBadgeView && <span title={`执行态由引擎按「状态词 + 是否有真执行体 + 排队作业」派生${execState?.reason ? `：${execState.reason}` : ''}`} className={`cursor-help text-[10px] px-1.5 py-0.5 rounded-full border font-medium ${execBadgeView.tone}`}>{execBadgeView.label}</span>}{execLine && <span className="text-[11px] text-gray-500">{execLine}</span>}{execState?.state === 'ghost' && <button type="button" disabled={submitting || actionCooldown} onClick={() => void handleReleaseAndRequeue(task.id)} title="状态写着在跑、实则无执行体——先真断再放回待执行队列" className="text-[10px] px-1.5 py-0.5 rounded border border-red-300 bg-white text-red-600 hover:bg-red-50 disabled:opacity-50">释放并重排</button>}{acceptanceFailed && <span title={`账上验收有 ${(acceptanceCheck!.failed ?? []).length} 条判据未达成（共 ${acceptanceCheck!.criteria_total ?? 0} 条）——「已完成」不等于「已验收」，详见下方验收块`} className="cursor-help text-[10px] px-1.5 py-0.5 rounded-full border border-red-200 bg-red-50 text-red-600 font-medium">✗ 验收 {(acceptanceCheck!.failed ?? []).length} 条未达</span>}{archetypeLabel&&<span className="text-xs px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600 cursor-help" title={[`形态：${archetypeLabel}`, archetypeSourceLabel&&`来源：${archetypeSourceLabel}`, archetypeReason&&`依据：${archetypeReason}`].filter(Boolean).join('\n')}>形态：{archetypeLabel}{archetypeSourceLabel?` · ${archetypeSourceLabel}`:''}</span>}{archetypeSource === 'fallback' && (task.status === 'paused' || task.status === 'failed') && <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700">形态由长度兜底判定，可能偏窄<button type="button" onClick={() => setShowContext(true)} className="ml-1 underline text-blue-600">切换任务形态</button><span className="text-amber-500/80">（仅影响后续运行，不改历史账）</span></span>}{taskEstimate?.basedOn ? <span title={`基于 ${taskEstimate.basedOn} 个相似历史任务预估`} className="text-xs px-1.5 py-0.5 rounded-full bg-cyan-50 text-cyan-600">预估 {formatTokens(taskEstimate.tokens)} / {taskEstimate.steps}步</span> : null}{PRIORITY_LABEL[task.priority] && <span className="text-xs text-orange-500 font-medium">{PRIORITY_LABEL[task.priority]}</span>}{completionQuality&&<span title={(snapshotActive ? '归档时快照 · ' : '') + (completionQuality.feedback||'')} className={`cursor-help text-xs px-1.5 py-0.5 rounded-full font-medium ${(completionQuality.score||0)>=80?'bg-green-100 text-green-700':(completionQuality.score||0)>=60?'bg-yellow-100 text-yellow-700':(completionQuality.score||0)>=40?'bg-orange-100 text-orange-700':'bg-red-100 text-red-600'}`}>★{completionQuality.score}分</span>}{autoCompletedNoOutput && <span title="该任务被直接标记完成但未产出真实成果（update_task_status 工具），未经 finalize 成果门禁——请人工复核" className="cursor-help text-[10px] px-1.5 py-0.5 rounded-full border border-red-200 bg-red-50 text-red-600 font-medium">⚠ 未达成果门禁</span>}{budgetUsage!=null&&<span className={`text-xs px-1.5 py-0.5 rounded-full ${budgetUsage>=0.95?'bg-red-100 text-red-700':budgetUsage>=0.7?'bg-yellow-100 text-yellow-700':'bg-blue-100 text-blue-700'}`}>{Math.round(budgetUsage*100)}%预算</span>}{costEstimate?.cost!=null&&<span title={`本次执行成本估算（¥）${costEstimate.cost>0?'':'· 所选模型单价为 0/未计费'}${costEstimate.model?` · 模型 ${costEstimate.model}`:''}`} className="text-xs text-gray-500">💰{costEstimate.cost>0?formatMoney(costEstimate.cost,{digits:4}):`${formatMoney(0,{digits:0})}${costEstimate.model?`(${costEstimate.model})`:''}`}</span>}</div>
                     {/* zx_20261105_1 M9: 归档不是黑洞——理由与时刻在头部副标题如实可见；
                         没有理由就写「未填写理由」，不编造一句看起来像理由的话。 */}
                     {task.status === 'archived' && (
@@ -1467,7 +1662,7 @@ export default function TaskDetailPage() {
                         {archiveReason
                           ? <span className="text-gray-700 break-words">{archiveReason}</span>
                           : <span className="text-gray-400">未填写理由</span>}
-                        {archivedAt && <span className="text-gray-400">· {formatTime(archivedAt)}</span>}
+                        {archivedAt && <span className="text-gray-400">· {formatTimeOrRaw(archivedAt)}</span>}
                       </p>
                     )}
                     {/* B2: 模板匹配依据——为什么套用了这个模板拆解 */}
@@ -1479,18 +1674,55 @@ export default function TaskDetailPage() {
                     {/* zx_20261018_1 批七「账」: 七源分账与裁剪数上屏（中文标签，renderer 是词表第二落点） */}
                     {tokenBreakdown && <p className="text-[11px] text-gray-500 mt-1 flex items-center gap-1.5 flex-wrap" title="本次执行上下文按来源拆分（字符÷4 估算 token）；超预算时按 知识→记忆→历史 顺序裁剪，用户请求/验收标准/系统骨架不裁">
                       <span className="font-medium text-gray-600">Token 分账</span>
-                      <span className="px-1.5 py-0.5 rounded-full bg-gray-100">系统 {formatToken(tokenBreakdown.system)}</span>
-                      <span className="px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-700">记忆 {formatToken(tokenBreakdown.memory)}</span>
-                      <span className="px-1.5 py-0.5 rounded-full bg-indigo-50 text-indigo-700">知识 {formatToken(tokenBreakdown.knowledge)}</span>
-                      <span className="px-1.5 py-0.5 rounded-full bg-sky-50 text-sky-700">历史 {formatToken(tokenBreakdown.history)}</span>
-                      <span className="px-1.5 py-0.5 rounded-full bg-gray-100">工具 {formatToken(tokenBreakdown.tools)}</span>
-                      <span className="px-1.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700">用户 {formatToken(tokenBreakdown.user)}</span>
-                      <span className="px-1.5 py-0.5 rounded-full bg-purple-50 text-purple-700">产出 {formatToken(tokenBreakdown.output)}</span>
-                      <span className="font-medium text-gray-600">合计 {formatToken(tokenBreakdown.total)}</span>
-                      {tokenBreakdown.budget > 0 && <span>预算 {formatToken(tokenBreakdown.budget)}</span>}
+                      <span className="px-1.5 py-0.5 rounded-full bg-gray-100">系统 {formatTokens(tokenBreakdown.system)}</span>
+                      <span className="px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-700">记忆 {formatTokens(tokenBreakdown.memory)}</span>
+                      <span className="px-1.5 py-0.5 rounded-full bg-indigo-50 text-indigo-700">知识 {formatTokens(tokenBreakdown.knowledge)}</span>
+                      <span className="px-1.5 py-0.5 rounded-full bg-sky-50 text-sky-700">历史 {formatTokens(tokenBreakdown.history)}</span>
+                      <span className="px-1.5 py-0.5 rounded-full bg-gray-100">工具 {formatTokens(tokenBreakdown.tools)}</span>
+                      <span className="px-1.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700">用户 {formatTokens(tokenBreakdown.user)}</span>
+                      <span className="px-1.5 py-0.5 rounded-full bg-purple-50 text-purple-700">产出 {formatTokens(tokenBreakdown.output)}</span>
+                      <span className="font-medium text-gray-600">合计 {formatTokens(tokenBreakdown.total)}</span>
+                      {tokenBreakdown.budget > 0 && <span>预算 {formatTokens(tokenBreakdown.budget)}</span>}
                       <span>{tokenBreakdown.trimmedTotal > 0 ? `已裁剪 ${tokenBreakdown.trimmedTotal} 字符` : '未裁剪'}</span>
                       {tokenBreakdown.overBudget && <span className="text-red-600 font-medium">裁剪后仍超预算</span>}
                     </p>}
+                    {/* zx_20261107_1 B7: 三笔执行外记账（预读/旁路/复盘）从头部徽标行移到「记账明细」——
+                        与上方上下文分账同一族（都是 token 账），头部只留 TaskHeader 那一处执行总数。 */}
+                    {(preludeTokens!=null || (sideTokensCe!=null && sideTokensCe>0) || (bgReviewTokens!=null && bgReviewTokens>0)) && (
+                      <p className="text-[11px] text-gray-500 mt-0.5 flex items-center gap-1.5 flex-wrap" title="执行外 token 记账明细（与上方上下文分账口径不同，各记账于其侧）">
+                        <span className="font-medium text-gray-600">记账明细</span>
+                        {preludeTokens!=null&&<span className="text-purple-400" title="任务开始前的需求理解预读消耗（主要矛盾+立志+需求卡「三调合一」单次预读），不计入步进 token"> · 预读~{formatTokens(preludeTokens)}</span>}
+                        {sideTokensCe!=null&&sideTokensCe>0&&<span className="text-amber-500" title="本次执行内旁路子 LLM（验收/内容校验/目标偏离核对）的估算 token，已并入上方总 token（账实相符）"> · 旁路~{formatTokens(sideTokensCe)}</span>}
+                        {bgReviewTokens!=null&&bgReviewTokens>0&&<span className="text-purple-300" title="任务完成后后台复盘（background-review：三元组+记忆提取+复盘+行动转化）的估算 token，独立于执行预算"> · 复盘~{formatTokens(bgReviewTokens)}</span>}
+                      </p>
+                    )}
+                    {/* zx_20261107_1 B6「信」: **为什么选它**——结构化选型记录（main 洗形后回传），
+                        理由行与落账的 `[选型]` 逐字同源；旧任务无记录即不渲染（不拿空白冒充"已记录"）。 */}
+                    {modelSelection && (
+                      <details className="mt-1 text-[11px] text-gray-500">
+                        <summary className="cursor-pointer select-none">
+                          为什么选它：<span className="font-medium text-gray-600">{modelSelection.model}</span>
+                          {modelSelection.pinned && <span className="ml-1 text-gray-400">（{PIN_SOURCE_LABEL[modelSelection.pinned.source] ?? modelSelection.pinned.source}）</span>}
+                        </summary>
+                        <div className="mt-1 pl-2 border-l-2 border-gray-100 space-y-0.5">
+                          <p className="break-words">{modelSelection.reason}</p>
+                          <p>
+                            单价 {formatMoney(modelSelection.inputPricePer1k, { digits: 4, currency: modelSelection.currency })}
+                            {' / '}{formatMoney(modelSelection.outputPricePer1k, { digits: 4, currency: modelSelection.currency })}
+                            <span className="text-gray-400"> 每 1k tokens（输入 / 输出{modelSelection.currency ? `，${modelSelection.currency}` : '，币种未知'}）</span>
+                          </p>
+                          {modelSelection.pinned && (
+                            <p>
+                              用户指定：{PIN_SOURCE_LABEL[modelSelection.pinned.source] ?? modelSelection.pinned.source}
+                              {' · '}{modelSelection.pinned.requested}
+                              {modelSelection.pinned.applied
+                                ? <span className="text-emerald-600">（本次已采用）</span>
+                                : <span className="text-amber-600">（不在本次可用池，已回落自动选型）</span>}
+                            </p>
+                          )}
+                        </div>
+                      </details>
+                    )}
                     {/* zx_20260924_1 M9-c: 完成来源——「这个分是谁给的」。**只显示，不改判定**（V-8 已裁定）。 */}
                     {completionVia && <p className="text-[11px] text-gray-400 mt-1">完成来源：<span className="font-medium text-gray-500">{completionVia}</span>{completionViaNote ? ` —— ${completionViaNote}` : ''}</p>}
                     {/* zx_20260924_1 M9-b: 无相似样本时的估时留痕——「没估时」不是"还没跑"，是"没有样本可依" */}
@@ -1504,31 +1736,21 @@ export default function TaskDetailPage() {
                     {milestonesWithoutChildTasks.length > 0 && <p className="mt-2 px-2 py-1 rounded bg-amber-50 border border-amber-200 text-xs text-amber-700">⚠️ {milestonesWithoutChildTasks.length} 个里程碑尚无对应子任务：{milestonesWithoutChildTasks.join('、')}（"登记在板上" ≠ "已执行"；本提示只报不拦，不影响完成判定）</p>}
                   </div>
                 </div>
-                {/* 统计 */}
-                <div className="grid grid-cols-4 gap-3 mb-3">
-                  <div className="bg-blue-50 rounded-lg p-2 text-center"><p className="text-lg font-bold text-blue-700">{formatToken(displayTokens)}</p><p className="text-[10px] text-blue-500">{executingNow ? 'Token消耗(实时)' : 'Token消耗'}</p></div>
-                  <div className="bg-purple-50 rounded-lg p-2 text-center"><p className="text-lg font-bold text-purple-700">{convTotal}</p><p className="text-[10px] text-purple-500">对话轮次</p></div>
-                  <div className="bg-green-50 rounded-lg p-2 text-center"><p className="text-lg font-bold text-green-700">{delivTotal}</p><p className="text-[10px] text-green-500" title="含子任务产出（task:get 子树聚合）">本任务（含子任务）</p></div>
-                  <div className="bg-orange-50 rounded-lg p-2 text-center"><p className="text-lg font-bold text-orange-700">{task.aggregate_version||0}</p><p className="text-[10px] text-orange-500">版本</p></div>
-                </div>
-                {/* zx_20260906_1 3e: 重试后信息差——当前成果空但存在已退休(旧版)成果时透出，避免误读为"无成果" */}
-                {delivTotal === 0 && retiredCount > 0 && (
-                  <div className="mb-3 px-3 py-2 rounded bg-gray-50 border border-gray-200 text-xs text-gray-500 flex items-center justify-between gap-2">
-                    <span>当前无有效产出物——该任务曾重试，有 <b>{retiredCount}</b> 项旧成果已退休(soft-retired，版本历史保留)。</span>
-                    <button type="button" onClick={() => navigate('/deliverables')} className="shrink-0 text-blue-500 hover:text-blue-700 hover:underline">前往产出物管理查看 →</button>
-                  </div>
-                )}
-                {/* 元信息 */}
-                <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-gray-400">
-                  <div className="flex items-center gap-1"><Clock className="w-3 h-3"/>创建: {formatTime(task.created_at)}</div>
-                  <div className="flex items-center gap-1"><TrendingUp className="w-3 h-3"/>更新: {formatTime(task.updated_at)}</div>
-                  <div className="flex items-center gap-1">来源: {taskSourceLabel(task.source)}</div>
-                  {task.depends_on && <div className="flex items-center gap-1 flex-wrap col-span-2"><GitBranch className="w-3 h-3"/>前置依赖: {depIds.map((did) => (
-                    <button key={did} type="button" onClick={() => navigate(`/tasks/${did}`)} title={`跳转前置任务：${taskNameOf(did)}`} className="text-blue-500 hover:text-blue-700 hover:underline">{taskNameOf(did)}</button>
-                  ))}</div>}
-                  {task.parent_task_id && <div className="flex items-center gap-1"><GitBranch className="w-3 h-3"/>父任务: <button type="button" onClick={() => navigate(`/tasks/${task.parent_task_id}`)} title="跳转父任务" className="text-blue-500 hover:text-blue-700 hover:underline">{taskNameOf(task.parent_task_id)}</button></div>}
-                  {stepInfo && <div className="flex items-center gap-1 col-span-2 text-blue-500"><AlertTriangle className="w-3 h-3"/>{stepInfo}</div>}
-                </div>
+                {/* 统计 + 元信息（zx_20261107_1 B9：摆法见 `TaskHeader`，数字仍由本页算） */}
+                <TaskHeader
+                  stats={{ tokens: displayTokens, executing: executingNow, conversations: convTotal, deliverables: delivTotal, version: task.aggregate_version || 0 }}
+                  retiredCount={retiredCount}
+                  meta={{
+                    createdAt: task.created_at,
+                    updatedAt: task.updated_at,
+                    sourceLabel: taskSourceLabel(task.source),
+                    dependsOn: depIds.map((did) => ({ id: did, label: taskNameOf(did) })),
+                    parent: task.parent_task_id ? { id: task.parent_task_id, label: taskNameOf(task.parent_task_id) } : null,
+                    stepInfo: stepInfo || null,
+                  }}
+                  onNavigateTask={(tid) => navigate(`/tasks/${tid}`)}
+                  onOpenDeliverables={() => navigate('/deliverables')}
+                />
                 {/* zx_20261023_5 批一（意义即使用）: 派单理由三行——与真派共用同一把尺
                     （`decideCreateDispatch`），界面说什么就是派发器判什么，不另立一套"看着能派"。 */}
                 {dispatchView && (
@@ -1540,6 +1762,22 @@ export default function TaskDetailPage() {
                     {dispatchView.lines.map((l) => (
                       <span key={l.key} className="px-1.5 py-0.5 rounded bg-gray-50 text-gray-500">{l.label}：{l.value}</span>
                     ))}
+                  </div>
+                )}
+                {/* zx_20261112_2 B1：**这次建单实际怎么处置的**——已派给谁 / 留在本机的原因 / 外派未成。
+                    旧任务无此账 ⇒ 不渲染（不把"当时没记"说成"没派"）。 */}
+                {dispatchDecision && (
+                  <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px]" title="建单当刻的派发结局（落 context_json.dispatch_decision）">
+                    <span className="font-medium text-gray-600">派发结局</span>
+                    {dispatchDecision.ok ? (
+                      <span className="px-1.5 py-0.5 rounded-full font-medium bg-emerald-50 text-emerald-700">
+                        已外派给 {dispatchDecision.nodeId ? (remoteNameOf(dispatchDecision.nodeId) || dispatchDecision.nodeId.slice(0, 8)) : '（未记目标）'}
+                      </span>
+                    ) : (
+                      <span className={`px-1.5 py-0.5 rounded-full font-medium ${dispatchDecision.attempted ? 'bg-amber-50 text-amber-700' : 'bg-gray-100 text-gray-600'}`}>
+                        {dispatchDecision.attempted ? `外派未成：${dispatchDecision.label}` : `留在本机：${dispatchDecision.label}`}
+                      </span>
+                    )}
                   </div>
                 )}
                 {/* zx_20261106_3 B5「见」: 本任务自身的外派状态 + 远端进度——与子任务徽标同一套措辞
@@ -1565,69 +1803,62 @@ export default function TaskDetailPage() {
                     })()}
                   </div>
                 )}
-                {/* 操作按钮 */}
-                {/* zx_20261018_3 D7（组2 实机照出）: 固定槽位——「暂停」与「恢复」不再共用同一个坐标。
-                    槽2=运行/暂停位：执行中是「暂停」，暂停后**原位**显示禁用的「已暂停」（不是「恢复」）；
-                    槽3=中止/恢复位，空槽用等宽占位撑住，后续按钮不左移右移。
+                {/* 操作按钮 —— 主/次/危三层由 `taskActionLayout(task.status)` 派生（页面不再按状态各写一遍）。
+                    zx_20261018_3 D7 的约束仍在：暂停态的主操作就是「恢复」，同一坐标不可能换成反向动作；
                     所有动作在提交期 + 700ms 冷却内统一禁用（`actionLocked`），`beginAction` 另用同步 ref 挡第二击。 */}
-                <div className="flex items-center gap-2 mt-3 pt-3 border-t">
-                  <ActionSlot>
-                    {/* zx_20261013_1 批二(K7): 挂本地文件——件就在手边，路在此接通（与建任务挂件同一条链） */}
-                    <button onClick={() => handleAttachFiles(task.id)} disabled={actionLocked} title="挂本地文件：落盘并写进任务上下文，下一次执行/回复即带上" className="w-full flex items-center justify-center gap-1 px-3 py-1 bg-sky-600 text-white rounded text-xs hover:bg-sky-700 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"><Paperclip className="w-3 h-3"/>挂附件</button>
-                  </ActionSlot>
-                  {['pending','executing','running','paused','failed','stabilizing'].includes(task.status) && <>
-                  <ActionSlot>
-                    {task.status==='pending' && <button onClick={() => handleStatus(task.id,'running')} disabled={actionLocked} title="执行" className="w-full flex items-center justify-center gap-1 px-3 py-1 bg-green-600 text-white rounded text-xs hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"><Play className="w-3 h-3"/>执行</button>}
-                    {task.status==='paused' && <button disabled title="任务已暂停——「恢复」在右侧独立按钮；同一坐标不再换成反向动作，避免暂停被连点成恢复" className="w-full flex items-center justify-center gap-1 px-3 py-1 bg-orange-500 text-white rounded text-xs opacity-50 cursor-not-allowed whitespace-nowrap"><Pause className="w-3 h-3"/>已暂停</button>}
-                    {/* zx_20260930 M11-5: `stabilizing` 的人工出口（与横幅同两个动作，动作栏这处便于滚到底时操作） */}
-                    {task.status==='stabilizing' && <button onClick={() => handleStatus(task.id,'pending')} disabled={actionLocked} title="确认并放回队列（等下一轮调度自动拉起）" className="w-full flex items-center justify-center gap-1 px-3 py-1 bg-amber-600 text-white rounded text-xs hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"><Play className="w-3 h-3"/>放回队列</button>}
-                    {(task.status==='executing'||task.status==='running') && <button onClick={() => handleStatus(task.id,'paused')} disabled={actionLocked} title="暂停" className="w-full flex items-center justify-center gap-1 px-3 py-1 bg-orange-500 text-white rounded text-xs hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"><Pause className="w-3 h-3"/>暂停</button>}
-                  </ActionSlot>
-                  <ActionSlot>
-                    {(task.status==='executing'||task.status==='running') && <button onClick={() => handleInterrupt(task.id)} disabled={actionLocked} title="中止（立即中断当前执行）" className="w-full flex items-center justify-center gap-1 px-3 py-1 bg-red-500 text-white rounded text-xs hover:bg-red-600 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"><AlertTriangle className="w-3 h-3"/>中止</button>}
-                    {(task.status==='paused'||task.status==='failed') && <button onClick={() => handleResume(task.id)} disabled={actionLocked} title="恢复（保留对话继续）" className="w-full flex items-center justify-center gap-1 px-3 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"><RotateCcw className="w-3 h-3"/>恢复</button>}
-                    {task.status==='stabilizing' && <button onClick={() => handleStatus(task.id,'paused')} disabled={actionLocked} title="暂停（转人工暂停态，可随时恢复）" className="w-full flex items-center justify-center gap-1 px-3 py-1 bg-orange-500 text-white rounded text-xs hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"><Pause className="w-3 h-3"/>暂停</button>}
-                  </ActionSlot>
-                  </>}
-                  {(task.status==='executing'||task.status==='running'||task.status==='paused'||task.status==='failed'||task.status==='completed') && <ActionSlot>
-                    {(task.status==='executing'||task.status==='running') && <button onClick={() => { setInjectText(''); setShowInject(v=>!v); }} disabled={actionLocked} title="追加输入（执行中注入提示，任务带新输入继续）" className="w-full flex items-center justify-center gap-1 px-3 py-1 bg-cyan-600 text-white rounded text-xs hover:bg-cyan-700 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"><MessageSquare className="w-3 h-3"/>追加输入</button>}
-                    {/* zx_20261103_1: 已完成任务同样可追加输入——任务重新打开并保留对话继续（不是清空重跑） */}
-                    {task.status==='completed' && <button onClick={() => { setInjectText(''); setShowInject(v=>!v); }} disabled={actionLocked} title="追加输入（任务重新打开并带此输入继续）" className="w-full flex items-center justify-center gap-1 px-3 py-1 bg-cyan-600 text-white rounded text-xs hover:bg-cyan-700 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"><MessageSquare className="w-3 h-3"/>追加输入</button>}
-                    {(task.status==='paused'||task.status==='failed') && <button onClick={() => { setReplyText(''); setShowReply(true); }} disabled={actionLocked} title="回复（输入内容后恢复任务）" className="w-full flex items-center justify-center gap-1 px-3 py-1 bg-teal-600 text-white rounded text-xs hover:bg-teal-700 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"><MessageSquare className="w-3 h-3"/>回复</button>}
-                  </ActionSlot>}
-                  {task.status==='failed' && <button onClick={() => handleRetry(task.id)} disabled={actionLocked} title="重试（清空对话从零开始）" className="flex items-center gap-1 px-3 py-1 bg-indigo-600 text-white rounded text-xs hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"><RefreshCw className="w-3 h-3"/>重试</button>}
-                  {(task.status==='paused'||task.status==='failed') && <button onClick={() => handleStatus(task.id,'completed')} disabled={actionLocked} title="标记完成" className="flex items-center gap-1 px-3 py-1 bg-emerald-600 text-white rounded text-xs hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed"><Check className="w-3 h-3"/>完成</button>}
-                  {/* zx_20261012_2 批二: 「归档（放弃）」。可弃的态=pending/planning/paused/failed/stabilizing；
-                      执行中(executing/running)刻意不给——须先「中止」，弃在途任务等于弃掉一个还在跑的东西，先停再弃。 */}
-                  {['pending','planning','paused','failed','stabilizing'].includes(task.status) && <button onClick={() => handleArchive(task.id)} disabled={actionLocked} title="归档（放弃）——弃 ≠ 败：它不再计入失败，也不阻塞父任务收口" className="flex items-center gap-1 px-3 py-1 bg-gray-500 text-white rounded text-xs hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed"><Archive className="w-3 h-3"/>归档</button>}
-                  {task.status==='completed' && <button onClick={() => handleRetry(task.id)} disabled={actionLocked} title="重新执行" className="flex items-center gap-1 px-3 py-1 bg-purple-600 text-white rounded text-xs hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed"><RotateCcw className="w-3 h-3"/>重新执行</button>}
-                  {/* zx_20261105_1 M9: 归档任务的唯一出口——照原题面另起一单（不是复活：原任务仍 archived）。
-                      草稿由 main 读原行生成；用户确认后才走 `task:create`。 */}
-                  {task.status==='archived' && <button onClick={handleArchiveDraft} disabled={actionLocked} title="以原题面新建：标题/描述/验收标准取自本任务，原任务仍保持已归档" className="flex items-center gap-1 px-3 py-1 bg-sky-600 text-white rounded text-xs hover:bg-sky-700 disabled:opacity-50 disabled:cursor-not-allowed"><CopyPlus className="w-3 h-3"/>以原题面新建</button>}
-                  {(task.status==='completed'||task.status==='failed'||task.status==='archived') && <button onClick={() => handleDelete(task.id)} disabled={actionLocked} title="删除" className="flex items-center gap-1 px-3 py-1 bg-red-500 text-white rounded text-xs hover:bg-red-600 disabled:opacity-50 disabled:cursor-not-allowed"><Trash2 className="w-3 h-3"/>删除</button>}
+                <div data-task-action-bar className="flex flex-wrap items-center gap-2 mt-3 pt-3 border-t">
+                  {actionLayout?.primary && (() => {
+                    const k = actionLayout.primary;
+                    return (
+                      <button type="button" data-task-action="primary" onClick={() => runTaskAction(k)} disabled={actionLocked} title={actionTitle(k, task.status)} className={`flex items-center gap-1 px-3 py-1 text-white rounded text-xs disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap ${PRIMARY_TONE[k] ?? 'bg-blue-600 hover:bg-blue-700'}`}>
+                        {ACTION_ICON[k]}{ACTION_LABEL[k]}
+                      </button>
+                    );
+                  })()}
+                  {actionLayout && actionLayout.secondary.length > 0 && (
+                    <button type="button" onClick={() => setShowActionMenu((v) => !v)} className="flex items-center gap-1 px-3 py-1 bg-gray-100 text-gray-600 rounded text-xs hover:bg-gray-200" title="更多操作：次要动作在折叠内，仍可执行">
+                      <ChevronDown className={`w-3 h-3 transition-transform ${showActionMenu ? 'rotate-180' : ''}`} />更多操作
+                    </button>
+                  )}
+                  {showActionMenu && actionLayout && (
+                    <div className="flex flex-wrap items-center gap-2 basis-full pl-1" data-task-action-secondary>
+                      {actionLayout.secondary.map((k) => (
+                        <button key={k} type="button" onClick={() => runTaskAction(k)} disabled={actionLocked} title={actionTitle(k, task.status)} className="flex items-center gap-1 px-3 py-1 bg-gray-50 border text-gray-600 rounded text-xs hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap">
+                          {ACTION_ICON[k]}{ACTION_LABEL[k]}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {actionLayout && actionLayout.danger.length > 0 && (
+                    <div className="ml-auto flex items-center gap-2" data-task-action-danger>
+                      {actionLayout.danger.map((k) => (
+                        <button key={k} type="button" onClick={() => runTaskAction(k)} disabled={actionLocked} title={actionTitle(k, task.status)} className="flex items-center gap-1 px-3 py-1 bg-red-50 border border-red-200 text-red-600 rounded text-xs hover:bg-red-100 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap">
+                          {ACTION_ICON[k]}{ACTION_LABEL[k]}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 {/* Phase C: 执行中追加输入内联框 */}
                 {showInject && (task.status==='executing'||task.status==='running'||task.status==='completed') && <div className="flex items-center gap-2 mt-2"><input value={injectText} onChange={e=>setInjectText(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'){handleInject(task.id, task.status);}}} className="flex-1 px-2 py-1 border rounded text-xs" placeholder={task.status==='completed' ? '输入要追加的内容，回车提交（任务重新打开并带此输入继续）' : '输入要注入的提示，回车提交（任务将软中断并带此输入继续）'}/><button onClick={()=>handleInject(task.id, task.status)} disabled={!injectText.trim()} className="px-2 py-1 bg-cyan-600 text-white rounded text-xs hover:bg-cyan-700 disabled:opacity-50">{task.status==='completed' ? '继续' : '注入'}</button></div>}
-                {/* zx_20261018_3 D11（组6 实机反馈）: 执行期实时块移到**操作栏下方**——按钮坐标不再受其高度影响。
-                    D13（组6 二次实机反馈）: 取消块内限高/滚动，思考与生成内容随页撑开，滚动只有页面这一条。 */}
-                {(task.status === 'executing' || task.status === 'running') && (
-                <LivePane>
-                {/* CoT (2026-09-03): 推理模型思考过程逐字上屏（紫色独立块，思考阶段可见） */}
-                {streamingReasoning && (task.status === 'executing' || task.status === 'running') && <div className="p-2 mb-3 bg-indigo-50 border border-indigo-200 rounded-lg space-y-1"><div className="flex items-center gap-2 flex-wrap"><span className="w-2 h-2 rounded-full bg-indigo-400 animate-pulse"/><span className="text-sm text-indigo-700 font-medium">🧠 AI 思考中…</span>{thinkingSince > 0 && <span className="text-xs text-indigo-400">{thinkingSec}s</span>}<button onClick={() => setShowThinking(!showThinking)} className="ml-auto text-[10px] px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-500 hover:bg-indigo-200" title="折叠/展开思考过程">{showThinking ? '收起' : '展开'}</button></div>{showThinking && <StreamPane title={streamingReasoning} className="text-xs text-indigo-700 whitespace-pre-wrap break-words font-mono">{streamingReasoning}</StreamPane>}</div>}
-                {/* D3 (2026-09-03 核实修复): 首个 step_finished 到达前 liveStatus 为空，此时独立渲染流式横幅，避免第 1 步 token 流式不可见 */}
-                {streamingText && !liveStatus && (task.status === 'executing' || task.status === 'running') && <div className="p-2 mb-3 bg-blue-50 border border-blue-200 rounded-lg space-y-1"><div className="flex items-center gap-2 flex-wrap"><span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse"/><span className="text-sm text-blue-800 font-medium">AI 正在生成…</span></div><StreamPane title={streamingText} className="text-xs text-blue-700 whitespace-pre-wrap break-words font-mono"><span className="text-blue-400">⏵ </span>{streamingText}</StreamPane></div>}
-                {/* Phase A: 执行中实时状态条（过程可见，非模态不打断） */}
-                {liveStatus && (task.status === 'executing' || task.status === 'running') && <div className="p-2 mb-3 bg-blue-50 border border-blue-200 rounded-lg space-y-1"><div className="flex items-center gap-2 flex-wrap"><span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse"/><span className="text-sm text-blue-800 font-medium">执行中 · 第 {String(liveStatus.step)} 步</span>{thinkingSince > 0 && <span className="text-xs text-blue-500 animate-pulse font-medium" title="最近步骤已完成，AI 正在生成下一步">🤖 AI 思考中… {thinkingSec}s</span>}{taskEstimate?.steps ? <span className="text-xs text-cyan-600">/ 预估 {taskEstimate.steps} 步{taskEstimate.steps > 0 ? `（${Math.min(100, Math.round((Number(liveStatus.step) / taskEstimate.steps) * 100))}%）` : ''}</span> : null}{taskEstimate?.steps && Number(liveStatus.step) < taskEstimate.steps ? <span className="text-xs text-cyan-500">预计剩余约 {taskEstimate.steps - Number(liveStatus.step)} 步</span> : null}{liveStatus.totalTokens != null && <span className="text-xs text-blue-600">{formatToken(liveStatus.totalTokens as number)} tokens</span>}{liveStatus.token_delta != null && <span className="text-xs text-blue-500" title="本步 token 增量"> · 本步 +{formatToken(Number(liveStatus.token_delta))}</span>}{liveStatus.totalTokens != null && liveWaterPct != null && <span className={`text-xs ${liveWaterPct >= 85 ? 'text-red-500 font-medium' : 'text-amber-600'}`} title="上下文占用近似估算(T2预算水位，随步骤实时刷新)"> · 上下文~{liveWaterPct}%</span>}{liveBias != null && taskEstimate?.tokens ? <span className={`text-xs ${liveBias >= 50 ? 'text-red-500 font-medium' : 'text-purple-600'}`} title="实际 vs 预估 token 偏差">{liveBias > 0 ? `超预估 +${liveBias}%` : `低于预估 ${liveBias}%`}</span> : null}</div>{taskEstimate?.steps ? <div className="h-1.5 bg-blue-100 rounded-full overflow-hidden"><div className="h-full bg-blue-500 rounded-full transition-all" style={{ width: `${Math.min(100, (Number(liveStatus.step) / taskEstimate.steps) * 100)}%` }} /></div> : null}{liveStatus.toolCalls ? <p className="text-xs text-blue-500" title={String(liveStatus.toolCalls)}>正在调用工具: {liveToolNames.length > 0 ? liveToolNames.join('、') : String(liveStatus.toolCalls)}</p> : null}{streamingText ? <StreamPane title={streamingText} className="text-xs text-blue-700 whitespace-pre-wrap break-words font-mono"><span className="text-blue-400">⏵ </span>{streamingText}</StreamPane> : liveStatus.text ? <p className="text-xs text-blue-700" title={String(liveStatus.text)}>{String(liveStatus.text).slice(0, 200)}</p> : null}</div>}
-                {/* zx_20260906 批4 (4b): 长单步执行中心跳脉冲（task.heartbeat 消费）——界面持续"呼吸"，不显伪冻结 */}
-                {hbFresh && heartbeat && (
-                  <div className="p-2 mb-3 bg-cyan-50 border border-cyan-200 rounded-lg flex items-center gap-2">
-                    <span className="relative flex h-2 w-2 shrink-0"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75" /><span className="relative inline-flex rounded-full h-2 w-2 bg-cyan-500" /></span>
-                    <span className="text-xs text-cyan-800">AI 正在执行长步骤（任务仍在推进）{heartbeat.elapsedSec >= 60 ? `· 已运行 ${Math.floor(heartbeat.elapsedSec / 60)}m${heartbeat.elapsedSec % 60}s` : `· 已运行 ${heartbeat.elapsedSec}s`}{heartbeat.tokens > 0 ? ` · ${formatToken(heartbeat.tokens)} tokens` : ''}</span>
-                  </div>
-                )}
-                {!streamingReasoning && !streamingText && !liveStatus && !hbFresh && <p className="text-xs text-gray-400">等待执行输出…</p>}
-                </LivePane>
-                )}
+                {/* zx_20261018_3 D11/D13: 执行期实时块在**操作栏下方**、不限高不块内滚动。
+                    zx_20261107_1 B9: 摆法整体搬进 `TaskProgress`；"何时算执行中/实时值怎么来"仍在本页。 */}
+                <TaskProgress
+                  status={task.status}
+                  streamingReasoning={streamingReasoning}
+                  showThinking={showThinking}
+                  onToggleThinking={() => setShowThinking(!showThinking)}
+                  thinkingSince={thinkingSince}
+                  thinkingSec={thinkingSec}
+                  streamingText={streamingText}
+                  liveStatus={liveStatus}
+                  liveToolNames={liveToolNames}
+                  liveWaterPct={liveWaterPct}
+                  liveBias={liveBias}
+                  estimate={taskEstimate ? { tokens: taskEstimate.tokens, steps: taskEstimate.steps } : null}
+                  heartbeatFresh={hbFresh}
+                  heartbeat={heartbeat}
+                />
               </div>
 
               {/* Phase C (2026-08-28 zx_2): 交付报告（慎终如始——完成态总览：目标达成/产出物/复盘/待关注） */}
@@ -1683,20 +1914,25 @@ export default function TaskDetailPage() {
                 </div>
               )}
 
-              {/* zx_20261016_3 M33-b: 子任务「目的」（四因·目的因）——拆解时写给"它服务于父目标的哪一点" */}
+              {/* zx_20261016_3 M33-b: 子任务「目的」（四因·目的因）——拆解时写给"它服务于父目标的哪一点"。
+                  zx_20261107_1 B7: 低频信息，默认折叠（首屏只留 任务目标/验收核对/子任务族验收 三段）。 */}
               {childPurpose && (
-                <div className="bg-white rounded-lg border p-4">
-                  <h4 className="font-medium mb-2 text-sm flex items-center gap-1"><Target className="w-4 h-4 text-emerald-500"/>子任务目的<span className="text-xs text-gray-400 font-normal">（四因·目的因）</span></h4>
-                  <p className="text-sm text-gray-700">{childPurpose}</p>
-                  <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
-                    {childFourCauses.map((c) => (
-                      <span key={c.cause} title={c.basis}
-                        className={`text-xs ${c.state === 'missing' ? 'text-amber-600' : 'text-gray-500'}`}>
-                        {c.label.split('（')[0]}：{c.state === 'carried' ? '已在条目' : c.state === 'runtime' ? '运行期承担' : '缺'}
-                      </span>
-                    ))}
+                <details className="bg-white rounded-lg border">
+                  <summary className="px-4 py-3 cursor-pointer select-none">
+                    <h4 className="font-medium text-sm flex items-center gap-1"><Target className="w-4 h-4 text-emerald-500"/>子任务目的<span className="text-xs text-gray-400 font-normal">（四因·目的因）</span></h4>
+                  </summary>
+                  <div className="px-4 pb-4">
+                    <p className="text-sm text-gray-700">{childPurpose}</p>
+                    <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
+                      {childFourCauses.map((c) => (
+                        <span key={c.cause} title={c.basis}
+                          className={`text-xs ${c.state === 'missing' ? 'text-amber-600' : 'text-gray-500'}`}>
+                          {c.label.split('（')[0]}：{c.state === 'carried' ? '已在条目' : c.state === 'runtime' ? '运行期承担' : '缺'}
+                        </span>
+                      ))}
+                    </div>
                   </div>
-                </div>
+                </details>
               )}
 
               {/* Phase A (2026-08-28 zx_1): 任务目标显性化（核心目标/成功标准/待调查项/主要矛盾） */}
@@ -1723,11 +1959,14 @@ export default function TaskDetailPage() {
                 </div>
               )}
 
-              {/* Phase B (2026-08-28 zx_1): 执行健康度（目标偏离/失败风险/复杂度升级/早停实时信号） */}
+              {/* Phase B (2026-08-28 zx_1): 执行健康度（目标偏离/失败风险/复杂度升级/早停实时信号）
+                  zx_20261107_1 B7: 默认折叠——头部条数常显，展开看逐条信号。 */}
               {signalStream.length>0 && (
-                <div className="bg-white rounded-lg border p-4">
-                  <h4 className="font-medium mb-2 text-sm flex items-center gap-1"><AlertTriangle className="w-4 h-4 text-orange-500"/>执行健康度 ({signalStream.length})</h4>
-                  <div className="space-y-1.5 max-h-60 overflow-y-auto">
+                <details className="bg-white rounded-lg border">
+                  <summary className="px-4 py-3 cursor-pointer select-none">
+                    <h4 className="font-medium text-sm flex items-center gap-1"><AlertTriangle className="w-4 h-4 text-orange-500"/>执行健康度 ({signalStream.length})</h4>
+                  </summary>
+                  <div className="px-4 pb-4 space-y-1.5 max-h-60 overflow-y-auto">
                     {signalStream.map((s,i) => {
                       const isDeviation = s.type === 'task.goal_deviation';
                       const sigType = String(s.signalType || '');
@@ -1746,14 +1985,17 @@ export default function TaskDetailPage() {
                       );
                     })}
                   </div>
-                </div>
+                </details>
               )}
 
-              {/* Phase A (2026-08-28 zx_2): 产出物验证结果透出（交付质量可见） */}
+              {/* Phase A (2026-08-28 zx_2): 产出物验证结果透出（交付质量可见）。
+                  zx_20261107_1 B7: 默认折叠——条数在标题常显。 */}
               {outputValidations && outputValidations.length>0 && (
-                <div className="bg-white rounded-lg border p-4">
-                  <h4 className="font-medium mb-2 text-sm flex items-center gap-1"><Check className="w-4 h-4 text-emerald-500"/>产出物验证 ({outputValidations.length})</h4>
-                  <div className="space-y-1.5">
+                <details className="bg-white rounded-lg border">
+                  <summary className="px-4 py-3 cursor-pointer select-none">
+                    <h4 className="font-medium text-sm flex items-center gap-1"><Check className="w-4 h-4 text-emerald-500"/>产出物验证 ({outputValidations.length})</h4>
+                  </summary>
+                  <div className="px-4 pb-4 space-y-1.5">
                     {outputValidations.map((v,i) => (
                       <div key={i} className={`border-l-2 pl-3 py-1 ${v.sufficient ? 'border-emerald-200 bg-emerald-50/50' : 'border-red-200 bg-red-50/50'}`}>
                         <div className="flex items-center gap-2 text-xs flex-wrap">
@@ -1766,14 +2008,14 @@ export default function TaskDetailPage() {
                       </div>
                     ))}
                   </div>
-                </div>
+                </details>
               )}
 
               {/* zx_20260906_2 批2 (2026-09-06): 验收标准逐条核对——finalize 验收证据可复盘(通过项/拒收项逐条+理由，非只一句 PASS) */}
               {/* zx_20260910_3 M1(名实相符): 未核验的载荷同样有 checked_at，必须显式展示"未核验+原因"而非空白
                   (此前恒空=无法区分"没跑到"与"没标准"，正是本轮 G1 的病象) */}
               {acceptanceVisible && acceptanceCheck && (
-                <div className="bg-white rounded-lg border p-4">
+                <div id="acceptance-check" className="bg-white rounded-lg border p-4">
                   <h4 className="font-medium mb-2 text-sm flex items-center gap-1"><Target className="w-4 h-4 text-blue-500"/>验收标准核对 {acceptanceFromSnapshot && <span className="text-gray-400 font-normal">· 归档时快照</span>} {acceptanceCheck.verified === false
                     ? <span className="text-xs text-amber-600 font-normal">{acceptanceCheck.reason === 'no_criteria' ? '(未设验收标准 · 未验收)'
                       : acceptanceCheck.reason === 'no_user_criteria' ? `(引擎代拟 ${(acceptanceCheck.proposed ?? []).length} 条 · 未验收)`
@@ -1781,8 +2023,8 @@ export default function TaskDetailPage() {
                       //   新增成因码（`output_insufficient`：产出内容不充分、本 run **从未进入验收判定**）在任务
                       //   详情页就看不见，只见到一句含糊的"未核验"。本仓既有纪律：**renderer 是词表的第二个落点**。
                       //   成因**点名**（查同一份 `ACCEPTANCE_REASON_LABEL`），落款仍带"尝试于"（它是尝试时刻，不是结论时刻）。
-                      : `(${ACCEPTANCE_REASON_LABEL[acceptanceCheck.reason ?? ''] ?? '未核验'}${acceptanceCheck.checked_at ? ` · 尝试于 ${formatTime(acceptanceCheck.checked_at)}` : ''})`}</span>
-                    : <span className="text-xs text-gray-400 font-normal">({(acceptanceCheck.passed ?? []).length} 通过 · {(acceptanceCheck.failed ?? []).length} 未达{acceptanceCheck.checked_at ? ` · ${formatTime(acceptanceCheck.checked_at)}` : ''})</span>}</h4>
+                      : `(${ACCEPTANCE_REASON_LABEL[acceptanceCheck.reason ?? ''] ?? '未核验'}${acceptanceCheck.checked_at ? ` · 尝试于 ${formatTimeOrRaw(acceptanceCheck.checked_at)}` : ''})`}</span>
+                    : <span className="text-xs text-gray-400 font-normal">({(acceptanceCheck.passed ?? []).length} 通过 · {(acceptanceCheck.failed ?? []).length} 未达{acceptanceCheck.checked_at ? ` · ${formatTimeOrRaw(acceptanceCheck.checked_at)}` : ''})</span>}</h4>
                   {acceptanceCheck.verified === false ? (
                     // zx_20260915 P0-2(d): 三态之一「无标准」单列——它不是"核对失败"（重跑也不会变），
                     // 给出的话术也必须不同：该补的是标准，不是重跑。另三种成因仍走下面那句。
@@ -1842,6 +2084,10 @@ export default function TaskDetailPage() {
                       <div className="border-l-2 border-amber-300 bg-amber-50/50 pl-3 py-2 text-xs text-amber-900">
                         <p className="font-medium">本次未取得核对结论（{ACCEPTANCE_REASON_LABEL[acceptanceCheck.reason ?? ''] ?? acceptanceCheck.reason ?? '原因未知'}）</p>
                         <p className="mt-0.5 text-amber-800"><b>未核验不等于通过</b>——本任务有验收判据却没判成，故<b>未标完成</b>，已暂停待人工。请核验产出后"恢复继续"（模型恢复即会重新判卷）或"标记完成"。</p>
+                        {/* zx_20261109_1 B5：判据回显缺失的可统计事实——计数与明细对不上，不许按"全过"记账。 */}
+                        {acceptanceCheck.reason === 'criteria_echo_missing' && (acceptanceCheck.criteria_echo_missing ?? 0) > 0 && (
+                          <p className="mt-0.5 text-amber-700">有 {acceptanceCheck.criteria_echo_missing} 条判据无法与模型回话一一对应（判据回显缺失）。</p>
+                        )}
                       </div>
                     ) : (
                     <div className="border-l-2 border-amber-200 bg-amber-50/50 pl-3 py-2 text-xs text-amber-800">
@@ -1851,15 +2097,25 @@ export default function TaskDetailPage() {
                     )
                   ) : (
                     <div className="space-y-1.5">
-                      {(acceptanceCheck.passed ?? []).map((c, i) => (
-                        <div key={`ap${i}`} className="border-l-2 border-emerald-200 bg-emerald-50/50 pl-3 py-1 text-xs text-gray-700">
-                          <span className="text-emerald-600 mr-1.5">✓ 已达成</span>{c}
-                        </div>
-                      ))}
+                      {/* zx_20261109_1 B5：逐条显示证据引用（仅展示，不重排）；旧账无引用 ⇒ 如实说"无引用记录"，不补造。 */}
+                      {(acceptanceCheck.passed ?? []).map((c, i) => {
+                        const refs = acceptanceCheck.items?.find((it) => it.criterion === c)?.evidence_refs ?? [];
+                        return (
+                          <div key={`ap${i}`} className="border-l-2 border-emerald-200 bg-emerald-50/50 pl-3 py-1 text-xs text-gray-700">
+                            <span className="text-emerald-600 mr-1.5">✓ 已达成</span>{c}
+                            {refs.length > 0
+                              ? <p className="text-xs text-gray-500 mt-0.5">引用：{refs.join('、')}</p>
+                              : Array.isArray(acceptanceCheck.items) ? <p className="text-xs text-gray-400 mt-0.5">引用：无引用记录</p> : null}
+                          </div>
+                        );
+                      })}
                       {(acceptanceCheck.failed ?? []).map((f, i) => (
                         <div key={`af${i}`} className="border-l-2 border-red-200 bg-red-50/50 pl-3 py-1">
                           <p className="text-xs text-red-700"><span className="font-medium">✗ {f.criterion}</span></p>
                           {f.reason && <p className="text-xs text-gray-500 mt-0.5">原因：{f.reason}</p>}
+                          {(f.evidence_refs?.length ?? 0) > 0
+                            ? <p className="text-xs text-gray-500 mt-0.5">引用：{(f.evidence_refs ?? []).join('、')}</p>
+                            : Array.isArray(acceptanceCheck.items) ? <p className="text-xs text-gray-400 mt-0.5">引用：无引用记录</p> : null}
                         </div>
                       ))}
                     </div>
@@ -1877,7 +2133,7 @@ export default function TaskDetailPage() {
               {/* zx_20261105_1 M6: 运行证据——被守卫拒绝/失败的命令逐条可查（工具、deny_kind、时间、命令）。
                   与判卷引用的是同一本账（`wa_task_runtime_evidence`），此页只读不回写。 */}
               {runtimeEvidence.length > 0 && (
-                <div className="bg-white rounded-lg border p-4">
+                <div id="run-evidence" className="bg-white rounded-lg border p-4">
                   <button type="button" onClick={() => setShowRunEvidence(v => !v)} className="w-full flex items-center gap-1 text-left">
                     <h4 className="font-medium text-sm flex items-center gap-1"><Terminal className="w-4 h-4 text-slate-500"/>运行证据
                       <span className="text-xs text-gray-400 font-normal">（共 {runtimeEvidence.length} 条 · 被拒 {runtimeEvidence.filter(r => !r.ok).length} 条）</span>
@@ -1893,7 +2149,7 @@ export default function TaskDetailPage() {
                             <span className="font-mono text-gray-700">{r.tool}</span>
                             <span className="font-mono text-gray-400">run:{r.id.slice(0, 8)}</span>
                             {r.ok ? <span className="text-gray-500">exit {r.exit_code ?? '-'}{r.timed_out ? ' · 超时' : ''}</span> : null}
-                            <span className="text-gray-400 ml-auto">{formatTime(r.created_at)}</span>
+                            <span className="text-gray-400 ml-auto">{formatTimeOrRaw(r.created_at)}</span>
                           </div>
                           {r.command && <div className="font-mono text-gray-600 mt-0.5 break-all">$ {r.command}</div>}
                           {r.deny_reason && <div className="text-red-600 mt-0.5 break-all">拒绝：{r.deny_reason}</div>}
@@ -1904,22 +2160,34 @@ export default function TaskDetailPage() {
                   )}
                 </div>
               )}
-
-              {/* E2 (2026-09-04_2): 扬弃小结——完成/失败任务的执行总判断（复盘顶部） */}
-              {digest && (
-                <div className="bg-white rounded-lg border p-4">
-                  <h4 className="font-medium mb-1.5 text-sm text-gray-700">本次扬弃小结</h4>
-                  <p className="text-xs text-gray-700">{digestLineText({ status: digest.status, steps: digest.steps, deviations: digest.deviations, signals: digest.signals, memoryInjections: digest.memoryInjections, quality: digest.quality })}</p>
-                  <p className="text-[10px] text-gray-400 mt-1">事实来源：wa_event_log 事件聚合（偏离/信号/记忆注入/步数），非展示臆造</p>
+              {/* zx_20261112_1 B4「诊」: 失败任务无证据行 ⇒ 明写「本次运行未留证据」（不隐藏、不假装有）。 */}
+              {task.status === 'failed' && runtimeEvidence.length === 0 && (
+                <div id="run-evidence" className="bg-white rounded-lg border p-4">
+                  <h4 className="font-medium mb-1 text-sm flex items-center gap-1"><Terminal className="w-4 h-4 text-slate-500"/>运行证据</h4>
+                  <p className="text-xs text-gray-500">本次运行未留证据（没有可核对的命令记录）。</p>
                 </div>
+              )}
+
+              {/* E2 (2026-09-04_2): 扬弃小结——完成/失败任务的执行总判断（复盘顶部）。
+                  zx_20261107_1 B7: 默认折叠（低频回顾信息）。 */}
+              {digest && (
+                <details className="bg-white rounded-lg border">
+                  <summary className="px-4 py-3 cursor-pointer select-none text-sm font-medium text-gray-700">本次扬弃小结</summary>
+                  <div className="px-4 pb-4">
+                    <p className="text-xs text-gray-700">{digestLineText({ status: digest.status, steps: digest.steps, deviations: digest.deviations, signals: digest.signals, memoryInjections: digest.memoryInjections, quality: digest.quality })}</p>
+                    <p className="text-[10px] text-gray-400 mt-1">事实来源：wa_event_log 事件聚合（偏离/信号/记忆注入/步数），非展示臆造</p>
+                  </div>
+                </details>
               )}
 
               {/* Phase B (2026-08-28 zx_2): 任务复盘透出（实践论再认识——教训可行动） */}
               {/* B1 (2026-09-03): 结构化复盘分节渲染（delta/lesson/action），旧数据回退 content */}
               {retrospective.length>0 && (
-                <div className="bg-white rounded-lg border p-4">
-                  <h4 className="font-medium mb-2 text-sm flex items-center gap-1"><History className="w-4 h-4 text-indigo-500"/>任务复盘</h4>
-                  <div className="space-y-1.5">
+                <details className="bg-white rounded-lg border">
+                  <summary className="px-4 py-3 cursor-pointer select-none">
+                    <h4 className="font-medium text-sm flex items-center gap-1"><History className="w-4 h-4 text-indigo-500"/>任务复盘</h4>
+                  </summary>
+                  <div className="px-4 pb-4 space-y-1.5">
                     {retrospective.map((r,i) => {
                       const st = r.structured;
                       const items: Array<{ label: string; value: string }> = st
@@ -1940,19 +2208,21 @@ export default function TaskDetailPage() {
                               <span className="text-indigo-600 font-medium mr-1.5">{it.label}</span>{it.value}
                             </p>
                           ))}
-                          <p className="text-[10px] text-gray-400">{formatTime(r.created_at)}</p>
+                          <p className="text-[10px] text-gray-400">{formatTimeOrRaw(r.created_at)}</p>
                         </div>
                       );
                     })}
                   </div>
-                </div>
+                </details>
               )}
 
               {/* B1 (2026-09-03_1): 方案里程碑（规划↔实施追踪） */}
               {planMilestones.length>0 && (
-                <div className="bg-white rounded-lg border p-4">
-                  <h4 className="font-medium mb-2 text-sm flex items-center gap-1">📋 方案里程碑</h4>
-                  <div className="space-y-1">
+                <details className="bg-white rounded-lg border">
+                  <summary className="px-4 py-3 cursor-pointer select-none">
+                    <h4 className="font-medium text-sm flex items-center gap-1">📋 方案里程碑</h4>
+                  </summary>
+                  <div className="px-4 pb-4 space-y-1">
                     {planMilestones.map((x,i)=>(
                       <div key={i} className="flex items-center gap-2 text-xs py-1 px-2 rounded bg-gray-50">
                         <span className="font-mono font-semibold text-gray-700 w-10">{x.milestone}</span>
@@ -1975,13 +2245,16 @@ export default function TaskDetailPage() {
                       </div>
                     ))}
                   </div>
-                </div>
+                </details>
               )}
 
               {/* zx_20260909 续跑(规划→独立实施): 实施任务「关联方案」——收口/动工按 scheme_ref.plan_task_id+标题 M 自动落地对应方案里程碑 */}
               {task && planMilestones.length === 0 && (
-                <div className="bg-white rounded-lg border p-4">
-                  <h4 className="font-medium mb-1 text-sm flex items-center gap-1">🔗 关联方案(规划)</h4>
+                <details className="bg-white rounded-lg border">
+                  <summary className="px-4 py-3 cursor-pointer select-none">
+                    <h4 className="font-medium text-sm flex items-center gap-1">🔗 关联方案(规划)</h4>
+                  </summary>
+                  <div className="px-4 pb-4">
                   <p className="text-[11px] text-gray-400 mb-2">用于「先规划成案、再独立实施落地」：关联后，本任务或其 M 子任务收口会自动把对应方案里程碑置 done 并落地到该子任务；也可到该方案(规划任务)的方案里程碑面板手动选落地任务。</p>
                   <div className="flex items-center gap-2 text-xs flex-wrap">
                     <span className="text-gray-600 shrink-0">当前：{(() => { try { const c = JSON.parse(task.context_json || '{}'); const sid = c.scheme_ref?.plan_task_id; return sid ? (projPlans.find((p) => p.id === sid)?.title || String(sid).slice(0, 8)) : '未关联'; } catch { return '未关联'; } })()}</span>
@@ -1993,7 +2266,8 @@ export default function TaskDetailPage() {
                       <button type="button" onClick={() => linkPlan(null)} className="text-[10px] px-1.5 py-0.5 bg-gray-100 text-gray-500 rounded hover:bg-gray-200">解除关联</button>
                     )}
                   </div>
-                </div>
+                  </div>
+                </details>
               )}
 
               {/* C2 (2026-09-04): 子任务族验收（全子状态/质量/token/结论） */}
@@ -2006,15 +2280,27 @@ export default function TaskDetailPage() {
                       <span className="truncate min-w-0">子任务推进中：{childProg.title}{childProg.step ? ` · 第 ${childProg.step} 步` : ''}{childProg.text ? ` · ${childProg.text}` : ''}</span>
                     </div>
                   )}
-                  <h4 className="font-medium mb-2 text-sm">📋 子任务族验收（{familyChildren.length}）</h4>
+                  {/* zx_20261112_1 B4「诊」: 族进度——完成/总数（终态口径同 `isTerminalStatus`）+ 运行中 + 等你处理。
+                      本块只在 `familyChildren.length>0` 时渲染，故不会出现"0/0"。 */}
+                  <div className="flex items-center gap-2 mb-2 flex-wrap">
+                    <h4 className="font-medium text-sm">📋 子任务族验收（{famProgress.total}）</h4>
+                    <span className="text-[11px] text-gray-500">完成 {famProgress.done} / {famProgress.total}</span>
+                    {famProgress.running > 0 && <span className="text-[11px] text-blue-600">运行中 {famProgress.running}</span>}
+                    {famProgress.waiting > 0 && <span className="text-[11px] text-amber-600">等你处理 {famProgress.waiting}</span>}
+                  </div>
                   <div className="space-y-1">
-                    {familyChildren.map((c,i)=>{
+                    {familyRows.map(({ task: c, depth, hasChildren, collapsed })=>{
                       const pend = c.status==='paused'||c.status==='failed';
                       const score = typeof c.score==='number'?c.score:null;
                       const low = c.status==='completed' && score!=null && score<60;
                       return (
                         <Fragment key={c.id}>
-                        <div className={`flex items-center gap-2 text-xs py-1 px-2 rounded ${pend?'bg-amber-50':low?'bg-red-50':'bg-gray-50'}`}>
+                        <div style={{ marginLeft: depth * 14 }} className={`flex items-center gap-2 text-xs py-1 px-2 rounded ${pend?'bg-amber-50':low?'bg-red-50':'bg-gray-50'}`}>
+                          {hasChildren ? (
+                            <button type="button" onClick={() => toggleChildCollapse(c.id)} title={collapsed ? '展开子任务' : '收起子任务'} className="shrink-0 text-gray-400 hover:text-gray-600">
+                              {collapsed ? <ChevronRight className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                            </button>
+                          ) : <span className="shrink-0 w-3" />}
                           <span className="flex-1 min-w-0 truncate text-gray-700" title={c.title}>{c.title}</span>
                           {/* zx_20261011_4 M4: 已外派子任务的外派徽标（人话取 node-view 一处真源；点开下钻远端摘要） */}
                           {c.remote && (
@@ -2044,7 +2330,7 @@ export default function TaskDetailPage() {
                             return <span title={tip} className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded-full ${cls}`}>{ACCEPTANCE_SOURCE_LABEL[src]}</span>;
                           })()}
                           {score!=null && <span className={`shrink-0 font-medium ${score>=60?'text-green-600':'text-red-600'}`}>{score}分</span>}
-                          {typeof c.tokens==='number' && c.tokens>0 && <span className="shrink-0 text-gray-400">{c.tokens>=1000?(c.tokens/1000).toFixed(0)+'K':String(c.tokens)}t</span>}
+                          {typeof c.tokens==='number' && c.tokens>0 && <span className="shrink-0 text-gray-400">{formatTokens(c.tokens)}t</span>}
                           {pend && <>
                             <button type="button" onClick={()=>childResume(c.id)} className="text-[10px] px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded hover:bg-blue-200 shrink-0">恢复</button>
                             <button type="button" onClick={()=>childStatus(c.id,'completed')} className="text-[10px] px-1.5 py-0.5 bg-green-100 text-green-700 rounded hover:bg-green-200 shrink-0">标记完成</button>
@@ -2058,7 +2344,7 @@ export default function TaskDetailPage() {
                         {c.status === 'archived' && (
                           <div className="text-[11px] text-gray-500 ml-2 mb-1">
                             归档理由：{c.archiveReason ? c.archiveReason : <span className="text-gray-400">未填写理由</span>}
-                            {c.archivedAt ? <span className="text-gray-400"> · {formatTime(c.archivedAt)}</span> : null}
+                            {c.archivedAt ? <span className="text-gray-400"> · {formatTimeOrRaw(c.archivedAt)}</span> : null}
                           </div>
                         )}
                         {/* zx_20261105_1 M4: 子代理结构化结论（结论 / 摘要 / 台账限定）——unknown 走中性灰，
@@ -2127,11 +2413,8 @@ export default function TaskDetailPage() {
                 </div>
               )}
 
-              {/* Phase A: 实时执行流（D2: 逐步展示耗时/token增量/工具成败） */}
-              {stepStream.length>0 && <div className="bg-white rounded-lg border p-4"><h4 className="font-medium mb-2 text-sm flex items-center gap-1"><Activity className="w-4 h-4 text-blue-500"/>实时执行流 ({stepStream.length})</h4><div ref={stepStreamRef} className="space-y-2 max-h-80 overflow-y-auto">{stepStream.map((s,i)=>(<div key={i} className="border-l-2 border-blue-200 pl-3 py-1"><div className="flex items-center gap-2 text-xs text-gray-400 mb-1 flex-wrap"><span className="font-medium text-blue-600">第 {String(s.step)} 步</span>{s.duration_ms != null && <span className="shrink-0" title="本步骤耗时">⏱ {formatDuration(Number(s.duration_ms))}</span>}{s.toolCalls ? <span className="truncate flex-1 min-w-0" title={String(s.toolCalls)}>{String(s.toolCalls).slice(0, 80)}</span> : null}{s.toolCalls ? <span className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded-full font-medium ${s.toolOk ? 'bg-green-50 text-green-600' : 'bg-red-50 text-red-600'}`} title={s.toolOk ? '工具调用成功' : '工具调用出现错误'}>{s.toolOk ? '✓ 工具成功' : '✗ 工具出错'}</span> : null}{s.token_delta != null ? <span className="shrink-0" title="本步骤 token 增量">+{formatToken(s.token_delta as number)} tokens</span> : (s.tokens != null && <span className="shrink-0">{formatToken(s.tokens as number)} tokens</span>)}</div>{s.text ? <p className="text-xs text-gray-700 whitespace-pre-wrap" style={{display:'-webkit-box',WebkitLineClamp:4,WebkitBoxOrient:'vertical',overflow:'hidden'}}>{String(s.text).slice(0, 500)}</p> : null}</div>))}</div></div>}
-
-              {/* C1 (2026-08-31): 工具调用时间线（人类记忆情节记忆——执行过程的时间序列，独立展示工具调用） */}
-              {stepStream.length>0 && <div className="bg-white rounded-lg border p-4"><h4 className="font-medium mb-2 text-sm flex items-center gap-1"><Clock className="w-4 h-4 text-cyan-500"/>工具时间线</h4><div className="space-y-1 max-h-60 overflow-y-auto">{stepStream.filter(s => s.toolCalls).map((s,i)=>(<div key={i} className="flex items-start gap-2 text-xs py-1 border-b border-gray-50 last:border-0"><span className="shrink-0 text-cyan-600 font-mono">第{String(s.step)}步</span><span className="text-gray-600 truncate" title={String(s.toolCalls)}>{String(s.toolCalls)}</span></div>))}</div></div>}
+              {/* zx_20261107_1 B9: 实时执行流 + 工具时间线摆法搬进 `TaskLogs`（含自动滚到底部的 ref）。 */}
+              <TaskLogs stepStream={stepStream} />
 
               {/* Phase B: 记忆注入可视化（任务识别依据透出，可纠偏）
                   zx_20260924 §2c UI-1: **本块已上移**至「本次附件」之上、「产出物」之前，并改为默认折叠
@@ -2140,94 +2423,40 @@ export default function TaskDetailPage() {
               {/* 实时文件变更（Phase 1） */}
               {fileStream.length>0 && <div className="bg-white rounded-lg border p-4"><h4 className="font-medium mb-2 text-sm flex items-center gap-1"><FileText className="w-4 h-4 text-blue-500"/>实时文件变更 ({fileStream.length})</h4><div className="space-y-2 max-h-80 overflow-y-auto">{fileStream.map((f,i)=>(<FileChangeItem key={i} f={f}/>))}</div></div>}
 
-              {/* 任务预算 + 上下文 */}
-              <div className="bg-white rounded-lg border p-4">
-                <div className="flex items-center justify-between mb-2">
-                  <h4 className="font-medium text-sm flex items-center gap-1"><TrendingUp className="w-4 h-4 text-orange-500"/>任务预算</h4>
-                  <button onClick={() => { if (showContext) { setShowContext(false); } else { setShowContext(true); } }} className="text-xs text-blue-500 hover:text-blue-700"><Edit className="w-3.5 h-3.5 inline"/> 编辑</button>
-                </div>
-                <div className="grid grid-cols-2 gap-3 text-sm">
-                  <div className="bg-gray-50 rounded p-2">
-                    <p className="text-xs text-gray-400">消耗 / 预算 (tokens){executingNow ? ' · 实时' : ''}</p>
-                    <div className="flex items-baseline gap-1 mt-1">
-                      <span className="text-lg font-bold text-blue-600">{formatToken(displayTokens)}</span>
-                      <span className="text-xs text-gray-400">/ {effectiveBudget ? formatToken(effectiveBudget) : (ctxForm.max_tokens_per_task ? formatToken(Number(ctxForm.max_tokens_per_task)) : '未设置')}</span>
-                    </div>
-                    {effBudgetTok > 0 && (
-                      <div>
-                        {/* E1 (2026-09-04_2): band 越界即质变点脉冲气泡 */}
-                        {budgetFlash && <p className="mt-1 text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5">{budgetFlash}</p>}
-                        <div className="mt-1 h-1.5 bg-gray-200 rounded-full overflow-hidden">
-                          <div className={`h-full rounded-full transition-all ${curBand >= 5 ? 'bg-red-500 animate-pulse' : curBand === 4 ? 'bg-orange-500' : curBand === 3 ? 'bg-yellow-500' : curBand >= 2 ? 'bg-amber-400' : 'bg-blue-500'}`}
-                            style={{ width: `${Math.min(100, (curRatio ?? 0) * 100)}%` }} />
-                        </div>
-                        <div className="relative mt-0.5 h-3 text-[9px] text-gray-400 select-none">
-                          <span className="absolute left-[60%] -translate-x-1/2">|60%</span>
-                          <span className="absolute left-[75%] -translate-x-1/2">|75%</span>
-                          <span className="absolute left-[95%] -translate-x-1/2">|95%</span>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                  <div className="bg-gray-50 rounded p-2">
-                    <p className="text-xs text-gray-400">费用（¥ 人民币）{costMax != null && costMax > 0 ? '· 已用/上限' : '· 已花费'}</p>
-                    <div className="flex items-baseline gap-1 mt-1 flex-wrap">
-                      <span className="text-lg font-bold text-green-600">{costUsed != null ? `¥${costUsed.toFixed(4)}` : (costEstimate?.cost != null ? `¥${costEstimate.cost.toFixed(6)}` : '未收口计账')}</span>
-                      {costMax != null && costMax > 0 ? (
-                        <span className="text-xs text-gray-400">/ ¥{costMax.toFixed(2)}{costSrcLabel}</span>
-                      ) : ctxForm.max_cost_usd_per_task ? (
-                        <span className="text-xs text-gray-400">/ ¥${ctxForm.max_cost_usd_per_task}</span>
-                      ) : costNoCapKnown ? (
-                        <span className="text-xs text-gray-400">（未设置金额上限，仅 Token 闸）</span>
-                      ) : null}
-                    </div>
-                    {costMax != null && costMax > 0 && costUsageRatio != null && (
-                      <div className="mt-1 h-1.5 bg-gray-200 rounded-full overflow-hidden">
-                        <div className={`h-full rounded-full transition-all ${costBand >= 5 ? 'bg-red-500 animate-pulse' : costBand === 4 ? 'bg-orange-500' : costBand === 3 ? 'bg-yellow-500' : costBand >= 2 ? 'bg-amber-400' : 'bg-green-500'}`}
-                          style={{ width: `${Math.min(100, costUsageRatio * 100)}%` }} />
-                      </div>
-                    )}
-                    {costGateReason === 'no_price' && (
-                      <p className="text-[10px] text-amber-600 mt-0.5">费用闸未生效：所选模型未配置单价，费用无法计量（仅 Token 闸生效）。可在「模型管理」为该模型配置单价。</p>
-                    )}
-                    {costGateReason === 'no_cap' && costUsed != null && (
-                      <p className="text-[10px] text-gray-500 mt-0.5">本任务未设金额上限：费用照常累计，仅按 Token 预算收敛。如需金额硬闸，可在下方「费用预算」填写。</p>
-                    )}
-                    {costEstimate?.model && <p className="text-[10px] text-gray-400 mt-0.5">模型: {costEstimate.model} · 输入{formatToken(costEstimate.inputTokens||0)}/输出{formatToken(costEstimate.outputTokens||0)}</p>}
-                  </div>
-                </div>
-                {showContext && (
-                  <div className="mt-3 pt-3 border-t space-y-2">
-                    {/* zx_20261030_2 M7: 形态手动覆盖（六档 + 按默认）；只影响下一次运行 */}
-                    <div>
-                      <label className="text-xs font-medium">执行形态（覆盖）</label>
-                      <select
-                        value={archetypeOverride}
-                        onChange={(e) => { void handleArchetypeOverride(e.target.value); }}
-                        className="w-full px-2 py-1 border rounded text-xs mt-0.5 bg-white"
-                      >
-                        <option value="">按默认（自动判定）</option>
-                        {ARCHETYPE_OVERRIDE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                      </select>
-                      <p className="text-[10px] text-gray-500 mt-0.5">仅对下一次运行生效，不影响本轮已落的账。</p>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2">
-                      <div><label className="text-xs font-medium">Token 预算</label><input type="number" value={ctxForm.max_tokens_per_task} onChange={e => setCtxForm({...ctxForm, max_tokens_per_task: e.target.value})} className="w-full px-2 py-1 border rounded text-xs mt-0.5" placeholder="如 100000" /></div>
-                      <div><label className="text-xs font-medium">费用预算（¥ 人民币/任务）</label><input type="number" step="0.01" value={ctxForm.max_cost_usd_per_task} onChange={e => setCtxForm({...ctxForm, max_cost_usd_per_task: e.target.value})} className="w-full px-2 py-1 border rounded text-xs mt-0.5" placeholder="留空 = 不设金额闸" /></div>
-                    </div>
-                    <div className="flex justify-end gap-2">
-                      <button onClick={() => setShowContext(false)} className="px-2 py-1 border rounded text-xs hover:bg-gray-50">取消</button>
-                      <button onClick={handleSaveContext} className="px-2 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700"><Check className="w-3 h-3 inline"/> 保存</button>
-                    </div>
-                  </div>
-                )}
-              </div>
+              {/* 任务预算 + 上下文（zx_20261107_1 B9：摆法与编辑表单见 `TaskCost`，数字与判据仍在本页） */}
+              <TaskCost
+                displayTokens={displayTokens}
+                effectiveBudget={effectiveBudget}
+                effBudgetTok={effBudgetTok}
+                budgetFlash={budgetFlash}
+                curBand={curBand}
+                curRatio={curRatio}
+                executingNow={executingNow}
+                costUsed={costUsed}
+                costMax={costMax}
+                costUsageRatio={costUsageRatio}
+                costBand={costBand}
+                costSrcLabel={costSrcLabel}
+                costNoCapKnown={costNoCapKnown}
+                costGateReason={costGateReason}
+                costEstimate={costEstimate}
+                showContext={showContext}
+                onToggleContext={() => setShowContext((v) => !v)}
+                ctxForm={ctxForm}
+                setCtxForm={setCtxForm}
+                onSaveContext={handleSaveContext}
+                archetypeOverride={archetypeOverride}
+                onArchetypeOverride={handleArchetypeOverride}
+                archetypeOptions={ARCHETYPE_OVERRIDE_OPTIONS}
+              />
 
               {/* 任务依赖关系 DAG（M3-4：常驻——新增前置的入口须"无前置时也在"，否则改不了空任务） */}
               {(
-                <div className="bg-white rounded-lg border p-4">
-                  <h4 className="font-medium mb-2 text-sm flex items-center gap-1"><GitBranch className="w-4 h-4 text-purple-500"/>任务依赖关系</h4>
-                  <div className="space-y-1 text-sm">
+                <details className="bg-white rounded-lg border">
+                  <summary className="px-4 py-3 cursor-pointer select-none">
+                    <h4 className="font-medium text-sm flex items-center gap-1"><GitBranch className="w-4 h-4 text-purple-500"/>任务依赖关系</h4>
+                  </summary>
+                  <div className="px-4 pb-4 space-y-1 text-sm">
                     {task.depends_on && (
                       <div className={`flex items-center gap-2 flex-wrap p-2 rounded ${depInfo.state === 'met' ? 'bg-emerald-50' : depInfo.state === 'dead' ? 'bg-red-50' : depInfo.state === 'unresolved' ? 'bg-gray-50' : 'bg-yellow-50'}`}>
                         <span className={`text-xs font-medium ${depInfo.state === 'met' ? 'text-emerald-700' : depInfo.state === 'dead' ? 'text-red-600' : depInfo.state === 'unresolved' ? 'text-gray-500' : 'text-yellow-700'}`}>
@@ -2265,14 +2494,16 @@ export default function TaskDetailPage() {
                       {!task.depends_on && !depPickerOpen && <span className="text-xs text-gray-400">当前无前置依赖</span>}
                     </div>
                   </div>
-                </div>
+                </details>
               )}
 
-              {/* 相似任务面板 */}
+              {/* 相似任务面板（zx_20261107_1 B7: 默认折叠——条数在标题常显） */}
               {similarTasks.length > 0 && (
-                <div className="bg-white rounded-lg border p-4">
-                  <h4 className="font-medium mb-2 text-sm flex items-center gap-1"><TrendingUp className="w-4 h-4 text-indigo-500"/>相似任务 ({similarTasks.length})</h4>
-                  <div className="space-y-1">
+                <details className="bg-white rounded-lg border">
+                  <summary className="px-4 py-3 cursor-pointer select-none">
+                    <h4 className="font-medium text-sm flex items-center gap-1"><TrendingUp className="w-4 h-4 text-indigo-500"/>相似任务 ({similarTasks.length})</h4>
+                  </summary>
+                  <div className="px-4 pb-4 space-y-1">
                     {similarTasks.map((s: Record<string, unknown>, i: number) => (
                       <div key={i} className="flex items-center justify-between text-sm py-1.5 border-b last:border-0">
                         <span className="text-xs truncate flex-1">{s.title as string}</span>
@@ -2281,18 +2512,33 @@ export default function TaskDetailPage() {
                       </div>
                     ))}
                   </div>
-                </div>
+                </details>
               )}
 
               {/* zx_20260924 §2c UI-1: 记忆注入——**本次任务往上下文里放了什么**（记忆这一半）。
                   上移至「本次附件」之上、「产出物」之前（用户 2026-09-24 点名"记忆注入移到产出物上面"）。 */}
               {memBlock}
 
+              {/* zx_20261113_1 B3「用」: 岗位注入——与「记忆注入」同族（上下文里放了什么）。 */}
+              {posInjectBlock}
+
               {/* zx_20260924 M7: 本次附件（去向）——与「记忆注入」同族（上下文里放了什么），族尾对着「产出物」成"一进一出" */}
               {attsBlock}
 
               {/* 产出物（zx_20260923_1 M3: 由「产出物验证」之上**移来此处**——「事件时间线」之上） */}
-              {delivsBlock}
+              <TaskArtifacts
+                currentTaskId={task.id}
+                items={delivs}
+                total={delivTotal}
+                exhausted={delivExhausted}
+                moreBusy={delivMoreBusy}
+                showAcceptance={showAccD}
+                drawerEnabled={drawerOn}
+                onLoadMore={loadMoreDelivs}
+                onPreview={handlePreviewDeliv}
+                onOpenDrawer={(did) => openDeliv(did)}
+                onNavigateTask={(tid) => navigate(`/tasks/${tid}`)}
+              />
 
               {/* 事件时间线（zx_20260924 §2c UI-2: **默认折叠**——用户 2026-09-24 点名；由头同 M3/UI-1，
                   折叠头报**条数**（折叠态下连有几条都看不见就不叫"默认折叠"，叫"默认消失"）。列表体逐字未动。） */}
@@ -2307,7 +2553,7 @@ export default function TaskDetailPage() {
                       const payload = typeof e.payload === 'string' ? (() => { try { return JSON.parse(e.payload as string); } catch { return {}; } })() : (e.payload as Record<string, unknown> || {});
                       return (
                         <div key={i} className="flex items-start gap-2 text-xs py-1">
-                          <span className="text-gray-400 flex-shrink-0 w-32">{formatTime(e.occurred_at as string)}</span>
+                          <span className="text-gray-400 flex-shrink-0 w-32">{formatTimeOrRaw(e.occurred_at as string)}</span>
                           <span className={`px-1.5 py-0.5 rounded-full text-[10px] flex-shrink-0 ${(e.event_type as string)?.includes('completed') ? 'bg-green-100 text-green-700' : (e.event_type as string)?.includes('failed') ? 'bg-red-100 text-red-600' : 'bg-blue-100 text-blue-700'}`}>{e.event_type as string}</span>
                           <span className="text-gray-500 truncate">{JSON.stringify(payload).slice(0, 80)}</span>
                         </div>
@@ -2330,7 +2576,7 @@ export default function TaskDetailPage() {
                     // zx_20260916_3 M5（O-F）：引擎代拟的 `user` 行**不再冒充用户**——标签印「引擎」。
                     // 判据取真函数（不是"内容里有没有某个词"的就地正则），故 M5 之后新增的代拟首标自动跟上。
                     <div key={c.id} className={`p-3 rounded-lg text-sm ${isEngineDraftedTurn(c.content)?'bg-slate-50 ml-4 border border-dashed border-slate-200':c.role==='user'?'bg-blue-50 ml-4':c.role==='assistant'?'bg-gray-50 mr-4':c.role==='system'?'bg-yellow-50 mx-4 text-xs':''}`}>
-                      <div className="flex items-center gap-2 mb-1"><span className="text-xs font-medium text-gray-400">{isEngineDraftedTurn(c.content) ? '引擎' : c.role}</span>{c.token_count?<span className="text-xs text-gray-300">{formatToken(c.token_count)} tokens</span>:null}<span className="text-xs text-gray-300">{formatTime(c.created_at)}</span></div>
+                      <div className="flex items-center gap-2 mb-1"><span className="text-xs font-medium text-gray-400">{isEngineDraftedTurn(c.content) ? '引擎' : c.role}</span>{c.token_count?<span className="text-xs text-gray-300">{formatTokens(c.token_count)} tokens</span>:null}<span className="text-xs text-gray-300">{formatTimeOrRaw(c.created_at)}</span></div>
                       {isToolCallRow(c) ? (
                         // zx_20261030_2 M7: `[工具调用] …` 系统行默认折叠为一行摘要，展开看全文（只动展示，不动数据）
                         <details className="mt-0.5">

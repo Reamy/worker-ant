@@ -72,8 +72,11 @@ ok(actn.includes('↻ 继续') && actn.includes('retryTask(it)'), 'failed 项 in
 
 console.log('S5 4a Dashboard(承接4f·终核修正：不双计不造假)');
 ok(dash.includes('const liveRunCount = Object.keys(heartbeats).length') && dash.includes('const liveMaxSec = Object.values(heartbeats).reduce'), 'liveRunCount/liveMaxSec 派生自 heartbeats');
-ok(dash.includes('value:formatToken(stats?.totalTokens)'), 'Token 卡主值=已入账 totalTokens(未叠加心跳 token)');
-ok(!dash.includes('实时 +{formatToken('), '无「实时 +token」重复叠加(双计已修正)');
+// zx_20261107_1 B9：Token 格式化收敛到共享 `formatTokens`（单源；逐页自写 `formatToken` 已退场）。
+//   判据仍是"主值取已入账 totalTokens、不叠加心跳 token"，只是跟着真源改名/换载体。
+ok(dash.includes('value:formatTokens(stats?.totalTokens)'), 'Token 卡主值=已入账 totalTokens(未叠加心跳 token)');
+ok(!dash.includes('实时 +{formatToken(') && !dash.includes('实时 +{formatTokens('),
+  '无「实时 +token」重复叠加(双计已修正；两代格式化名都不得复活该写法)');
 ok(dash.includes('心跳在线'), '执行中 Token 卡带「心跳在线」副行(随 heartbeat 跳动·长单步不静止)');
 ok(dash.includes('不重复叠加心跳 token(同源于对话 token_count)'), '副行 title 如实说明口径');
 ok(dash.includes('animate: liveRunCount > 0'), '执行中 Token 卡带脉冲');

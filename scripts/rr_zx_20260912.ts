@@ -183,7 +183,8 @@ async function m0(): Promise<void> {
     ok(/last_attempt_at\s+TEXT/.test(block), 'M3 后 DDL 含 last_attempt_at TEXT');
     // 行为侧：真库 4 行逐态计数（dead=3 / sent=1，与用户所见数字一致）
     const db = mkdb(); seedReal(db);
-    eq(outboxStats(db), { pending: 0, blocked_quota: 0, dead: 3, sent: 1, other: 0 }, '真库 4 行四态穷尽计数');
+    // zx_20261110_1 B7：`dismissed` 单列一档（关闭项不再混进 other）⇒ 整对象断言按更强形状核。
+    eq(outboxStats(db), { pending: 0, blocked_quota: 0, dead: 3, sent: 1, dismissed: 0, other: 0 }, '真库 4 行四态穷尽计数（dismissed 单列）');
     eq(listOutbox(db).length, 4, 'listOutbox 真库 4 行全返（下钻链路在 _5 M1 即已可用）');
     const dead = listOutbox(db, { status: 'dead' });
     eq(dead.length, 3, 'status=dead 过滤 = 真库 3 条');

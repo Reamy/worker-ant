@@ -169,8 +169,18 @@ export function DeviceOnboardingWizard({ devices, onClose, onDone }: DeviceOnboa
     onDone();
   }
 
-  /** 渠道对应的台账设备行（按渠道自述的协议归属；发现不覆盖用户的勾选）。 */
-  const matching = channel == null ? [] : devices.filter((d) => channel.protocols.includes(d.protocol));
+  /** 云设备地址前缀的基名（`tuya@acc:d1` ⇒ `tuya`，`homeassistant:d1` ⇒ `homeassistant`）。 */
+  const baseProviderOfAddress = (address: string): string => {
+    const sep = address.indexOf(':');
+    const providerId = sep >= 0 ? address.slice(0, sep) : '';
+    const at = providerId.indexOf('@');
+    return at > 0 ? providerId.slice(0, at) : providerId;
+  };
+  /** 渠道对应的台账设备行（云渠道按账号基名归属，其余按协议；发现不覆盖用户的勾选）。 */
+  const matching = channel == null ? [] : devices.filter((d) =>
+    channel.accountProvider != null
+      ? d.protocol === 'cloud' && baseProviderOfAddress(d.address) === channel.accountProvider
+      : channel.protocols.includes(d.protocol));
   const selectedCount = Object.values(selected).filter(Boolean).length;
 
   return (
@@ -241,9 +251,18 @@ export function DeviceOnboardingWizard({ devices, onClose, onDone }: DeviceOnboa
 
               {channel.requires === 'credentials' && !auth?.hasCredentials && (
                 <div className="rounded-lg border bg-gray-50 px-3 py-2 text-xs text-gray-600">
-                  请先在页面下方的「{channel.label}」配置区填写：
-                  <span className="font-mono ml-1">{channel.settingsKeys.join('、')}</span>
-                  （密钥类字段会**加密落库**，界面上不再回显）。
+                  {channel.accountProvider != null ? (
+                    <>
+                      请先在页面下方的「设备云账号」新增并**启用**一个 {channel.label} 账号
+                      （凭据各自加密落库，界面上不再回显）。
+                    </>
+                  ) : (
+                    <>
+                      请先在页面下方的「{channel.label}」配置区填写：
+                      <span className="font-mono ml-1">{channel.settingsKeys.join('、')}</span>
+                      （密钥类字段会**加密落库**，界面上不再回显）。
+                    </>
+                  )}
                   <div className="mt-1.5">
                     <button onClick={() => void recheck()} disabled={busy === 'auth'}
                       className="text-[11px] px-2 py-0.5 border border-gray-300 rounded hover:bg-white disabled:opacity-50">我已填好，重新检查</button>

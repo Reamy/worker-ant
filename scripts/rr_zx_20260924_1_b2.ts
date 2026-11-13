@@ -67,6 +67,8 @@ CREATE TABLE wa_tasks (
   status TEXT DEFAULT 'pending', context_json TEXT DEFAULT '{}', workflow_config TEXT DEFAULT '{}',
   priority INTEGER DEFAULT 0, depends_on TEXT DEFAULT '', parent_task_id TEXT DEFAULT '',
   source TEXT DEFAULT 'user', acceptance_criteria TEXT DEFAULT '', aggregate_version INTEGER DEFAULT 0,
+  -- zx_20261112_2: 生产迁移列（IM 建单会写它）；夹具不许比生产窄。
+  position_id TEXT NOT NULL DEFAULT '',
   created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now'))
 );
 CREATE TABLE wa_task_conversations (
@@ -119,6 +121,10 @@ const taskProject = (db: AnyDb, id: string): string | undefined =>
 function send(db: AnyDb, from: string, text: string): { replies: string[]; run: () => Promise<void> } {
   const replies: string[] = [];
   const ctx = { db, channelId: 'ch-1', channelType: CH, sendReply: async (_to: string, t: string) => { replies.push(t); } };
+  // zx_20261112_1 B3: 回访用户入参——先落一条该用户历史 inbound，首聊欢迎不占 replies[0]
+  //（欢迎由 rr_zx_20261112_1 专测；本套测项目认领，不重复计量）。
+  db.prepare("INSERT INTO wa_im_conversations (id, channel_id, external_user_id, message_json, direction) VALUES (?, 'ch-1', ?, '{\"seed\":true}', 'inbound')")
+    .run(`seed-${Math.random().toString(36).slice(2)}`, from);
   return { replies, run: () => routeImMessage(ctx as never, from, text, 'p2p', 'ctx-0', undefined) };
 }
 
@@ -312,7 +318,12 @@ async function s3(): Promise<void> {
   eq(replies.length, 1, '@ 消息恰回一句');
   const out = replies[0] ?? '';
   ok(out.includes('（项目: 项目甲）'), '@ 命中的项目 = 项目甲', out);
-  ok(!out.includes('（依据：'), '@ 在场时**不附依据句**（第三态：没有第二种解释可挑）');
+  // zx_20261111_3 B4 重定向（钉真契约，非放宽）：本句要钉的是**项目来源**没有第二种解释，
+  //   而不是"回执里不许出现「依据」二字"——本轮起建单回执另有一行**意图**自证（「我理解成…（依据：…）」），
+  //   那是另一件事。故改钉 projectBasisNote 的两句具体文案都不在场，并正面确认意图自证在场。
+  ok(!out.includes('（依据：你最近一笔 IM 任务所属项目）') && !out.includes('（依据：当前最活跃项目）'),
+    '@ 在场时**不附项目依据句**（第三态：没有第二种解释可挑）');
+  ok(out.includes('我理解成：建任务'), '@ 在场时仍附**意图**自证那一行（两件事不混）');
   const idn = (db.prepare('SELECT id FROM wa_tasks ORDER BY rowid DESC LIMIT 1').get() as { id: string }).id;
   eq(taskProject(db, idn), 'pA', '@ 命中的任务真落 项目甲');
   ok(projectBasisNote(null) === '', '反证：第三态的依据句**就是**空串（与上面回执的缺席同一件事）');

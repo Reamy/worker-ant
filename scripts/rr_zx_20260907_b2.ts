@@ -90,8 +90,10 @@ ok(ipc.includes('acceptance_check'), 'project.ipc 派生源 ctxJson.acceptance_c
 const page = rd('apps/worker-ant-desktop/renderer/src/pages/DeliverablesPage.tsx');
 // zx_20260913 M2-6: 判据由手抄 `d.type === 'doc'` 收敛为共享 isAcceptanceType(doc/code)，
 // 故此处改钉新谓词 + 其真源导入（旧字面量已按本轮方案删除，钉旧串即钉一段不存在的代码）。
+// zx_20261108_1 B6：同一导入行又多了 `DELIVERABLE_TASK_NONE`，故钉「从该模块导入且含这两个符号」，
+//   不再钉逐字整行（逐字钉会把"加了别的共享符号"误判成判据失效）。
 ok(page.includes('acceptance') && page.includes('已验收') && page.includes('isAcceptanceType(d.type) && d.acceptance?.checked_at')
-  && page.includes("import { isAcceptanceType, isPreviewType } from '../../../src/main/core/deliverable-types.js'"),
+  && /import \{[^}]*isAcceptanceType[^}]*isPreviewType[^}]*\} from '\.\.\/\.\.\/\.\.\/src\/main\/core\/deliverable-types\.js';/.test(page),
   'DeliverablesPage 已核徽标消费在案（判据=共享 isAcceptanceType，非手抄字面量）');
 
 console.log(`\nPASS=${pass} FAIL=${fail}`);

@@ -33,7 +33,11 @@ import { eventBus } from './event-bus.js';
 import { toolRegistry, SHELL_EXPLORE_QUOTA_KEY, deriveShellExploreQuota, type ExploreQuotaLedger } from './tool-registry.js';
 import { costGateReasonOf } from './exec-budget.js';
 import { pauseTask } from './pause-task.js';
-import { PAUSE_REASON_NO_PROGRESS, PAUSE_REASON_TOOL_LOOP } from './pause-reason.js';
+import { PAUSE_REASON_NO_PROGRESS, PAUSE_REASON_POLICY_PAUSED, PAUSE_REASON_TOOL_LOOP } from './pause-reason.js';
+// zx_20261108_1 B5：预算策略在**执行中**按真实累计评估（成本条件此前只在 `taskTokens: 0` 处评 ⇒ 永不触发）。
+import { evaluateBudgetPolicies } from './policy-engine.js';
+import { loadPolicies } from './policy-config.js';
+import { pushImNotify } from './im/im-notify.js';
 import { stepStopVerdict } from './stop-signals.js';
 import { recordToolUsage, type ProjectThresholds } from './feedback-engine.js';
 import { logStepExecution, stepEventToolLabel } from './observability.js';
@@ -51,7 +55,6 @@ import { stepTokenDelta, estimateTokensFromChars } from './token-estimate.js';
 import {
   BUDGET_HARD_STOP_TOOLS,
   BUDGET_WARN_TOOLS,
-  CONVERGE_CMD_HARD,
   D3_GATE_TOOLS,
   MIXED_SHELL_TOOLS,
   advanceLoopRun,
@@ -101,6 +104,8 @@ interface StepFinishEvent {
  * 改名语义见文件头"访问器"一条。
  */
 export interface StepScope {
+  /** zx_20261110_2 B1/B5：步完成即"还在动"——看门狗的活动时刻由此推（可选，缺省=不推）。 */
+  onStepTick?: () => void;
   get ctx(): AgentContext;
   get taskId(): string;
   get db(): Database.Database;
@@ -194,6 +199,10 @@ function safeJsonLen(v: unknown): number {
 
 export function createStepHandler(d: StepScope) {
   return async (event: StepFinishEvent): Promise<void> => {
+    // zx_20261110_2 B1：步完成是"还在动"的**最强**证据（比流式分片强：分片可能是同一步的重复）。
+    //   挂在这里而不是在执行体的接线处包一层，是为了让"步逻辑"仍然只有一个落点
+    //   （M9 的抽取不被 B1 的看门狗接线反向打散）；记账失败绝不阻断步回调。
+    try { d.onStepTick?.(); } catch { /* 记账失败不阻断步回调 */ }
     // zx_20261012_3 批二：本步 token 是否含"估"——写进 ctxJson 指标，供事后辨明账里有多少推算。
     let estimatedStep = false;
     d.stepCount++;
@@ -246,6 +255,63 @@ export function createStepHandler(d: StepScope) {
           logger.warn({ error: (e as Error)?.message, model: d.modelName, tokens: stepTokens }, '[exec-step] ANS 记账上报失败');
         });
       } catch { /* ANS 记账失败不阻塞执行 */ }
+      // zx_20261112_2 B4：同时报**质量账**——`ans_model_quality_logs` 是选型（可靠性/成功率）的原料。
+      //   归档前的老服务每步都报，现桌面只报计费 ⇒ 本地模型的成败从未回馈选型。与计费同口径：
+      //   异步、失败只记日志、不阻塞执行。空 token 的步不报。
+      try {
+        const latency = d.lastStepTs > 0 ? Math.max(0, Date.now() - d.lastStepTs) : undefined;
+        const tokenEff = stepTokens > 0 ? Math.min(1, Math.max(0, stepComp / stepTokens)) : undefined;
+        const qualityRec = {
+          model_id: d.modelName,
+          project_id: d.projectId,
+          task_type: d.archetype,
+          capability: 'chat',
+          success: true,
+          output_accepted: true,
+          ...(tokenEff !== undefined ? { token_efficiency: tokenEff } : {}),
+          ...(latency !== undefined ? { latency_ms: latency } : {}),
+        };
+        const acQ = (await d.ctx.getAnsClient()) as { post?: (p: string, b: unknown) => Promise<unknown> };
+        acQ.post?.('/api/v1/billing/quality', qualityRec).catch((e: unknown) => {
+          logger.warn({ error: (e as Error)?.message, model: d.modelName }, '[exec-step] ANS 质量账上报失败');
+        });
+      } catch { /* 质量账失败不阻塞执行 */ }
+    }
+    // zx_20261108_1 B5（名实相符）：Token/费用预算**在执行中逐拍评估**。
+    //   病根：执行前的策略闸只能拿 `taskTokens: 0` 评——那时还没跑，成本条件的度量本就未产生，
+    //   于是 `budget_hard_limit` **永不触发**，而设置页把它写成「上限」。现在成本条件只在**能拿到
+    //   真实累计**的地方评：每步累加后（`totalTokensUsed`/`totalCostUsed` 已含本步）在此处判。
+    //   项目历史失败率仍是另一条轴，执行前按条件自己的窗口取数（`exec-model-select.ts`）。
+    //   `engine.policy_check` 关 ⇒ 不评估（一键回退到"无策略检查"的旧行为，非删代码）。
+    if (stepTokens > 0 && !d.controller.signal.aborted && readBoolSetting(d.db, 'engine.policy_check')) {
+      try {
+        const budget = evaluateBudgetPolicies(
+          { taskTokens: d.totalTokensUsed, taskCost: d.totalCostUsed },
+          loadPolicies(d.db),
+        );
+        for (const action of budget.actions) {
+          if (action.type === 'pause_task') {
+            const line = `[策略] ${action.message || '策略触发，任务暂停'}`;
+            try {
+              d.db.prepare("INSERT INTO wa_task_conversations (id, task_id, role, content, token_count, created_at) VALUES (?, ?, 'system', ?, 0, datetime('now'))")
+                .run(crypto.randomUUID(), d.taskId, line);
+            } catch { /* 记不上不阻断暂停 */ }
+            logger.warn({ taskId: d.taskId.slice(0, 8), tokens: d.totalTokensUsed, cost: d.totalCostUsed }, line);
+            pauseTask(d.db, { taskId: d.taskId, reason: PAUSE_REASON_POLICY_PAUSED, note: action.message });
+            try { d.controller.abort(new Error('策略暂停')); } catch {}
+            break;
+          }
+          if (action.type === 'notify_admin') {
+            const line = `[策略通知] ${action.message}`;
+            try {
+              d.db.prepare("INSERT INTO wa_task_conversations (id, task_id, role, content, token_count, created_at) VALUES (?, ?, 'system', ?, 0, datetime('now'))")
+                .run(crypto.randomUUID(), d.taskId, line);
+            } catch { /* 记不上不阻断执行 */ }
+            logger.warn({ taskId: d.taskId.slice(0, 8), tokens: d.totalTokensUsed, cost: d.totalCostUsed }, line);
+            void pushImNotify(d.db, d.taskId, line, 'admin_notify');
+          }
+        }
+      } catch { /* 策略评估 best-effort，不弄崩执行 */ }
     }
     if (event.text) {
       // zx_20261030_2 M5（「一段话只说一遍」）：只累计**真正写入**的字符（与落库同一截断口径），
@@ -532,17 +598,19 @@ export function createStepHandler(d: StepScope) {
     //   原写法把两者一起拉黑，收尾命令（跑测试/`git commit`）也一并弹回：第二只标本上 6 次收尾命令全被拒，
     //   只能 `ask_user` 请"特权执行"——38 秒往返，且须人在电脑前（§1.4-Ⅱ）。
     const cmdN = d.exploreCmdN;
-    if (cmdN >= CONVERGE_CMD_HARD) {
+    // zx_20261113_2 M10：D3 硬线与 A3 配额**同源派生**——不再手写 15，避免「软 12 / 硬 15 / A3 硬 20」三本账。
+    const convergeHard = deriveShellExploreQuota(d.maxSteps, d.archetype).hard;
+    if (cmdN >= convergeHard) {
       const pureKeys = D3_GATE_TOOLS.filter((k) => d.toolMap[k] && isExplorationToolAlways(k) && !d.disabledTools.has(k));
       const cappedKeys = D3_GATE_TOOLS.filter((k) => d.toolMap[k] && !isExplorationToolAlways(k) && !d.cappedTools.has(k));
       for (const k of pureKeys) {
         d.disabledTools.add(k);
-        d.disableToolGracefully(k, `工具 ${k} 已因命令高频探索(≥${CONVERGE_CMD_HARD}次)硬禁用；请聚焦产出（write_file/finalize），确需读取用 read_file。`);
+        d.disableToolGracefully(k, `工具 ${k} 已因命令高频探索(≥${convergeHard}次)硬禁用；请聚焦产出（write_file/finalize），确需读取用 read_file。`);
       }
       for (const k of cappedKeys) {
         d.cappedTools.add(k);
         capNonExploration(k,
-          `本次调用属**探索类**（目录/文件枚举、只读探测），已因高频探索(≥${CONVERGE_CMD_HARD}次)拒绝。`
+          `本次调用属**探索类**（目录/文件枚举、只读探测），已因高频探索(≥${convergeHard}次)拒绝。`
           + `⚠ 这是对**该次调用**的拒绝，**不是**${k} 被禁用——${k} 仍可用，跑测试/构建/git 提交等**收尾命令照常放行**，请直接调用。`);
       }
       const parts: string[] = [];
@@ -550,7 +618,7 @@ export function createStepHandler(d: StepScope) {
       if (cappedKeys.length > 0) parts.push(`${cappedKeys.join('、')} 收窄为「只拒探索类调用（ls/cat/find 等），收尾命令照常」`);
       if (parts.length > 0) {
         d.db.prepare("INSERT INTO wa_task_conversations (id, task_id, role, content, token_count, created_at) VALUES (?, ?, 'system', ?, 0, datetime('now'))")
-          .run(crypto.randomUUID(), d.taskId, `[探索收敛] 探索类调用已 ≥${CONVERGE_CMD_HARD} 次：${parts.join('；')}。请立即聚焦 write_file 产出并 finalize。`);
+          .run(crypto.randomUUID(), d.taskId, `[探索收敛] 探索类调用已 ≥${convergeHard} 次：${parts.join('；')}。请立即聚焦 write_file 产出并 finalize。`);
       }
     }
 

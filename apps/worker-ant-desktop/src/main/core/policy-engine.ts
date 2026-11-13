@@ -102,6 +102,38 @@ export function evaluatePolicies(metrics: PolicyMetrics, policies: readonly Poli
 }
 
 /**
+ * zx_20261108_1 B5：只评估 **cost** 条件（Token/费用），供**执行循环逐拍**调用。
+ *
+ * 旧调用点在执行前以 `taskTokens: 0` 评估成本条件 ⇒ `budget_hard_limit` **永不触发**，
+ * 设置页却写着"上限"——名实不符。现在成本条件只在能拿到**真实累计**的地方评估：
+ * 循环每步累加后调本函数；项目历史失败率是另一条轴，执行前按窗口取数（`evaluateFailurePolicies`）。
+ * 一条策略若只含 error_rate，不在此评估；只保留 cost 条件后仍为空的策略整条跳过。
+ */
+export function evaluateBudgetPolicies(
+  metrics: { taskTokens?: number; taskCost?: number },
+  policies: readonly Policy[] = DEFAULT_POLICIES,
+): PolicyResult {
+  const costOnly = policies
+    .map((p) => ({ ...p, conditions: p.conditions.filter((c) => c.type === 'cost') }))
+    .filter((p) => p.conditions.length > 0);
+  return evaluatePolicies(metrics, costOnly);
+}
+
+/**
+ * zx_20261108_1 B5：只评估 **error_rate** 条件，供**执行前**按条件自己的窗口取数。
+ * 与 `evaluateBudgetPolicies` 同一分工：每种条件只在它的度量真实可得处评估。
+ */
+export function evaluateFailurePolicies(
+  metrics: { projectRecentFailures?: (window: number) => number },
+  policies: readonly Policy[] = DEFAULT_POLICIES,
+): PolicyResult {
+  const failureOnly = policies
+    .map((p) => ({ ...p, conditions: p.conditions.filter((c) => c.type === 'error_rate') }))
+    .filter((p) => p.conditions.length > 0);
+  return evaluatePolicies({ projectRecentFailures: metrics.projectRecentFailures }, failureOnly);
+}
+
+/**
  * 强制重新加载策略。zx_20261012_2 批一（如实化）: **无缓存故无需 reload**——
  *   本模块不持有任何可变策略副本；每次 `evaluatePolicies` 都由调用方把策略
  *   （`policy-config.loadPolicies(db)` 现读库）传进来。保留本函数只为兼容既有 import，

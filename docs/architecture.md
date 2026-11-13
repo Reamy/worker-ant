@@ -11,15 +11,16 @@
 │                    worker-ant-desktop (Electron)              │
 │                                                              │
 │  ┌─ renderer (React 19 + Vite + Tailwind v4) ─────────────┐ │
-│  │  Dashboard / Projects / Tasks / Deliverables / Memories  │ │
-│  │  IM / Models / ApiKeys / Skills / MCP / A2A / Plugins    │ │
-│  │  Templates / Users / Activity / Settings                 │ │
+│  │  Dashboard / Projects / Tasks / Positions / Deliverables │ │
+│  │  Memories / TeamLibrary / Inbox / IM / Models / ApiKeys  │ │
+│  │  Skills / MCP / A2A / Plugins / Templates / Users / …    │ │
 │  └──────────────────────────┬───────────────────────────────┘ │
 │                             │ preload + IPC（contextBridge）   │
 │  ┌─ main 主进程 —— 引擎本体 ─▼───────────────────────────────┐ │
 │  │  事件溯源项目/任务引擎 · 调度器（cron/自主模式）             │ │
 │  │  Agent 执行循环 · 子代理 · 验收评分 · 产出校验              │ │
 │  │  记忆 / 配方 / 知识蒸馏 · 技能与工具注册表 · MCP 客户端池    │ │
+│  │  岗位（角色）/ 项目画像与业务知识 · 团队共享库               │ │
 │  │  A2A 运行时 · IM 适配器 · 成果交付 · 通知 · 设备/协同        │ │
 │  │  ans-client（HMAC + LRU） ———————————┐                    │ │
 │  └───────────────────────────────────────┼────────────────────┘ │

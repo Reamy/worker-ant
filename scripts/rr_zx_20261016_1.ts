@@ -402,9 +402,11 @@ async function main(): Promise<void> {
     // ── P-7 ★路由次序：新臂在**步骤-2 之后、步骤0 之前**（按处理体定扫描起点）─────────────────
     {
       const src = CODE(`${A}/src/main/services/im-router.ts`);
-      const iNum = src.indexOf('if (handleNumberSelection(ctx, fromUser, msgText)) return;');
-      const iPair = src.indexOf('if (handleTerminalPairReply(ctx, fromUser, msgText)) return;');
-      const iAppr = src.indexOf('if (checkPendingApproval(ctx, fromUser, msgText)) return;');
+      // zx_20261108_1 B2：入站统一走 `routeText`（原文与路由文本分离）⇒ 断言按**调用符号**定位，不再钉形参名。
+      const iNum = src.indexOf('handleNumberSelection(ctx, fromUser, routeText');
+      // zx_20261112_2 B3：配对审批补 `chatType`（私聊闸）⇒ 按新签名定位，次序判据不变。
+      const iPair = src.indexOf('handleTerminalPairReply(ctx, fromUser, routeText, chatType)');
+      const iAppr = src.indexOf('checkPendingApproval(ctx, fromUser, routeText)');
       ok(iNum >= 0 && iPair > iNum, 'P-7a ★新臂**在步骤-2（编号选择）之后**');
       ok(iAppr > iPair, 'P-7b ★★新臂**在步骤0（任务审批队列）之前**——否则「同意接入 X」可能先被自由回复吃掉');
       ok(/resolvePairTarget\(ctx\.db/.test(src) && /approveTerminal\(ctx\.db/.test(src) && /rejectTerminal\(ctx\.db/.test(src),

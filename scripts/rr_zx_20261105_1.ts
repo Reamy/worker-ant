@@ -212,10 +212,11 @@ function sectionA(): void {
   eq(acceptanceVerdictOf(buildUnverifiedCheckPayload('empty_checks')), 'unjudged', 'A35 空判据 ⇒ unjudged');
   eq(acceptanceVerdictOf(buildUnverifiedCheckPayload('no_criteria')), 'not_checked', 'A36 无题目 ⇒ not_checked');
 
-  const ae = readCode(`${A}/src/main/core/agent-executor.ts`);
-  ok(ae.includes("evidenceIndex = new Set(bundle.runtimeEvidence.map(evidenceIdOf))") && ae.includes('enforceEvidenceBoundChecks(parsed, evidenceIndex)'),
+  // zx_20261109_1 B6：判卷整块搬至 `exec-acceptance.ts` ⇒ A37/A38 随实现走。
+  const accept = readCode(`${A}/src/main/core/exec-acceptance.ts`);
+  ok(accept.includes("evidenceIndex = new Set(bundle.runtimeEvidence.map(evidenceIdOf))") && accept.includes('enforceEvidenceBoundChecks(parsed, evidenceIndex)'),
     'A37 判卷先解析、再按本任务证据强制降级');
-  ok(ae.includes('每条判据须附 evidence_refs') && ae.includes('run:<id>'), 'A38 判卷提示词要求引用运行证据');
+  ok(accept.includes('每条判据须附 evidence_refs') && accept.includes('run:<id>'), 'A38 判卷提示词要求引用运行证据');
   const ev = readCode(`${A}/src/main/core/exec-evidence.ts`);
   ok(ev.includes('listRuntimeEvidence(db, taskId)') && ev.includes('renderRuntimeEvidence(bundle.runtimeEvidence)'),
     'A39 判卷证据面同源取运行证据');
@@ -925,7 +926,9 @@ function sectionI(): void {
     'I25 切任务同样落归档因由/时刻');
   ok(page.includes('归档理由：') && page.includes('未填写理由'), 'I26 头部显示理由，缺失写「未填写理由」');
   ok(page.includes('c.archiveReason ? c.archiveReason : <span className="text-gray-400">未填写理由</span>'), 'I27 归档子卡显示理由（缺失占位）');
-  ok(page.includes('formatTime(c.archivedAt)'), 'I28 归档子卡显示归档时间');
+  // zx_20261107_1 B9：时刻格式化收敛到 `lib/format` 的 `formatTimeOrRaw`（缺时刻时不印"Invalid Date"）。
+  //   "归档子卡显示归档时间"这一判据不变，只随真源改名。
+  ok(page.includes('formatTimeOrRaw(c.archivedAt)'), 'I28 归档子卡显示归档时间');
   ok(page.includes('以原题面新建') && page.includes('const d = await tasks.archiveDraft(task.id);'), 'I29 按钮草稿取自服务端');
   ok(page.includes('原任务仍为已归档'), 'I30 回执明说原任务未被复活');
   ok(page.includes("const projectId = createCtx.mode === 'archive' && createCtx.projectId ? createCtx.projectId : task.project_id;"),

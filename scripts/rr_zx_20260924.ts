@@ -821,6 +821,8 @@ CREATE TABLE wa_tasks (
   status TEXT DEFAULT 'pending', context_json TEXT DEFAULT '{}', workflow_config TEXT DEFAULT '{}',
   priority INTEGER DEFAULT 0, depends_on TEXT DEFAULT '', parent_task_id TEXT DEFAULT '',
   source TEXT DEFAULT 'user', acceptance_criteria TEXT DEFAULT '', aggregate_version INTEGER DEFAULT 0,
+  -- zx_20261112_2: 生产迁移列（IM 建单会写它）；夹具不许比生产窄。
+  position_id TEXT NOT NULL DEFAULT '',
   created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now'))
 );
 CREATE TABLE wa_task_conversations (
@@ -893,7 +895,9 @@ CREATE TABLE wa_jobs (
       const saved = putMedia('摘要用件.txt', '件的内容');
       const realPath = saved.ok ? saved.path : '';
       // ① 先造出一张**暂停任务**——走**真路由**（6 字、≤10 ⇒ `isShortMessage` ⇒ `paused`），不手写任务行。
-      await sendText(db, USER, '分析这个文件');
+      //   ⚠ zx_20261110_1 B1：软研究词（分析…）单独出现不再建单；这里要的是"真路由建出任务"这件**脚手架**，
+      //     故用显式建单词「创建任务摘要」——夹具按新的生产语义说话，不改判据本身。
+      await sendText(db, USER, '创建任务摘要');
       const taskId = lastTaskId(db);
       const beforeCtx = taskOf(db, taskId)?.ctx;
       crit('M3', !!taskId && beforeCtx?.externalUser === USER && taskOf(db, taskId)?.status === 'paused',
@@ -938,7 +942,8 @@ CREATE TABLE wa_jobs (
       const USER = 'u-2e-n3';
       const m1 = putMedia('第一件.txt', 'AAA'); const m2 = putMedia('第二件.txt', 'BBB');
       const p1 = m1.ok ? m1.path : ''; const p2 = m2.ok ? m2.path : '';
-      await sendText(db, USER, '分析这个文件');
+      // zx_20261110_1 B1：脚手架用显式建单词（与分析/搜索等软研究词区分开）。
+      await sendText(db, USER, '创建任务摘要');
       const taskId = lastTaskId(db);
       await sendMedia(db, USER, '第一件.txt', p1, 'AAA');
       await pace();
@@ -984,7 +989,8 @@ CREATE TABLE wa_jobs (
       const USER = 'u-2e-n5';
       const saved = putMedia('编号别挂.txt', 'no');
       const p = saved.ok ? saved.path : '';
-      await sendText(db, USER, '分析这个文件');       // 造一张暂停任务（等着被编号选中）
+      // zx_20261110_1 B1：脚手架用显式建单词（软研究词不再单独建单）。
+      await sendText(db, USER, '创建任务摘要');       // 造一张暂停任务（等着被编号选中）
       const taskId = lastTaskId(db);
       await sendMedia(db, USER, '编号别挂.txt', p, 'no');
       await pace();
@@ -1387,15 +1393,24 @@ CREATE TABLE wa_jobs (
     // ── M5-h 完成路的接线：**两条出口一把尺**，且**不塞进四路共引的既有通知回调** ────────────
     {
       const aiTask = stripComments(fs.readFileSync(path.join(MAIN, 'core/jobs/ai-task.ts'), 'utf-8'));
+      // zx_20261110_2 B5：推件不再在两条完成出口各写一遍，改为**两处各入队同一个后置作业**
+      //   （`task-postlude`），实呼只在后置作业体内一处发生 ⇒「一把尺」的载体由
+      //   "两处同形的直呼"升级为"两处共享同一实现"——判据更强（同时钉住两处入队 + 唯一实呼 + 完成态闸）。
       const sites = aiTask.split('ctx.sendImPrimaryDeliverables(').length - 1;
-      crit('M5', sites === 2 && aiTask.includes('sendImPrimaryDeliverables?: (taskId: string, projectId: string) => void;')
-        && /statusRow\?\.status === 'completed'[\s\S]{0,160}sendImPrimaryDeliverables/.test(aiTask)
-        && /taskRow\?\.status === 'completed'[\s\S]{0,160}sendImPrimaryDeliverables/.test(aiTask),
-        'M5-15 **两条完成出口一把尺**：`ctx.sendImPrimaryDeliverables(` 全文**恰 2 处**'
-        + '（`ai-task` 首跑完成 + `resume-ai-task` 恢复完成；只接一处则"恢复后干完的任务"永不推件），'
-        + '且两处都在 `status === \'completed\'` 之下（失败/暂停也甩个 20MB 文件，那不叫推成果）；'
+      const regs = aiTask.split('scheduler.register(POSTLUDE_JOB_TYPE,').length - 1;
+      const exits = (aiTask.match(/if \((?:statusRow|taskRow)\?\.status === 'completed'\) enqueuePostlude\(/g) || []).length;
+      const at = aiTask.indexOf('ctx.sendImPrimaryDeliverables(');
+      const inPostlude = at > 0 && at > aiTask.indexOf('scheduler.register(POSTLUDE_JOB_TYPE,');
+      crit('M5', sites === 1 && regs === 1 && exits === 2 && inPostlude
+        && aiTask.includes("sendImPrimaryDeliverables?: (taskId: string, projectId: string) => void;")
+        && /statusRow\?\.status !== 'completed'\) return;/.test(aiTask),
+        'M5-15 **两条完成出口一把尺**：`ctx.sendImPrimaryDeliverables(` 全文**恰 1 处**、且落在唯一一个'
+        + '`scheduler.register(POSTLUDE_JOB_TYPE, …)` 体内；两条完成出口（`ai-task` 首跑完成 + `resume-ai-task` 恢复完成）'
+        + '**各入队同一个后置作业**（`if (statusRow?/taskRow?.status === \'completed\') enqueuePostlude(` 恰 2 处；只接一处则'
+        + '"恢复后干完的任务"永不推件）；后置作业体首句即 `statusRow?.status !== \'completed\' return`'
+        + '（失败/暂停也甩个 20MB 文件，那不叫推成果）；'
         + '**另起一个回调**而不塞进 `sendImNotification`——后者被完成/失败/暂停/超长在场四路共引',
-        `调用点=${sites} 处`);
+        `实呼=${sites} 处；后置作业注册=${regs} 处；完成态入队口=${exits} 处；实呼在后置作业体内=${inPostlude ? '是' : '否'}`);
 
       const idx = stripComments(fs.readFileSync(path.join(MAIN, 'index.ts'), 'utf-8'));
       // zx_20261106_1 M1：动态 import 改静态（tsup clean 后旧 chunk 名会整段静默）；失败仍不阻断收尾，但改为**留痕**。
@@ -1426,11 +1441,13 @@ CREATE TABLE wa_jobs (
     //   故这里把**键序**也当判据，不是"内容对就行"。
     const aux = auxModelRequest();
     const auxJson = JSON.stringify(aux);
-    crit('M6', auxJson === '{"capabilities":["chat"],"strategy":"cost-optimal","excludeCapabilities":["reasoning"]}'
+    // zx_20261111_1 B2：辅助路新增 `preferRemote: true`（本地端点可能慢到数分钟，不该被随机点到）。
+    //   键序仍固定、新键**追加在末尾**——键序是被下游 `JSON.stringify` 比对吃住的。
+    crit('M6', auxJson === '{"capabilities":["chat"],"strategy":"cost-optimal","excludeCapabilities":["reasoning"],"preferRemote":true}'
       && AUX_LLM_CAPABILITIES.join(',') === 'chat' && AUX_LLM_EXCLUDE_CAPABILITIES.join(',') === 'reasoning'
       && AUX_LLM_STRATEGY === 'cost-optimal',
-      'M6-1 **档的逐字形状**：辅助路请求**恰三键**、键序 `capabilities,strategy,excludeCapabilities`、值逐字'
-      + '（`[\'chat\']` / `cost-optimal` / `[\'reasoning\']`）——键序是被下游 `JSON.stringify` 比对吃住的，'
+      'M6-1 **档的逐字形状**：辅助路请求**恰四键**、键序 `capabilities,strategy,excludeCapabilities,preferRemote`、值逐字'
+      + '（`[\'chat\']` / `cost-optimal` / `[\'reasoning\']` / `true`）——键序是被下游 `JSON.stringify` 比对吃住的，'
       + '不是"内容对就行"',
       `JSON.stringify(auxModelRequest()) = ${auxJson}`);
 
@@ -1439,10 +1456,11 @@ CREATE TABLE wa_jobs (
     const mainReq = buildModelRequest({ archetype: 'research', strategy: 'cost-optimal' });
     const mainCaps = mainReq.capabilities as string[];
     crit('M6', !('excludeCapabilities' in mainReq) && mainCaps.includes('reasoning') && !mainCaps.includes('vision')
-      && !('maxCostPer1k' in mainReq),
+      && !('maxCostPer1k' in mainReq) && !('preferRemote' in mainReq),
       'M6-2 **另一侧标本**：主执行路（`research` 形态）**不带** `excludeCapabilities`、能力里**有** `reasoning`'
       + '——正是辅助路排除的那一个；且 `maxCostPer1k` **未配置时该键根本不出现**'
-      + '（键在场且为 0 会被 ANS 读成"只要免费模型"，把付费模型一次筛没）',
+      + '（键在场且为 0 会被 ANS 读成"只要免费模型"，把付费模型一次筛没）；'
+      + '`preferRemote` 也**只在辅助路**——主执行路该由用户选定的模型来跑，不因"本地慢"被悄悄换掉',
       `主路键=[${Object.keys(mainReq).join(',')}] 能力=[${mainCaps.join(',')}]`);
 
     // ── M6-3 可选策略**只动 strategy**，且每次发**新数组**（档不是共享可变物）──────────────
@@ -1479,9 +1497,14 @@ CREATE TABLE wa_jobs (
     //   ⇒ 总量 20→21（定义仍 1、调用 20）、文件数 7→8；**"零手写 exclude"这一定钉不变**。
     //   zx_20261029_2「通」：新增辅助路调用点 `core/intent-model-plan.ts`（规则未中时由模型出计划）
     //   ⇒ 总量 21→22（定义仍 1、调用 21）、文件数 8→9；**"零手写 exclude"这一定钉不变**。
-    crit('M6', totalHits === 22 && defHits === 1 && callFiles.length === 9 && handWritten.length === 0,
-      'M6-4 **档的唯一真源**：去注释面 `auxModelRequest(` 全 `src/main` 恰 **22** 处 = **1 定义 + 21 调用**，'
-      + '调用点落在 **9 个文件**（agent-executor 3 / memory-consolidation 2 / memory-kg 1 / memory-manager 10 / output-validator 1 / jobs 1 / task-decompose 1 / project-brief-job 1 / intent-model-plan 1），'
+    //   zx_20261109_1 B6：验收判卷的调用点随判卷整块搬至 `core/exec-acceptance.ts`
+    //   （agent-executor 3→2、exec-acceptance 0→1）⇒ 总量仍 22、调用 21，文件数 9→10；**两钉不变**。
+    //   zx_20261112_2 B2：IM 意图补漏改用本档（services/im-router.ts 1 处）
+    //   ⇒ 总量 22→23（定义仍 1、调用 22）、文件数 10→11；**"零手写 exclude"这一定钉不变**
+    //   （本轮正是把 im-router 手写的 exclude 换成 `auxModelRequest()` 才让这条保持 0）。
+    crit('M6', totalHits === 23 && defHits === 1 && callFiles.length === 11 && handWritten.length === 0,
+      'M6-4 **档的唯一真源**：去注释面 `auxModelRequest(` 全 `src/main` 恰 **23** 处 = **1 定义 + 22 调用**，'
+      + '调用点落在 **11 个文件**（agent-executor 2 / exec-acceptance 1 / memory-consolidation 2 / memory-kg 1 / memory-manager 10 / output-validator 1 / jobs 1 / task-decompose 1 / project-brief-job 1 / intent-model-plan 1 / im-router 1），'
       + '且**除档自身外零处**手写 `excludeCapabilities: [\'reasoning\']`——病根正是这些调用处曾各写一份、'
       + '与主路口径互斥；**数字是钉**：新加调用点会让此处变红，逼人回来确认它确实走了本档',
       `扫描面 ${m6src.length} 个 .ts；总命中 ${totalHits}（定义 ${defHits} + 调用 ${totalHits - defHits}）；`
@@ -1547,8 +1570,10 @@ CREATE TABLE wa_jobs (
     //   承本仓既例：renderer 不在 `src/main` 扫描面内，且引不动 main 的运行时 ⇒ 只扫**去注释面**的接线。
     const settings = stripComments(fs.readFileSync(
       path.join(root, A, 'renderer/src/pages/SettingsPage.tsx'), 'utf-8'));
+    // zx_20261108_1 B5：写口收敛到统一 `saveSetting`（键名仍走 import、`settings:set` 只在写口内一处发出）。
     crit('M6', settings.includes("import { MAX_COST_PER_1K_KEY } from '../../../src/main/core/model-request.js';")
-      && settings.includes('invoke(\'settings:set\', MAX_COST_PER_1K_KEY, v)')
+      && /saveSetting\([^)]*MAX_COST_PER_1K_KEY/.test(settings)
+      && settings.includes("invoke('settings:set', key, value)")
       && settings.includes('Number.isFinite(n) && n > 0 ? String(n) : \'\'')
       && settings.includes('commitMaxCostPer1k(e.target.value)')
       && !settings.includes("'engine.model_max_cost_per1k'"),
@@ -1845,9 +1870,13 @@ CREATE TABLE wa_jobs (
     // ── UI-9 渲染层**接线**（这三条的病根在 renderer，规则对了还得真接上）────────────────
     const page = stripComments(fs.readFileSync(
       path.join(root, A, 'renderer/src/pages/TaskDetailPage.tsx'), 'utf-8'));
+    // zx_20261107_1 B9：产出物块抽成 `TaskArtifacts`——顺序按**组件挂载位**量；
+    //   树构建调用随块搬进组件（页面不再直接 `buildDeliverableTree(delivs)`）。按符号重定向，不放宽。
+    const artifacts = stripComments(fs.readFileSync(
+      path.join(root, A, 'renderer/src/components/task/TaskArtifacts.tsx'), 'utf-8'));
     const iMem = page.indexOf('{memBlock}');
     const iAtts = page.indexOf('{attsBlock}');
-    const iDelivs = page.indexOf('{delivsBlock}');
+    const iDelivs = page.indexOf('<TaskArtifacts');
     ok(iMem > 0 && iAtts > iMem && iDelivs > iAtts,
       'UI-9 **渲染顺序 = 记忆注入 → 本次附件 → 产出物**（用户要的"记忆注入在产出物上面"；'
       + '把 M7 建立的"一进一出"整族留在产出物之前，而不是拆开）',
@@ -1857,10 +1886,11 @@ CREATE TABLE wa_jobs (
       'UI-9b **默认折叠**：`showMem`/`showEvents` 初值都是 `false`（折叠态下报条数，见两处折叠头）',
       '两处 useState(false) 均在去注释面命中');
     const memSites = page.split('memoryInjection.map(').length - 1;
-    ok(memSites === 1 && page.includes('buildDeliverableTree(delivs)'),
+    const treeCall = /buildDeliverableTree\(\w+\)/.test(artifacts);
+    ok(memSites === 1 && treeCall && page.includes('<TaskArtifacts'),
       'UI-9c **一个落点**：`memoryInjection.map(` 全页**恰 1 处**（上移不是复制——原处那份已删），'
-      + '且产出物块真调 `buildDeliverableTree(delivs)`（不是把树函数引进来当摆设）',
-      `memoryInjection 渲染点=${memSites} 处；buildDeliverableTree 调用=${page.includes('buildDeliverableTree(delivs)') ? '在场' : '**不在场**'}`);
+      + '且产出物块真调 `buildDeliverableTree(...)`（TaskArtifacts 内，不是把树函数引进来当摆设）',
+      `memoryInjection 渲染点=${memSites} 处；TaskArtifacts 树构建调用=${treeCall ? '在场' : '**不在场**'}`);
   }
 
   // ═════════════════════════════════════════════════════════════════════════

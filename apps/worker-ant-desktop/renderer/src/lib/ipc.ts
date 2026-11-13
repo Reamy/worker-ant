@@ -35,9 +35,26 @@ import type { DispatchResult, DispatchReadResult } from '../../../src/main/core/
 import type { NodeEnrollmentReason } from '../../../src/main/core/node-heartbeat.js';
 // zx_20261005 M8: 许可状态形状取 main 侧**零依赖真源**（`core/license.ts`），不手抄镜像。仅类型引用。
 import type { LicenseState } from '../../../src/main/core/license.js';
+// zx_20261113_4 B2「荐」：首屏业务知识状态的返回形状取 main IPC 真源（仅类型，打包期擦除）。
+import type { KnowledgeBusinessStatus } from '../../../src/main/ipc/knowledge.ipc.js';
+export type { KnowledgeBusinessStatus };
 import type { SeatUsage } from '../../../src/main/core/seat-quota.js';
 // zx_20261005 M22（Team 档软闸）: 面板据 `gate` 显示升级提示/禁用动作。仅类型引用 main 真源，打包期擦除。
 import type { TeamGate } from '../../../src/main/core/team-gate.js';
+// zx_20261107_1 B4: 注入 ROI 的形状取 main 侧真源（`memory-injection-stats.ts`），不手抄镜像。
+import type { InjectionRoiView } from '../../../src/main/core/memory-injection-stats.js';
+// zx_20261108_1 B4「忆」: 记忆列表/详情/容量/写口的形状同取 main 侧零依赖真源 `core/memory-admin.ts`
+//   （仅类型，打包期擦除）。筛选参数与服务端实现共用同一份定义 ⇒ 参数名不会两边各写一套。
+import type {
+  MemoryCapacity,
+  MemoryDetail,
+  MemoryListFilter,
+  MemoryListResult,
+  MemoryMutateResult,
+  MemoryMutation,
+} from '../../../src/main/core/memory-admin.js';
+// zx_20261108_1 B3: IM 理解审计行的形状取 main 侧真源（仅类型，打包期擦除）。
+import type { IntentAuditRow } from '../../../src/main/core/im/im-intent-audit.js';
 import type { ProGate } from '../../../src/main/core/pro-gate.js';
 // zx_20261005 M11: 定价形状同引 main 侧真源（`core/pricing.ts`），不手抄镜像。
 import type { PricingPayload } from '../../../src/main/core/pricing.js';
@@ -49,6 +66,9 @@ import type { TierUsagePayload } from '../../../src/main/core/tier-usage.js';
 import type { CloudEntitlementPayload, ProFeatureGatePayload } from '../../../src/main/ipc/license.ipc.js';
 // zx_20261029_2 M6: 单项 Pro 能力的键（词表只在 main 落一处；渲染层只传键名，不手抄档位判断）。
 import type { ProFeature } from '../../../src/main/core/pro-gate.js';
+// zx_20261108_1 B6: 产出物筛选/排序参数与 main 侧**共用同一份定义**（仅类型，打包期擦除）——
+//   参数名不会两边各写一套，服务端新增筛选条件时这里跟着编译期报错。
+import type { DeliverableListParams } from '../../../src/main/core/deliverable-query.js';
 // zx_20261017_1 批七: 知识包预览/导出的返回形状同引 main 真源（仅类型，打包期擦除）。
 import type { KnowledgeInjectionStats, ProjectKnowledgePreview } from '../../../src/main/core/project-knowledge.js';
 import type { KnowledgeExportResult } from '../../../src/main/core/knowledge-export.js';
@@ -63,7 +83,7 @@ import type { KnowledgeProfileView } from '../../../src/main/ipc/knowledge.ipc.j
 // zx_20261027_3 M6a: 知识卡成效形状同引 main core 真源（仅类型，打包期擦除）。
 import type { KnowledgeCardUsage } from '../../../src/main/core/knowledge-cards.js';
 // zx_20261021_3 批五: 领域包的资产/注入成效形状同引 main 真源（仅类型，打包期擦除）。
-import type { DomainPackListRow, DomainPackPayload, DomainPackStats } from '../../../src/main/core/domain-pack.js';
+import type { DomainPackDetail, DomainPackListRow, DomainPackPayload, DomainPackStats } from '../../../src/main/core/domain-pack.js';
 // zx_20261030_1 M6「荐」: 相似项目条目与 main 侧同形（IPC 只传纯数据）。
 import type { SimilarProject } from '../../../src/main/core/project-similarity.js';
 // zx_20261014_4 批三: 「门」（外部 AI 终端接入）的返回形状取 main 侧真源——仅类型引用，打包期擦除。
@@ -78,7 +98,7 @@ import type { DiscoveryPairResult, DiscoveryPendingPayload, ExternalListPayload,
 import type { AuditEventRow, AuditSource } from '../../../src/main/core/audit-labels.js';
 // zx_20261017_1 批六: 团队共享库的条目形状与候选形状取共享真源/main core（仅类型，打包期擦除）。
 import type { TeamItem, TeamItemKind } from '../../../../../packages/shared-types/src/team.js';
-import type { LocalCandidates, LocalTeamItem } from '../../../src/main/core/team-library.js';
+import type { LocalCandidates, LocalTeamItem, TeamPreview } from '../../../src/main/core/team-library.js';
 // zx_20261101_2 M3: 项目节点分工的视图/写入形状取 main 侧真源（仅类型，打包期擦除）。
 import type {
   ProjectNodePolicyView,
@@ -89,6 +109,9 @@ import type {
   ProjectDispatchMode,
   ResolvedProjectDispatch,
 } from '../../../src/main/core/project-dispatch-mode.js';
+// zx_20261107_1 B6: 选型记录与三处落点的形状同取 main 真源（仅类型，打包期擦除）。
+import type { ModelSelection } from '../../../src/main/core/model-selection.js';
+import type { PinnedModel } from '../../../src/main/core/model-preference.js';
 
 /** `project:node_policy_get` 载荷——视图 + Team 闸（与 `nodes:list` 同形同源）。 */
 export interface ProjectNodePolicyPayload extends ProjectNodePolicyView {
@@ -181,7 +204,12 @@ export interface ProjectBriefRecord {
   tokensIn: number;
   tokensOut: number;
   trigger: string;
+  /** 最近一次尝试的落账时刻（成功与失败都写）。 */
   updatedAt: string;
+  /** 最近一次成功生成时刻；失败重跑不改写（老库无此列时为空串）。 */
+  generatedAt: string;
+  /** 最近一次尝试所用的模型；选型前失败为空串。 */
+  attemptModel: string;
 }
 
 export const projects = {
@@ -276,7 +304,22 @@ export const projects = {
     set: (projectId: string, mode: ProjectDispatchMode | null) =>
       ipcCall<{ ok: boolean; project_mode: ProjectDispatchMode | null }>('project:dispatch_mode_set', { projectId, mode }),
   },
+
+  // zx_20261107_1 B6: 项目级模型覆盖（`context_json.model_override` 单键）。
+  //   `effective` 是优先级 resume > project > default 的**裁定结果**（渲染层只显示，不自己算第二份）。
+  modelOverride: {
+    get: (projectId: string) => ipcCall<ProjectModelOverridePayload>('project:model_override_get', { projectId }),
+    set: (projectId: string, model: string | null) =>
+      ipcCall<{ ok: boolean; project_override: string | null }>('project:model_override_set', { projectId, model }),
+  },
 };
+
+/** `project:model_override_get` 载荷。 */
+export interface ProjectModelOverridePayload {
+  project_override: string | null;
+  default_model: string | null;
+  effective: PinnedModel | null;
+}
 
 // ===== Knowledge pack（zx_20261017_1 批七）=====
 // 预览与注入同一把尺（main 侧 `previewProjectKnowledge` / `selectKnowledgeForInject`）；
@@ -312,6 +355,9 @@ export const knowledge = {
     ipcCall<KnowledgeAbsorbReceipt>('knowledge:absorb-now', { projectId }),
   similarProjects: (projectId: string) =>
     ipcCall<{ projects: SimilarProject[] }>('knowledge:similar-projects', { projectId }),
+  // zx_20261113_4 B2「荐」：首屏业务知识状态（画像 / 已启用包 / 待采纳建议）一次回齐。
+  businessStatus: (projectId: string) =>
+    ipcCall<KnowledgeBusinessStatus>('knowledge:business-status', { projectId }),
 };
 
 /** 手动吸收回执（与 main 侧 `knowledge:absorb-now` 返回同形；数如实上屏）。 */
@@ -336,11 +382,74 @@ export const packs = {
   unapply: (projectId: string, packId: string) =>
     ipcCall<{ removed: boolean }>('packs:unapply', { projectId, packId }),
   stats: (projectId: string) => ipcCall<DomainPackStats>('packs:stats', { projectId }),
+  // zx_20261113_5 M3「口」：单包详情（只读；看不是启用，不挂 Pro 闸）。
+  detail: (packId: string) => ipcCall<DomainPackDetail>('packs:detail', { packId }),
   // zx_20261030_1 M6「荐」: 系统建议的候选包（未启用、可拒绝）与「忽略」。
   suggested: (projectId: string) =>
     ipcCall<{ packs: DomainPackListRow[] }>('packs:suggested', { projectId }),
   dismiss: (packId: string) =>
     ipcCall<{ dismissed: boolean }>('packs:dismiss', { packId }),
+};
+
+// ===== 岗位（zx_20261112_1 B1）=====
+// 形状取 main 侧真源 `core/positions.ts`（仅类型，打包期擦除）；渲染层不手抄第二份。
+export type { Position, PositionListRow, PositionDetail, PositionLesson, PositionProfile, PositionProjectBinding } from '../../../src/main/core/positions.js';
+import type {
+  Position,
+  PositionDetail,
+  PositionListRow,
+  PositionLesson,
+  PositionLessonPromoteTarget,
+  PositionProfile,
+  PositionProjectBinding,
+  ProjectPositionBoardRow,
+} from '../../../src/main/core/positions.js';
+
+export interface PositionWriteBody {
+  name: string;
+  category?: string;
+  description?: string;
+  skills?: string[];
+  rules?: string[];
+  knowledge?: string[];
+  enabled?: boolean;
+}
+
+export const positions = {
+  list: () => ipcCall<{ positions: PositionListRow[] }>('positions:list'),
+  get: (id: string) => ipcCall<PositionDetail>('positions:get', { id }),
+  create: (body: PositionWriteBody) => ipcCall<{ position: Position }>('positions:create', body),
+  update: (id: string, body: PositionWriteBody) =>
+    ipcCall<{ position: Position }>('positions:update', { ...body, id }),
+  toggle: (id: string, enabled: boolean) =>
+    ipcCall<{ position: Position }>('positions:toggle', { id, enabled }),
+  remove: (id: string) =>
+    ipcCall<{ deleted: boolean; unboundProjects: number; keptLessons: number }>('positions:delete', { id }),
+  projectToggle: (positionId: string, projectId: string, enabled: boolean) =>
+    ipcCall<{ projects: PositionProjectBinding[] }>('positions:projectToggle', { positionId, projectId, enabled }),
+  // zx_20261112_1 B2「任」: 本项目可指派岗位（岗位启用 ∧ 项目绑定启用）——建单下拉 / 派活共用。
+  forProject: (projectId: string) => ipcCall<{ positions: Position[] }>('positions:forProject', { projectId }),
+  // zx_20261113_1 B1「联」: 项目详情岗位卡——含未启用项 × 绑定态 × 本项目任务数 × 待审候选，计数由 main 一次取齐。
+  projectBoard: (projectId: string) =>
+    ipcCall<{ positions: ProjectPositionBoardRow[] }>('positions:projectBoard', { projectId }),
+  // zx_20261113_1 B5「像」: 岗位画像——任务/验收/经验/注入账，一处派生。
+  profile: (id: string) => ipcCall<PositionProfile>('positions:profile', { id }),
+  // zx_20261113_1 B6「商」: 岗位知识包导出/导入（Pro 闸在 main；文件对话框也在 main）。
+  exportPackage: (id: string) =>
+    ipcCall<{ cancelled: boolean; path?: string; lessons?: number }>('positions:export', { id }),
+  importPackage: (mode: 'merge' | 'replace' = 'merge') =>
+    ipcCall<{ cancelled: boolean; position?: Position; created?: boolean; mode?: string; addedSections?: number; addedLessons?: number; skippedLessons?: number }>('positions:import', { mode }),
+  lessons: (positionId: string) => ipcCall<{ lessons: PositionLesson[] }>('positions:lessons', { positionId }),
+  decideLesson: (id: string, decision: 'accepted' | 'rejected', by?: string) =>
+    ipcCall<{ lesson: PositionLesson }>('positions:decideLesson', { id, decision, by }),
+  // zx_20261113_2 M17：编辑经验（缩短后再晋升）。
+  updateLesson: (id: string, content: string) =>
+    ipcCall<{ lesson: PositionLesson }>('positions:updateLesson', { id, content }),
+  // zx_20261113_1 B4「晋」: 已采纳的可迁移经验晋升到岗位四段之一 / 撤回。
+  promoteLesson: (id: string, target: PositionLessonPromoteTarget) =>
+    ipcCall<{ position: Position; lesson: PositionLesson }>('positions:promoteLesson', { id, target }),
+  unpromoteLesson: (id: string) =>
+    ipcCall<{ position: Position; lesson: PositionLesson }>('positions:unpromoteLesson', { id }),
 };
 
 // ===== Task =====
@@ -366,7 +475,36 @@ export const tasks = {
   // zx_20260930 M4-2: 对话与成果各自分页。`*Total` 是**服务端全量口径**（与当页明细同集合、同范围真源），
   //   页面据此写"已加载 K / 共 M"并决定是否出「加载更多」——不得用当页长度冒充总数。
   get: (id: string, page?: { convLimit?: number; convOffset?: number; delivLimit?: number; delivOffset?: number }) =>
-    ipcCall<{ task: Record<string, unknown>; conversations: Array<Record<string, unknown>>; conversationsTotal?: number; deliverables: Array<Record<string, unknown>>; deliverablesTotal?: number }>('task:get', { id, ...page }),
+    ipcCall<{
+      task: Record<string, unknown>;
+      conversations: Array<Record<string, unknown>>;
+      conversationsTotal?: number;
+      deliverables: Array<Record<string, unknown>>;
+      deliverablesTotal?: number;
+      /** zx_20261107_1 B6：本次执行的选型记录（旧任务无此键 ⇒ `null`）。 */
+      modelSelection?: ModelSelection | null;
+      /**
+       * zx_20261110_2 B3/B7：执行态派生量（`live/queued/ghost/idle/terminal`）与最后进展。
+       * 派生量不入库——一秒就变，落库即陈旧；读不到时 main 如实给 `null`（页面按"未知"画）。
+       */
+      execState?: { state: string; reason: string } | null;
+      lastProgressAt?: string | null;
+      stuckMs?: number | null;
+      pendingJobAgeMs?: number | null;
+      /** zx_20261112_1 B2「任」：指派岗位（id/name/enabled）；未指派或岗位已删 ⇒ `null`。 */
+      position?: { id: string; name: string; enabled: boolean } | null;
+      /** zx_20261112_2 B1：「这次建单到底派没派、为什么」——旧任务无此键 ⇒ `null`。 */
+      dispatchDecision?: { attempted: boolean; ok: boolean; reason: string; label: string; nodeId?: string; at: string } | null;
+    }>('task:get', { id, ...page }),
+
+  /**
+   * zx_20261110_2 B7：幽灵态的**唯一出口**——释放该任务的全部在途键与残留执行作业，退回队列并重新派发。
+   * 服务端二次校验：只有 `execState === 'ghost'` 才放行（其余回 `INVALID_STATE` 并附当前态）。
+   */
+  releaseAndRequeue: (id: string) =>
+    ipcCall<{ id: string; status: string; released: number; aborted: boolean; execState: { state: string; reason: string } | null }>(
+      'task:releaseAndRequeue', { id },
+    ),
 
   /** zx_20261023_5 批一：任务详情「派单理由」三行（与真派同一把尺）。 */
   dispatchReason: (id: string) => ipcCall<DispatchReasonView>('task:dispatchReason', { id }),
@@ -375,8 +513,9 @@ export const tasks = {
   // zx_20260909_1 M4(Z1): planTaskId 可选——新建即关联"方案(规划)"(创建即落 ctx.scheme_ref, 先于动工)
   // zx_20260914 M0.6: clientRequestId 可选——**一次表单提交 = 一个键**，main 侧据此幂等去重（双击不再建两份）。
   // zx_20261013_1 批二(K7): attachmentPaths 可选——建任务时就把本地件挂上（main 侧落盘并写 `context_json.attachments`）。
-  create: (projectId: string, title: string, description?: string, priority?: number, acceptance_criteria?: string, parentTaskId?: string, planTaskId?: string, clientRequestId?: string, attachmentPaths?: string[]) =>
-    ipcCall<Record<string, unknown>>('task:create', { projectId, title, description, priority, acceptance_criteria, parent_task_id: parentTaskId, plan_task_id: planTaskId, client_request_id: clientRequestId, attachment_paths: attachmentPaths }),
+  // zx_20261112_1 B2「任」: positionId 可选——建单即指派岗位（main 侧先验「岗位启用 ∧ 项目绑定启用」）。
+  create: (projectId: string, title: string, description?: string, priority?: number, acceptance_criteria?: string, parentTaskId?: string, planTaskId?: string, clientRequestId?: string, attachmentPaths?: string[], positionId?: string) =>
+    ipcCall<Record<string, unknown>>('task:create', { projectId, title, description, priority, acceptance_criteria, parent_task_id: parentTaskId, plan_task_id: planTaskId, client_request_id: clientRequestId, attachment_paths: attachmentPaths, positionId }),
 
   // zx_20261105_1 M7: 判据候选（只读）——建单弹窗实时预览，人点「采用」后才经 `update` 入列。
   suggestCriteria: (title: string, description?: string) =>
@@ -445,6 +584,14 @@ export const im = {
   conversations: (channelId: string, opts?: { offset?: number; beforeSeq?: number; q?: string; direction?: string }) =>
     ipcCall<Array<Record<string, unknown>>>('im:conversations', { channelId, ...opts }),
 
+  // zx_20261108_1 B3: 入站「理解结果」的审计只读口——每条消息的 intent/route/理由与关联任务。
+  //   锁定档位 ⇒ `TEAM_REQUIRED`（main 侧先判闸、不查库），界面据此如实提示升级，不显示空表。
+  intentAudit: (opts?: { channelId?: string; limit?: number; offset?: number }) =>
+    ipcCall<{ rows: IntentAuditRow[]; total: number }>('im:intentAudit', opts),
+  // 导出（Team `audit_export` 闸）：main 写 `<dataDir>/exports/im-intent-*.csv`，回落盘路径与行数。
+  intentAuditExport: (opts?: { channelId?: string }) =>
+    ipcCall<{ savedTo: string; rows: number }>('im:intentAuditExport', opts),
+
   // zx_20260914 M1-1: **手工回话**——界面第一次能自己说一句。此前只能「看」(`conversations`)，
   //   或「重发别人的话」(`im:resend` 认 convId)，"回得了话"缺最后一环。
   //   失败按错误码抛出（`IpcError.code`）：NO_CONTENT/BAD_REQUEST/NOT_FOUND/TOO_LONG/NO_ADAPTER/SEND_FAILED，
@@ -493,8 +640,19 @@ export const admin = {
 
   users: () => ipcCall<Array<Record<string, unknown>>>('admin:users'),
 
-  memories: (projectId?: string, type?: string) =>
-    ipcCall<{ list: Array<Record<string, unknown>>; counts: Array<Record<string, unknown>> }>('admin:memories', { projectId, type }),
+  // zx_20261108_1 B4: 服务端筛选（关键词 FTS/LIKE、来源、时刻、项目、类型）+ 分页。
+  //   入参即 main 侧 `MemoryListFilter` 本身——参数名与服务端实现同源，不在渲染层另起一套。
+  memories: (filters: MemoryListFilter = {}) =>
+    ipcCall<MemoryListResult>('admin:memories', filters),
+
+  /** 单条详情：来源 / 项目 / 注入历史与 ROI / 人工改账历史。 */
+  memoryDetail: (id: string) => ipcCall<MemoryDetail>('admin:memoryDetail', id),
+
+  /** 人工写口：新增 / 修订 / 遗忘（成功一律落审计）。 */
+  memoryMutate: (input: MemoryMutation) => ipcCall<MemoryMutateResult>('admin:memoryMutate', input),
+
+  /** 容量与索引健康（只读）。 */
+  memoryCapacity: () => ipcCall<MemoryCapacity>('admin:memoryCapacity'),
 
   deleteMemory: (id: string) => ipcCall<{ id: string; deleted: boolean }>('admin:deleteMemory', id),
 
@@ -506,6 +664,10 @@ export const admin = {
   // zx_20261018_3 批一: 注入账的读者（注入 ≠ 主动引用，两本账各自可见）。
   memoryInjectionStats: (projectId?: string) =>
     ipcCall<{ injected: number; distinctMemories: number; usedTimes: number; completed: number; failed: number; pending: number; charsInjected: number; hitRate: number; failedShare: number; wasteChars: number }>('memory:injectionStats', { projectId }),
+
+  // zx_20261107_1 B4: 注入 ROI——来源合计全档可看；每任务明细由 Team「审计视图」闸决定是否解锁。
+  injectionRoi: (projectId?: string, limit?: number) =>
+    ipcCall<InjectionRoiView>('memory:injectionRoi', { projectId, limit }),
 
   markExemplar: (id: string) => ipcCall<{ id: string; marked: boolean }>('admin:markExemplar', id),
 
@@ -593,10 +755,22 @@ export const templates = {
 // ===== Deliverable =====
 export const deliverables = {
   // zx_20260930 M4-2: 真分页——`limit`/`offset` 显式传（缺省由 main 侧 `resolvePage` 兜到 PAGE_DEFAULT）。
-  //   返回体由裸数组改为 `{ rows, total, retiredCount, limit, offset }`：`total`/`retiredCount` 均为
+  //   返回体 `{ rows, total, retiredCount, limit, offset }`：`total`/`retiredCount` 均为
   //   **服务端按同一组筛选条件**算出的全量条数（`retiredCount` 供"已退休 N 项"提示，不得由当页长度冒充）。
-  list: (projectId?: string, type?: string, keyword?: string, page?: { limit?: number; offset?: number }) =>
-    ipcCall<{ rows: Array<Record<string, unknown>>; total: number; retiredCount: number; limit: number; offset: number }>('deliverable:list', { projectId, type, keyword, ...page }),
+  // zx_20261108_1 B6: 由"位置参数（项目/类型/关键词）"改为**参数对象**——任务/时间/主件/排序/是否含已退休
+  //   一并下沉服务端；`DeliverableListParams` 直接取 main 侧真源，渲染层不再手抄第二套参数名。
+  list: (params: DeliverableListParams = {}) =>
+    ipcCall<{ rows: Array<Record<string, unknown>>; total: number; retiredCount: number; limit: number; offset: number }>('deliverable:list', params),
+
+  // zx_20261108_1 B6: 打开 / 在文件夹中显示——**只递成果 id**，路径由 main 从库里取并过工作目录围栏。
+  //   失败如实带 `reason`（no_path/url/not_absolute/traversal/out_of_root/missing），不笼统说"打不开"。
+  open: (id: string, mode: 'open' | 'reveal' = 'open') =>
+    ipcCall<{ path: string; opened?: true; revealed?: true }>('deliverable:open', { id, mode }),
+
+  // zx_20261108_1 B6: 按当前筛选导出 CSV（Pro 能力 `deliverable_export`；落点走系统保存对话框）。
+  //   取消不是错误（`cancelled:true`）；被拒时 ipcCall 抛出带 PRO_REQUIRED 的 IpcError，调用方直显 message。
+  exportCsv: (params: DeliverableListParams = {}) =>
+    ipcCall<{ path: string; count: number; cancelled: boolean }>('deliverable:exportCsv', params),
 
   // zx_20260930 M4-2: 下拉名录（项目/任务/无任务计数）——由服务端一次算清，**不是**"把列表整份读回来再筛"。
   //   分页后名录必须与页无关（否则选定项目后下拉自坍缩 = E15 复发），故与 `list` 分成两个出口。
@@ -715,7 +889,7 @@ export const audit = {
 
 // ===== Team library（团队共享库，zx_20261017_1 批六）=====
 // 形状同引 main core / shared-types 真源；页面不手抄第二份。
-export type { TeamItem, TeamItemKind, LocalCandidates, LocalTeamItem };
+export type { TeamItem, TeamItemKind, LocalCandidates, LocalTeamItem, TeamPreview };
 export interface TeamItemsPayload {
   local: LocalCandidates;
   remote: TeamItem[];
@@ -731,6 +905,11 @@ export const team = {
   items: (filter?: { kind?: TeamItemKind; offset?: number }) =>
     ipcCall<TeamItemsPayload>('team:items', filter),
   share: (kind: TeamItemKind, localId: string) => ipcCall<TeamItem>('team:share', { kind, localId }),
+  // zx_20261113_5 M2「见」：两条只读预览——本机传 localId，远端传 body（与分享同一次映射）。
+  localPreview: (kind: TeamItemKind, localId: string) =>
+    ipcCall<TeamPreview>('team:localPreview', { kind, localId }),
+  preview: (kind: TeamItemKind, title: string, body: Record<string, unknown>) =>
+    ipcCall<TeamPreview>('team:preview', { kind, title, body }),
   importItem: (item: TeamItem, projectId?: string | null) =>
     ipcCall<TeamImportResult>('team:import', { item, ...(projectId ? { projectId } : {}) }),
   remove: (id: string) => ipcCall<{ id: string; deleted: boolean }>('team:delete', { id }),
@@ -771,7 +950,10 @@ export const nodes = {
   setOrchestrateMode: (mode: string) => ipcCall<{ mode: string }>('nodes:set-orchestrate-mode', { mode }),
   // zx_20261017_1 批三: 建单即派读/写（本机设置 `node.auto_dispatch_on_create`；M7 起三态：显式/缺省）。
   autoDispatch: () => ipcCall<AutoDispatchPayload>('nodes:auto-dispatch'),
-  setAutoDispatch: (enabled: boolean) => ipcCall<{ enabled: boolean }>('nodes:set-auto-dispatch', { enabled }),
+  setAutoDispatch: (enabled: boolean) => ipcCall<{ enabled: boolean; source?: 'explicit' | 'default'; reason?: string }>('nodes:set-auto-dispatch', { enabled }),
+  /** zx_20261112_2 B1：三态切换（`off` / `default` 满负荷才溢出 / `always` 总是外派）。 */
+  setAutoDispatchMode: (mode: 'off' | 'default' | 'always') =>
+    ipcCall<{ enabled: boolean; source?: 'explicit' | 'default'; reason?: string }>('nodes:set-auto-dispatch', { mode }),
   /** 首次满足条件时的**一次性告知**应答（`true`=知道了保持开启、`false`=一键关闭；Team 已解锁才可达）。 */
   confirmAutoDispatch: (accept: boolean) => ipcCall<{ enabled: boolean; prompted: boolean }>('nodes:confirm-auto-dispatch', { accept }),
 };
@@ -1085,6 +1267,12 @@ export const ansProxy = {
    * 而元数据是 `data` 的兄弟键，经 `get` 会一并被丢掉（界面于是分不清"就这么多"与"只给了前 100"）。
    */
   getPaged: <T>(path: string) => ipcCall<AnsPage<T>>('ans-proxy:getPaged', path),
+  /**
+   * zx_20261107_1 B6: **完整信封**读取——`get` 剥一层 `.data` 后只剩数组，列表旁的兄弟键
+   *   （`/models/recommended` 的 `use_cases`/`provider_currency`）会被静默丢掉。
+   *   本通道剥一层后拿到的就是 ANS 原始回包 `{ data, use_cases, provider_currency }`。
+   */
+  getRaw: <T>(path: string) => ipcCall<T>('ans-proxy:getRaw', path),
   post: <T>(path: string, body?: unknown) => ipcCall<T>('ans-proxy:post', path, body),
   put: <T>(path: string, body?: unknown) => ipcCall<T>('ans-proxy:put', path, body),
   delete: <T>(path: string) => ipcCall<T>('ans-proxy:delete', path),

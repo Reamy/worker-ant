@@ -12,6 +12,7 @@ import Database from 'better-sqlite3';
 import { modelsRoutes } from '../routes/models.js';
 import { resolveOptimalModel } from '../routes/optimal-model.js';
 import { parseModelCapabilities } from '../services/resource-matcher.js';
+import { buildEndpointTestRequest } from '../services/endpoint-test.js';
 import { encryptApiKey } from '../utils/security.js';
 
 function jsonReq(path: string, method: string, body?: unknown): Request {
@@ -130,6 +131,45 @@ describe('models routes', () => {
     // 真零命中：失败形回包，不带 capabilityMatch（失败路没有"主模型满足度"可说）
     const miss = resolveOptimalModel(db, { capabilities: ['audio'] }) as { capabilityMatch?: string };
     expect(miss.capabilityMatch).toBeUndefined();
+  });
+
+  it('B2: preferRemote —— 有远端选远端且带 usedLocalFallback=false；仅本地时如实 true；不传则无此键', () => {
+    db.prepare(
+      "INSERT INTO ans_ai_providers (id, name, base_url) VALUES ('p-local', 'ollama', 'http://127.0.0.1:11434')",
+    ).run();
+    db.prepare(
+      "INSERT INTO ans_ai_models (id, provider_id, name, capabilities) VALUES ('m-local', 'p-local', 'qwen-local', '[\"chat\"]')",
+    ).run();
+    // 本地 priority 故意更高：preferRemote 生效时远端仍必须胜出
+    db.prepare(
+      "INSERT INTO ans_model_endpoints (id, model_id, url, api_key_ref, priority) VALUES ('e-local', 'm-local', 'http://127.0.0.1:11434/v1', ?, 99)",
+    ).run(encryptApiKey('sk-local'));
+    try {
+      const remote = resolveOptimalModel(db, { capabilities: ['chat'], preferRemote: true }) as {
+        id?: string;
+        usedLocalFallback?: boolean;
+      };
+      expect(remote.id).toBe('m1');
+      expect(remote.usedLocalFallback).toBe(false);
+      expect('usedLocalFallback' in remote).toBe(true);
+
+      db.prepare("UPDATE ans_model_endpoints SET status = 'inactive' WHERE id = 'e1'").run();
+      const local = resolveOptimalModel(db, { capabilities: ['chat'], preferRemote: true }) as {
+        id?: string;
+        usedLocalFallback?: boolean;
+      };
+      expect(local.id).toBe('m-local');
+      expect(local.usedLocalFallback).toBe(true);
+      db.prepare("UPDATE ans_model_endpoints SET status = 'active' WHERE id = 'e1'").run();
+
+      // 旧调用方：不传 preferRemote ⇒ 回包形状逐字不变（无 usedLocalFallback 键）
+      const legacy = resolveOptimalModel(db, { capabilities: ['chat'] }) as unknown as Record<string, unknown>;
+      expect('usedLocalFallback' in legacy).toBe(false);
+    } finally {
+      db.prepare("DELETE FROM ans_model_endpoints WHERE id = 'e-local'").run();
+      db.prepare("DELETE FROM ans_ai_models WHERE id = 'm-local'").run();
+      db.prepare("DELETE FROM ans_ai_providers WHERE id = 'p-local'").run();
+    }
   });
 
   it('M6-a: parseModelCapabilities 两面标本——认得出来的要认出来，认不出的当空数组（不猜不抛）', () => {
@@ -273,5 +313,101 @@ describe('models routes', () => {
     const data = (await r.json()) as { data: { success: boolean; error: string | null } };
     expect(data.data.success).toBe(false);
     expect(data.data.error).toContain('解密失败');
+  });
+
+  it('M6: Ollama 原生 /api/embed 端点用 POST 原 URL（不是 GET .../models）', async () => {
+    db.prepare(
+      "INSERT INTO ans_ai_models (id, provider_id, name, capabilities) VALUES ('m-embed', 'p1', 'nomic-embed-text-v2-moe:latest', '[\"embedding\"]')",
+    ).run();
+    db.prepare(
+      "INSERT INTO ans_model_endpoints (id, model_id, url, api_key_ref) VALUES ('e-embed', 'm-embed', 'http://localhost:11434/api/embed', ?)",
+    ).run(encryptApiKey('ollama'));
+    const origFetch = globalThis.fetch;
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return new Response('{"embeddings":[[0.1]]}', { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      const r = await app.handle(jsonReq('/api/v1/models/endpoints/e-embed/test', 'POST'));
+      const data = (await r.json()) as { data: { success: boolean } };
+      expect(data.data.success).toBe(true);
+      expect(calls).toHaveLength(1);
+      const call = calls[0]!;
+      expect(call.url).toBe('http://localhost:11434/api/embed');
+      expect(call.init?.method).toBe('POST');
+      expect(JSON.parse(String(call.init?.body))).toEqual({ model: 'nomic-embed-text-v2-moe:latest', input: 'ping' });
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('M6: 协议自适应纯函数——OpenAI 基址 GET /models；/v1/embeddings POST 原 URL', () => {
+    expect(buildEndpointTestRequest('https://api.openai.com/v1')).toEqual({ method: 'GET', url: 'https://api.openai.com/v1/models' });
+    expect(buildEndpointTestRequest('https://x/v1/embeddings', 'e')).toEqual({
+      method: 'POST', url: 'https://x/v1/embeddings', body: { model: 'e', input: 'ping' },
+    });
+    expect(buildEndpointTestRequest('http://h/api/embeddings', 'e')).toEqual({
+      method: 'POST', url: 'http://h/api/embeddings', body: { model: 'e', prompt: 'ping' },
+    });
+  });
+});
+
+/**
+ * zx_20261107_1 B6：币种单源——`provider_currency` 从目录 JSON 经三个出口如实带出，
+ * 目录里查不到（用户自建 UUID）⇒ `null`，**不臆造**。
+ */
+describe('B6: 币种单源三出口', () => {
+  let b6db: Database.Database;
+  let b6app: ReturnType<typeof modelsRoutes>;
+
+  beforeAll(() => {
+    b6db = new Database(':memory:');
+    b6db.exec(`
+      CREATE TABLE ans_ai_providers (id TEXT PRIMARY KEY, name TEXT, base_url TEXT, status TEXT DEFAULT 'active', source TEXT DEFAULT 'user', enabled INTEGER DEFAULT 1, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));
+      CREATE TABLE ans_ai_models (id TEXT PRIMARY KEY, provider_id TEXT, name TEXT, capabilities TEXT DEFAULT '[]', context_window INTEGER DEFAULT 4096, max_output_tokens INTEGER DEFAULT 1024, input_price_per_1k REAL DEFAULT 0, output_price_per_1k REAL DEFAULT 0, status TEXT DEFAULT 'active', source TEXT DEFAULT 'user', description TEXT DEFAULT '', enabled INTEGER DEFAULT 1, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));
+      CREATE TABLE ans_model_endpoints (id TEXT PRIMARY KEY, model_id TEXT, url TEXT, api_key_ref TEXT, priority INTEGER DEFAULT 0, weight REAL DEFAULT 1.0, status TEXT DEFAULT 'active', created_at TEXT DEFAULT (datetime('now')), health_check_at TEXT DEFAULT '', health_status TEXT DEFAULT '', last_latency_ms INTEGER DEFAULT 0);
+      CREATE TABLE ans_audit_logs (id TEXT PRIMARY KEY, actor TEXT, action TEXT, resource_type TEXT, resource_id TEXT, detail TEXT DEFAULT '{}', created_at TEXT DEFAULT (datetime('now')));
+      CREATE TABLE ans_model_quality_logs (id TEXT PRIMARY KEY, model_id TEXT, project_id TEXT, task_type TEXT, capability TEXT, success INTEGER DEFAULT 1, output_accepted INTEGER DEFAULT 1, token_efficiency REAL, latency_ms INTEGER, created_at TEXT DEFAULT (datetime('now')));
+      CREATE TABLE ans_billing_records (id TEXT PRIMARY KEY, endpoint_id TEXT, model_id TEXT, project_id TEXT, tokens_in INTEGER DEFAULT 0, tokens_out INTEGER DEFAULT 0, cost REAL DEFAULT 0.0, currency TEXT DEFAULT 'USD', created_at TEXT DEFAULT (datetime('now')));
+      INSERT INTO ans_ai_providers (id, name, base_url, source) VALUES ('openai', 'OpenAI', 'https://api.openai.com/v1', 'system');
+      INSERT INTO ans_ai_providers (id, name, base_url, source) VALUES ('uuid-user', '我的自建', 'http://127.0.0.1:11434', 'user');
+      INSERT INTO ans_ai_models (id, provider_id, name, capabilities, source) VALUES ('gpt-6-astra', 'openai', 'gpt-6-astra', '["chat"]', 'system');
+      INSERT INTO ans_ai_models (id, provider_id, name, capabilities, source) VALUES ('my-local', 'uuid-user', 'my-local', '["chat"]', 'user');
+    `);
+    const enc = encryptApiKey('sk-test');
+    b6db.prepare("INSERT INTO ans_model_endpoints (id, model_id, url, api_key_ref) VALUES ('e-openai', 'gpt-6-astra', 'https://api.openai.com/v1', ?)").run(enc);
+    b6app = modelsRoutes(b6db);
+  });
+
+  it('/providers 每行带 currency：目录内 → USD；自建 UUID → null', async () => {
+    const r = await b6app.handle(jsonReq('/api/v1/models/providers', 'GET'));
+    const data = (await r.json()) as { data: Array<{ id: string; currency: string | null }> };
+    expect(data.data.find((p) => p.id === 'openai')!.currency).toBe('USD');
+    expect(data.data.find((p) => p.id === 'uuid-user')!.currency).toBeNull();
+  });
+
+  it('/recommended 的 provider_currency 与逐行 currency 同源于目录 JSON', async () => {
+    const r = await b6app.handle(jsonReq('/api/v1/models/recommended', 'GET'));
+    const data = (await r.json()) as {
+      data: Array<{ id: string; currency: string | null }>;
+      provider_currency: Record<string, string>;
+      use_cases: unknown[];
+    };
+    expect(data.provider_currency.openai).toBe('USD');
+    expect(data.provider_currency.deepseek).toBe('CNY');
+    expect(data.data.find((m) => m.id === 'gpt-6-astra')!.currency).toBe('USD');
+    // use_cases 仍原样回传（场景 bug 修复依赖这个键名）
+    expect(Array.isArray(data.use_cases)).toBe(true);
+    expect(data.use_cases.length).toBeGreaterThan(0);
+  });
+
+  it('/optimal 主模型带 provider_id + provider_currency', () => {
+    const ok = resolveOptimalModel(b6db, { capabilities: ['chat'] }) as {
+      provider_id?: string;
+      provider_currency?: string | null;
+    };
+    expect(ok.provider_id).toBe('openai');
+    expect(ok.provider_currency).toBe('USD');
   });
 });

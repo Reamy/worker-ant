@@ -16,8 +16,8 @@ import { createLogger } from './logger.js';
 import { auxModelRequest } from './model-request.js';
 import { estimateTokensFromChars } from './token-estimate.js';
 import {
-  BRIEF_INPUT_MAX_CHARS, PROJECT_BRIEF_MAX_TOKENS,
-  buildProjectBriefPrompt, collectProjectBriefInputs, decideAutoInit,
+  BRIEF_INPUT_MAX_CHARS, PROJECT_BRIEF_MAX_TOKENS, composeBriefSourceHash,
+  buildProjectBriefPrompt, collectProjectBriefInputs, decideAutoInit, loadProjectBrief,
   markBriefRunning, parseProjectBrief, saveBriefFailed, saveBriefReady,
 } from './project-brief.js';
 
@@ -92,6 +92,23 @@ export interface RunProjectBriefInitResult {
   tokensOut?: number;
 }
 
+/** 超时判据（`AbortSignal.timeout` 在本作业里是唯一的 abort 来源）。 */
+function isTimeoutError(err: unknown): boolean {
+  const e = err as { name?: string; message?: string } | undefined;
+  return /timeout|timed out|aborted/i.test(`${e?.name ?? ''} ${e?.message ?? ''}`);
+}
+
+/** 本次是否落在本机端点（只用于失败时多说一句，不改变选型）。 */
+function localEndpointHint(url: string): string {
+  try {
+    const host = new URL(url).hostname.replace(/^\[|\]$/g, '');
+    if (host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '0.0.0.0') {
+      return ' 本次选中的是本地模型，可在 ANS 调整端点优先级。';
+    }
+  } catch { /* 非法 URL ⇒ 不多说 */ }
+  return '';
+}
+
 /** 从 usage 读真值；缺席则按字符估并如实返回。 */
 function readUsage(
   usage: BriefGenerateResult['usage'] | undefined,
@@ -114,37 +131,71 @@ export async function runProjectBriefInit(deps: RunProjectBriefInitDeps): Promis
   if (!projectId) return { ok: false, reason: '缺少项目 id' };
   if (running.has(projectId)) return { ok: true, skipped: true, reason: '同一项目的须知正在生成' };
   running.add(projectId);
+  // 本次尝试实际选中的模型/端点：失败时如实入账（选型前失败则留空，不拿上次的值冒充）。
+  let attemptedModel = '';
+  let attemptedUrl = '';
+  // zx_20261111_1 B2: ANS 只在请求了 preferRemote 时带本键；缺键＝旧 ANS 或未请求，按"未知"处理。
+  let usedLocalFallback: boolean | undefined;
 
   try {
-    const proj = db.prepare('SELECT name, working_dir FROM wa_projects WHERE id = ?')
-      .get(projectId) as { name?: string; working_dir?: string } | undefined;
+    const proj = db.prepare('SELECT name, description, working_dir FROM wa_projects WHERE id = ?')
+      .get(projectId) as { name?: string; description?: string; working_dir?: string } | undefined;
     if (!proj) return { ok: false, reason: '项目不存在' };
 
     const workingDir = String(proj.working_dir ?? '');
+    const description = String(proj.description ?? '');
+    const hasDescription = description.trim().length > 0;
     const auto = decideAutoInit(workingDir);
-    if (!auto.run && auto.reason !== '工作目录为空') {
-      // 不存在/不可读/未设置 ⇒ 没什么可读的，直接如实记失败
-      saveBriefFailed(db, projectId, `无法读取工作目录：${auto.reason}`, trigger);
+    // zx_20261111_2：描述是用户亲手写的优先事实源——目录不可用/为空但描述非空时仍可生成。
+    if (!auto.run && auto.reason !== '工作目录为空' && !hasDescription) {
+      // 两样来源都不可用：原因把"目录不可用 + 描述为空"一起说清，别让人猜缺哪样。
+      saveBriefFailed(db, projectId, `无法读取工作目录：${auto.reason}，项目描述也为空`, trigger);
       return { ok: false, reason: auto.reason };
     }
 
     markBriefRunning(db, projectId, trigger);
 
     const inputs = await collectProjectBriefInputs(workingDir);
-    if (inputs.files.length === 0 && inputs.tree.length === 0) {
-      const reason = auto.reason === '工作目录为空' ? '工作目录为空，没有可读的资料' : '未读到可用的仓库资料';
+    if (inputs.files.length === 0 && inputs.tree.length === 0 && !hasDescription) {
+      const reason = auto.reason === '工作目录为空'
+        ? '工作目录为空，没有可读的资料'
+        : (auto.run ? '工作目录中未读到可用资料，项目描述也为空' : `${auto.reason}，项目描述也为空`);
       saveBriefFailed(db, projectId, reason, trigger);
       return { ok: false, reason };
     }
 
-    const m = await ansClient.getOptimalModel(auxModelRequest({ strategy: 'balanced' }));
+    // 辅助路缺省排除 reasoning（防思考吃光输出预算），但池中只剩思考模型时不应直接失败：
+    //   先按缺省口径选一次，选不到再放宽一次（zx_20261111_2 追加；缺省口径本身未变）。
+    const pickModel = async (allowReasoning: boolean) => {
+      try {
+        return await ansClient.getOptimalModel(auxModelRequest({ strategy: 'balanced', allowReasoning }));
+      } catch {
+        return undefined;
+      }
+    };
+    let m = await pickModel(false);
     if (!m?.url || !m?.api_key || !m?.model_name) {
-      const reason = '无可用 chat 模型（ANS 未连接或无可用模型）';
+      m = await pickModel(true);
+      if (m?.url && m?.api_key && m?.model_name) {
+        logger.warn(
+          { projectId: projectId.slice(0, 8), model: m.model_name },
+          'project-brief: 池中无非思考 chat 模型，本轮放宽为思考模型',
+        );
+      }
+    }
+    if (!m?.url || !m?.api_key || !m?.model_name) {
+      const reason = '无可用 chat 模型（已尝试非思考与思考模型；ANS 未连接或无可用模型）';
       saveBriefFailed(db, projectId, reason, trigger);
       return { ok: false, reason };
     }
+    attemptedModel = m.model_name;
+    attemptedUrl = m.url;
+    usedLocalFallback = (m as { usedLocalFallback?: unknown }).usedLocalFallback === true;
+    if (usedLocalFallback) {
+      logger.warn({ projectId: projectId.slice(0, 8), model: m.model_name }, 'project-brief: 无远端候选，本轮回退本地模型');
+    }
 
-    const prompt = buildProjectBriefPrompt(inputs, String(proj.name ?? ''));
+    const prompt = buildProjectBriefPrompt(inputs, String(proj.name ?? ''), description);
     if (prompt.length > BRIEF_INPUT_MAX_CHARS * 2) {
       // 防御：提示词主体受采样预算约束，超出的只可能是包装文本；仍以采样上限为准
       logger.warn({ projectId: projectId.slice(0, 8), chars: prompt.length }, 'project-brief: 提示词异常偏长');
@@ -169,29 +220,40 @@ export async function runProjectBriefInit(deps: RunProjectBriefInitDeps): Promis
       const reason = exhausted
         ? `模型未产出正文：输出预算（${BRIEF_MAX_OUTPUT_TOKENS} tokens）在思考阶段用尽（finish=length），可换非思考模型或调高预算`
         : `模型未返回可解析的须知 JSON（响应开头：${preview || '空'}）`;
-      saveBriefFailed(db, projectId, reason, trigger);
+      saveBriefFailed(db, projectId, reason, trigger, attemptedModel);
       return { ok: false, reason };
     }
 
     const { tokensIn, tokensOut } = readUsage(result.usage, prompt.length, String(result.text || '').length);
     saveBriefReady(db, projectId, {
       brief,
-      sourceHash: inputs.fingerprint,
+      sourceHash: composeBriefSourceHash(inputs.fingerprint, description),
       model: m.model_name,
       tokensIn,
       tokensOut,
       trigger,
     });
     logger.info(
-      { projectId: projectId.slice(0, 8), files: inputs.files.length, tree: inputs.tree.length, tokensIn, tokensOut },
+      {
+        projectId: projectId.slice(0, 8), files: inputs.files.length, tree: inputs.tree.length,
+        descChars: description.trim().length, tokensIn, tokensOut,
+      },
       'project-brief: 生成完成',
     );
     return { ok: true, tokensIn, tokensOut };
   } catch (err) {
     const msg = (err as Error)?.message || String(err);
-    try { saveBriefFailed(db, projectId, `生成失败：${msg}`, trigger); } catch { /* 落账失败不吞掉原始错误 */ }
-    logger.warn({ projectId: projectId.slice(0, 8), errMsg: msg }, 'project-brief: 生成失败');
-    return { ok: false, reason: msg };
+    // 超时要把"是谁没在时限内返回、旧须知还在不在"说清，别让界面只显示英文 abort 文本。
+    let reason = `生成失败：${msg}`;
+    if (isTimeoutError(err)) {
+      const kept = (() => {
+        try { return loadProjectBrief(db, projectId)?.brief ? '；已保留上一份成功须知' : ''; } catch { return ''; }
+      })();
+      reason = `生成超时（${Math.round(BRIEF_GENERATE_TIMEOUT_MS / 1000)} 秒）：本轮模型「${attemptedModel || '未选型'}」未在时限内返回${kept}。${localEndpointHint(attemptedUrl)}`.trim();
+    }
+    try { saveBriefFailed(db, projectId, reason, trigger, attemptedModel); } catch { /* 落账失败不吞掉原始错误 */ }
+    logger.warn({ projectId: projectId.slice(0, 8), errMsg: msg, attemptedModel }, 'project-brief: 生成失败');
+    return { ok: false, reason };
   } finally {
     running.delete(projectId);
   }

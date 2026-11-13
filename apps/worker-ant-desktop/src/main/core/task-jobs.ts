@@ -10,6 +10,12 @@
  * 在受控回归里用内存库跑**真** SQL，而非在测试里复刻判据（复刻的断言只是自我印证）。
  */
 
+// zx_20261110_2 B4「恒」: 作废作业**不等于**中止执行体——这一句实话说在一处（本模块仍零 electron 依赖）。
+import { createLogger } from './logger.js';
+import { hasTaskRun } from './task-run-registry.js';
+
+const logger = createLogger('task-jobs');
+
 /** 仅需 prepare().run()/.get()/.all() 的最小库接口 */
 export interface TaskJobStmt {
   run(...args: unknown[]): { changes?: number };
@@ -40,12 +46,10 @@ export function execJobPayloadLike(taskId: string): string {
  * 都**没有**它 ⇒ 已归档/已完成的任务能被后续流程改写成 `paused`（真库事故 `9cc5bb81` / `58c60680`）。
  * 现统一从此取；本模块零 import，故任何 core 模块引用它都不会成环。
  */
-export const TERMINAL_STATUSES = ['completed', 'failed', 'archived'] as const;
-
-/** 该状态是否终态。`undefined`/空串按"非终态"论（查不到行时不冒认终态）。 */
-export function isTerminalStatus(status: string | null | undefined): boolean {
-  return !!status && (TERMINAL_STATUSES as readonly string[]).includes(status);
-}
+// zx_20261111_3「显」：词表与判据移到零依赖的 `status-terms.ts`（渲染层要取它，而本模块会连带
+//   `logger.ts` 的模块求值期 `process.env`，在渲染进程里必崩）。此处**原样转出**，调用点一字不改。
+import { TERMINAL_STATUSES, isTerminalStatus } from './status-terms.js';
+export { TERMINAL_STATUSES, isTerminalStatus };
 
 /** 任务是否已终态（completed/failed/archived）——终态任务不应再被 execution 作业拉起 */
 export function isTerminalTask(db: TaskJobDb, taskId: string): boolean {
@@ -90,4 +94,13 @@ export function supersedeExecutionJobs(db: TaskJobDb, taskId: string, reason = '
       `UPDATE wa_jobs SET status = 'done', completed_at = datetime('now'), error = ? WHERE status IN ('pending','running') AND type IN (${EXEC_JOB_TYPES.map(() => '?').join(',')}) AND payload LIKE ?`
     ).run(reason, ...EXEC_JOB_TYPES, execJobPayloadLike(taskId));
   } catch { /* best-effort */ }
+  // zx_20261110_2 B4「恒」：作业行作废了，而**执行体可能还在跑**——这两件事此前一声不响地被当成一件。
+  //   后果：库里没有作业能证明它在跑，界面与调度都以为"没人干"，而进程里那一路还在烧 token（本轮事故形态）。
+  //   此处**不改行为**（调用方各有各的后续处置），只把这句实话说出来，别再静默。
+  //   判据取 `task-run-registry`（真有在途 run 的唯一凭据），不看状态词。
+  try {
+    if (hasTaskRun(taskId)) {
+      logger.warn({ taskId: taskId.slice(0, 8), reason }, 'job_superseded_but_run_live：执行作业已作废，但该任务仍有在途执行体在跑');
+    }
+  } catch { /* 记账失败不影响作废本身 */ }
 }

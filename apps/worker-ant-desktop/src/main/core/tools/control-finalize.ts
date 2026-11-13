@@ -25,7 +25,10 @@ import { boolSetting, readBoolSetting } from '../settings-bool.js';
 // zx_20260930 M8: 归并读点须排除墓碑（`MEM_LIVE_SQL` 一处真源）。
 import { MEM_LIVE_SQL } from '../memory-lifecycle.js';
 import { buildCompletionAccount, goalAchievedOf } from '../task-outcome.js';
-import { readTaskAcceptanceCriteria, criteriaSourceOf, UNVERIFIED_REASON_LABEL, isAcceptanceVerified, acceptanceVerdictOf, goalEvidenceOf } from '../acceptance-check.js';
+import { readTaskAcceptanceCriteria, criteriaSourceOf, UNVERIFIED_REASON_LABEL, unverifiedReasonText, isAcceptanceVerified, acceptanceVerdictOf, goalEvidenceOf } from '../acceptance-check.js';
+import { mergeFinalizeChecks } from '../run-trace.js';
+// zx_20261113_2 M15：收口时只提示 Git 未提交，不自动提交。
+import { gitWorkingTreeAdvice } from '../git-advisory.js';
 import { MAX_MANUAL_ITEMS, MAX_VERIFICATION_ISSUES, createVerificationFixTask, extractVerificationIssues, isReportDocPath } from '../verification-issues.js';
 import { eventBus } from '../event-bus.js';
 import { failedChildren, childNames } from '../children-gate.js';
@@ -386,19 +389,18 @@ export async function runFinalizeTask(deps: ToolDeps, args: { summary: string; q
     const finalizeTargets = docValidationTargets(db, taskId, workingDir);
     if (finalizeTargets.length > 0) {
       try {
-        const { validateOutputs, VALIDATION_CRITERIA_VERSION, LLM_VALIDATION_TIMEOUT_MS } = await import('../output-validator.js');
+        const { validateOutputs, VALIDATION_CRITERIA_VERSION, LLM_VALIDATION_BUDGET_MS, summarizeUnverified } = await import('../output-validator.js');
         const ansClient = await ctx.getAnsClient();
         // zx_20261028_2 M3：逐文件串行（单文件 30s abort ⇒ N 个文件最坏 N×30s，收口假死的病根）
         //   改为有界并发一批问完。结论仍按输入序返回，账目顺序与拒收文案一字未改。
         // zx_20260922_1 M7（F9）：`validateOutput` 的第三参（任务题面）早已删除——量文件，就问文件。
+        // zx_20261109_1 B3：本 run 共用一份**总预算**（12s）与熔断器——首条超时后其余文件即刻按
+        //   `unknown` 快速返回，不再各等一次 12s（N 个文件最坏从 N×12s 收到 12s）。
         const targets = finalizeTargets.map((abs) => ({ file: abs, archetype: archetypeForFile(abs) }));
-        const results = await validateOutputs(ansClient as never, targets);
+        const results = await validateOutputs(ansClient as never, targets, { breaker: deps.sufficiencyBreaker, budgetMs: LLM_VALIDATION_BUDGET_MS });
         const ov: Array<Record<string, unknown>> = [];
         const insufficient: string[] = [];
         const insuffReasons: Array<{ file: string; reasons: string[] }> = [];
-        // zx_20261028_2 M3：`unknown`（辅助模型超时/不可用/内容不可解码）**不阻断但必须可见**——
-        //   此前只落库不发声，收口后无人知道"充分"那栏其实是没问出来。
-        const unverified: string[] = [];
         for (const r of results) {
           const abs = r.file;
           // 省耗账实(1a): 内容校验为旁路子 LLM——usage 记入执行期账本，收口并账（逐条累加）
@@ -415,8 +417,6 @@ export async function runFinalizeTask(deps: ToolDeps, args: { summary: string; q
           if (r.status === 'insufficient') {
             insufficient.push(abs);
             insuffReasons.push({ file: abs, reasons: issues.length > 0 ? issues : (missingAspects.length > 0 ? missingAspects : [suggestion].filter(Boolean)) });
-          } else if (r.status === 'unknown') {
-            unverified.push(path.basename(abs));
           }
         }
         ctxJson.output_validations = ov;
@@ -425,9 +425,10 @@ export async function runFinalizeTask(deps: ToolDeps, args: { summary: string; q
         if (insufficient.length > 0) {
           return JSON.stringify({ error: `finalize 内容充分性门禁未通过：产出文件 ${insufficient.join('、')} 已生成但内容校验不充分。${formatInsufficiencyReasons(insuffReasons)}请按上述原因补全后再 finalize；若确需收口请在任务管理执行"标记完成"。`, insufficientOutputs: insufficient, insufficientReasons: insuffReasons });
         }
-        if (unverified.length > 0) {
-          checks.push(`[INFO] 内容充分性未核 ${unverified.length} 个（辅助模型 ${Math.round(LLM_VALIDATION_TIMEOUT_MS / 1000)}s 内无结论/不可用）：${unverified.join('、')}——不阻断收口，可人工复核`);
-        }
+        // zx_20261109_1 B3：`unknown` 的可见文案与 run_close 收口段**同源**（`summarizeUnverified`）——
+        //   此前两处各写一句，措辞与成因分类已经各说各话。成因按 reasonCode 分四类，熔断如实点名。
+        const unverifiedInfo = summarizeUnverified(results, deps.sufficiencyBreaker);
+        if (unverifiedInfo) checks.push(unverifiedInfo);
       } catch { /* 校验失败不阻断 finalize（回退到存在性门禁） */ }
     }
     // zx_20260928 M2: 此处原有「自评分 <60 → **拒绝** finalize」的一道闸，**已删**。
@@ -469,7 +470,8 @@ export async function runFinalizeTask(deps: ToolDeps, args: { summary: string; q
       //   结论），此前两句话并列而不相认——人读详情页看到自相矛盾（真库标本 `7c39678e`：
       //   `[WARN] 验收未核验（模型未输出可解析的核对结论）` 与账上 5/10 已核验同处一页）。
       //   `accPayload` 即 `checkAcceptanceCriteria` 回传的**账上生效那一笔**（同一次读，不另查库）。
-      const reasonLabel = UNVERIFIED_REASON_LABEL[accOutcome.reason];
+      // zx_20261109_1 G11：`criteria_path_missing` 要把缺哪几条路径写出来（判据缺陷 vs 交付缺陷要分得开）。
+      const reasonLabel = unverifiedReasonText({ reason: accOutcome.reason, criteria_path_missing: accPayload.criteria_path_missing }) || UNVERIFIED_REASON_LABEL[accOutcome.reason] || '原因未记录';
       if (isAcceptanceVerified(accPayload)) {
         const passedTotal = Number(accPayload.passed_total) || 0;
         const criteriaTotal = Number(accPayload.criteria_total) || 0;
@@ -675,7 +677,13 @@ export async function runFinalizeTask(deps: ToolDeps, args: { summary: string; q
       checks.push(`[WARN] 本次有 ${truncated.length} 个文件只读取了部分内容（${shown}${more}）——"没读到"不等于"不存在"。${tail}`);
     }
   } catch { /* 如实性提示 best-effort，不阻断收口 */ }
-  ctxJson.finalize_checks = checks;
+  // zx_20261113_2 M15：只提示 Git 未提交（项目约定要求提交），不自动 add/commit；非 git/失败则静默。
+  try {
+    const gitAdvice = gitWorkingTreeAdvice(workingDir);
+    if (gitAdvice) checks.push(gitAdvice);
+  } catch { /* 提示失败不阻断收口 */ }
+  // zx_20261109_1 B5（G13）：旧条目**保留**（续跑不抹历史），本轮条目带 `[run <8位>]`，相邻同文去重。
+  ctxJson.finalize_checks = mergeFinalizeChecks(ctxJson.finalize_checks, checks, ctx.runId);
   // B1 回写 (2026-09-03_1): 实施任务带 scheme_ref → 完成时回写对应方案里程碑 done + 落地任务 id
   // zx_20260907: 补自动联动——scheme_ref 无生产者时回退按标题 M 前缀(父方案优先/同项目唯一)解析，新建"方案实施任务"finalize 即自动 done
   // zx_20260909 续跑(规划→独立实施): scheme_ref 仅带 plan_task_id(实施锚父关联方案, 子任务继承)时, 里程碑按标题 M{n} 派生——

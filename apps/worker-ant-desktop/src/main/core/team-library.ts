@@ -19,7 +19,8 @@
 import { randomUUID } from 'node:crypto';
 import { isTeamItemKind, type TeamItem, type TeamItemKind } from '@worker-ant/shared-types';
 // zx_20261021_3 批三: 领域包的**包内结构**只由 `core/domain-pack.ts` 认（本模块不另写一份解析/节词表）。
-import { parseDomainPackJson } from './domain-pack.js';
+// zx_20261113_5 M2：预览的节名也从同一张表取（renderer 不手抄第二份中文节名）。
+import { DOMAIN_PACK_SECTION_LABEL, parseDomainPackJson } from './domain-pack.js';
 // zx_20261022_3 批八: 画像的结构/校验/落库同出 `core/project-profile.ts`（本模块不另写解析）。
 import { insertImportedProfile, parseProjectProfileJson, readProjectProfile } from './project-profile.js';
 // zx_20261030_1 M5「限」：用户驱动的记忆导入受档位容量闸（机器写入不在此列——见 §1.4）。
@@ -86,8 +87,15 @@ export function listLocalItems(db: TeamLibraryDb): LocalCandidates {
   const templates = rows<{ id: string; name: string; category: string }>(
     'SELECT id, name, category FROM wa_task_templates ORDER BY updated_at DESC, created_at DESC LIMIT 201',
   );
+  // zx_20261113_5 M1「隐」：**墓碑与空正文不得进候选**。
+  //   实测：459 行 `memory_type='deleted'` 的正文被清空，老查询把它们按 importance 排到前列，
+  //   界面一眼是「(空记忆)」，还能被分享/导入成正文。谓词用 `memory_type`（与 `MEM_LIVE_SQL`
+  //   同款真源字段；不用 `deleted_at`——既有 rr 夹具的 wa_memories 没有该列）。
   const memories = rows<{ id: string; content: string; memory_type: string }>(
-    'SELECT id, content, memory_type FROM wa_memories ORDER BY importance DESC, updated_at DESC LIMIT 201',
+    `SELECT id, content, memory_type FROM wa_memories
+      WHERE memory_type <> 'deleted'
+        AND content IS NOT NULL AND TRIM(content) <> ''
+      ORDER BY importance DESC, updated_at DESC LIMIT 201`,
   );
   const deliverables = rows<{ id: string; name: string; type: string; status: string }>(
     'SELECT id, name, type, status FROM wa_deliverables ORDER BY created_at DESC LIMIT 201',
@@ -186,9 +194,11 @@ export function shareItem(db: TeamLibraryDb, kind: TeamItemKind, localId: string
       .prepare('SELECT content, memory_type, importance, reasoning FROM wa_memories WHERE id = ?')
       .get(localId) as { content: string; memory_type: string; importance: number; reasoning: string } | undefined;
     if (!row) throw new TeamLibraryError(`记忆不存在：${localId}`);
+    // zx_20261113_5 M1：空正文（典型是删除后的墓碑）**不冒充可分享**——发出去别人也只能收到空壳。
+    if (!str(row.content).trim()) throw new TeamLibraryError(`记忆内容为空，不能分享：${localId}`);
     return {
       kind,
-      title: firstChars(row.content || '(空记忆)', 200),
+      title: firstChars(row.content, 200),
       body: {
         content: row.content,
         memory_type: row.memory_type,
@@ -209,6 +219,7 @@ export function shareItem(db: TeamLibraryDb, kind: TeamItemKind, localId: string
       kind,
       title: firstChars(row.name || pack.name || '(未命名领域包)', 200),
       // 体 = 包本身（含 version/sections/training:false/omitted_sections）；名与描述取库里行（用户可改过）。
+      // B3：v2 业务域须随包同行——本白名单是手抄的，漏一字段即静默丢失（`business` 缺席时不补空壳）。
       body: {
         version: pack.version,
         name: row.name || pack.name,
@@ -218,6 +229,7 @@ export function shareItem(db: TeamLibraryDb, kind: TeamItemKind, localId: string
         derived_at: pack.derived_at,
         training: false,
         omitted_sections: pack.omitted_sections,
+        ...(pack.business ? { business: pack.business } : {}),
       },
     };
   }
@@ -257,6 +269,170 @@ export function shareItem(db: TeamLibraryDb, kind: TeamItemKind, localId: string
       status: row.status,
     },
   };
+}
+
+// ============================================================
+// zx_20261113_5 M2「见」：可读预览——与分享载荷**同一次组装**
+// ============================================================
+// 为什么在这里：`shareItem` 已经会按 kind 组装出「真正会发出去的东西」。
+//   预览若另写一份读法，就会出现"看到的"与"发出去的"两套口径（也正是本轮要治的病）。
+//   故 `previewLocalItem` = `shareItem` → `previewTeamBody`；远端由 renderer 交回 body 走同一映射。
+
+export interface TeamPreviewRow {
+  label: string;
+  value: string;
+}
+
+export interface TeamPreviewSection {
+  label: string;
+  content: string;
+}
+
+export interface TeamPreview {
+  kind: TeamItemKind;
+  title: string;
+  /** 元数据行（空值不占行——不编「无」）。 */
+  rows: TeamPreviewRow[];
+  /** 内容节（每节一段可读正文）。 */
+  sections: TeamPreviewSection[];
+  /** 非空 = 如实说明（如成果只元数据、包体有节被省略）。 */
+  note?: string;
+}
+
+function rowsOf(pairs: Array<[string, unknown]>): TeamPreviewRow[] {
+  const out: TeamPreviewRow[] = [];
+  for (const [label, v] of pairs) {
+    if (v === null || v === undefined) continue;
+    const value = typeof v === 'string' ? v : String(v);
+    if (!value.trim()) continue;
+    out.push({ label, value });
+  }
+  return out;
+}
+
+function listText(v: unknown): string {
+  if (!Array.isArray(v)) return '';
+  return v
+    .map((x) => (typeof x === 'string' ? x : JSON.stringify(x)))
+    .map((s) => s.trim())
+    .filter((s) => s !== '')
+    .join('\n');
+}
+
+function asRecord(v: unknown): Record<string, unknown> {
+  return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+}
+
+/** 把分享载荷的 body 映射成可读预览。**不读库、不写库**；坏形状只会少几节，不抛。 */
+export function previewTeamBody(kind: TeamItemKind, title: string, body: Record<string, unknown>): TeamPreview {
+  const out: TeamPreview = { kind, title: str(title), rows: [], sections: [] };
+  if (kind === 'template') {
+    out.rows = rowsOf([
+      ['分类', str(body.category)],
+      ['描述', str(body.description)],
+    ]);
+    const subtasks = listText(body.subtasks);
+    if (subtasks) out.sections.push({ label: '子任务', content: subtasks });
+    const keywords = listText(body.keywords);
+    if (keywords) out.sections.push({ label: '关键词', content: keywords });
+    return out;
+  }
+  if (kind === 'memory') {
+    out.rows = rowsOf([
+      ['类型', str(body.memory_type)],
+      ['重要度', body.importance],
+    ]);
+    const content = str(body.content);
+    if (content) out.sections.push({ label: '内容', content });
+    const reasoning = str(body.reasoning);
+    if (reasoning) out.sections.push({ label: '理由', content: reasoning });
+    return out;
+  }
+  if (kind === 'domain_pack') {
+    const sections = Array.isArray(body.sections) ? body.sections : [];
+    const chars = sections.reduce(
+      (n, s) => n + str(asRecord(s).content).length,
+      0,
+    );
+    const source = asRecord(body.source);
+    out.rows = rowsOf([
+      ['节数', sections.length],
+      ['字数', chars],
+      ['出处项目', str(source.project_name)],
+      ['版本', body.version],
+    ]);
+    for (const s of sections) {
+      const sec = asRecord(s);
+      const key = str(sec.section);
+      const content = str(sec.content);
+      if (!content) continue;
+      out.sections.push({
+        label: DOMAIN_PACK_SECTION_LABEL[key as keyof typeof DOMAIN_PACK_SECTION_LABEL] ?? key,
+        content,
+      });
+    }
+    const biz = asRecord(body.business);
+    const bizTerms = Array.isArray(biz.terms) ? biz.terms : [];
+    const bizRules = Array.isArray(biz.rules) ? biz.rules : [];
+    const bizScenes = Array.isArray(biz.scenarios) ? biz.scenarios : [];
+    if (bizTerms.length || bizRules.length || bizScenes.length) {
+      const lines: string[] = [];
+      for (const t of bizTerms) {
+        const term = asRecord(t);
+        const meaning = str(term.meaning);
+        lines.push(`概念：${str(term.term)}${meaning ? ` —— ${meaning}` : ''}`);
+      }
+      for (const r of bizRules) lines.push(`规则：${str(asRecord(r).rule)}`);
+      for (const s of bizScenes) lines.push(`场景：${str(asRecord(s).scenario)}`);
+      out.sections.push({ label: '业务域', content: lines.filter((l) => l.trim() !== '概念：').join('\n') });
+    }
+    const omitted = Array.isArray(body.omitted_sections) ? body.omitted_sections.map((x) => str(x)) : [];
+    if (omitted.length) out.note = `超体量上限，未携带的节：${omitted.join(' / ')}`;
+    return out;
+  }
+  if (kind === 'project_profile') {
+    const profile = asRecord(body.profile);
+    const runtime = asRecord(profile.runtime);
+    const tasks = asRecord(runtime.tasks);
+    const deliverables = asRecord(runtime.deliverables);
+    const calls = asRecord(runtime.calls);
+    out.rows = rowsOf([
+      ['版本', profile.version],
+      ['出处项目', str(body.source_project_name)],
+      ['生成时间', str(profile.generatedAt)],
+    ]);
+    const terms = str(profile.terms);
+    if (terms) out.sections.push({ label: '术语', content: terms });
+    const acceptance = str(profile.acceptance);
+    if (acceptance) out.sections.push({ label: '验收', content: acceptance });
+    const recipes = str(profile.recipes);
+    if (recipes) out.sections.push({ label: '配方', content: recipes });
+    const lessons = Array.isArray(profile.lessons) ? profile.lessons.map((x) => str(x)).filter(Boolean) : [];
+    if (lessons.length) out.sections.push({ label: '教训', content: lessons.join('\n') });
+    const runtimeLines: string[] = [];
+    if (tasks.total !== undefined) runtimeLines.push(`任务 ${str(tasks.total)}（完成 ${str(tasks.completed)} / 失败 ${str(tasks.failed)} / 进行 ${str(tasks.active)}）`);
+    if (deliverables.total !== undefined) runtimeLines.push(`成果 ${str(deliverables.total)}`);
+    if (calls.total !== undefined) runtimeLines.push(`外部调用 ${str(calls.total)}（成功 ${str(calls.ok)} / 失败 ${str(calls.failed)}）`);
+    if (runtimeLines.length) out.sections.push({ label: '运行面', content: runtimeLines.join('\n') });
+    return out;
+  }
+  // deliverable：只元数据
+  out.rows = rowsOf([
+    ['类型', str(body.type)],
+    ['状态', str(body.status)],
+    ['描述', str(body.description)],
+  ]);
+  out.note = '成果只共享元数据，不含文件内容。';
+  return out;
+}
+
+/**
+ * 本机候选的可读预览。走**既有** `shareItem` 的组装：
+ * 分享会被拒的（空记忆 / 坏包 / 坏画像），预览同样如实拒——不另给一条"看得到但发不出"的路。
+ */
+export function previewLocalItem(db: TeamLibraryDb, kind: TeamItemKind, localId: string): TeamPreview {
+  const payload = shareItem(db, kind, localId);
+  return previewTeamBody(kind, payload.title, payload.body);
 }
 
 function requireBody(item: TeamItem): Record<string, unknown> {
@@ -332,6 +508,9 @@ export function importItem(
   }
 
   if (kind === 'memory') {
+    // zx_20261113_5 M1：空内容不导入——不再回落成 `item.title`（那会把一条空壳"洗"成正文）。
+    const content = str(body.content);
+    if (!content.trim()) throw new TeamLibraryError('共享条目不是可用的记忆（内容为空）');
     // zx_20261030_1 M5「限」：团队共享库**导入**的记忆总条数（`source='team_library'`）受档位上限约束。
     //   到顶即按本模块既有错误形状拒（`TeamLibraryError`，IPC 原样上屏）；已导入的记忆一条不删。
     const verdict = capacityRefusal(resolveLicenseTier(db), 'maxTeamLibraryMemories', countTeamLibraryMemories(db));
@@ -341,7 +520,7 @@ export function importItem(
     ).run(
       id,
       projectId,
-      str(body.content) || item.title,
+      content,
       'semantic',
       num(body.importance, 0.5),
       'team_library',

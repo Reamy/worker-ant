@@ -58,6 +58,8 @@ import os from 'node:os';
 import http from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { checkBuildPins, stripKeepingLines } from './lib/rr-pins.js';
+// zx_20261112_1 B4：任务动作分层收成零依赖纯模块（renderer/src/lib/task-actions），本套按真源重定向。
+import { taskActionLayout } from '../apps/worker-ant-desktop/renderer/src/lib/task-actions.js';
 // A · M1：显形判定 / 发件下游 / 取件守则 —— 一律调**生产导出**（G-1：不自造等价实现）
 import {
   imMediaOf, extOf, baseNameOf, audioPlayNote, formatMediaSize, resolveAudioPreview,
@@ -877,8 +879,13 @@ async function groupBc(): Promise<void> {
     'B-c-10 ★handler 真的调它（定义了不调 ⇒ 标牌永远空白）');
   const page = RD(`${A}/renderer/src/pages/IMPage.tsx`);
   ok(/interface Conversation \{[^}]*task_id\?: string/.test(page), 'B-c-11 渲染侧类型收到 `task_id`');
-  ok(/\{c\.task_id&&<span className="ml-1 px-1 rounded bg-gray-200/.test(page),
-    'B-c-12 ★标牌**只在 `task_id` 非空时出现**（空串＝无归属 ⇒ 界面上什么都不说，不替它编一个）');
+  // zx_20261108_1 B3：标牌由不可点的 `<span>` 升级为可点的 `<button>`（看得见归属就要跳得到任务）。
+  //   按符号重定向到更强的新真源（不是放宽）：①仍只在 `task_id` 非空时渲染；②点击真跳 `/tasks/<真 id>`；
+  //   ③文案仍是「属于任务」。
+  const badgeAt = page.indexOf('{c.task_id&&');
+  const badge = badgeAt < 0 ? '' : page.slice(badgeAt, badgeAt + 320);
+  ok(page.includes('{c.task_id&&<button') && badge.includes('navigate(`/tasks/${c.task_id}`)') && badge.includes('属于任务'),
+    'B-c-12 ★标牌**只在 `task_id` 非空时出现**（空串＝无归属 ⇒ 界面上什么都不说，不替它编一个），且可点跳任务');
 
   // ── 行为一：落点函数本体（真库，两只标本一起试）──
   {
@@ -1493,11 +1500,12 @@ function groupDe(): void {
     const s = outboxStats(db);
     eq([s.pending, s.dead, s.other], [1, 2, 2],
       'D-f-2 折叠档照旧：`other` 兜住 unsupported_media(1) + 未知态(1)，值恰为 2');
+    // zx_20261110_1 B7：`dismissed` 单列一档（关闭项不再混进 other）⇒ 总数两侧同步纳入。
     eq(Object.values(counts).reduce((a, b) => a + b, 0),
-      s.pending + s.blocked_quota + s.dead + s.sent + s.other,
+      s.pending + s.blocked_quota + s.dead + s.sent + s.dismissed + s.other,
       'D-f-3 ★两个口径**总数相等**（同一次 `GROUP BY status` 派生 ⇒ 界面各组的"共 M 条"加起来必等于横幅的总数）');
-    eq(Object.keys(s).sort(), ['blocked_quota', 'dead', 'other', 'pending', 'sent'],
-      'D-f-4 折叠档返回值**形状不变**（`byStatus` 是**另立**的出口，不塞进这里——既有整对象断言因此逐字仍成立）');
+    eq(Object.keys(s).sort(), ['blocked_quota', 'dead', 'dismissed', 'other', 'pending', 'sent'],
+      'D-f-4 折叠档返回值**形状不变**（`byStatus` 是**另立**的出口，不塞进这里；B7 增 `dismissed` 单列一档）');
   }
 
   // ── ② 稳定次序：同一秒多行时翻页**不重不漏**（`created_at` 只到秒；不补 `rowid` 则次序不定 = 分页病） ──
@@ -1658,23 +1666,26 @@ CREATE TABLE wa_task_conversations (
   }
 
   // ── ③ `deliverable:list`：`total`/`retiredCount` 与明细**同一段 FROM/JOIN/WHERE、同一组 params** ──
+  // zx_20261108_1 B6：取数整段搬到 `core/deliverable-query.ts`（rr 可直跑、导出与列表同一次装配），
+  //   IPC 只剩 `queryDeliverables(db, input)` 一跳。扫描面按**符号**重定向到新载体，钉的形状更具体
+  //   （`displayWhere`/`coreWhere`/`values` 全部具名，不再靠匿名 `params` 复用来证明同集合）。
   {
-    const ipc = RD(`${A}/src/main/ipc/project.ipc.ts`);
-    const iList = ipc.indexOf("ipcMain.handle('deliverable:list'");
-    const iNext = ipc.indexOf('ipcMain.handle(', iList + 10);
-    const seg = iList >= 0 && iNext > iList ? ipc.slice(iList, iNext) : '';
-    ok(seg.length > 2000, 'D-g-22 扫描面自证：`deliverable:list` handler 体取到（否则下面几条是空转假绿）', `${seg.length} 字节`);
-    ok(/const total = \(db\.prepare\(`SELECT COUNT\(\*\) AS c \$\{from\}`\)\.get\(\.\.\.params\)/.test(seg),
-      'D-g-23 ★`total` 复用**同一段 `from` + 同一组 `params`**（两处手抄必然分叉："共 M 条"与这页的行就不是一个集合了）');
-    ok(/const retiredCount = \(db\.prepare\([\s\S]{0,400}?d\.status = 'retired'`\)\.get\(\.\.\.params\)/.test(seg),
+    const q = RD(`${A}/src/main/core/deliverable-query.ts`);
+    const iq = q.indexOf('export function queryDeliverables(');
+    const seg = iq >= 0 ? q.slice(iq) : '';
+    ok(seg.length > 2000, 'D-g-22 扫描面自证：`queryDeliverables` 函数体取到（否则下面几条是空转假绿）', `${seg.length} 字节`);
+    ok(/const total = \(db\.prepare\(`SELECT COUNT\(\*\) AS c \$\{from\} WHERE \$\{displayWhere\}`\)\.get\(\.\.\.values\)/.test(seg),
+      'D-g-23 ★`total` 复用**同一段 `from` + 同一组 `values`**（两处手抄必然分叉："共 M 条"与这页的行就不是一个集合了）');
+    ok(/const retiredCount = \(db\.prepare\(`SELECT COUNT\(\*\) AS c \$\{from\} WHERE \$\{coreWhere\} AND d\.status = 'retired'`\)\.get\(\.\.\.values\)/.test(seg),
       'D-g-24 ★"已退休 N 项"改由**服务端按同一组筛选条件**算（原先由渲染层数当页 items ⇒ 分页后那提示的数比它所指的集合小）');
-    ok(seg.includes('${from} ORDER BY d.created_at DESC, d.rowid DESC${page.sql}'),
-      'D-g-25 ★明细次序补 `d.rowid DESC` 兜同秒行（同 §②：`created_at` 单独不是全序）');
-    ok(seg.includes('return { data: { rows: data, total, retiredCount, limit: page.limit, offset: page.offset } }'),
+    ok(seg.includes(', d.rowid ${dir}'),
+      'D-g-25 ★明细次序补 `d.rowid` 同向兜同秒行（同 §②：`created_at` 单独不是全序）');
+    ok(seg.includes('return { rows, total, retiredCount, limit, offset };'),
       'D-g-26 ★返回体含 `total`/`limit`/`offset`——"只给前 N 条且不说还剩多少"正是本轮所治的病');
-    ok(seg.includes('for (const r of data) r.size_bytes = statSizeBytes(r.file_path);'),
-      'D-g-27 计数器与大小列仍打在**局部名 `data`** 上（分页改的是取数，不是这行接线）');
-    ok(seg.includes('const page = resolvePage(limit, offset);'),
+    ok(/if \(sort !== 'size'\) for \(const r of rows\) r\.size_bytes = statSizeBytes\(r\.file_path\);/.test(seg)
+      && seg.includes('r.other_writers = writers.get'),
+      'D-g-27 计数器与大小列仍打在**行对象**上（分页改的是取数，不是这行接线）');
+    ok(seg.includes('const page = resolvePage(p.limit, p.offset);'),
       'D-g-28 ★夹取走共享真源（不在 handler 里自己夹）');
   }
 
@@ -1738,25 +1749,36 @@ CREATE TABLE wa_task_conversations (
       'D-g-42b [TaskDetailPage.tsx] ★反证：字面量**穷举**恰两个翻页哨兵（`=1` = "另一个列表只要 1 行"），批大小一律走真源');
     ok(src['DeliverablesPage.tsx']!.includes('const PAGE_SIZE = LIST_PAGE_SIZE;'),
       'D-g-43 成果页把批次收敛成一个名字（后续三处调用都读它）');
-    ok(src['DeliverablesPage.tsx']!.includes('{ limit: PAGE_SIZE, offset: 0 }')
-      && src['DeliverablesPage.tsx']!.includes('{ limit: PAGE_SIZE, offset: items.length }'),
+    // zx_20261108_1 B6：成果页三处（首屏/加载更多/导出）改由 `buildParams` 一处装配，批大小仍取真源
+    //   `PAGE_SIZE`；判据按符号重定向到新载体，钉的仍是"首屏取第 0 页、续取按已列出条数"。
+    const delivPage = src['DeliverablesPage.tsx']!;
+    ok(delivPage.includes('deliverables.list(buildParams(PAGE_SIZE, 0))')
+      && delivPage.includes('deliverables.list(buildParams(PAGE_SIZE, items.length))')
+      && /limit,\s*\n\s*offset,/.test(delivPage),
       'D-g-44 ★成果页首屏取第 0 页、「加载更多」按**已列出的条数**取下一页（不是重新取前 N 条）');
-    ok(src['ProjectDetailPage.tsx']!.includes('{ limit: LIST_PAGE_SIZE, offset: 0 }')
-      && src['ProjectDetailPage.tsx']!.includes('{ limit: LIST_PAGE_SIZE, offset: pjDelivs.length }'),
+    ok(src['ProjectDetailPage.tsx']!.includes('limit: LIST_PAGE_SIZE, offset: 0')
+      && src['ProjectDetailPage.tsx']!.includes('limit: LIST_PAGE_SIZE, offset: pjDelivs.length'),
       'D-g-45 ★项目详情页同尺（首屏 0 / 续取已列出条数）');
     ok(src['TaskDetailPage.tsx']!.includes('convLimit: LIST_PAGE_SIZE, convOffset: 0, delivLimit: LIST_PAGE_SIZE, delivOffset: 0')
       && src['TaskDetailPage.tsx']!.includes('convOffset: convs.length')
       && src['TaskDetailPage.tsx']!.includes('delivOffset: delivs.length'),
       'D-g-46 ★任务详情两个列表各取第 0 页、各按已列出条数续取（参数一个不漏）');
+    // zx_20261107_1 B9：任务详情的两个折叠块按关节抽进 `TaskArtifacts`/`TaskHeader`，计数与退休提示
+    //   随部件走。判据按**符号**重定向到新载体，并额外钉"页面确实把服务端全量传下去"——
+    //   只搬组件不接线同样是假绿（钉的仍是"印服务端全量""判全量为 0"，不是放宽）。
+    const tdPage = src['TaskDetailPage.tsx']!;
+    const taBox = RD(`${A}/renderer/src/components/task/TaskArtifacts.tsx`);
+    const thBox = RD(`${A}/renderer/src/components/task/TaskHeader.tsx`);
     // 计数如实：印服务端总数，不印当页长度
-    ok(src['TaskDetailPage.tsx']!.includes('本任务（含子任务）{delivTotal} 条')
-      && src['TaskDetailPage.tsx']!.includes('对话历史 ({convTotal})'),
-      'D-g-47 ★折叠头与计数块印**服务端全量**（`delivTotal`/`convTotal`）');
-    ok(!src['TaskDetailPage.tsx']!.includes('本任务（含子任务）{delivs.length}')
-      && !src['TaskDetailPage.tsx']!.includes('对话历史 ({convs.length})'),
+    ok(taBox.includes('本任务（含子任务）{total} 条') && tdPage.includes('total={delivTotal}')
+      && tdPage.includes('对话历史 ({convTotal})'),
+      'D-g-47 ★折叠头与计数块印**服务端全量**（组件收 `total`，页面以 `delivTotal` 传入 / `convTotal`）');
+    ok(!taBox.includes('本任务（含子任务）{items.length}') && !tdPage.includes('本任务（含子任务）{delivs.length}')
+      && !tdPage.includes('对话历史 ({convs.length})'),
       'D-g-48 ★反证：把"这一批多少"印成"一共多少"的旧写法已零处（那时下方还挂着「加载更多」，自相矛盾）');
-    ok(src['TaskDetailPage.tsx']!.includes('{delivTotal === 0 && retiredCount > 0 && ('),
-      'D-g-49 「重试后仅存退休件」的提示判**全量**为 0（否则分页后第一页恰空的假象会让它不亮）');
+    ok(thBox.includes('stats.deliverables === 0 && retiredCount > 0 && (')
+      && tdPage.includes('deliverables: delivTotal') && tdPage.includes('retiredCount={retiredCount}'),
+      'D-g-49 「重试后仅存退休件」的提示判**全量**为 0（组件判 `stats.deliverables`，页面以 `delivTotal` 传入；否则分页后第一页恰空的假象会让它不亮）');
     ok(src['DeliverablesPage.tsx']!.includes('const projects = facetProjects.map(p => [p.id, p.name || \'未知项目\'] as const)')
       && !src['DeliverablesPage.tsx']!.includes('new Map(items.filter('),
       'D-g-50 ★下拉名录既不受页内筛选、也不受分页影响（E15「选定后自坍缩」不会换个入口复发）');
@@ -1867,10 +1889,17 @@ function groupEb(): void {
   //   `isTerminalStatus` 取——旧判据在**函数体里找字面量**，收口后切到空块。
   //   按新载体重定向：既钉「三元组本身含 archived」，又钉「isTerminalTask 真的经它取」——只钉前者
   //   会漏掉"函数自己另抄一份名单"的情形（那正是收口前的老样子）。
-  const triple = jobs.match(/export const TERMINAL_STATUSES\s*=\s*\[([^\]]*)\]/);
+  // zx_20261111_3 B5：三元组与判据迁到零依赖 `core/status-terms.ts`（渲染层要取它；`task-jobs.ts`
+  //   会连带 `logger.ts` 的模块求值期 `process.env`，在渲染进程里必崩）。**按符号重定向到新载体**，
+  //   强度不减：既钉三元组真身在新模块，又钉 `task-jobs` 是**转出**而非另抄一份字面量。
+  const statusTerms = RD(`${A}/src/main/core/status-terms.ts`);
+  const triple = statusTerms.match(/export const TERMINAL_STATUSES\s*=\s*\[([^\]]*)\]/);
   const terminalStatuses = triple ? [...triple[1]!.matchAll(/'([^']+)'/g)].map((x) => x[1]) : [];
   eq(terminalStatuses, ['completed', 'failed', 'archived'],
-    'E-b-6a ★终态三元组一处真源（`isTerminalTask` 与执行体/暂停写口/改状态共用一份）');
+    'E-b-6a ★终态三元组一处真源（`status-terms.ts`；`isTerminalTask` 与执行体/暂停写口/改状态共用一份）');
+  ok(!/export const TERMINAL_STATUSES\s*=/.test(jobs)
+    && /export \{ TERMINAL_STATUSES, isTerminalStatus \}/.test(jobs),
+    'E-b-6a2 ★`task-jobs.ts` 只**转出**、不另抄一份三元组字面量（反证第二份）');
   ok(!!m && m[0].includes('isTerminalStatus('),
     'E-b-6b ★`isTerminalTask` 经 `isTerminalStatus` 取三元组（不另抄第二份名单）');
   ok(terminalStatuses.includes('archived') && !(REVIEWABLE_STATUSES as readonly string[]).includes('archived'),
@@ -2688,8 +2717,10 @@ function groupGa(): void {
     dbG.prepare('INSERT INTO wa_memories (id, project_id, content, embedding, memory_type, importance, created_at) VALUES (?,?,?,?,?,?,?)')
       .run(id, 'p1', content, embedding, 'semantic', 0.5, gaIso(GA_NOW - ageDays * 24 * GA_HOUR));
   };
-  // 5 条填充：占掉 `getRecent(5)` 的排除位（故不进长期层池），且无 embedding ⇒ 也不进语义检索池。
-  for (let i = 0; i < 5; i++) insMem(`f${i}`, `填充${i}`, 0, null);
+  // 5 条填充：占掉 `getRecent(5)` 的排除位（不进长期层池），且无 embedding ⇒ 也不进语义检索池。
+  // zx_20261110_1 B4：short 层不再被丢弃（三层配额合并）⇒ 这 5 条里前 2 条会进结果。
+  //   时刻按小时错开，使 `created_at DESC` 的先后可复现（同一时刻的并列序是 SQLite 实现细节，不可当判据）。
+  for (let i = 0; i < 5; i++) insMem(`f${i}`, `填充${i}`, i / 24, null);
   insMem('m1', '花园浇水施肥', 1);
   insMem('m2', '数据库索引优化', 2);
   insMem('m3', '部署失败复盘与回滚脚本要先备份', 3);
@@ -2697,19 +2728,19 @@ function groupGa(): void {
     .run('t-schema', 'p1', '修部署', '', JSON.stringify({ task_embedding: [1, 0] }));
   const SCHEMA_TXT = '部署失败复盘与回滚';
   const orderOf = (schema: string): string[] => memG.retrieveTaskRelevant('t-schema', 'p1', 5, schema).map((m) => String(m.id));
-  eq(orderOf(''), ['m1', 'm2', 'm3'],
-    'G-a-37 前置：不传图式 ⇒ 旧口径（三条语义层同键并列，稳定序＝`created_at DESC`）——这正是新老两态的共同基线');
-  eq(orderOf(SCHEMA_TXT), ['m3', 'm1', 'm2'],
+  eq(orderOf(''), ['f0', 'f1', 'm1', 'm2', 'm3'],
+    'G-a-37 前置：不传图式 ⇒ 三层合并后的基线（近因层前 2 条 + 长期层 3 条按 `created_at DESC`）——新老两态的共同基线');
+  eq(orderOf(SCHEMA_TXT), ['m3', 'f0', 'f1', 'm1', 'm2'],
     'G-a-38 ★★传图式 ⇒ 按**当下需求**重建条序：`m3` 整条都是需求点到的（亲和度 0.5），提到首位；'
-    + '另两条零共同词（0）并列，保持上一跳的序 ⇒「重建」不是"两段拼"也不是"全按新分重排"');
+    + '另四条零共同词（0）并列，保持上一跳的序 ⇒「重建」不是"两段拼"也不是"全按新分重排"');
   dbG.prepare('INSERT INTO wa_settings (key, value) VALUES (?, ?)').run('memory.schema_recall', 'false');
-  eq(orderOf(SCHEMA_TXT), ['m1', 'm2', 'm3'],
-    'G-a-39 ★开关关 ⇒ **逐位回旧口径**（同一池、同一图式，差别只可能来自开关 ⇒ A/B 成立）');
+  eq(orderOf(SCHEMA_TXT), ['f0', 'f1', 'm1', 'm2', 'm3'],
+    'G-a-39 ★开关关 ⇒ **逐位回基线**（同一池、同一图式，差别只可能来自开关 ⇒ A/B 成立）');
   dbG.prepare("UPDATE wa_settings SET value = 'true' WHERE key = 'memory.schema_recall'").run();
   eq([...orderOf(SCHEMA_TXT)].sort(), [...orderOf('')].sort(),
     'G-a-40 ★★成员集**一字不动**（只重排）——本处不新增任何"东西去哪了"的黑洞：'
     + '本轮刚撤掉装配层那道静默丢段（M7-a），不得在检索层再添一个');
-  eq(orderOf('a'), ['m1', 'm2', 'm3'],
+  eq(orderOf('a'), ['f0', 'f1', 'm1', 'm2', 'm3'],
     'G-a-41 图式提不出关键词 ⇒ **整趟不动**（原序返回，不是"逐条判、判不出给零分"——那是把不知道混进了零分）');
 
   // 同一条判据在纯函数层的两侧标本（上条的"不动"必须是**因为**那条判不出，不是这些候选本就同序）
@@ -2805,10 +2836,13 @@ function groupGb(): void {
     + '不得整体覆写——照抄"写得对"的样子，两处都在场');
 
   // M7-d 分层检索接线
-  ok(retSrc.includes('const pool = retrieveLayered(mgr, queryText, queryEmb, projectId, topK, { longTermK: Math.max(topK * 4, 20) }).longTerm;')
-    && retSrc.includes('const { episodic, semantic } = splitTaskLayers(pool, (m) => mgr.retrievalStrength(m), Date.now());')
-    && retSrc.includes('const merged = mergeTaskLayers(episodic, semantic, topK);'),
-    'G-b-9 ★三跳齐全且按序：**放宽**长期层池（`longTermK`）→ 按 Tulving 二分各排各的（强度由管理器传值）→ 轮转交织取 topK');
+  // zx_20261110_1 B4：取数从「只拿 longTerm」改为「一次取三层再按配额合并」（short→mid→long）。
+  //   判据按符号重定向（不放宽）：仍要求**放宽**长期层 → Tulving 二分 → 轮转交织，且三层真进合并。
+  ok(retSrc.includes('const layered = retrieveLayered(mgr, queryText, queryEmb, projectId, topK, { longTermK: Math.max(topK * 4, 20) });')
+    && retSrc.includes('const { episodic, semantic } = splitTaskLayers(layered.longTerm, (m) => mgr.retrievalStrength(m), Date.now());')
+    && retSrc.includes('const longOrdered = mergeTaskLayers(episodic, semantic, layered.longTerm.length);')
+    && retSrc.includes('const merged = mergeMemoryLayers(layered.shortTerm, layered.midTerm, longOrdered, topK);'),
+    'G-b-9 ★四跳齐全且按序：**放宽**长期层池（`longTermK`）→ 按 Tulving 二分各排各的（强度由管理器传值）→ 轮转交织 → short/mid/long 三层配额合并取 topK');
 
   // M7-e 工作记忆
   // zx_20261027_1 M5：复述分支中间按"只升不降"补了出处升级（evidence 行插在原一条语句之间），
@@ -3106,11 +3140,16 @@ function groupHg(): void {
     'H-g-14 索引与**查询形状**对齐（拦截查询按 `memory_type + deleted_fingerprint` 走）');
 
   // ⑥ 消费侧：筛得取值来源保留全量（否则墓碑那一格点不到）；审计面真给 `deleted_*` 两列
-  ok(/SELECT memory_type, COUNT\(\*\) as cnt FROM wa_memories GROUP BY memory_type/.test(admin),
+  // zx_20261108_1 B4：记忆列表取数整段搬到 `core/memory-admin.ts`（IPC 只剩一跳），扫描面按符号重定向。
+  const memAdmin = RD(`${A}/src/main/core/memory-admin.ts`);
+  ok(/SELECT memory_type, COUNT\(\*\) AS cnt FROM wa_memories GROUP BY memory_type/.test(memAdmin),
     'H-g-15 ★类型卡的计数**保留全部取值**（含 `deleted`）——它同时是筛选条的取值来源，墓碑那一格必须点得到');
-  ok(/const total = \(db\.prepare\(`SELECT COUNT\(\*\) as c FROM wa_memories m\$\{whereSql\}`\)\.get\(\.\.\.params\)/.test(admin),
+  ok(/const whereSql = ` WHERE \$\{w\.join\(' AND '\)\}`/.test(memAdmin)
+    && /\$\{join\}\$\{whereSql\}`,\n?\s*\)\.get\(\.\.\.p\)/.test(memAdmin)
+    && /LEFT JOIN wa_projects p ON m\.project_id = p\.id\$\{join\}\$\{whereSql\} ORDER BY/.test(memAdmin),
     'H-g-16 ★`total` 与列表**同一套 WHERE**（此前是全库计数、与筛选无关 ⇒ 带筛选的翻页总数恒错）');
-  ok(/where\.push\(`m\.\$\{MEM_LIVE_SQL\}`\)/.test(admin) && /if \(type\) \{ where\.push\('m\.memory_type = \?'\)/.test(admin),
+  ok(/else \{ where\.push\(`m\.\$\{MEM_LIVE_SQL\}`\); \}/.test(memAdmin)
+    && /if \(filter\.type\) \{ where\.push\('m\.memory_type = \?'\); params\.push\(filter\.type\); \}/.test(memAdmin),
     'H-g-17 两句收口：**不点名类型 ⇒ 常规列表（不含墓碑）**；点名 `type` ⇒ 精确匹配（点名 `deleted` 即审计面）');
   ok(/const row = db\.prepare\("SELECT id FROM wa_memories WHERE id = \? AND memory_type = 'semantic'"\)\.get\(id\)/.test(admin),
     'H-g-18 ★偏好页的守卫**保留**：只删得动 `semantic` 行（墓碑是 `deleted` ⇒ 二次删除恒 false，不会把缘由改写）');
@@ -3275,8 +3314,12 @@ function groupIa(): void {
   //   既不把"仅注释提及"误当漏头，也不放过真实未上路的请求（面更准，非放宽）。
   const srcsCode = new Map<string, string>(files.map((f) => [f, stripKeepingLines(srcs.get(f)!).join('\n')] as const));
   const apiFiles = files.filter((f) => srcsCode.get(f)!.includes('/api/v1/')).sort();
+  // zx_20261112_2：第三条**真签名路**——注入的 `AnsClient` 实例直接调 `post()`（SDK `requestWithRetry` 自带三头）。
+  //   `memory-manager.ts` 的 embedding 用量上报走这条；它不是豁免，仍是签名路，只是不经 `getAnsClient()` 门面。
   const unrouted = apiFiles.filter((f) => f !== TRUTH
-    && !/ansSignedRequest\s*\(/.test(srcsCode.get(f)!) && !/getAnsClient\s*\(\s*\)/.test(srcsCode.get(f)!));
+    && !/ansSignedRequest\s*\(/.test(srcsCode.get(f)!)
+    && !/getAnsClient\s*\(\s*\)/.test(srcsCode.get(f)!)
+    && !/this\.ansClient\.(?:post|get|requestWithRetry)\s*\(/.test(srcsCode.get(f)!));
   eq(unrouted, NOT_ON_SIGNING_PATH,
     'I-a-5 ★★完备性：`/api/v1/` 的每个文件都在签名路上；未上路的**恰是点名的豁免**'
     + '（多一个＝有路仍漏头，少一个＝豁免已不必要、应删；`ans-supervisor.ts` 为 zx_20261005 M21 新豁免：'
@@ -4424,17 +4467,26 @@ function groupLe(): void {
 
   // ② ★两个出口（pending / paused）真落在 GUI 上，且都不是"等它自己超时"
   const page = RD(`${A}/renderer/src/pages/TaskDetailPage.tsx`);
-  eq((page.match(/task\.status==='stabilizing' &&/g) ?? []).length, 3,
-    'L-e-3 ★详情页三处认得该态（横幅 + 动作栏两钮）——此前**一处也没有**，任务就此永久停住');
-  ok(/task\.status==='stabilizing'[\s\S]{0,120}?handleStatus\(task\.id,'pending'\)/.test(page)
-    && /task\.status==='stabilizing' && <button onClick=\{\(\) => handleStatus\(task\.id,'paused'\)\}/.test(page),
-    'L-e-4 ★★两个**明确出口**：`→ pending`（确认并放回队列，等下一轮调度自动拉起）与 `→ paused`（转人工暂停态）'
+  // zx_20261112_1 B4：动作栏改由纯函数 `taskActionLayout` 唯一派生（页面不再按状态各写一遍）；
+  //   判据随真源前移——横幅仍在页面，两个人工出口改钉「布局真源 + 真 handler」，不放宽。
+  eq((page.match(/task\.status==='stabilizing' &&/g) ?? []).length, 1,
+    'L-e-3 ★详情页横幅认得该态（此前**一处也没有**，任务就此永久停住）');
+  const stabLayout = taskActionLayout('stabilizing');
+  eq([stabLayout.primary, stabLayout.secondary.includes('pause'), stabLayout.danger.includes('archive')], ['requeue', true, true],
+    'L-e-3b ★动作栏由唯一真源派生：主操作=放回队列、次要含转人工暂停、危险含归档（分层不得丢掉出口）');
+  ok(/case 'requeue': void handleStatus\(task\.id, 'pending'\)/.test(page)
+    && /case 'pause': void handleStatus\(task\.id, 'paused'\)/.test(page),
+    'L-e-4 ★★两个**明确出口**都接到真 handler：`→ pending`（确认并放回队列，等下一轮调度自动拉起）与 `→ paused`（转人工暂停态）'
     + '——"它不会自己超时恢复"这句话必须有对应的按钮才不是空话');
   ok(/稳定观察中/.test(page) && /确认并放回队列/.test(page),
     'L-e-5 横幅说人话：成因条数从 `context_json.status_changes` **如实数出来**，不让人自己去猜为什么停');
+  // zx_20261107_1 B9：徽标配色收敛到共享 `lib/status-view.ts`（页面不再各写一张色表）。
+  //   判据随真源前移，并钉"列表页确实用共享判定出徽标"——只登记颜色不接线同样是假绿。
+  const statusView = RD(`${A}/renderer/src/lib/status-view.ts`);
   const tasksPage = RD(`${A}/renderer/src/pages/TasksPage.tsx`);
-  ok(/stabilizing:'bg-amber-50/.test(tasksPage),
-    'L-e-6 ★任务列表徽标也给了档（原无档 ⇒ 落灰底，与"不认识的态"混同）');
+  ok(/stabilizing: 'bg-amber-50/.test(statusView) && /\$\{taskStatusPill\((t|status)\.status\)\}/.test(tasksPage)
+    && tasksPage.includes("from '../lib/status-view'"),
+    'L-e-6 ★任务列表徽标也给了档（原无档 ⇒ 落灰底，与"不认识的态"混同；配色在共享词表、页面经 `taskStatusPill` 取）');
 
   // ③ 渲染层是词表的第二个落点：产物证据（minify 后搜**中文串**，标识符不可靠）
   const assetsDir = path.join(root, A, 'renderer', 'dist', 'assets');

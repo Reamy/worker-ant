@@ -7,6 +7,8 @@ import { useLiveQuery } from '../lib/useLiveQuery';
 import { FreshnessPill } from '../components/FreshnessPill';
 import DeleteProjectDialog from '../components/DeleteProjectDialog';
 import { PROJECT_STATUS_LABEL, statusText } from '../lib/status-view';
+// zx_20261107_1 B9: token 展示与详情页同尺
+import { formatTokens } from '../lib/format';
 import { Plus, Edit, Trash2, Play, Pause, Check, Archive, FolderKanban, Copy, Brain, Search } from 'lucide-react';
 
 interface Project {
@@ -252,9 +254,9 @@ export default function ProjectsPage() {
                       ? <span className="text-orange-500" title="任务统计取数失败——不是「没有任务」">统计不可用</span>
                       : <span>任务 {p.taskStats?.total||0}(✅{p.taskStats?.completed||0})</span>}
                     {p.deliverableStats?.total ? <span>产出物 {p.deliverableStats.total} (MCP:{p.deliverableStats.mcp||0} A2A:{p.deliverableStats.a2a||0})</span> : null}
-                    {p.tokenStats?.total_tokens ? <span>Token {p.tokenStats.total_tokens>=1000?(p.tokenStats.total_tokens/1000).toFixed(0)+'K':String(p.tokenStats.total_tokens)}</span> : null}
+                    {p.tokenStats?.total_tokens ? <span>Token {formatTokens(p.tokenStats.total_tokens)}</span> : null}
                     {p.cron_schedule && <span className="font-mono">⏰ {p.cron_schedule}</span>}
-                    {p.budget?.max_tokens_per_task ? <span title="任务Token预算">💰 {p.budget.max_tokens_per_task>=1000?(p.budget.max_tokens_per_task/1000).toFixed(0)+'K':String(p.budget.max_tokens_per_task)}</span> : null}
+                    {p.budget?.max_tokens_per_task ? <span title="任务Token预算">💰 {formatTokens(p.budget.max_tokens_per_task)}</span> : null}
                     {p.rhythm && (p.rhythm.activeHourStart!=null || p.rhythm.activeHourEnd!=null) && <span title={`活跃时间 ${p.rhythm.activeHourStart??''}-${p.rhythm.activeHourEnd??''}点`}>🕐 {p.rhythm.activeHourStart??0}-{p.rhythm.activeHourEnd??24}点</span>}
                     {p.staleness==='stale' && <span className="text-orange-500">● 低活跃</span>}
                     {p.staleness==='dormant' && <span className="text-red-400">● 不活跃</span>}

@@ -23,7 +23,7 @@ import { buildModelRequest, compareModelCapabilities, deriveMinContextWindow, de
 // zx_20261003 M3: 选型期判族的**嗅探口**——与装配层（`attachment-inline.ts` 的 `defaultIo.readHead`）
 //   共用同一实现，两处对同一件东西必得同族（详见 `file-head.ts` 头注释）。
 import { readHeadFromFile } from './file-head.js';
-import { evaluatePolicies } from './policy-engine.js';
+import { evaluateFailurePolicies } from './policy-engine.js';
 // zx_20261012_2 批一（策略可配）: 阈值/窗口读库真源 + 窗内失败数唯一取数实现。
 import { countRecentFailures, loadPolicies } from './policy-config.js';
 // zx_20261012_2 批一: 策略闸总开关（缺省即开）——关 ⇒ 连取数都不取，逐字回旧行为。
@@ -33,6 +33,9 @@ import { PAUSE_REASON_POLICY_PAUSED } from './pause-reason.js';
 // zx_20261012_2 批五 M5: `notify_admin` 策略动作须**真的通知到人**（此前只写会话行，名实不符）。
 import { pushImNotify } from './im/im-notify.js';
 import type { TaskArchetype } from './task-archetype.js';
+// zx_20261107_1 B6：选型五要素的**结构化载体**（行体由它派生，落 `context_json.model_selection`）。
+import { formatModelSelectionReason, type ModelSelection, type ModelSelectionPinned } from './model-selection.js';
+import { resolvePinnedModel } from './model-preference.js';
 import { createLogger } from './logger.js';
 
 const logger = createLogger('exec-model-select');
@@ -108,6 +111,11 @@ interface EndpointHop {
   model_name?: string;
   capabilities?: unknown;
   context_window?: unknown;
+  // zx_20261107_1 B6：降级/沿用换路时，费用与供应商身份必须**随跳走**——否则账上仍按上一跳的价归因。
+  input_price_per_1k?: unknown;
+  output_price_per_1k?: unknown;
+  provider_id?: unknown;
+  provider_currency?: unknown;
 }
 
 /** 策略引擎在执行前闸口判了暂停 ⇒ 本段就此收尾，调用方须立刻 `return { content, steps: 0 }`。 */
@@ -138,6 +146,11 @@ export interface ModelSelectPicked {
    *   那是"无从比对"，不是"不具备"（见 `BuildAttachmentPartsOptions` 的同一条尺）。
    */
   modelCapabilities: string[] | null;
+  /**
+   * zx_20261107_1 B6: 本次选型的**结构化记录**（与落账的选型行同源）。
+   * 调用方不再需要解析中文行；GUI 的「为什么选它」直接读它（落库副本在 `context_json.model_selection`）。
+   */
+  modelSelection: ModelSelection;
 }
 
 export type ModelSelectResult = ModelSelectStopped | ModelSelectPicked;
@@ -250,6 +263,10 @@ export async function selectModelForTask(o: {
     modelResult.api_key = hop.api_key || (apiKeyPolicy === 'reuse' ? modelResult.api_key : '') || '';
     if (Array.isArray(hop.capabilities)) modelResult.capabilities = hop.capabilities;
     else delete modelResult.capabilities;
+    // zx_20261107_1 B6：费用与供应商身份随跳走（旧 ANS 缺席时保持前值——"没有这个数"不改写已有真值）。
+    for (const k of ['input_price_per_1k', 'output_price_per_1k', 'provider_id', 'provider_currency'] as const) {
+      if (hop[k] !== undefined) modelResult[k] = hop[k];
+    }
   };
 
   // zx_20260924 M6-a（毛选·实事求是）: **回验 ANS 给的模型到底带不带本任务要的能力**。
@@ -351,7 +368,10 @@ export async function selectModelForTask(o: {
    * 命中**备用端点**时提升为首选：把该模型自己的名字/钥匙/价格/窗口/输出上限/能力**一起**搬过来——
    *   只搬 `model_name` 会留下上一个模型的价格与窗口，成本账与上下文水位就和实际在用的模型脱节。
    */
-  const wantedModel = (preferredModel || '').trim();
+  // zx_20261107_1 B6：三处指定（恢复路 > 项目级 > 全局默认）由 `resolvePinnedModel` **一处**裁定。
+  //   恢复路仍是第一优先 ⇒ 既有恢复行为逐字不变；两处新入口只在没有恢复路时生效。
+  const pinned = resolvePinnedModel(db, projectId, preferredModel);
+  const wantedModel = pinned?.requested ?? '';
   let preferredInPool = false;
   if (wantedModel) {
     const sameHop = mr.sameProviderFallback as Record<string, unknown> | undefined;
@@ -362,7 +382,7 @@ export async function selectModelForTask(o: {
     const hit = pool.find((x) => String(x.ep.model_name ?? '') === wantedModel);
     preferredInPool = !!hit;
     if (hit && hit.ep !== mr) {
-      for (const k of ['model_id', 'model_name', 'url', 'api_key', 'max_output_tokens', 'context_window', 'input_price_per_1k', 'output_price_per_1k', 'capabilities'] as const) {
+      for (const k of ['model_id', 'model_name', 'url', 'api_key', 'max_output_tokens', 'context_window', 'input_price_per_1k', 'output_price_per_1k', 'provider_id', 'provider_currency', 'capabilities'] as const) {
         if (hit.ep[k] !== undefined) mr[k] = hit.ep[k];
       }
       if (hit.ep.model_id !== undefined) mr.id = hit.ep.model_id;
@@ -496,15 +516,26 @@ export async function selectModelForTask(o: {
       .run(crypto.randomUUID(), taskId, line);
   }
 
-  // zx_20261104_1 M5：沿用结果按**最终在用**的模型成文——中间换过路（探活/上下文升级）再写"已沿用"就是假话。
-  //   前缀用 `[选型·沿用]` 而非 `[选型]`：后者是选型四要素那本账的专属前缀（全仓恰一处，rr 有反证断言）。
-  if (wantedModel) {
+  // zx_20261104_1 M5 / zx_20261107_1 B6：指定结果按**最终在用**的模型成文——中间换过路（探活/上下文升级）
+  //   再写"已沿用"就是假话。前缀用 `[选型·沿用]`（恢复路，文案逐字保留）或 `[选型·指定]`（项目级/全局默认）；
+  //   两者都**不含** `[选型]` 子串（`]` 前是 `·`），选型四要素那本账仍全仓恰一处。
+  let pinnedSelection: ModelSelectionPinned | null = null;
+  if (pinned) {
     const finalName = String(modelResult.model_name ?? '未知');
-    const line = finalName === wantedModel
-      ? `[选型·沿用] 恢复沿用上次模型 ${wantedModel}`
-      : !preferredInPool
-        ? `[选型·沿用] 上次模型 ${wantedModel} 不在本次可用端点中，已重新选型为 ${finalName}`
-        : `[选型·沿用] 上次模型 ${wantedModel} 本次未能沿用（最终为 ${finalName}），已重新选型`;
+    const applied = finalName === wantedModel;
+    pinnedSelection = { source: pinned.source, requested: wantedModel, applied };
+    const sourceLabel = pinned.source === 'project' ? '项目级设置' : '全局默认';
+    const line = pinned.source === 'resume'
+      ? (applied
+        ? `[选型·沿用] 恢复沿用上次模型 ${wantedModel}`
+        : !preferredInPool
+          ? `[选型·沿用] 上次模型 ${wantedModel} 不在本次可用端点中，已重新选型为 ${finalName}`
+          : `[选型·沿用] 上次模型 ${wantedModel} 本次未能沿用（最终为 ${finalName}），已重新选型`)
+      : (applied
+        ? `[选型·指定] 已按${sourceLabel}使用模型 ${wantedModel}`
+        : !preferredInPool
+          ? `[选型·指定] 指定模型 ${wantedModel} 不在本次可用端点中，已自动选型为 ${finalName}`
+          : `[选型·指定] 指定模型 ${wantedModel} 本次未能沿用（最终为 ${finalName}），已自动选型`);
     try {
       db.prepare(
         "INSERT INTO wa_task_conversations (id, task_id, role, content, token_count, created_at) VALUES (?, ?, 'system', ?, 0, datetime('now'))"
@@ -533,13 +564,38 @@ export async function selectModelForTask(o: {
   //     把 `modelResult` 换成**另一个**模型，那时落账会记下一个**最终没在用**的模型（"在册≠在路"）。
   //     `finalCaps` 之后、策略闸之前 = 选型**已定稿**而任务尚未被闸拦下，正是"选型收尾"这一刻。
   //   ⚠ 全文只此一处写 `[选型]` 前缀——多了就是第二本账，两边迟早分家（rr 有反证断言钉死"恰一条"）。
-  const selectLine = `[选型] 策略来源=${strategySource || '未知'} · 策略=${modelStrategy}`
-    + ` · 模型=${String(modelResult.model_name ?? '未知')} · 端点=${endpointScope(String(mr.url || ''))}`
-    + ` · 能力匹配=${capabilityMatchLabel(modelResult, finalCaps)}`;
+  const selection: ModelSelection = {
+    strategySource: strategySource || '未知',
+    strategy: modelStrategy,
+    model: String(modelResult.model_name ?? '未知'),
+    endpoint: endpointScope(String(mr.url || '')),
+    capabilityMatch: capabilityMatchLabel(modelResult, finalCaps),
+    reason: '',
+    inputPricePer1k: typeof modelResult.input_price_per_1k === 'number' && Number.isFinite(modelResult.input_price_per_1k)
+      ? modelResult.input_price_per_1k
+      : null,
+    outputPricePer1k: typeof modelResult.output_price_per_1k === 'number' && Number.isFinite(modelResult.output_price_per_1k)
+      ? modelResult.output_price_per_1k
+      : null,
+    currency: typeof modelResult.provider_currency === 'string' && modelResult.provider_currency
+      ? modelResult.provider_currency
+      : null,
+    pinned: pinnedSelection,
+  };
+  selection.reason = formatModelSelectionReason(selection);
+  const selectLine = `[选型] ${selection.reason}`;
   try {
     db.prepare(
       "INSERT INTO wa_task_conversations (id, task_id, role, content, token_count, created_at) VALUES (?, ?, 'system', ?, 0, datetime('now'))"
     ).run(crypto.randomUUID(), taskId, selectLine);
+  } catch { /* 记不上不阻断执行 */ }
+  // zx_20261107_1 B6：结构化副本落 `context_json.model_selection`——**只 `json_set` 一个键**，
+  //   绝不整份覆写（`context_json` 的兄弟键：附件/目标/方案…不能被这一笔抹掉）。
+  //   写失败不阻断执行（与上方会话行同一立场）。
+  try {
+    db.prepare(
+      "UPDATE wa_tasks SET context_json = json_set(COALESCE(context_json, '{}'), '$.model_selection', json(?)) WHERE id = ?"
+    ).run(JSON.stringify(selection), taskId);
   } catch { /* 记不上不阻断执行 */ }
 
   // zx_20261013_1 批一（称器于事 · 毛选「主要矛盾」）: **硬需能力缺 ⇒ 如实拒，不静默跑**。
@@ -578,8 +634,10 @@ export async function selectModelForTask(o: {
   //   ③ 开关——`engine.policy_check` 关 ⇒ **连取数都不取**，逐字回"无策略检查"旧行为（一键回退）。
   if (readBoolSetting(db, 'engine.policy_check')) {
     try {
-      const policyResult = evaluatePolicies(
-        { taskTokens: 0, taskCost: 0, projectRecentFailures: (w) => countRecentFailures(db, projectId, w) },
+      // zx_20261108_1 B5：此处**只评项目历史失败率**（成本条件的度量此刻还是 0，
+      //   在这里评等于永远不触发）；Token/费用预算由执行循环每步累加后评估（`exec-step.ts`）。
+      const policyResult = evaluateFailurePolicies(
+        { projectRecentFailures: (w) => countRecentFailures(db, projectId, w) },
         loadPolicies(db),
       );
       if (policyResult.triggered) {
@@ -603,5 +661,5 @@ export async function selectModelForTask(o: {
       }
     } catch { /* policy check best-effort */ }
   }
-  return { modelResult, hasMedia, sdkRetryCtx, modelCapabilities: finalCaps?.got ?? null };
+  return { modelResult, hasMedia, sdkRetryCtx, modelCapabilities: finalCaps?.got ?? null, modelSelection: selection };
 }

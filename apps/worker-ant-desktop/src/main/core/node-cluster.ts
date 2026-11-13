@@ -40,6 +40,8 @@ export interface ClusterNode {
   disk: number | null;
   /** 我方派给它的单里"成/败"的比例（0–1，样本 < 3 ⇒ `null`）。 */
   successRate: number | null;
+  /** 已收口的出站单数（成功率的分母）；0 = 还没派过 ⇒ `successRate` 也为 `null`。 */
+  successSamples: number;
   /** 我方派给它的单的平均耗时（毫秒）；无样本 ⇒ `null`。 */
   latency: number | null;
   /** 正占机器槽位的任务数（本机取实时 DB 计数，他机取最近心跳快照）；未知 ⇒ `null`。 */
@@ -89,8 +91,8 @@ function capabilitiesOf(node: Pick<AnsNode, 'card'>): NodeCardCategory[] {
   return raw.filter(isNodeCardCategory);
 }
 
-/** 我方派给某节点的出站单 → (成功率, 平均耗时)。 */
-function rateOf(dispatches: NodeDispatchRecord[], nodeId: string): { successRate: number | null; latency: number | null } {
+/** 我方派给某节点的出站单 → (成功率, 平均耗时, 已收口样本数)。 */
+function rateOf(dispatches: NodeDispatchRecord[], nodeId: string): { successRate: number | null; latency: number | null; samples: number } {
   const settled = dispatches.filter(
     (d) => d.targetNodeId === nodeId && (d.status === 'done' || d.status === 'error'),
   );
@@ -99,6 +101,7 @@ function rateOf(dispatches: NodeDispatchRecord[], nodeId: string): { successRate
   return {
     successRate: settled.length >= MIN_RATE_SAMPLES ? done / settled.length : null,
     latency: latencies.length > 0 ? Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length) : null,
+    samples: settled.length,
   };
 }
 
@@ -158,7 +161,7 @@ export function buildClusterView(input: {
     const freeSlots = isLocal && limit != null && limit > 0
       ? Math.max(0, limit - input.local.running)
       : num(s.free_slots);
-    const { successRate, latency } = rateOf(input.dispatches, n.node_id);
+    const { successRate, latency, samples } = rateOf(input.dispatches, n.node_id);
     rows.push({
       id: n.node_id,
       name: n.name || n.node_id.slice(0, 8),
@@ -172,6 +175,7 @@ export function buildClusterView(input: {
       mem: ratio(num(s.free_mem), num(s.total_mem)),
       disk: ratio(num(s.disk_free), num(s.disk_total)),
       successRate,
+      successSamples: samples,
       latency,
       running,
       queued: isLocal ? input.local.queued : queuedTo(input.dispatches, n.node_id),
@@ -193,6 +197,7 @@ export function buildClusterView(input: {
       mem: null,
       disk: null,
       successRate: null,
+      successSamples: 0,
       latency: null,
       running: input.local.running,
       queued: input.local.queued,

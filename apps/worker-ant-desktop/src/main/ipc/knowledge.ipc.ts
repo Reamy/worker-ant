@@ -38,6 +38,7 @@ import {
   currentProfileSourceHash,
   listProjectProfileHistory,
   profileInjectionStats,
+  projectProfileExists,
   readProjectProfile,
   saveProjectProfile,
   setProjectProfileEnabled,
@@ -59,7 +60,11 @@ import {
 } from '../core/knowledge-watermark.js';
 import { similarProjects } from '../core/project-similarity.js';
 // zx_20261030_1 M6「荐」: 候选领域包的建议/忽略通道与知识收件箱同处（`packs.ipc.ts` 保持五个基础通道）。
-import { dismissAutoCandidateDomainPack, listSuggestedDomainPacks } from '../core/domain-pack.js';
+import {
+  dismissAutoCandidateDomainPack,
+  listAppliedDomainPacks,
+  listSuggestedDomainPacks,
+} from '../core/domain-pack.js';
 
 type IpcFailure = { error: { code: string; message: string } };
 
@@ -78,6 +83,18 @@ export interface KnowledgeProfileView {
   stats: ProjectProfileInjectionStats;
   /** zx_20261027_3 M6b: 旧版留痕条数（自动跟随覆盖前归档；"换过几版"可回溯）。 */
   history: number;
+}
+
+/**
+ * zx_20261113_4 B2「荐」：项目详情**首屏**的业务知识状态（一次调用回齐三块）。
+ *   · `profile`：是否存在（只认行，含导入/形状不认识）、是否启用、是否过期；
+ *   · 已启用领域包数 / 待采纳候选数（候选永不自动启用，这里只是计数）。
+ * 读不到就如实回零值——不把"没读到"编成"已成型"。
+ */
+export interface KnowledgeBusinessStatus {
+  profile: { exists: boolean; enabled: boolean; stale: boolean; origin: ProjectProfileOrigin | null };
+  appliedPacks: number;
+  suggestedPacks: number;
 }
 
 function projectIdOf(input: { projectId?: unknown } | undefined): string {
@@ -325,6 +342,32 @@ export function initKnowledgeIpc(db: Database.Database, dataDir: string): void {
       const projectId = projectIdOf(input);
       if (!projectId) return { error: { code: 'INVALID_REQUEST', message: '缺少项目 id' } } satisfies IpcFailure;
       return { data: { projects: similarProjects(db as never, projectId) } };
+    } catch (e) {
+      return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } } satisfies IpcFailure;
+    }
+  });
+
+  // zx_20261113_4 B2「荐」：项目详情首屏——业务知识状态（画像 / 已启用包 / 待采纳建议）一次回齐。
+  ipcMain.handle('knowledge:business-status', async (_event, input?: { projectId?: unknown }) => {
+    try {
+      const projectId = projectIdOf(input);
+      if (!projectId) return { error: { code: 'INVALID_REQUEST', message: '缺少项目 id' } } satisfies IpcFailure;
+      const stored = readProjectProfile(db as never, projectId);
+      const exists = projectProfileExists(db as never, projectId);
+      // 过期只对**可解析的本机画像**有意义：读不到内容就不知道旧不旧，如实标 false（不编"已过期"）。
+      let stale = false;
+      if (stored) {
+        try {
+          const built = buildProjectProfile(db as never, projectId);
+          if (built.ok) stale = built.profile.sourceHash !== stored.sourceHash;
+        } catch { stale = false; }
+      }
+      const status: KnowledgeBusinessStatus = {
+        profile: { exists, enabled: stored?.enabled ?? false, stale, origin: stored?.origin ?? null },
+        appliedPacks: listAppliedDomainPacks(db as never, projectId).length,
+        suggestedPacks: listSuggestedDomainPacks(db as never, projectId).length,
+      };
+      return { data: status };
     } catch (e) {
       return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } } satisfies IpcFailure;
     }

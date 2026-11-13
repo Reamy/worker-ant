@@ -27,6 +27,9 @@ import { setStrategyBreaker, STRATEGY_BREAKER_HOURS } from './feedback-engine.js
 import { recordProposal, hasPendingProposalFor, ensureSelfEvolveTable, type SelfEvolveKind } from './self-evolve.js';
 // zx_20261022_2 批二: 两种时刻写法用同一把尺归一后再比。
 import { utcSql } from './sql-time.js';
+// zx_20261110_2 B4「恒」: 回收**必须真断**——只置 paused 不动执行体，是本轮事故的根：
+//   界面写着已暂停，执行体还在跑（每步判据要到下一步才看状态词），于是"停了"是个空词。
+import { abortTaskRun } from './task-run-registry.js';
 
 const logger = createLogger('healing');
 
@@ -342,11 +345,28 @@ export function findStaleExecutingTasks(db: Database.Database, staleMs: number =
 export function reclaimStaleExecutingTask(db: Database.Database, task: StaleExecTask): boolean {
   const cur = db.prepare('SELECT status FROM wa_tasks WHERE id = ?').get(task.id) as { status?: string } | undefined;
   if (!cur || !EXEC_STALE_STATUSES.includes(String(cur.status))) return false;
+  // zx_20261110_2 B4「恒」：**先真断，再安葬**。
+  //   只 `pauseTask` 不动执行体时，run 要等**下一步**的判据才看见 `paused` —— 若它正卡在一次
+  //   永不返回的模型/工具调用里，那一步永远不会到来：库里已暂停、进程里照跑（本轮事故的形态）。
+  //   两句之间**不得有 await**（本函数同步执行完才把控制权还给事件循环）⇒ abort 引发的 catch 一定
+  //   晚于 `pauseTask` 的落库，执行体读到的必是 `paused`，不会误记成 failed。
+  const hadHandle = abortTaskRun(task.id, 'self_heal_stale_exec: 执行超时无心跳，自愈回收已中止本轮回合');
   // zx_20260917 M1: 因由 `exec_timeout`——执行中超时无心跳（自愈/调度双路判定）；执行者"自愈监视器"进 label，不占因名。
   pauseTask(db, { taskId: task.id, reason: PAUSE_REASON_EXEC_TIMEOUT });
+  // 如实记：**有没有找到可断的句柄**是两件事，不许都写成"已中止"（本轮红线：发了与停了分开记）。
+  if (hadHandle) {
+    eventBus.emit('run.abort_sent', {
+      taskId: task.id, task_id: task.id, run_id: null, source: 'self_heal', reason: 'self_heal_stale_exec',
+      idleMs: null, attempt: 1,
+    }).catch(() => {});
+  } else {
+    logger.info({ taskId: task.id.slice(0, 8) }, '超时回收：此刻没有在途执行句柄（无人在跑），只落暂停');
+  }
   db.prepare("INSERT INTO wa_task_conversations (id, task_id, role, content) VALUES (?, ?, 'system', ?)").run(
     randomUUID(), task.id,
-    `[超时] 任务执行超过${EXEC_STALE_MS / 60000}分钟无心跳，已自动暂停（超时回收）。最后心跳: ${task.updated_at}。可手动恢复重试。`,
+    `[超时] 任务执行超过${EXEC_STALE_MS / 60000}分钟无心跳，已自动暂停（超时回收）。`
+    + (hadHandle ? '已找到在途执行句柄并中止本轮。' : '未找到在途执行句柄（当时没有执行体在跑）。')
+    + `最后心跳: ${task.updated_at}。可手动恢复重试。`,
   );
   return true;
 }

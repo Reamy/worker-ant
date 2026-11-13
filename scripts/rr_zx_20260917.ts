@@ -80,7 +80,10 @@ import {
   GOAL_DEVIATION_REASON_LIMIT, truncateGoalDeviationReason,
   buildCompletedItemsBlock, buildDeviationPrompt, buildUserDirectiveBlock, buildTools,
   collectWrittenFiles, readRecentUserDirectives, realDeliverables,
+  flushTaskCommandWrites,
 } from '../apps/worker-ant-desktop/src/main/core/agent-executor.js';
+// zx_20261109_1 B2：命令窗口补登记改为 run 级合并队列（工具处入队、收口前 flush 一次）。
+import { CommandWriteQueue } from '../apps/worker-ant-desktop/src/main/core/command-write-queue.js';
 import {
   EVIDENCE_FILE_BITS_LIMIT, collectEvidence, renderEvidence,
 } from '../apps/worker-ant-desktop/src/main/core/exec-evidence.js';
@@ -1313,7 +1316,11 @@ async function main(): Promise<void> {
     const wdir = fs.mkdtempSync(path.join(os.tmpdir(), 'rr_20260917_m4w_'));
     // ctx 只需要 `db`——`buildTools` 的签名就是 (ctx, taskId, projectId, workingDir)；
     // 真工具体因此可被**受控回归**直跑（比对 SQL 手抄一遍强得多：抄的那份不会跟着实现漂）。
-    const tools = buildTools({ db: wdb } as never, 'T', 'P', wdir) as unknown as Record<string, { execute: (a: never) => Promise<string> }>;
+    // zx_20261109_1 B2：命令窗口写入改**入队 + run 收口前 flush 一次**——本段显式持有队列，
+    //   用 `flushTaskCommandWrites`（生产真实现）驱动盘点；F-1 因此新增"flush 前仍 0 行"的正面断言。
+    const wq = new CommandWriteQueue();
+    const flushWrites = async () => { await flushTaskCommandWrites(wdb as never, wq, 'T'); };
+    const tools = buildTools({ db: wdb } as never, 'T', 'P', wdir, { commandWriteQueue: wq }) as unknown as Record<string, { execute: (a: never) => Promise<string> }>;
     ok(Object.keys(tools).length > 50, '★ F 前置：真工具集建成（下面对 `execute_command`/`edit_file` 的断言走的是**实现本尊**）');
     const reader = (p: string): string | null => { try { return fs.existsSync(p) ? fs.readFileSync(p, 'utf-8') : null; } catch { return null; } };
     const evOf = (): string => renderEvidence(collectEvidence(wdb, 'T'), reader);
@@ -1326,9 +1333,13 @@ async function main(): Promise<void> {
     const longAgo = new Date(Date.now() - 10_000);
     fs.utimesSync(stale, longAgo, longAgo); // 明确定在命令之前，不受 mtime 分辨率影响
     await tools.execute_command!.execute({ command: 'echo noop' } as never);
+    await flushWrites();
     eq(rowsOf().length, 0,
       '★ F-1 反证：跑一条**不写文件**的命令 ⇒ **0 行**登记 ⇒ 不是"命令一跑就把目录里所有东西收成成果"（目录里确有 `old.py`）');
     await tools.execute_command!.execute({ command: "printf 'x' > new.py" } as never);
+    eq(rowsOf().length, 0,
+      '★ F-1 延后（0→0 的正面）：命令返回时**尚未**登记 —— zx_20261109_1 B2 起补登记合并到 run 收口前一次，不再每条命令后扫整树');
+    await flushWrites();
     const r1 = rowsOf();
     eq(r1.map((r) => path.basename(r.file_path)), ['new.py'],
       '★ F-1 正面（0→1）：命令窗口内写出的 `new.py` **恰一行**登记为 doc 产出物');
@@ -1365,6 +1376,7 @@ async function main(): Promise<void> {
     await tools.read_file!.execute({ filePath: '_tmp_edit_scratch.py' } as never); // M17-① 同 F-2：先读后改
     await tools.edit_file!.execute({ filePath: '_tmp_edit_scratch.py', old_string: 'x = 1', new_string: 'x = 2' } as never);
     await tools.execute_command!.execute({ command: "printf 'y' > _tmp_by_command.py" } as never);
+    await flushWrites(); // B2：命令写入须先 flush 才入产出物账（本段验证的正是"登记后果"，不是入队）
     const probes = selectProbeDeliverables(wdb as never, 'T').map((r) => path.basename(String(r.file_path ?? ''))).sort();
     eq(probes, ['_tmp_by_command.py', '_tmp_edit_scratch.py'],
       '★ F-3 同尺：两个入口写的 `_tmp_*` 都被**同一个** `docNotProbe` 认作探针（`edit_file` 不比 `execute_command` 宽、也不比它窄）');
@@ -1382,6 +1394,7 @@ async function main(): Promise<void> {
     // ── F-4 边界如实：`SKIP_DIRS` 下的生成物看不见（§6.0bis-d③，登记在册、此处只钉住它仍成立）──
     fs.mkdirSync(path.join(wdir, 'output'), { recursive: true });
     await tools.execute_command!.execute({ command: "printf 'z' > output/gen.py" } as never);
+    await flushWrites(); // B2：先真跑一次盘点——否则"没登记"可能只是"还没 flush"，断言空转
     ok(!rowsOf().some((r) => r.file_path.includes('/output/')),
       '★ F-4 边界如实：`output/`（`SKIP_DIRS`）下的生成物**看不见** —— 这条边界是**已知且已登记**的，不是本轮新引入的静默');
   }
@@ -1426,12 +1439,14 @@ async function main(): Promise<void> {
       const b = blks[tool] ?? '';
       const iBase = b.indexOf('const writeBaselineMs = Date.now();');
       const iRun = b.indexOf('runShellCommand(');
-      const iReg = b.indexOf('registerFilesWrittenByCommand(');
+      // zx_20261109_1 B2：第三个锚点由"当场盘点"改为"入队"（本次仅改**载体的名字**，
+      //   钉的次序不变：基准在命令启动前 ⇒ 归因窗口仍是该条命令；入队必须发生在命令跑完之后）。
+      const iReg = b.indexOf('commandWriteQueue.enqueue(');
       ok(iBase > 0 && iRun > iBase && iReg > iRun,
-        `★ 接线：\`${tool}\` 的次序是 **基准 → 跑命令 → 盘点**（基准取在命令启动前，归因窗口才是该条命令）`);
+        `★ 接线：\`${tool}\` 的次序是 **基准 → 跑命令 → 入队**（基准取在命令启动前，归因窗口才是该条命令）`);
       ok(b.includes(`sinceMs: writeBaselineMs, via: '${via}'`), `★ 接线：\`${tool}\` 的盘点带 \`via: '${via}'\`（来源可追溯）`);
     }
-    ok(!(blks.bash ?? '').includes('registerFilesWrittenByCommand'),
+    ok(!(blks.bash ?? '').includes('commandWriteQueue.enqueue('),
       '★ 接线：`bash` **不挂**登记（§6.0bis-b 自纠：它是只读白名单、显式拒重定向，挂了就是永不触发的死代码）');
     ok(/reject|重定向/.test(blks.bash ?? ''),
       '★ 接线：上一条的依据在场——`bash` 走 `validateReadonlyBashCommand`（"写不了"是**代码事实**，不是注释里的一句话）');

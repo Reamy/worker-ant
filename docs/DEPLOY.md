@@ -72,7 +72,8 @@ pnpm dist:win
 pnpm dist:linux
 # 输出: release/工蚁-<version>-linux-x86_64.AppImage / 工蚁-<version>-linux-amd64.deb
 
-# 上传前复制为 ASCII 文件名（如 worker-ant-0.5.0-mac-arm64.dmg）
+# 上传前复制为 ASCII 文件名（如 worker-ant-0.6.0-mac-arm64.dmg），并生成 SHA256SUMS.txt
+#   → apps/worker-ant-desktop/release/github-assets/
 ```
 
 > 跨平台构建需要下载目标平台的 Electron 与 electron-builder 工具件；国内网络下若超时，可加
@@ -106,22 +107,28 @@ bash scripts/rebuild-ans-native.sh
 
 ```bash
 # 产物文件名用 ASCII（避免上传/下载链路的编码问题）
-gh release create v0.5.0 \
-  release/worker-ant-0.5.0-mac-arm64.dmg \
-  release/worker-ant-0.5.0-mac-arm64.zip \
-  release/worker-ant-0.5.0-win-x64.exe \
-  release/worker-ant-0.5.0-linux-x86_64.AppImage \
-  release/worker-ant-0.5.0-linux-amd64.deb \
+gh release create v0.6.0 \
+  release/github-assets/worker-ant-0.6.0-mac-arm64.dmg \
+  release/github-assets/worker-ant-0.6.0-mac-arm64.zip \
+  release/github-assets/worker-ant-0.6.0-win-x64.exe \
+  release/github-assets/worker-ant-0.6.0-linux-x86_64.AppImage \
+  release/github-assets/worker-ant-0.6.0-linux-amd64.deb \
+  release/github-assets/SHA256SUMS.txt \
   --repo Reamy/worker-ant \
-  --title "工蚁 v0.5.0 — 多机协同能力优先、跨机进度与失败收口、Windows/Linux 版发布" \
+  --title "工蚁 v0.6.0 — 岗位与项目业务知识、共享库可预览、任务级跨机真派" \
   --notes-file <发布说明.md>
 ```
+
+> ⚠ **发布件一律取本机构建**。`.github/workflows/build.yml` 只上传 Actions artifacts，
+> 且公开仓 `actions/secrets` 为空 ⇒ 其 macOS job 恒走 `Package (macOS, unsigned — no signing secrets)`。
+> 拿 CI 的 dmg 当发布件，就等于把「已签名 + 公证」这句话变成假的（v0.5.0 的 5 个资产字节数与本地文件逐一相同，即本机构建）。
 
 - 发布说明须列出 **SHA-256 校验值**与系统要求（macOS 13+ / arm64、Windows 10/11 x64、Linux x86_64），并如实写明
   Windows / Linux 安装包**未做代码签名**。
 - 自动更新尚未启用（`publish.provider: github` 保持注释），升级暂时靠手动下载新版本。
-- 公开仓源码由 `scripts/publish-oss.ts` 从 `git archive HEAD` 导出后生成**快照提交**，
-  与本地提交历史不一一对应。
+- 公开仓源码由 `scripts/publish-oss.ts` 从 `git archive HEAD` 导出后生成**快照提交**，与本地提交历史不一一对应。
+  日常发版用 `--append`（把本次导出树叠在远端 `main` 之上，提交正文自动列出自上一枚公开提交 `Local-Head`
+  以来的变更），tag 须打在**这一枚公开提交**上；`--push --force` 只在需要整体替换时用（会孤儿化历史）。
 
 ## 默认账户
 

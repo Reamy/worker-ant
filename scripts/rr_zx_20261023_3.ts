@@ -111,8 +111,28 @@ async function main(): Promise<void> {
       'A-11 调用模型前再复核一次（prelude 期间被暂停不漏网）');
     ok(/const aborted = abortTaskRun\([^)]*\);/.test(ex)
       && /aborted\s*\?[\s\S]{0,160}?:/.test(ex), 'A-12 interrupt 如实回报有没有真中止（旧实现丢弃返回值）');
-    ok(/finally \{[\s\S]{0,400}?unregisterTaskRun\(taskId, controller\);/.test(ex),
-      'A-13 所有出口统一注销句柄（含抛错）');
+    // zx_20261110_2 B1 重定向（按符号 + 配对花括号取**最外层** `finally` 的体）：
+    //   旧写法是"`finally {` 之后 400 字内出现注销"——一个**距离窗口**，收尾段一旦多两笔账（B1 的
+    //   `run.abort_observed` 就是）就误红，而它真正想钉的是"所有出口统一注销"。改钉**更强**的形状：
+    //   注销在外层 finally 体里、恰一次、且是体末尾最后一句（其后不再有可能抛错/return 的语句）。
+    const iOuterFinally = ex.lastIndexOf('  } finally {');
+    const iOpen = iOuterFinally >= 0 ? ex.indexOf('{', iOuterFinally) : -1;
+    let iClose = -1;
+    if (iOpen >= 0) {
+      let depth = 0;
+      for (let i = iOpen; i < ex.length; i++) {
+        const c = ex[i];
+        if (c === '{') depth++;
+        else if (c === '}') { depth--; if (depth === 0) { iClose = i; break; } }
+      }
+    }
+    const outerFinally = iClose > iOpen ? ex.slice(iOpen, iClose + 1) : '';
+    const unregAt = outerFinally.indexOf('unregisterTaskRun(taskId, controller);');
+    ok(outerFinally.length > 0, 'A-13a 最外层 `finally` 体已定位（按符号 + 配对花括号，不按行号）');
+    ok(unregAt >= 0 && outerFinally.split('unregisterTaskRun(taskId, controller);').length - 1 === 1,
+      'A-13b 外层 finally 里注销句柄**恰一次**（含抛错出口，不多不少）');
+    ok(unregAt >= 0 && outerFinally.slice(unregAt + 'unregisterTaskRun(taskId, controller);'.length).trim() === '}',
+      'A-13c 注销是 finally 体的**最后一句**（其后不再有可抛错/可提前 return 的语句）');
 
     // 每步判据的接线：exec-step 只调判据、真 abort，不再"记个旗继续跑"。
     const st = CODE(`${A}/src/main/core/exec-step.ts`);

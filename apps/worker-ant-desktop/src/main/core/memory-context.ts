@@ -28,7 +28,7 @@ import type { MemoryManager, MemoryEntry } from './memory-manager.js';
 import { selectKnowledgeForInject, KNOWLEDGE_INJECT_MAX_TOKENS, PROJECT_KNOWLEDGE_SECTION_LABEL } from './project-knowledge.js';
 // zx_20261021_3 批一（庄子·火传）: 「领域包」段——把用户**显式启用**的可携带领域经验注入上下文。
 //   渲染与逐包取舍同出 `core/domain-pack.ts`（与包派生同处，免得分家）。
-import { renderDomainPackSection } from './domain-pack.js';
+import { DOMAIN_PACK_INJECT_MAX_TOKENS, renderDomainPackSection } from './domain-pack.js';
 // zx_20261022_3 批八（维特根斯坦·意义即使用）: 「项目画像」段——把整份画像压进一屏（≤200 token）。
 //   **总预算不增**：知识书预算 = 400 − 画像实际 token；画像未启用/不可读 ⇒ 知识书仍 400。
 //   渲染、折算、ref_id 同出 `core/project-profile.ts`（与画像生成同处，免得分家）。
@@ -283,7 +283,9 @@ export function buildMemoryContext(memory: MemoryManager, projectId: string, tas
   const domainPackInjections: Array<{ ref_id: string; chars: number }> = [];
   try {
     const applied = typeof memory.listAppliedDomainPacks === 'function' ? memory.listAppliedDomainPacks(projectId) : [];
-    const rendered = renderDomainPackSection(applied);
+    // B3：业务域子块按本任务文本**按需**挑选（无任务文本 ⇒ 全留，仍受 150-token 子界）。
+    // zx_20261113_4 B3「注」：有任务文本时按相关性排序（无文本 ⇒ 原序）；预算与整包取舍不变。
+    const rendered = renderDomainPackSection(applied, DOMAIN_PACK_INJECT_MAX_TOKENS, taskText);
     if (rendered.text) {
       domainPackText = rendered.text;
       domainPackInjections.push(...rendered.injections);

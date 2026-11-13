@@ -577,6 +577,105 @@ export function refreshProjectProfileIfEnabled(
   } catch { return { refreshed: false, reason: 'error' }; }
 }
 
+/** 单轮夜间巩固最多补建几个画像（有界；避免一次扫全库）。 */
+export const PROFILE_BOOTSTRAP_MAX_PER_RUN = 5;
+
+/** 自动成型的结局（`reason` 直接用于日志/断言——"为什么没建"必须说得出口）。 */
+export type ProfileBootstrapReason = 'created' | 'exists' | 'disabled' | 'no_facts';
+
+/**
+ * zx_20261113_4 B1「成」（道德经·自知者明 / 毛选·抓主要矛盾）：**该不该自动 bootstrap**——纯判据，零 IO。
+ *
+ * 病根：画像的生成/注入/跟随都写好了，但首次生成**只在 IPC 手点**（`zx_20261027_3 M6b` 刻意"不新建"）
+ *   ⇒ 真库 0 份，项目业务知识的小模型从未成型。
+ *
+ * 取舍（用户 2026-11-13 拍板）：
+ *   · 自动的只有「本项目自身事实压缩成画像」——零 LLM、确定性、不引入外部主张；
+ *   · **外来领域包仍永不自动启用**（那条纪律不变）；
+ *   · 已有画像（含导入）⇒ 不覆盖；无事实 ⇒ 不建空壳；关掉开关 ⇒ 逐字回旧行为。
+ */
+export function profileBootstrapDecision(input: {
+  autoEnabled: boolean;
+  hasProfile: boolean;
+  hasFacts: boolean;
+}): Exclude<ProfileBootstrapReason, 'created'> | 'create' {
+  if (!input.autoEnabled) return 'disabled';
+  if (input.hasProfile) return 'exists';
+  if (!input.hasFacts) return 'no_facts';
+  return 'create';
+}
+
+/**
+ * **画像行是否存在**——只看行，不解析 JSON。
+ *
+ * 为什么不用 `readProjectProfile` 判存在：它在 JSON 解析失败时返回 `null`（对未来版本/未知形状是
+ * 合理容错），但拿它当「有没有画像」会把「已有但形状不认识 / 导入的」误判成没有，于是 bootstrap
+ * 把用户资产覆盖掉。存在性只认行。
+ */
+export function projectProfileExists(db: ProfileDb, projectId: string): boolean {
+  return hasProjectProfileRow(db, str(projectId));
+}
+
+function hasProjectProfileRow(db: ProfileDb, projectId: string): boolean {
+  const row = db.prepare('SELECT 1 AS one FROM wa_project_profiles WHERE project_id = ?').get(projectId) as
+    | { one?: number }
+    | undefined;
+  return !!row;
+}
+
+/**
+ * zx_20261113_4 B1：**首次自动成型**——只建不改。
+ *
+ * 与 `refreshProjectProfileIfEnabled` 的分工：
+ *   · 本函数管「**从没有到有**」（首次 bootstrap，夜间巩固时按开关调）；
+ *   · 后者管「**已有到最新**」（任务收口后跟随，不新建、不动导入画像）。
+ * 两者都不改用户的 `enabled` 选择，也都不碰 `origin='imported'`。
+ */
+export function ensureProjectProfileBootstrapped(
+  db: ProfileDb,
+  projectId: string,
+  opts: { autoEnabled: boolean; now?: string },
+): { created: boolean; reason: ProfileBootstrapReason } {
+  const pid = str(projectId);
+  if (!pid) return { created: false, reason: 'no_facts' };
+  if (!opts.autoEnabled) return { created: false, reason: 'disabled' };
+  if (hasProjectProfileRow(db, pid)) return { created: false, reason: 'exists' };
+  const built = buildProjectProfile(db, pid, { now: opts.now });
+  if (!built.ok) return { created: false, reason: 'no_facts' };
+  const verdict = profileBootstrapDecision({ autoEnabled: true, hasProfile: false, hasFacts: true });
+  if (verdict !== 'create') return { created: false, reason: verdict };
+  saveProjectProfile(db, built.profile);
+  return { created: true, reason: 'created' };
+}
+
+/**
+ * zx_20261113_4 B1：**还缺画像的项目**（有事实、未归档、`wa_project_profiles` 无行）。
+ *
+ * 为什么不能只挂在「有未吸收事件」上：存量项目可能早已无新事件（真库 9 个项目就是这样），
+ *   只跟事件走会让它们永远没有画像。故夜间巩固另做一次有界补跑。
+ * 有界且确定性：`PROFILE_BOOTSTRAP_MAX_PER_RUN` + `updated_at DESC, id`。
+ */
+export function projectsMissingProfile(
+  db: ProfileDb,
+  limit: number = PROFILE_BOOTSTRAP_MAX_PER_RUN,
+): string[] {
+  const lim = Math.max(1, Math.floor(Number(limit) || PROFILE_BOOTSTRAP_MAX_PER_RUN));
+  const rows = db.prepare(
+    `SELECT p.id AS id
+       FROM wa_projects p
+      WHERE (p.status IS NULL OR p.status <> 'archived')
+        AND NOT EXISTS (SELECT 1 FROM wa_project_profiles x WHERE x.project_id = p.id)
+        AND (
+          EXISTS (SELECT 1 FROM wa_project_knowledge k WHERE k.project_id = p.id)
+          OR EXISTS (SELECT 1 FROM wa_tasks t WHERE t.project_id = p.id)
+          OR EXISTS (SELECT 1 FROM wa_deliverables d WHERE d.project_id = p.id)
+        )
+      ORDER BY p.updated_at DESC, p.id
+      LIMIT ?`,
+  ).all(lim) as Array<{ id?: string }>;
+  return rows.map((r) => str(r.id)).filter((id) => id !== '');
+}
+
 /** 画像的注入账（`source='project_profile'`）——有写口就必须有读口。 */
 export function profileInjectionStats(db: ProfileDb, projectId: string): ProjectProfileInjectionStats {
   const row = db.prepare(

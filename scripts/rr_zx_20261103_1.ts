@@ -49,6 +49,8 @@ const IPC = 'apps/worker-ant-desktop/src/main/ipc/project.ipc.ts';
 const AI_TASK = 'apps/worker-ant-desktop/src/main/core/jobs/ai-task.ts';
 const SETTLE = 'apps/worker-ant-desktop/src/main/core/pause-settlement.ts';
 const PAGE = 'apps/worker-ant-desktop/renderer/src/pages/TaskDetailPage.tsx';
+// zx_20261112_1 B4「诊」：操作分层真源（零依赖纯模块）——C1/C2 按符号重定向到它，不弱化原判据。
+const ACTIONS = 'apps/worker-ant-desktop/renderer/src/lib/task-actions.ts';
 
 function main(): void {
   // ═══ §A 判据纯函数 ═════════════════════════════════════════════════════════
@@ -80,8 +82,11 @@ function main(): void {
     const ipc = CODE(IPC);
     ok(ipc.includes("!['paused', 'failed', 'completed'].includes(task.status)"),
       'B1 task:resume 状态守卫接受 completed');
-    ok(ipc.includes('只有暂停/失败/已完成的任务可以恢复'),
-      'B2 拒绝文案与守卫一致（不谎报可接受的状态）');
+    // zx_20261110_2 B3 改钉：拒绝文案从"只有暂停/失败/已完成"补上了第四种可恢复情形
+    //   （"状态显示在运行、实则无执行体"——幽灵态）。判据随之钉**完整形状**而非旧句子的一半：
+    //   既要列出三种明确状态，又要说出第四种，且仍以"无法恢复"定性（不谎报、也不漏报）。
+    ok(ipc.includes('无法恢复。只有暂停/失败/已完成（或状态显示在运行、实则无执行体）的任务可以恢复。'),
+      'B2 拒绝文案与守卫一致（三种状态 + 幽灵态逐一点名，不谎报可接受面）');
     ok(ipc.includes("const fromCompleted = task.status === 'completed';"),
       'B3 fromCompleted 由**当时状态**派生（不信任调用方自报）');
     ok(ipc.includes('enqueueResumeJob(db, id, task.project_id, reply, fromCompleted);'),
@@ -112,9 +117,12 @@ function main(): void {
   console.log('\n【C】renderer 接线 —— 已完成有入口，按状态选路');
   {
     const page = RD(PAGE);
-    ok(page.includes("(task.status==='executing'||task.status==='running'||task.status==='paused'||task.status==='failed'||task.status==='completed') && <ActionSlot>"),
-      'C1 动作槽条件纳入 completed');
-    ok(page.includes('title="追加输入（任务重新打开并带此输入继续）"'),
+    // zx_20261112_1 B4「诊」：动作条件收进 `taskActionLayout` 一处——按符号重定向（不弱化）：
+    //   completed 态的主操作必须是「追加输入」，且页面确实按分层真源摆按钮。
+    const actions = RD(ACTIONS);
+    ok(page.includes('taskActionLayout(task.status)') && /else if \(s === 'completed'\) primary = 'inject';/.test(actions),
+      'C1 completed 态有「追加输入」主操作（条件真源 task-actions）');
+    ok(actions.includes('追加输入（任务重新打开并带此输入继续）'),
       'C2 已完成任务的按钮如实说明「重新打开并继续」');
     ok(page.includes("showInject && (task.status==='executing'||task.status==='running'||task.status==='completed')"),
       'C3 内联输入框在已完成态可见');

@@ -68,11 +68,11 @@ function mkTmp(prefix: string): string {
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-/** 生产 DDL 逐字（database.ts 的 wa_project_briefs）+ 作业读到的两列。 */
+/** 生产 DDL 逐字（database.ts 的 wa_project_briefs）+ 作业读到的列（zx_20261111_2 起含 description）。 */
 function makeDb(): DatabaseSync {
   const db = new DatabaseSync(':memory:');
   db.exec(`
-    CREATE TABLE wa_projects (id TEXT PRIMARY KEY, name TEXT, working_dir TEXT DEFAULT '', context_json TEXT DEFAULT '{}');
+    CREATE TABLE wa_projects (id TEXT PRIMARY KEY, name TEXT, description TEXT DEFAULT '', working_dir TEXT DEFAULT '', context_json TEXT DEFAULT '{}');
     CREATE TABLE wa_project_briefs (
       project_id TEXT PRIMARY KEY,
       status TEXT NOT NULL DEFAULT 'pending',
@@ -83,6 +83,8 @@ function makeDb(): DatabaseSync {
       tokens_in INTEGER NOT NULL DEFAULT 0,
       tokens_out INTEGER NOT NULL DEFAULT 0,
       trigger TEXT NOT NULL DEFAULT '',
+      generated_at TEXT NOT NULL DEFAULT '',
+      attempt_model TEXT NOT NULL DEFAULT '',
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
@@ -260,6 +262,9 @@ console.log('\n【D】M2：落库与后台作业');
     'D-1c 成功：状态 ready、须知可读回、模型名落账');
   eq([ready.tokensIn, ready.tokensOut, ready.error, ready.sourceHash], [11, 22, '', 'h1'],
     'D-1d tokens 由 0 变正数并逐值落账（不是"没抛就算过"）');
+  ok(ready.generatedAt.length > 0 && ready.attemptModel === 'm1',
+    'D-1e 成功同时记下"成功生成时刻"与本次尝试模型（时间与模型分账）',
+    `generatedAt=${ready.generatedAt} attemptModel=${ready.attemptModel}`);
 }
 
 {
@@ -272,12 +277,16 @@ console.log('\n【D】M2：落库与后台作业');
   ok(failed.status === 'failed' && failed.error.length > 0, 'D-2 从未成功过的失败 ⇒ 状态 failed 且原因非空', failed.error);
 
   saveBriefReady(db as never, 'p1', { brief: GOOD_BRIEF, sourceHash: 'h1', model: 'm1', tokensIn: 5, tokensOut: 6, trigger: 'manual' });
+  const genBefore = loadProjectBrief(db as never, 'p1')!.generatedAt;
   markBriefRunning(db as never, 'p1', 'manual');
-  saveBriefFailed(db as never, 'p1', '生成失败：网络中断', 'manual');
+  saveBriefFailed(db as never, 'p1', '生成失败：网络中断', 'manual', 'm-fail');
   const after = loadProjectBrief(db as never, 'p1')!;
-  ok(after.status === 'ready' && after.brief?.summary === GOOD_BRIEF.summary,
-    'D-2b 重跑失败**不覆盖**上一份成功须知（状态仍 ready、内容仍在）');
+  ok(after.status === 'failed' && after.brief?.summary === GOOD_BRIEF.summary,
+    'D-2b 重跑失败：状态如实记 failed，且**不覆盖**上一份成功须知（内容仍在）');
   ok(after.error.includes('网络中断'), 'D-2c 同时如实记下这次失败原因（界面能说"上次重跑失败"）');
+  ok(after.generatedAt === genBefore && after.generatedAt.length > 0,
+    'D-2d 失败重跑不改写 generatedAt（"上次成功生成于"仍是真的）', `before=${genBefore} after=${after.generatedAt}`);
+  ok(after.attemptModel === 'm-fail', 'D-2e 记下本次尝试模型（不是上次成功的 m1）', after.attemptModel);
 }
 
 {
@@ -292,6 +301,7 @@ console.log('\n【D】M2：落库与后台作业');
   const row = loadProjectBrief(db as never, 'p1')!;
   ok(good.ok && row.status === 'ready', 'D-3 作业成功链路：选模型 → 生成 → 解析 → 落账');
   eq([row.tokensIn, row.tokensOut, row.model], [30, 40, 'fake-m'], 'D-3b usage 真值原样落账（不被估算替代）');
+  const genAfterGood = row.generatedAt;
 
   const bad = await runProjectBriefInit({
     db: db as never, ansClient: ans as never, projectId: 'p1', trigger: 'manual',
@@ -299,7 +309,9 @@ console.log('\n【D】M2：落库与后台作业');
   });
   const after = loadProjectBrief(db as never, 'p1')!;
   ok(!bad.ok && String(bad.reason).includes('未返回可解析'), 'D-3c 坏输出 ⇒ 失败并说人话原因', String(bad.reason));
-  ok(after.status === 'ready' && after.brief !== null, 'D-3d 且上一份成功须知仍在（不因一次坏输出抹成空白）');
+  ok(after.status === 'failed' && after.brief !== null && after.generatedAt === genAfterGood,
+    'D-3d 失败状态如实落库，上一份成功须知与生成时刻仍在（不因一次坏输出抹成空白/改时间）');
+  ok(after.attemptModel === 'fake-m', 'D-3d2 尝试模型随失败落账（界面能看出这次是谁失败了）', after.attemptModel);
 
   // 思考模型把输出预算全吃在思维链上（实测 qwen3.5:9b：1500 用尽、finish=length、正文为空）——
   //   原因须点明"预算用尽"，不能只说"响应开头：空"（那是现象，不是病根）。
@@ -310,8 +322,8 @@ console.log('\n【D】M2：落库与后台作业');
   ok(!starved.ok && String(starved.reason).includes('思考') && String(starved.reason).includes('finish=length'),
     'D-3h 空正文且 finish=length ⇒ 原因点明"预算在思考阶段用尽"', String(starved.reason));
   const afterStarved = loadProjectBrief(db as never, 'p1')!;
-  ok(afterStarved.status === 'ready' && afterStarved.brief !== null,
-    'D-3i 且这次空输出同样不抹掉上一份成功须知');
+  ok(afterStarved.status === 'failed' && afterStarved.brief !== null && afterStarved.generatedAt === genAfterGood,
+    'D-3i 且这次空输出同样不抹掉上一份成功须知、不改写生成时刻');
   // 地板而不是等式：实测思考模型一次生成用掉 3537（1500 则正文为空）⇒ 预算须给思考留足。
   ok(BRIEF_MAX_OUTPUT_TOKENS >= 4096,
     'D-3j 输出预算给思考留足（地板 4096；1500 实测被思维链吃光）', `实测 ${BRIEF_MAX_OUTPUT_TOKENS}`);
@@ -351,7 +363,10 @@ console.log('\n【E】M3：接线（创建即入队 / 稳定前缀注入 / 预�
   const ipc = stripComments(readSrc(`${A}/src/main/ipc/project.ipc.ts`));
   ok(/decideAutoInit\(/.test(ipc) && /enqueueJob\(db, 'project-init-brief'/.test(ipc),
     'E-1 project:create 成功分支真做"判目录可跑 → 入队"（两跳都在源码里）');
-  ok(/auto\.run\s*\?/.test(ipc) && /initBrief/.test(ipc), 'E-1b 创建返回体带须知排队状态（界面能如实提示）');
+  // zx_20261111_2：判据加强——入队条件是「目录可跑 **或** 项目描述非空」，返回体仍如实带排队状态。
+  ok(/const shouldInit = auto\.run \|\| hasDescription/.test(ipc)
+    && /shouldInit\s*\?/.test(ipc) && /initBrief/.test(ipc),
+    'E-1b 创建返回体带须知排队状态（目录可跑或描述非空；界面能如实提示）');
   ok(/'project:brief'/.test(ipc) && /'project:initBrief'/.test(ipc), 'E-1c 读写两口都在册（详情页可看可重跑）');
 
   const jobs = stripComments(readSrc(`${A}/src/main/core/jobs/index.ts`));
@@ -439,7 +454,8 @@ console.log('\n【G】M4：产界面（独立 chunk 内确有入口与文案）'
   const detailSrc = detail ? fs.readFileSync(path.join(assets, detail), 'utf-8') : '';
   ok(detailSrc.includes('项目须知') && detailSrc.includes('重新初始化') && detailSrc.includes('生成须知'),
     'G-1b 详情页含「项目须知」与重跑入口文案');
-  ok(detailSrc.includes('仓库文件已变化'), 'G-1c 过期提示文案在产物里（不是只写在源码里）');
+  // zx_20261111_2：来源新增项目描述，过期文案同步点名（判据随真源加强，不是放宽）。
+  ok(detailSrc.includes('仓库文件或项目描述已变化'), 'G-1c 过期提示文案在产物里且覆盖两种来源（不是只写在源码里）');
   const listSrc = list ? fs.readFileSync(path.join(assets, list), 'utf-8') : '';
   ok(!!list && listSrc.includes('正在后台读取工作目录生成'), 'G-2 列表页创建后如实提示"后台生成中"');
 

@@ -48,7 +48,9 @@ const arch = stripComments(rd(ARCH));
 const TD = 'apps/worker-ant-desktop/renderer/src/pages/TaskDetailPage.tsx';
 const PD = 'apps/worker-ant-desktop/renderer/src/pages/ProjectDetailPage.tsx';
 const PP = 'apps/worker-ant-desktop/renderer/src/pages/ProjectsPage.tsx';
-const td = rd(TD); const pd = rd(PD); const pp = rd(PP);
+// zx_20261107_1 B9：费用卡由 TaskDetailPage 抽进 `TaskCost`——「任务详情」侧的落点随之重定向。
+const TC = 'apps/worker-ant-desktop/renderer/src/components/task/TaskCost.tsx';
+const td = rd(TD); const pd = rd(PD); const pp = rd(PP); const tc = rd(TC);
 
 (async () => {
   console.log('S0 行为探针：resolveCostBudget 三态 + buildBudgetContextBlock 四种渲染结果（非静态扫描）');
@@ -174,12 +176,14 @@ const td = rd(TD); const pd = rd(PD); const pp = rd(PP);
   {
     ok(td.includes('cost_budget_src'), 'TaskDetail：读 cost_budget_src 作为判据');
     ok(/costSrc === 'none' \|\| \(costMax != null && costMax <= 0\)/.test(td), '★TaskDetail：无上限判据覆盖"来源 none"与"数值 ≤0"');
-    ok(td.includes('未设置金额上限'), '★TaskDetail：如实提示本任务未设金额上限');
+    ok(tc.includes('未设置金额上限'), '★TaskDetail：如实提示本任务未设金额上限（TaskCost）');
     // zx_20261104_1 M6: 「已设但未定价」提示改由三态原因承载（cost_gate_reason === 'no_price'），
     // 旧任务无该字段时仍回退读 cost_gate_active —— 判据换成更精确的载体，覆盖面反而更宽。
-    ok(td.includes("costGateReason === 'no_price'") && td.includes('costGateActive === true'),
+    // zx_20261107_1 B9：渲染分支随卡片进 `TaskCost`；页面仍持旧字段回退（costGateActive === true），
+    //   两处一起才算"三态原因 + 旧字段回退"仍在。
+    ok(tc.includes("costGateReason === 'no_price'") && td.includes('costGateActive === true'),
       'TaskDetail：已设但未定价的提示仍在（三态原因 + 旧字段回退）');
-    ok(td.includes('留空 = 不设金额闸'), 'TaskDetail：输入框占位如实说明留空语义');
+    ok(tc.includes('留空 = 不设金额闸'), 'TaskDetail：输入框占位如实说明留空语义');
     ok(pd.includes('留空 = 不设金额闸'), 'ProjectDetail：输入框占位如实说明留空语义');
     ok(pd.includes('费用上限「—」'), '★ProjectDetail：上限为空时如实说明"暂无金额闸"');
     ok(pp.includes('费用上限留空 = 不设金额闸'), '★Projects：新建项目处如实说明"不再自动兜底默认金额"');
@@ -187,11 +191,12 @@ const td = rd(TD); const pd = rd(PD); const pp = rd(PP);
 
   console.log('S7 防反向漂移（旧口径仍在，本轮不得顺手改名/改文案）');
   {
-    ok(td.includes('（¥ 人民币）'), 'TaskDetail 费用卡标题仍标 ¥ 人民币（C1 口径不可回退）');
-    ok(td.includes('费用预算（¥ 人民币/任务）'), 'TaskDetail 预算编辑器标签未改名');
-    ok(/¥\$\{ctxForm\.max_cost_usd_per_task\}/.test(td), 'TaskDetail 仍展示该值（名实：按 ¥ 存/用/展）');
+    ok(tc.includes('（¥ 人民币）'), 'TaskDetail 费用卡标题仍标 ¥ 人民币（C1 口径不可回退）');
+    ok(tc.includes('费用预算（¥ 人民币/任务）'), 'TaskDetail 预算编辑器标签未改名');
+    ok(/¥\$\{ctxForm\.max_cost_usd_per_task\}/.test(tc), 'TaskDetail 仍展示该值（名实：按 ¥ 存/用/展）');
     ok(pd.includes('费用上限(¥)/任务'), 'ProjectDetail 标签未改名');
-    ok(pd.includes('¥{ctx.budget.max_cost_usd_per_task'), 'ProjectDetail 仍展示该值');
+    // zx_20261107_1 B6：数值改由共享 `formatMoney` 出（CNY ⇒ ¥；币种单源），不再内联 `¥{…}`。
+    ok(pd.includes('formatMoney(ctx.budget.max_cost_usd_per_task)'), 'ProjectDetail 仍展示该值');
     ok(pp.includes('单任务费用上限¥(如3.6)'), 'Projects 既有占位未被误改');
   }
 

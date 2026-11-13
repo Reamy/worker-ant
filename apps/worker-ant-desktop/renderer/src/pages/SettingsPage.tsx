@@ -3,7 +3,10 @@ import { invoke } from '../lib/ipc';
 // zx_20261005 M8: 许可读写走专用通道（激活须验签落库，不经通用 settings:set）；`LicenseState` 取 main 侧真源。
 import { license as licenseApi, IpcError, nodes as nodesApi, sample as sampleApi } from '../lib/ipc';
 // zx_20261005 M21: ANS 缺省地址**单一真源**在 shared-types；renderer 经 `ans:defaults` 过桥取（不直引包）。
-import { ans as ansApi } from '../lib/ipc';
+import { ans as ansApi, admin as adminApi } from '../lib/ipc';
+// zx_20261112_1 B4「诊」：ANS「测试连接」复用 `admin:health` 的真探针（受保护请求 + 三态 + 一句依据），
+//   词表与仪表盘同源（`HEALTH_LEVEL_LABEL`），本页不另造"连不上/连得上"的二值说法。
+import { HEALTH_LEVEL_LABEL, isHealthLevel, type HealthReport } from '../../../src/main/core/health-check.js';
 import type { LicenseStatus } from '../lib/ipc';
 // zx_20261023_5 批五: 云端权益上屏形状同引 main IPC 真源（仅类型，打包期擦除）。
 import type { CloudEntitlementPayload } from '../../../src/main/ipc/license.ipc.js';
@@ -15,9 +18,16 @@ import type { PricingPayload } from '../../../src/main/core/pricing.js';
 import type { TierCatalogPayload } from '../../../src/main/core/tier-catalog.js';
 // zx_20261022_3 批九: 用量形状同引 main 侧真源（`core/tier-usage.ts`）；本页只上屏，不自行数库/猜上限。
 import type { TierUsagePayload } from '../../../src/main/core/tier-usage.js';
-import { Monitor, Cpu, HardDrive, RefreshCw, Lock, Check, Globe, Save, Bell, Package, GitBranch, Shield, ShieldCheck, ListTree, Terminal } from 'lucide-react';
+import { Monitor, Cpu, HardDrive, RefreshCw, Lock, Check, Globe, Save, Bell, Package, GitBranch, Shield, ShieldCheck, ListTree, Terminal, BookOpen } from 'lucide-react';
+// zx_20261111_3「显」：第一行的唯一真源在 main 纯模块（设置页只说"还差什么"，不自己排优先级）。
+import NextActionBar from '../components/NextActionBar';
+import { nextActionForSettings, type NextActionId } from '../../../src/main/core/next-action.js';
 // zx_20260910_3 M3(G3): 布尔 setting 判据**两侧共用同一文件**——读写同一口径，防"写 '0' 而读只认 'false'"
 import { boolSetting } from '../../../src/main/core/settings-bool.js';
+// zx_20261107_1 B8「名实」: 布尔键**白名单**同引 main 那一份——「高级设置」区由它自动枚举，
+//   本页不再手抄第二张名单（新增键自动进区，不会再出现"注册了却点不到"）。
+//   刻意与上一行分开写：旧套 `rr_zx_20260910_3_b3` 以 `import { boolSetting }` 的**精确形状**钉住两侧共用一份判据。
+import { BOOL_SETTING_KEYS } from '../../../src/main/core/settings-bool.js';
 // zx_20260924 M6-c: 成本上限的**键名**同样不手抄——读端（`readMaxCostPer1k`）在哪，键就在哪
 import { MAX_COST_PER_1K_KEY } from '../../../src/main/core/model-request.js';
 // zx_20261018_3 批四「度」: 机器并发上限设置键（零依赖真源；引擎读口 `task-accounting` 引同一份）。
@@ -27,6 +37,10 @@ import { MACHINE_CONCURRENCY_SETTING_KEY } from '../../../src/main/core/settings
 import { POLICY_OVERRIDES } from '../../../src/main/core/policy-keys.js';
 // zx_20261023_4: 首启设密码卡片也在设置页挂一次——用户软跳过向导后仍可设自己的密码。
 import LocalOwnerPasswordCard from '../components/LocalOwnerPasswordCard';
+// zx_20261108_1 B5：动作路径的**可见结果**——写失败不再静默吞掉（本地显示回滚 + 红条说明原因）。
+import { ActionFeedback, useActionFeedback } from '../lib/action-feedback';
+// zx_20261108_1 B5：缺省关键的三写法解析（'true'/'1'/'on'）与 main 侧同一份，面板不再手抄。
+import { parseTriState } from '../../../src/main/core/settings-bool.js';
 
 // 购买入口与各档定价由 main 侧 `core/pricing.ts` 一处供（经 `license:pricing` 过桥）——
 // 渲染层**不再**自带价格字面量或 URL（改价只改真源一处；承 M21「第二落点」纪律）。
@@ -56,7 +70,132 @@ function UsageBar({ label, used, limit }: { label: string; used: number; limit: 
   );
 }
 
+// ═══ zx_20261107_1 B8「实·通·信」：布尔开关三张名单，与 main `BOOL_SETTING_KEYS` 同一把尺 ═══
+//   ① EXPOSED：本页有专属开关行（每行有自己的标题与说明，用户点得到）；
+//   ② ELSEWHERE：在他页有专属入口（设备页 / 协同页）——此处**不再摆第二个开关**，
+//      否则同一键两个入口，规则当场分家；`node.external_inbound` 还须走 `external:setInbound`
+//      真起真停（通用 `settings:set` 只写库，写了不真起 = 本轮要治的名实不符）；
+//   ③ ADVANCED：其余全部，收进「高级设置」区（键名 + 中文名 + 开关，一个不少）。
+//   三者并集必须**恰等于**白名单——不满足即意味着新增了一个无处可点的开关。
+//   断言在 `scripts/rr_zx_20261107_1_settings.ts`：名单由白名单派生，新增键自动进高级区，不会掉队。
+const DELIV_OPTS: Array<{ key: string; label: string; desc: string; mainConsumed?: boolean }> = [
+  { key: 'show_delivery_digest', label: '本阶段成果交付单', desc: '项目详情顶部成果交付单卡（里程碑/主要成果/已验收/高质）。' },
+  { key: 'digest_window_switch', label: '交付单时间窗切换', desc: '交付单 全部/近30/近7 切换条（false=回 all-time）。' },
+  { key: 'primary_marker', label: '★主要成果标记', desc: '产出物页/抽屉/交付单的 ★ 置主与展示。' },
+  { key: 'primary_auto', label: 'finalize 自动置 primary', desc: '验收全过后自动把最新 doc 置主要成果（人工仍可撤）。主进程消费，下一任务收口生效。', mainConsumed: true },
+  { key: 'show_acceptance', label: '验收徽标(✓已验收)', desc: '产出物列表/交付单/抽屉的验收证据透出；false 时两入口(list/digest/preview)一致隐藏。' },
+  { key: 'per_doc_acceptance', label: '验收按产出物逐条显示', desc: '同一任务多 doc 各显各的 ✓（验收后才补的 doc 不显）；关=回落整任务扇出。主进程消费，下一收口生效。', mainConsumed: true },
+  { key: 'task_achievement_summary', label: '任务列表成果摘要', desc: '任务列表行「成果N·✓验收p/t·★主」chip。' },
+  { key: 'doc_drawer', label: '就地成果详情抽屉', desc: '交付单/最近产出物/任务详情/命令面板点 doc 就地展开版本流·验收·溯源。' },
+];
+
+const IM_OPTS: Array<{ key: string; label: string; desc: string }> = [
+  { key: 'notify_to_creator', label: '关键通知只发给任务创建人', desc: '完成/失败通知投给任务创建人（无 IM 来源的任务回落最近 1:1 私聊）。关=回落旧「全渠道广播」（多渠道部署会把通知发给非创建人）。' },
+  { key: 'notify_pause_needed', label: '需人工介入暂停时通知', desc: 'agent 判定需人介入的暂停（硬暂停/无进展/内容不充分/partial 悬置）推 ⚠️ 给创建人；用户主动暂停（GUI/托盘）不推。' },
+];
+
+const EXPOSED_BOOL_KEYS: readonly string[] = [
+  ...DELIV_OPTS.map((o) => `deliverable.${o.key}`),
+  ...IM_OPTS.map((o) => `im.${o.key}`),
+  'engine.policy_check',
+  'sched.critical_path',
+  'engine.model_capability_gate',
+  'engine.capability_strict_fallback',
+  'engine.plan_auto_decompose',
+  'engine.shell_multi_segment',
+  'engine.kill_background_on_exit',
+  // zx_20261113_4 B1「成」：项目画像首次自动成型（缺省即开；关 ⇒ 回「首次由用户点」旧行为）
+  'profile_auto_bootstrap',
+];
+
+const ELSEWHERE_BOOL_KEYS: readonly string[] = [
+  'device.intent_model_fallback', // 设备页「意图模型兜底」
+  'node.external_inbound',        // 协同页「外部终端入站」——真起真停走 external:setInbound，不能只写库
+];
+
+const ADVANCED_BOOL_KEYS: readonly string[] = BOOL_SETTING_KEYS.filter(
+  (k) => !EXPOSED_BOOL_KEYS.includes(k) && !ELSEWHERE_BOOL_KEYS.includes(k),
+);
+
+const ADVANCED_GROUPS: Array<{ label: string; prefix: string }> = [
+  { label: '交付与展示', prefix: 'deliverable.' },
+  { label: '引擎行为', prefix: 'engine.' },
+  { label: '记忆', prefix: 'memory.' },
+  { label: 'IM 通知', prefix: 'im.' },
+  { label: '界面与常驻', prefix: 'ui.' },
+  { label: '其它', prefix: '' },
+];
+const advancedGroupOf = (key: string): string =>
+  ADVANCED_GROUPS.find((g) => !!g.prefix && key.startsWith(g.prefix))?.label ?? '其它';
+
+// 高级区 26 个键的中文名——用户可见文案落在 renderer（词表第二落点）；缺名即由断言弄红。
+const ADVANCED_BOOL_LABELS: Record<string, string> = {
+  'deliverable.acceptance_on_close': '收口时自动验收',
+  'deliverable.probe_disposition': '探针文件处置',
+  'deliverable.primary_prefer_created': '优先「已创建」置主',
+  'deliverable.first_write_v1': '首次写入 v1 口径',
+  'engine.completion_gate_no_output': '无产出不得算完成',
+  'engine.failed_with_reason': '失败必须带原因',
+  'engine.children_failed_pause': '子任务失败即暂停',
+  'engine.answer_provenance': '回答标注出处',
+  'engine.deviation_full_input': '偏离判据完整输入',
+  'engine.shell_advice_honest': 'Shell 拒绝文案如实化',
+  'engine.milestone_subject_check': '里程碑主体校验',
+  'memory.outcome_exemplar': '按结局取范式',
+  'memory.receipt_dedup': '回执去重',
+  'memory.exemplar_effect_rank': '范式按实效排序',
+  'memory.consolidation_idle_skip': '空闲跳过巩固',
+  'memory.schema_recall': '图式重构召回',
+  'im.completion_summary': '完成摘要',
+  'im.busy_ack': '忙时回执',
+  'im.notice_single_source': '通知单一来源',
+  'ui.presence_bar': '常驻状态条',
+  'ui.presence_minimize': '状态条最小化',
+  'ui.tray_presence_menu': '托盘状态菜单',
+  'ui.stale_running_hint': '卡死任务提示',
+  'plan.link_at_create': '新建任务时可关联方案',
+  'notification.pause_and_deviation': '暂停/偏离通知',
+  'ans_auto_start': '自动托管本机 ANS',
+};
+
+// 搜索：分区关键词（卡片级过滤）——中文分词做不到，就按"用户会打的词"列在这里。
+const SECTION_KEYWORDS: Record<string, string> = {
+  'local-owner': '本机密码 所有者 账号',
+  password: '修改密码 账号 登录',
+  ans: 'ANS 服务 地址 API Key 密钥 资源',
+  notify: '桌面通知 免打扰 安静时段 系统通知 横幅 toast',
+  sound: '提示音 声音',
+  deliverable: '成果展示 交付单 产出物 验收 主要成果 抽屉',
+  model: '模型选型 成本 单价 上限 美元 价格',
+  concurrency: '机器并发 并发上限 CPU 核数',
+  sched: '调度顺序 关键路径 优先级 启动',
+  decompose: '任务拆解 计划 自动拆解 子任务 模板',
+  knowledge: '项目业务知识 画像 领域包 自动成型 知识',
+  shell: '命令执行 多段 后台进程 退出 sudo',
+  policy: '策略引擎 熔断 失败数 预算 Token 阈值',
+  capability: '模型能力 把关 严格备用 降级 选型失败 硬需',
+  orchestrate: '多机协同 编排 外派 建单即派 节点 团队',
+  im: 'IM 通知 创建人 暂停 补发 回执 摘要 渠道',
+  license: '许可 激活 档位 用量 定价 权益 云端 指纹 升级 容量 试用 席位',
+  sample: '示例项目 演示',
+  sysinfo: '系统信息 版本 平台 数据库 开源许可',
+  update: '自动更新 检查更新',
+  stack: '技术栈 框架 组件',
+};
+const ADVANCED_KEYWORDS = '高级设置 开关 布尔 白名单';
+
 export default function SettingsPage() {
+  // zx_20261108_1 B5：动作路径**可见结果**的总闸——写失败回滚本地值并红条说明原因。
+  const fb = useActionFeedback();
+  /** 设置写口。此前每个开关都是 `try { … } catch {}`：没写进去，界面却仍显示"已打开/已保存"。 */
+  const saveSetting = async (what: string, key: string, value: string, revert: () => void) => {
+    try {
+      await invoke('settings:set', key, value);
+    } catch (e) {
+      revert();
+      fb.fail(`「${what}」未保存`, e);
+    }
+  };
   const [checking, setChecking] = useState(false);
   const [updateMsg, setUpdateMsg] = useState('');
   const [pwForm, setPwForm] = useState({ oldPassword: '', newPassword: '' });
@@ -82,22 +221,9 @@ export default function SettingsPage() {
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [snd, setSnd] = useState({ completed: true, failed: true, await: true });
   // zx_20260909 X2④(道德经·有无相生 / 王阳明·知行合一): 成果展示开关组——deliverable.* 键此前无 GUI 只能 DB 直改(回退"标而不准"), 本组让其真实可点
-  const DELIV_OPTS: Array<{ key: string; label: string; desc: string; mainConsumed?: boolean }> = [
-    { key: 'show_delivery_digest', label: '本阶段成果交付单', desc: '项目详情顶部成果交付单卡（里程碑/主要成果/已验收/高质）。' },
-    { key: 'digest_window_switch', label: '交付单时间窗切换', desc: '交付单 全部/近30/近7 切换条（false=回 all-time）。' },
-    { key: 'primary_marker', label: '★主要成果标记', desc: '产出物页/抽屉/交付单的 ★ 置主与展示。' },
-    { key: 'primary_auto', label: 'finalize 自动置 primary', desc: '验收全过后自动把最新 doc 置主要成果（人工仍可撤）。主进程消费，下一任务收口生效。', mainConsumed: true },
-    { key: 'show_acceptance', label: '验收徽标(✓已验收)', desc: '产出物列表/交付单/抽屉的验收证据透出；false 时两入口(list/digest/preview)一致隐藏。' },
-    { key: 'per_doc_acceptance', label: '验收按产出物逐条显示', desc: '同一任务多 doc 各显各的 ✓（验收后才补的 doc 不显）；关=回落整任务扇出。主进程消费，下一收口生效。', mainConsumed: true },
-    { key: 'task_achievement_summary', label: '任务列表成果摘要', desc: '任务列表行「成果N·✓验收p/t·★主」chip。' },
-    { key: 'doc_drawer', label: '就地成果详情抽屉', desc: '交付单/最近产出物/任务详情/命令面板点 doc 就地展开版本流·验收·溯源。' },
-  ];
+  // zx_20261107_1 B8: `DELIV_OPTS` / `IM_OPTS` 上提到模块作用域——高级区的三张名单要由它们派生。
   const [delivOpts, setDelivOpts] = useState<Record<string, boolean>>(Object.fromEntries(DELIV_OPTS.map((o) => [o.key, true])));
   // zx_20260909_1 补⑤(§十三): IM 通知开关组——im.* 键此前无 GUI 只能 DB 直改
-  const IM_OPTS: Array<{ key: string; label: string; desc: string }> = [
-    { key: 'notify_to_creator', label: '关键通知只发给任务创建人', desc: '完成/失败通知投给任务创建人（无 IM 来源的任务回落最近 1:1 私聊）。关=回落旧「全渠道广播」（多渠道部署会把通知发给非创建人）。' },
-    { key: 'notify_pause_needed', label: '需人工介入暂停时通知', desc: 'agent 判定需人介入的暂停（硬暂停/无进展/内容不充分/partial 悬置）推 ⚠️ 给创建人；用户主动暂停（GUI/托盘）不推。' },
-  ];
   const [imOpts, setImOpts] = useState<Record<string, boolean>>(Object.fromEntries(IM_OPTS.map((o) => [o.key, true])));
   const [outboxRetryMin, setOutboxRetryMin] = useState('10');
   // zx_20261012_2 批一(策略可配): 策略引擎——阈值/窗口此前写死在源码、GUI 无处可调（只能 DB 直改）。
@@ -107,7 +233,7 @@ export default function SettingsPage() {
     'policy.cascade_fail_window': { label: '熔断：统计窗口（最近 N 个任务）', desc: '只数最近 N 个任务的失败数。此前该窗口写了却从不生效（数的是全时段），历史失败会误触熔断致新任务开跑即停。', min: 1, max: 9999 },
     'policy.notify_fail_threshold': { label: '通知：近期失败数阈值', desc: '项目近期失败数达到此值 ⇒ 记一条策略通知（不暂停任务）。', min: 1, max: 9999 },
     'policy.notify_fail_window': { label: '通知：统计窗口（最近 N 个任务）', desc: '只数最近 N 个任务的失败数。', min: 1, max: 9999 },
-    'policy.budget_tokens': { label: 'Token 预算上限', desc: '任务 Token 消耗上限。当前在「执行前」评估（此刻消耗必为 0）⇒ 该闸实际从不触发，属在册待改项。', min: 0, max: 999999999 },
+    'policy.budget_tokens': { label: 'Token 预算上限', desc: '任务 Token 消耗上限：执行中逐拍累计评估，达到上限即暂停任务并告知。留空 = 用内置缺省（3,000,000）。', min: 0, max: 999999999 },
   };
   const [policyCheck, setPolicyCheck] = useState(true);
   // zx_20261023_5 批一：就绪排序「关键路径优先」（缺省即开；关 ⇒ 回 priority DESC, created_at ASC 旧序）
@@ -124,6 +250,14 @@ export default function SettingsPage() {
   // zx_20261029_3 M5：多段命令逐段校验（缺省即开）。关 ⇒ `execute_command` 回"分隔符一律拒"旧行为。
   const [shellMultiSegment, setShellMultiSegment] = useState(true);
   const [killBackgroundOnExit, setKillBackgroundOnExit] = useState(true);
+  // zx_20261113_4 B1「成」：项目画像首次自动成型（缺省即开；关 ⇒ 回「首次由用户点」旧行为）。
+  const [profileAutoBootstrap, setProfileAutoBootstrap] = useState(true);
+  // zx_20261107_1 B8: 高级区（白名单里没有专属开关的布尔键）+ 设置页搜索。
+  //   高级键一律「缺省即开」⇒ 首帧先按开渲染，载入后按库值校正（不闪成"全关"再翻回来）。
+  const [advBool, setAdvBool] = useState<Record<string, boolean>>(
+    () => Object.fromEntries(ADVANCED_BOOL_KEYS.map((k) => [k, true])),
+  );
+  const [settingsQuery, setSettingsQuery] = useState('');
   // zx_20260924 M6-c: 模型选型成本上限（美元/1k tokens）的**写端**。
   //   此前该键只有读端（`readMaxCostPer1k`，由 `exec-model-select` 喂进 ANS 的 `maxCostPer1k`），
   //   GUI 无处可点 ⇒ 成本闸实际上是一条"装好了却没人能上电"的线。此处补上入口。
@@ -156,6 +290,13 @@ export default function SettingsPage() {
   // zx_20261005 M16: 三态判据（未配置 / 已配置 / 开发态）——由 main 侧 `ans:status` 过桥。
   //   渲染层**不自行推断**"配没配"（否则是同一判据的第二个落点，两侧漂开即名实不符）。
   const [ansStatus, setAnsStatus] = useState<{ configured: boolean; isDev: boolean } | null>(null);
+  // zx_20261112_1 B4「诊」：ANS 连接测试——结果**就地**显示（不弹 alert），失败保留原因。
+  const [ansTestBusy, setAnsTestBusy] = useState(false);
+  const [ansTest, setAnsTest] = useState<{ ok: boolean; text: string } | null>(null);
+  // zx_20261111_3「显」：第一行要的两件事之一——全局默认模型（`settings:get` 既有读口）。
+  //   `modelReadOk=false` ⇒ 没取到，第一行说"未取得"，不冒充"按自动选型"。
+  const [defaultModel, setDefaultModel] = useState<string>('');
+  const [modelReadOk, setModelReadOk] = useState(false);
   // zx_20261011_4 M4: 多机协同**编排模式**（本机设置 `node.orchestrate_mode`）。词表由 main 一处真源给
   //   （`nodes:orchestrate-mode` 随读回传 `modes`）——本页只按它摆选项，不手抄 `off`/`auto`。
   const [orchMode, setOrchMode] = useState('off');
@@ -180,6 +321,10 @@ export default function SettingsPage() {
     licenseApi.usage().then(setUsage).catch(() => { /* 浏览器态/ANS 不可达时整块不显示 */ });
     // 云端权益只读缓存（不发请求）；启动时 main 已 5 秒有界拉过一次。
     licenseApi.cloud().then(setCloud).catch(() => { /* 浏览器态无此通道 */ });
+    // zx_20261111_3「显」：第一行要的默认模型（同一读口，不在渲染层猜）。
+    invoke<string | null>('settings:get', 'model.default_model')
+      .then((v) => { setDefaultModel(v || ''); setModelReadOk(true); })
+      .catch(() => { setModelReadOk(false); });
   }, []);
 
   /** 用户点「重新同步」：main 侧拉一次（5s 有界、失败 fail-open）；档位可能因此变化 ⇒ 重取状态与用量。 */
@@ -258,15 +403,20 @@ export default function SettingsPage() {
         // zx_20261013_1 批一: 能力把关开关（同 `boolSetting` 一处真源；缺省即开）
         setCapGate(boolSetting(all['engine.model_capability_gate']));
         // ⚠ 本键**缺省关**，不能用 `boolSetting`（它「只有明确说关才算关」⇒ 缺省为真）；
-        //   引擎侧消费 `readBoolSettingDefaultOff`（同一把尺：「只有明确说开才算开」），面板侧按字面三写法读。
-        const sf = all['engine.capability_strict_fallback'];
-        setStrictFallback(sf === 'true' || sf === '1' || sf === 'on');
+        //   引擎侧消费 `readBoolSettingDefaultOff`（同一把尺：「只有明确说开才算开」），面板侧用同一份三写法解析。
+        setStrictFallback(parseTriState(all['engine.capability_strict_fallback']) === 'true');
         // zx_20261028_2 M4：计划自动拆解（同一把 `boolSetting` 尺；缺省即开）
         setPlanAutoDecompose(boolSetting(all['engine.plan_auto_decompose']));
         // zx_20261029_3 M5：多段命令逐段校验（同一把 `boolSetting` 尺；缺省即开）
         setShellMultiSegment(boolSetting(all['engine.shell_multi_segment']));
         // zx_20261029_3 M3：退出带走后台进程组（同一把 `boolSetting` 尺；缺省即开）
         setKillBackgroundOnExit(boolSetting(all['engine.kill_background_on_exit']));
+        // zx_20261113_4 B1「成」：项目画像首次自动成型（同一把 `boolSetting` 尺；缺省即开）
+        setProfileAutoBootstrap(boolSetting(all['profile_auto_bootstrap']));
+        // zx_20261107_1 B8：高级区自动枚举——键全部由白名单派生，本页不手抄；读口仍是同一把 `boolSetting` 尺
+        const adv: Record<string, boolean> = {};
+        for (const k of ADVANCED_BOOL_KEYS) adv[k] = boolSetting(all[k]);
+        setAdvBool(adv);
         const pn: Record<string, string> = {};
         for (const o of POLICY_OVERRIDES) pn[o.key] = all[o.key] ?? '';
         setPolicyNums(pn);
@@ -282,88 +432,107 @@ export default function SettingsPage() {
 
   const toggleSysNotif = async (on: boolean) => {
     setSysNotif(on);
-    try { await invoke('settings:set', 'ui_system_notifications', on ? '1' : '0'); } catch {}
+    await saveSetting('桌面通知', 'ui_system_notifications', on ? '1' : '0', () => setSysNotif(!on));
   };
   const toggleDnd = async (on: boolean) => {
     setDnd(on);
-    try { await invoke('settings:set', 'ui_dnd', on ? '1' : '0'); } catch {}
+    await saveSetting('免打扰总开关', 'ui_dnd', on ? '1' : '0', () => setDnd(!on));
   };
 
   const setQuietHour = async (which: 'start' | 'end', v: string) => {
+    const prev = which === 'start' ? quietStart : quietEnd;
     if (which === 'start') setQuietStart(v); else setQuietEnd(v);
-    try { await invoke('settings:set', which === 'start' ? 'notify_quiet_start' : 'notify_quiet_end', v); } catch {}
+    const label = which === 'start' ? '免打扰开始时间' : '免打扰结束时间';
+    const key = which === 'start' ? 'notify_quiet_start' : 'notify_quiet_end';
+    await saveSetting(label, key, v, () => {
+      if (which === 'start') setQuietStart(prev); else setQuietEnd(prev);
+    });
   };
   const toggleQuietMuteCritical = async (on: boolean) => {
     setQuietMuteCritical(on);
-    try { await invoke('settings:set', 'notify_quiet_mute_critical', on ? '1' : '0'); } catch {}
+    await saveSetting('安静时段连失败也静音', 'notify_quiet_mute_critical', on ? '1' : '0', () => setQuietMuteCritical(!on));
   };
   const toggleSoundGlobal = async (on: boolean) => {
     setSoundEnabled(on);
-    try { await invoke('settings:set', 'notify_sound_enabled', on ? '1' : '0'); } catch {}
+    await saveSetting('提示音', 'notify_sound_enabled', on ? '1' : '0', () => setSoundEnabled(!on));
   };
   const toggleSoundClass = async (cls: 'completed' | 'failed' | 'await', on: boolean) => {
     setSnd((p) => ({ ...p, [cls]: on }));
     const key = { completed: 'sound_completed', failed: 'sound_failed', await: 'sound_await' }[cls];
-    try { await invoke('settings:set', key, on ? '1' : '0'); } catch {}
+    const label = { completed: '完成提示音', failed: '失败提示音', await: '需输入提示音' }[cls];
+    await saveSetting(label, key, on ? '1' : '0', () => setSnd((p) => ({ ...p, [cls]: !on })));
   };
   const toggleDeliv = async (key: string, on: boolean) => {
     setDelivOpts((p) => ({ ...p, [key]: on }));
     // M5 实机复核修: 写 'true'/'false'(deliverable.* 消费方按 !=='false' 判定); 写 '0'/'1' 会致关闭不生效
-    try { await invoke('settings:set', `deliverable.${key}`, on ? 'true' : 'false'); } catch {}
+    await saveSetting('成果展示开关', `deliverable.${key}`, on ? 'true' : 'false', () => setDelivOpts((p) => ({ ...p, [key]: !on })));
   };
   const toggleIm = async (key: string, on: boolean) => {
     setImOpts((p) => ({ ...p, [key]: on }));
     // 与 deliverable.* 同口径: 消费方按 !=='false' 判定, 故写 'true'/'false'(写 '0'/'1' 会致关闭不生效)
-    try { await invoke('settings:set', `im.${key}`, on ? 'true' : 'false'); } catch {}
+    await saveSetting('IM 通知开关', `im.${key}`, on ? 'true' : 'false', () => setImOpts((p) => ({ ...p, [key]: !on })));
   };
   const commitOutboxMinutes = async (raw: string) => {
+    const prev = outboxRetryMin;
     const v = Math.max(0, Math.min(1440, Math.floor(Number(raw) || 0)));
     setOutboxRetryMin(String(v));
-    try { await invoke('settings:set', 'im.outbox_retry_min', String(v)); } catch {}
+    await saveSetting('IM 补发窗口（分钟）', 'im.outbox_retry_min', String(v), () => setOutboxRetryMin(prev));
   };
   // zx_20261012_2 批一: 策略闸开关 + 数值提交口（照 `commitOutboxMinutes` 手法：受控输入 + 失焦提交 + 回写钳位值）。
   //   空串**不**当 0——按"用内置缺省"办（主进程 `readNumberSetting` 读空即回落 `DEFAULT_POLICIES` 同名字段）。
   const togglePolicyCheck = async (on: boolean) => {
     setPolicyCheck(on);
-    try { await invoke('settings:set', 'engine.policy_check', on ? 'true' : 'false'); } catch {}
+    await saveSetting('策略闸', 'engine.policy_check', on ? 'true' : 'false', () => setPolicyCheck(!on));
   };
   // zx_20261023_5 批一：关键路径优先（缺省即开；写 'true'/'false' 与 `boolSetting` 同口径）
   const toggleCriticalPath = async (on: boolean) => {
     setCriticalPath(on);
-    try { await invoke('settings:set', 'sched.critical_path', on ? 'true' : 'false'); } catch {}
+    await saveSetting('关键路径优先', 'sched.critical_path', on ? 'true' : 'false', () => setCriticalPath(!on));
   };
   // zx_20261013_1 批一: 能力把关开关（`engine.model_capability_gate`，缺省即开；写 'true'/'false' 与消费端一致）。
   const toggleCapGate = async (on: boolean) => {
     setCapGate(on);
-    try { await invoke('settings:set', 'engine.model_capability_gate', on ? 'true' : 'false'); } catch {}
+    await saveSetting('能力硬需把关', 'engine.model_capability_gate', on ? 'true' : 'false', () => setCapGate(!on));
   };
   // zx_20261022_3 批六: 严格备用开关（`engine.capability_strict_fallback`，**缺省关**；写 'true'/'false'，
   //   读端 `readBoolSettingDefaultOff` 亦认 '1'/'on'，故历史写法不会把用户的开读成关）。
   const toggleStrictFallback = async (on: boolean) => {
     setStrictFallback(on);
-    try { await invoke('settings:set', 'engine.capability_strict_fallback', on ? 'true' : 'false'); } catch {}
+    await saveSetting('严格备用', 'engine.capability_strict_fallback', on ? 'true' : 'false', () => setStrictFallback(!on));
   };
   // zx_20261028_2 M4：计划自动拆解（缺省即开；写 'true'/'false' 与 `readBoolSetting` 同口径）
   const togglePlanAutoDecompose = async (on: boolean) => {
     setPlanAutoDecompose(on);
-    try { await invoke('settings:set', 'engine.plan_auto_decompose', on ? 'true' : 'false'); } catch {}
+    await saveSetting('计划自动拆解', 'engine.plan_auto_decompose', on ? 'true' : 'false', () => setPlanAutoDecompose(!on));
   };
   // zx_20261029_3 M5：多段命令逐段校验（缺省即开；写 'true'/'false' 与 `readBoolSetting` 同口径）
   const toggleShellMultiSegment = async (on: boolean) => {
     setShellMultiSegment(on);
-    try { await invoke('settings:set', 'engine.shell_multi_segment', on ? 'true' : 'false'); } catch {}
+    await saveSetting('多段命令逐段校验', 'engine.shell_multi_segment', on ? 'true' : 'false', () => setShellMultiSegment(!on));
   };
   // zx_20261029_3 M3：退出带走后台进程组（缺省即开；写 'true'/'false' 与 `readBoolSetting` 同口径）
+  // zx_20261113_4 B1「成」：项目画像自动成型开关（缺省即开；写 'true'/'false' 与主进程 `readBoolSetting` 同口径）。
+  const toggleProfileAutoBootstrap = async (on: boolean) => {
+    setProfileAutoBootstrap(on);
+    await saveSetting('项目画像自动成型', 'profile_auto_bootstrap', on ? 'true' : 'false', () => setProfileAutoBootstrap(!on));
+  };
   const toggleKillBackgroundOnExit = async (on: boolean) => {
     setKillBackgroundOnExit(on);
-    try { await invoke('settings:set', 'engine.kill_background_on_exit', on ? 'true' : 'false'); } catch {}
+    await saveSetting('退出带走后台进程组', 'engine.kill_background_on_exit', on ? 'true' : 'false', () => setKillBackgroundOnExit(!on));
+  };
+  // zx_20261107_1 B8：高级区开关——全部由白名单枚举而来，写 'true'/'false' 与消费端 `boolSetting` 同口径。
+  //   刻意**不含** `node.external_inbound`（缺省关 + 须真起真停，走协同页 `external:setInbound`）。
+  const toggleAdvancedBool = async (key: string, on: boolean) => {
+    setAdvBool((p) => ({ ...p, [key]: on }));
+    await saveSetting(ADVANCED_BOOL_LABELS[key] ?? key, key, on ? 'true' : 'false', () => setAdvBool((p) => ({ ...p, [key]: !on })));
   };
   const commitPolicyNum = async (key: string, raw: string, min: number, max: number) => {
+    const prev = policyNums[key] ?? '';
     const t = raw.trim();
     const n = Number(t);
     const v = t === '' || !Number.isFinite(n) ? '' : String(Math.max(min, Math.min(max, Math.floor(n))));
     setPolicyNums((p) => ({ ...p, [key]: v }));
-    try { await invoke('settings:set', key, v); } catch {}
+    await saveSetting(POLICY_NUM_LABELS[key]?.label ?? key, key, v, () => setPolicyNums((p) => ({ ...p, [key]: prev })));
   };
   /**
    * zx_20260924 M6-c: 成本上限的提交口。与 `commitOutboxMinutes` 同形（受控输入 + 失焦提交 + 回写规范化后的值）。
@@ -379,7 +548,12 @@ export default function SettingsPage() {
   const commitOrchMode = async (mode: string) => {
     const prev = orchMode;
     setOrchMode(mode);
-    try { await nodesApi.setOrchestrateMode(mode); } catch { setOrchMode(prev); }
+    try {
+      await nodesApi.setOrchestrateMode(mode);
+    } catch (e) {
+      setOrchMode(prev);
+      fb.fail('「编排模式」未保存', e);
+    }
   };
   /** zx_20261017_1 批三: 建单即派开关提交口（失败回滚显示，不把"没写进去"显示成"已开"）。
    *  zx_20261029_2 M7：写口落的是**显式**值——成功后策略来源随之变为 `explicit`（理由跟 main 同一句话）。 */
@@ -390,20 +564,26 @@ export default function SettingsPage() {
     try {
       await nodesApi.setAutoDispatch(on);
       setAutoPolicy({ source: 'explicit', reason: on ? '已手动开启' : '已手动关闭' });
-    } catch { setAutoDispatch(prev); setAutoPolicy(prevPolicy); }
+    } catch (e) {
+      setAutoDispatch(prev);
+      setAutoPolicy(prevPolicy);
+      fb.fail('「建单即派」未保存', e);
+    }
   };
   const commitMaxCostPer1k = async (raw: string) => {
+    const prev = maxCostPer1k;
     const n = Number(raw);
     const v = Number.isFinite(n) && n > 0 ? String(n) : '';
     setMaxCostPer1k(v);
-    try { await invoke('settings:set', MAX_COST_PER_1K_KEY, v); } catch {}
+    await saveSetting('模型选型成本上限', MAX_COST_PER_1K_KEY, v, () => setMaxCostPer1k(prev));
   };
   /** zx_20261018_3 批四「度」: 机器并发上限提交口——留空/非数/≤0 ⇒ 写空串 = 回到 CPU 派生缺省。 */
   const commitMachineMaxConcurrency = async (raw: string) => {
+    const prev = machineMaxConcurrency;
     const n = Number(raw);
     const v = Number.isFinite(n) && n > 0 ? String(Math.floor(n)) : '';
     setMachineMaxConcurrency(v);
-    try { await invoke('settings:set', MACHINE_CONCURRENCY_SETTING_KEY, v); } catch {}
+    await saveSetting('机器并发上限', MACHINE_CONCURRENCY_SETTING_KEY, v, () => setMachineMaxConcurrency(prev));
   };
   const Switch = ({ on, onToggle }: { on: boolean; onToggle: (v: boolean) => void }) => (
     <button type="button" role="switch" aria-checked={on} onClick={() => onToggle(!on)} className={`relative w-9 h-5 shrink-0 rounded-full transition-colors ${on ? 'bg-blue-600' : 'bg-gray-300'}`}>
@@ -421,7 +601,34 @@ export default function SettingsPage() {
       setAnsSecretSet({ apiKey: st?.ans_api_key === true, secretKey: st?.ans_secret_key === true });
       setAnsConfig((p) => ({ ...p, ans_api_key: '', ans_secret_key: '' }));
       setAnsSaved(true); setTimeout(() => setAnsSaved(false), 2000);
-    } catch {}
+    } catch (e) {
+      // 服务地址/凭据是**服务器连接的唯一入口**——写失败必须说，不能让界面装作"已保存"。
+      fb.fail('ANS 配置未保存', e);
+    }
+  };
+
+  /**
+   * zx_20261112_1 B4「诊」：ANS「测试连接」——真发一次**受保护**请求（`admin:health` 的 ANS 探针，
+   *   三态 + 依据），不另造二值判据。结果就地显示；探针本身失败也如实说"未完成 + 原因"。
+   */
+  const handleTestAns = async () => {
+    if (ansTestBusy) return;
+    setAnsTestBusy(true);
+    setAnsTest(null);
+    try {
+      const d = (await adminApi.health()) as { report?: HealthReport };
+      const item = d?.report?.items?.find((i) => i.key === 'ans');
+      if (!item) {
+        setAnsTest({ ok: false, text: '健康自检未返回 ANS 一项（本机自检未完成），无法判定' });
+        return;
+      }
+      const level = isHealthLevel(item.level) ? HEALTH_LEVEL_LABEL[item.level] : String(item.level);
+      setAnsTest({ ok: item.level === 'ok', text: `ANS ${level}${item.evidence ? `：${item.evidence}` : ''}` });
+    } catch (e) {
+      setAnsTest({ ok: false, text: `测试未完成：${(e as Error).message}` });
+    } finally {
+      setAnsTestBusy(false);
+    }
   };
 
   const handleInstallSample = async () => {
@@ -479,11 +686,82 @@ export default function SettingsPage() {
           ? `无生效权益（${cloud.sourceLabel ?? '未签发'}）`
           : '尚未同步';
 
+  // zx_20261107_1 B8: 搜索与「高级设置」派生——分区关键词做卡片级过滤；高级区键全部来自白名单。
+  // zx_20261110_1 B5（G17）：只搜分区名会把"用户明明看得见的行"说成不存在——补**行级**索引
+  //   （label + description + 键名）：映射表驱动的行由表自身派生，手写行在此列其标题/键名。
+  //   命中一行即展开所在节（节本就全展开，这里只决定显隐）。
+  const q = settingsQuery.trim().toLowerCase();
+  const ROW_KEYWORDS: Record<string, string[]> = {
+    deliverable: DELIV_OPTS.map((o) => `${o.label} ${o.desc} deliverable.${o.key}`),
+    im: IM_OPTS.map((o) => `${o.label} ${o.desc} im.${o.key}`),
+    policy: POLICY_OVERRIDES.map((o) => `${o.key} ${POLICY_NUM_LABELS[o.key]?.label ?? ''} ${POLICY_NUM_LABELS[o.key]?.desc ?? ''}`),
+    advanced: ADVANCED_BOOL_KEYS.map((k) => `${k} ${ADVANCED_BOOL_LABELS[k] ?? ''}`),
+    'local-owner': ['本机所有者密码 首次登录自动进入'],
+    password: ['当前密码 新密码 修改密码'],
+    ans: ['ANS 地址 服务地址 API Key 密钥 连接测试'],
+    notify: ['免打扰总开关', '关键事态原生系统通知', '免打扰时段', '安静时段内也静音失败/需输入'],
+    sound: ['提示音总开关', '按事件类静音 任务完成 任务失败 等待你输入'],
+    model: ['模型单价上限 max_cost_per_1k'],
+    concurrency: ['机器并发上限'],
+    sched: ['关键路径优先'],
+    decompose: ['计划自动拆解'],
+    shell: ['多段命令逐段校验', '退出时带走后台进程'],
+    capability: ['启用能力把关', '严格备用 缺硬需即拒'],
+    orchestrate: ['外派策略', '建单即派'],
+    license: ['激活码 档位 用量 配额 云端权益 设备指纹 升级'],
+  };
+  const rowHit = (id: string): boolean => !!q && (ROW_KEYWORDS[id] ?? []).some((t) => t.toLowerCase().includes(q));
+  const sectionVisible = (id: string): boolean =>
+    !q || (SECTION_KEYWORDS[id] ?? id).toLowerCase().includes(q) || rowHit(id);
+  const cardCls = (id: string): string =>
+    `bg-white rounded-lg border p-6${sectionVisible(id) ? '' : ' hidden'}`;
+  const wrapCls = (id: string): string => (sectionVisible(id) ? '' : 'hidden');
+  const advancedHits = ADVANCED_BOOL_KEYS.filter(
+    (k) => !q || k.toLowerCase().includes(q) || (ADVANCED_BOOL_LABELS[k] ?? '').toLowerCase().includes(q),
+  );
+  const advancedVisible = !q || advancedHits.length > 0 || ADVANCED_KEYWORDS.includes(q);
+  const advancedList = q && advancedHits.length > 0 ? advancedHits : ADVANCED_BOOL_KEYS;
+  const noMatch = !!q && advancedHits.length === 0 && !ADVANCED_KEYWORDS.includes(q)
+    && !Object.values(SECTION_KEYWORDS).some((kw) => kw.toLowerCase().includes(q))
+    && !Object.values(ROW_KEYWORDS).some((rows) => rows.some((t) => t.toLowerCase().includes(q)));
+  const advRow = (key: string) => (
+    <div key={key} className="flex items-center justify-between gap-4">
+      <div>
+        <p className="text-sm text-gray-700">{ADVANCED_BOOL_LABELS[key] ?? key}</p>
+        <p className="text-[11px] text-gray-400 font-mono">{key}</p>
+      </div>
+      <Switch on={!!advBool[key]} onToggle={(v) => toggleAdvancedBool(key, v)} />
+    </div>
+  );
+
+  // zx_20261111_3「显」：第一行——只回答"还差什么才能跑起来"；一切就绪时不摆按钮。
+  const settingsNextAction = nextActionForSettings({
+    ans: ansStatus == null ? 'unknown' : (ansStatus.configured ? 'configured' : 'unconfigured'),
+    ansNote: ansStatus == null ? 'ANS 状态未取得' : null,
+    defaultModel: modelReadOk ? defaultModel : null,
+  });
+  function handleSettingsNextAction(aid: NextActionId): void {
+    if (aid === 'open_settings') document.getElementById('settings-ans')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
   return (
     <div><h2 className="text-xl font-bold mb-6">设置</h2>
+      {/* zx_20261108_1 B5：任一写口失败在此如实上屏（含原因），不再静默吞掉 */}
+      <ActionFeedback note={fb.note} onClose={() => fb.setNote(null)} />
+      {/* zx_20261111_3「显」：第一行——此刻是什么 / 凭什么 / 下一步点哪个 */}
+      <div className="mb-4"><NextActionBar action={settingsNextAction} onAction={handleSettingsNextAction} /></div>
       <div className="space-y-6 max-w-2xl">
-        <LocalOwnerPasswordCard />
-        <div className="bg-white rounded-lg border p-6">
+        <input
+          value={settingsQuery}
+          onChange={(e) => setSettingsQuery(e.target.value)}
+          placeholder="搜索设置（如：通知 / 模型 / 并发 / 记忆）"
+          className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+        />
+        {noMatch && <p className="text-sm text-gray-400">没有匹配的设置项。</p>}
+        <div className={wrapCls('local-owner')}>
+          <LocalOwnerPasswordCard />
+        </div>
+        <div className={cardCls('password')}>
           <h3 className="font-semibold mb-4 flex items-center gap-2"><Lock className="w-4 h-4"/>修改密码</h3>
           <form onSubmit={handleChangePassword} className="space-y-3">
             <div><label className="block text-sm font-medium mb-1">当前密码</label><input type="password" value={pwForm.oldPassword} onChange={e => setPwForm({...pwForm,oldPassword:e.target.value})} required className="w-full max-w-xs px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"/></div>
@@ -493,7 +771,7 @@ export default function SettingsPage() {
           </form>
         </div>
         {/* ANS 服务配置 */}
-        <div className="bg-white rounded-lg border p-6">
+        <div className={cardCls('ans')} id="settings-ans">
           <h3 className="font-semibold mb-4 flex items-center gap-2"><Globe className="w-4 h-4"/>ANS 服务配置</h3>
           {!ansLoaded ? <p className="text-sm text-gray-400">加载中...</p> : <div className="space-y-3">
             {/* zx_20261005 M16: 凭据三态如实上屏——未配置是**生产首启的正常态**，须引导而非沉默 */}
@@ -505,13 +783,18 @@ export default function SettingsPage() {
             <div><label className="block text-sm font-medium mb-1">服务地址</label><input value={ansConfig.ans_server_url} onChange={e=>setAnsConfig({...ansConfig,ans_server_url:e.target.value})} className="w-full max-w-md px-3 py-2 border rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder={ansDefaultUrl || 'http://localhost:27183'}/></div>
             <div><label className="block text-sm font-medium mb-1">API Key</label><input value={ansConfig.ans_api_key} onChange={e=>setAnsConfig({...ansConfig,ans_api_key:e.target.value})} placeholder={ansSecretSet.apiKey ? '已配置（留空不修改）' : '未配置'} className="w-full max-w-md px-3 py-2 border rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"/></div>
             <div><label className="block text-sm font-medium mb-1">Secret Key</label><div className="flex items-center gap-2"><input type={showSecret?'text':'password'} value={ansConfig.ans_secret_key} onChange={e=>setAnsConfig({...ansConfig,ans_secret_key:e.target.value})} placeholder={ansSecretSet.secretKey ? '已配置（留空不修改）' : '未配置'} className="w-full max-w-md px-3 py-2 border rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"/><button onClick={()=>setShowSecret(!showSecret)} className="text-xs text-gray-400 hover:text-gray-600">{showSecret?'隐藏':'显示'}</button></div></div>
-            <button onClick={handleSaveAns} className={`flex items-center gap-1 px-4 py-2 rounded-lg text-sm text-white transition-colors ${ansSaved?'bg-green-600':'bg-blue-600 hover:bg-blue-700'}`}>{ansSaved?<><Check className="w-3.5 h-3.5"/>已保存（即时生效）</>:'保存配置'}</button>
+            <div className="flex items-center gap-2 flex-wrap">
+              <button onClick={handleSaveAns} className={`flex items-center gap-1 px-4 py-2 rounded-lg text-sm text-white transition-colors ${ansSaved?'bg-green-600':'bg-blue-600 hover:bg-blue-700'}`}>{ansSaved?<><Check className="w-3.5 h-3.5"/>已保存（即时生效）</>:'保存配置'}</button>
+              {/* zx_20261112_1 B4「诊」：连得上没有，点一下就有真答案（受保护请求 + 三态 + 依据） */}
+              <button onClick={handleTestAns} disabled={ansTestBusy} data-ans-test className="px-4 py-2 rounded-lg text-sm border border-blue-200 text-blue-600 hover:bg-blue-50 disabled:opacity-50">{ansTestBusy?'测试中...':'测试连接'}</button>
+              {ansTest && <span data-ans-test-result className={`text-xs ${ansTest.ok?'text-green-600':'text-red-500'}`}>{ansTest.text}</span>}
+            </div>
             <p className="text-xs text-gray-400">修改后立即生效，所有 ANS 资源页面将使用新配置重连。</p>
           </div>}
         </div>
 
         {/* A2 (2026-09-03): 桌面原生通知开关 */}
-        <div className="bg-white rounded-lg border p-6">
+        <div className={cardCls('notify')}>
           <h3 className="font-semibold mb-4 flex items-center gap-2"><Bell className="w-4 h-4"/>桌面通知</h3>
           {/* zx_20260906 批4 (4c): 全局免打扰总开关——六路(OS横幅/toast/声音/铃点/dock/需处理)降为一路中心记录 */}
           <div className="mb-4 flex items-center justify-between gap-4">
@@ -519,18 +802,14 @@ export default function SettingsPage() {
               <p className="text-sm font-medium">免打扰总开关</p>
               <p className="text-xs text-gray-400 mt-1">开启后不再弹原生横幅 / 应用内 toast / 提示音；事件仍记录到通知中心·铃点·需处理列表（中心记录不丢）。改动即时生效。</p>
             </div>
-            <button type="button" role="switch" aria-checked={dnd} onClick={() => toggleDnd(!dnd)} className={`relative w-11 h-6 shrink-0 rounded-full transition-colors ${dnd ? 'bg-blue-600' : 'bg-gray-300'}`}>
-              <span className={`absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${dnd ? 'translate-x-5' : ''}`} />
-            </button>
+            <Switch on={dnd} onToggle={toggleDnd} />
           </div>
           <div className="flex items-center justify-between gap-4">
             <div>
               <p className="text-sm font-medium">关键事态原生系统通知</p>
               <p className="text-xs text-gray-400 mt-1">聚焦窗口时以应用内提示为主（不弹系统横幅）；失焦/最小化时弹系统横幅（归一主通道）。任务失败 / 等待输入即时；完成仅在离开窗口时弹；正在观看该任务不打扰。</p>
             </div>
-            <button type="button" role="switch" aria-checked={sysNotif} onClick={() => toggleSysNotif(!sysNotif)} className={`relative w-11 h-6 shrink-0 rounded-full transition-colors ${sysNotif ? 'bg-blue-600' : 'bg-gray-300'}`}>
-              <span className={`absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${sysNotif ? 'translate-x-5' : ''}`} />
-            </button>
+            <Switch on={sysNotif} onToggle={toggleSysNotif} />
           </div>
           <p className="text-xs text-gray-400 mt-3">仅桌面端生效；开关即时生效，无需重启。</p>
           {/* B1 (2026-09-03_2): 免打扰时段（完成类不弹，仅记录；失败/需输入仍弹） */}
@@ -550,15 +829,13 @@ export default function SettingsPage() {
                 <p className="text-sm font-medium">安静时段内也静音"失败/需输入"应用内提示</p>
                 <p className="text-xs text-gray-400 mt-0.5">原生系统通知仍会弹出（关键事态守中）；仅收敛应用内 toast。勾选后即刻生效。</p>
               </div>
-              <button type="button" role="switch" aria-checked={quietMuteCritical} onClick={() => toggleQuietMuteCritical(!quietMuteCritical)} className={`relative w-11 h-6 shrink-0 rounded-full transition-colors ${quietMuteCritical ? 'bg-blue-600' : 'bg-gray-300'}`}>
-                <span className={`absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${quietMuteCritical ? 'translate-x-5' : ''}`} />
-              </button>
+              <Switch on={quietMuteCritical} onToggle={toggleQuietMuteCritical} />
             </div>
           </div>
         </div>
 
         {/* D2 (2026-09-04_2): 提示音（全局 + 分事件类，运行中即时生效；系统通知/应用内 toast 均受控） */}
-        <div className="bg-white rounded-lg border p-6">
+        <div className={cardCls('sound')}>
           <h3 className="font-semibold mb-4 flex items-center gap-2"><Bell className="w-4 h-4"/>提示音</h3>
           <div className="space-y-3">
             <div className="flex items-center justify-between gap-4">
@@ -578,7 +855,7 @@ export default function SettingsPage() {
         </div>
 
         {/* zx_20260909 X2④(道德经·有无相生 / 王阳明·知行合一): 成果展示开关组——deliverable.* 可回退真实可点 */}
-        <div className="bg-white rounded-lg border p-6">
+        <div className={cardCls('deliverable')}>
           <h3 className="font-semibold mb-1 flex items-center gap-2"><Package className="w-4 h-4"/>成果展示</h3>
           <p className="text-xs text-gray-400 mb-3">控制「主要成果」在交付单 / 产出物列表 / 任务列表 / 就地抽屉中的呈现。renderer 即时生效；primary_auto 等主进程消费键在下一任务收口生效。</p>
           <div className="space-y-3">
@@ -595,7 +872,7 @@ export default function SettingsPage() {
         </div>
 
         {/* zx_20260924 M6-c: 模型选型成本上限——此前只有读端无写端（GUI 无处可点，只能 DB 直改） */}
-        <div className="bg-white rounded-lg border p-6">
+        <div className={cardCls('model')}>
           <h3 className="font-semibold mb-1 flex items-center gap-2"><Cpu className="w-4 h-4"/>模型选型</h3>
           <p className="text-xs text-gray-400 mb-3">向 ANS 申请模型时附带的成本上限；ANS 按「输入+输出单价之和 ≤ 该值」筛模型。主进程消费，下一个任务生效。
             {/* zx_20261013_2 批四（维特根斯坦·语言游戏）:「美元」在「模型单价」与「任务预算」**两场游戏**里指的不是一回事，
@@ -617,7 +894,7 @@ export default function SettingsPage() {
         </div>
 
         {/* zx_20261018_3 批四「度」: 机器级并发上限——此前项目闸只管"一个项目几个"，整机总量无上限 */}
-        <div className="bg-white rounded-lg border p-6">
+        <div className={cardCls('concurrency')}>
           <h3 className="font-semibold mb-1 flex items-center gap-2"><Cpu className="w-4 h-4"/>机器并发</h3>
           <p className="text-xs text-gray-400 mb-3">整台机器同时能跑几个任务（跨所有项目合计）。到上限时新任务退回队列、指数退避后重试，<span className="text-gray-500">不会被打断正在跑的任务</span>。主进程消费，下一次认领生效。</p>
           <div className="flex items-center justify-between gap-4">
@@ -635,7 +912,7 @@ export default function SettingsPage() {
         </div>
 
         {/* zx_20261023_5 批一(孙子·先为不可胜): 调度顺序——同优先级时长依赖链先启动 */}
-        <div className="bg-white rounded-lg border p-6">
+        <div className={cardCls('sched')}>
           <h3 className="font-semibold mb-1 flex items-center gap-2"><GitBranch className="w-4 h-4"/>调度顺序</h3>
           <p className="text-xs text-gray-400 mb-3">决定"先跑谁"。主进程消费，下一次调度生效。</p>
           <div className="flex items-center justify-between gap-4">
@@ -649,7 +926,7 @@ export default function SettingsPage() {
 
         {/* zx_20261028_2 M4(能拆则拆，不硬拆): 计划自动拆解——引擎"到点即拆"的开关。
             键早已在 `settings-bool.ts` 的白名单里、主进程也在读，缺的只是这一处读写口。 */}
-        <div className="bg-white rounded-lg border p-6">
+        <div className={cardCls('decompose')}>
           <h3 className="font-semibold mb-1 flex items-center gap-2"><ListTree className="w-4 h-4"/>任务拆解</h3>
           <p className="text-xs text-gray-400 mb-3">计划类任务到点即拆为可执行子任务（模板或 LLM 规划）。主进程消费，下一个任务生效。</p>
           <div className="flex items-center justify-between gap-4">
@@ -664,9 +941,23 @@ export default function SettingsPage() {
           </div>
         </div>
 
+        {/* zx_20261113_4 B1「成」(道德经·自知者明): 项目业务知识——画像首次自动成型。
+            只建「本项目自身事实压缩成的画像」；外来领域包仍永不自动启用。 */}
+        <div className={cardCls('knowledge')}>
+          <h3 className="font-semibold mb-1 flex items-center gap-2"><BookOpen className="w-4 h-4"/>项目业务知识</h3>
+          <p className="text-xs text-gray-400 mb-3">夜间巩固时，从项目已发生的任务、产出物与服务调用里派生出 200 token 的「项目画像」（确定性、零 LLM），新任务执行时自动带上。</p>
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-sm font-medium">项目画像自动成型<span className="ml-1 text-[9px] px-1 py-0.5 rounded bg-amber-100 text-amber-700 align-middle">主进程</span></p>
+              <p className="text-xs text-gray-400 mt-0.5">关 ⇒ 不自动新建，首次仍由你在项目详情里手点生成（一键回退）。已有画像、导入画像与外来领域包都不受影响。</p>
+            </div>
+            <Switch on={profileAutoBootstrap} onToggle={toggleProfileAutoBootstrap} />
+          </div>
+        </div>
+
         {/* zx_20261029_3 M5(维特根斯坦·语言游戏): 多段命令——语法（有分隔符）不等于权限（要 sudo）。
             开关必须有 GUI 读写口，否则"承诺的一键回退"只是白名单里的一行字。 */}
-        <div className="bg-white rounded-lg border p-6">
+        <div className={cardCls('shell')}>
           <h3 className="font-semibold mb-1 flex items-center gap-2"><Terminal className="w-4 h-4"/>命令执行</h3>
           <p className="text-xs text-gray-400 mb-3">决定智能体执行通用命令时如何读分隔符。主进程消费，下一次工具调用生效。</p>
           <div className="flex items-center justify-between gap-4">
@@ -692,7 +983,7 @@ export default function SettingsPage() {
         </div>
 
         {/* zx_20261012_2 批一(策略可配): 策略引擎——阈值/窗口此前写死在源码，GUI 无处可调（只能 DB 直改） */}
-        <div className="bg-white rounded-lg border p-6">
+        <div className={cardCls('policy')}>
           <h3 className="font-semibold mb-1 flex items-center gap-2"><Shield className="w-4 h-4"/>策略引擎</h3>
           <p className="text-xs text-gray-400 mb-3">任务「执行前」的策略闸：项目近期失败过多则暂停/通知。主进程消费，下一个任务生效。留空 = 用内置缺省。</p>
           <div className="space-y-3">
@@ -726,7 +1017,7 @@ export default function SettingsPage() {
         </div>
 
         {/* zx_20261013_1 批一(称器于事): 模型能力把关——选型后若最终在用模型缺本任务**硬需**能力，如实拒而非静默降级 */}
-        <div className="bg-white rounded-lg border p-6">
+        <div className={cardCls('capability')}>
           <h3 className="font-semibold mb-1 flex items-center gap-2"><ShieldCheck className="w-4 h-4"/>模型能力把关</h3>
           <p className="text-xs text-gray-400 mb-3">
             任务「选型定稿」之后、执行之前：若最终在用的模型缺本任务**硬需**能力（vision/chat/function-calling），则**如实拒并写「[选型失败]」**，而不是让装配层省略图片把缺口掩盖过去。软需能力（code/reasoning）缺则允许续跑（如实记账）。主进程消费，下一个任务生效。
@@ -753,7 +1044,7 @@ export default function SettingsPage() {
         </div>
 
         {/* zx_20261011_4 M4: 多机协同**编排模式**——把本机跑不过来的就绪子任务外派给网络里的他机 */}
-        <div className="bg-white rounded-lg border p-6">
+        <div className={cardCls('orchestrate')}>
           <h3 className="font-semibold mb-1 flex items-center gap-2"><GitBranch className="w-4 h-4"/>多机协同编排</h3>
           <p className="text-xs text-gray-400 mb-3">缺省关闭（不变更既有行为）。开启后，当本机该项目并发位已占满且仍有就绪子任务时，把溢出的（每拍至多 3 件）外派给协同网络里的他机执行；结果回传后本机如实收口并继续推进依赖链。仅在本机已入网且 Team 档已解锁时生效。</p>
           <div className="flex items-center justify-between gap-4">
@@ -784,7 +1075,7 @@ export default function SettingsPage() {
         </div>
 
         {/* zx_20260909_1 补⑤(§十三): IM 通知开关组——im.notify_to_creator/notify_pause_needed/outbox_retry_min 可回退真实可点 */}
-        <div className="bg-white rounded-lg border p-6">
+        <div className={cardCls('im')}>
           <h3 className="font-semibold mb-1 flex items-center gap-2"><Bell className="w-4 h-4"/>IM 通知</h3>
           <p className="text-xs text-gray-400 mb-3">控制任务关键通知（完成 / 失败 / 需人工介入暂停）经 IM 渠道投递给创建人的行为。主进程消费，下一次通知（或下一轮补发扫描）生效。</p>
           <div className="space-y-3">
@@ -812,7 +1103,7 @@ export default function SettingsPage() {
           </div>
         </div>
 
-        <div className="bg-white rounded-lg border p-6"><h3 className="font-semibold mb-4 flex items-center gap-2"><Package className="w-4 h-4"/>许可与激活</h3>
+        <div className={cardCls('license')}><h3 className="font-semibold mb-4 flex items-center gap-2"><Package className="w-4 h-4"/>许可与激活</h3>
           <div className="space-y-2 text-sm">
             {/* zx_20261027_3 M3「试得真」：试用给的就是团队版能力——档位行直说"团队版能力（剩 N 天）"，
                 与 `license.ts` 的 `tier:'team'` 及价目表 `trial.grantsTier` 同一事实。 */}
@@ -1017,7 +1308,7 @@ export default function SettingsPage() {
             </div>
           </div>
         </div>
-        <div className="bg-white rounded-lg border p-6"><h3 className="font-semibold mb-4 flex items-center gap-2"><Package className="w-4 h-4"/>示例项目</h3>
+        <div className={cardCls('sample')}><h3 className="font-semibold mb-4 flex items-center gap-2"><Package className="w-4 h-4"/>示例项目</h3>
           <p className="text-sm text-gray-500 mb-3">一键载入一份示例（项目 / 任务 / 产出物 / 记忆），用于快速了解工蚁。示例带「示例」徽标，与你的真实数据隔离，可随时一键删除。</p>
           <div className="flex items-center gap-2">
             <button onClick={handleInstallSample} disabled={sampleBusy} className="px-3 py-1.5 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:opacity-50">载入示例项目</button>
@@ -1025,7 +1316,7 @@ export default function SettingsPage() {
           </div>
           {sampleMsg && <p className="text-xs text-gray-500 mt-2">{sampleMsg}</p>}
         </div>
-        <div className="bg-white rounded-lg border p-6"><h3 className="font-semibold mb-4 flex items-center gap-2"><Monitor className="w-4 h-4"/>系统信息</h3>
+        <div className={cardCls('sysinfo')}><h3 className="font-semibold mb-4 flex items-center gap-2"><Monitor className="w-4 h-4"/>系统信息</h3>
           <div className="space-y-2 text-sm">
             <div className="flex justify-between"><span className="text-gray-500">应用版本</span><span className="font-mono">{appVersion || '—'}</span></div>
             <div className="flex justify-between"><span className="text-gray-500">架构模式</span><span className="text-blue-600 font-medium">单进程 Electron + IPC</span></div>
@@ -1035,13 +1326,39 @@ export default function SettingsPage() {
             <div className="flex justify-between"><span className="text-gray-500">开源许可</span><a href="https://github.com/Reamy/worker-ant" target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">AGPL-3.0-only</a></div>
           </div>
         </div>
-        <div className="bg-white rounded-lg border p-6"><h3 className="font-semibold mb-4 flex items-center gap-2"><RefreshCw className="w-4 h-4"/>自动更新</h3>
+        <div className={cardCls('update')}><h3 className="font-semibold mb-4 flex items-center gap-2"><RefreshCw className="w-4 h-4"/>自动更新</h3>
           <button onClick={handleCheckUpdate} disabled={checking} className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50"><RefreshCw className={`w-4 h-4 ${checking?'animate-spin':''}`}/>{checking?'检查中...':'检查更新'}</button>
           {updateMsg && <p className="text-sm text-gray-500 mt-2">{updateMsg}</p>}
         </div>
-        <div className="bg-white rounded-lg border p-6"><h3 className="font-semibold mb-4 flex items-center gap-2"><Cpu className="w-4 h-4"/>技术栈</h3>
+        <div className={cardCls('stack')}><h3 className="font-semibold mb-4 flex items-center gap-2"><Cpu className="w-4 h-4"/>技术栈</h3>
           <div className="flex flex-wrap gap-2">{['TypeScript','Electron 33','React 19','Vite 6','Tailwind CSS v4','better-sqlite3','Vercel AI SDK v4','JWT (jose)','bcrypt','node-cron'].map(t=>(<span key={t} className="px-2 py-1 bg-gray-100 rounded text-xs font-mono text-gray-600">{t}</span>))}</div>
         </div>
+
+        {/* zx_20261107_1 B8「实·通·信」：高级设置——白名单里没有专属开关的布尔键全在这里。
+            键由 main `BOOL_SETTING_KEYS` 派生（不手抄第二张名单），每项有键名与中文名；写口与上面各开关同一口径。 */}
+        {advancedVisible && (
+          <div className="bg-white rounded-lg border p-6">
+            <h3 className="font-semibold mb-1 flex items-center gap-2"><ListTree className="w-4 h-4"/>高级设置</h3>
+            <p className="text-xs text-gray-400 mb-3">其余布尔开关——都有实际引擎行为，只是平时不常改。键名与主进程白名单 <span className="font-mono">BOOL_SETTING_KEYS</span> 同一来源：新增键会自动出现在这里，不会再「注册了却点不到」。</p>
+            {q ? (
+              <div className="space-y-3">{advancedList.map(advRow)}</div>
+            ) : (
+              <details className="mt-1">
+                <summary className="text-sm text-blue-600 cursor-pointer select-none">展开高级开关（{ADVANCED_BOOL_KEYS.length} 项）</summary>
+                <div className="mt-3 space-y-4">
+                  {ADVANCED_GROUPS.filter((g) => ADVANCED_BOOL_KEYS.some((k) => advancedGroupOf(k) === g.label)).map((g) => (
+                    <div key={g.label}>
+                      <p className="text-xs font-medium text-gray-500 mb-2">{g.label}</p>
+                      <div className="space-y-3">
+                        {ADVANCED_BOOL_KEYS.filter((k) => advancedGroupOf(k) === g.label).map(advRow)}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </details>
+            )}
+          </div>
+        )}
       </div>
     </div>);
 }

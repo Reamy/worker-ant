@@ -26,6 +26,12 @@ export function isNodeRole(value: unknown): value is NodeRole {
 }
 
 /**
+ * 角色取值的**具名常量**（`NODE_ROLE.observer` 之类）——给"只返回某一档"的判定模块引用，
+ * 免得在别处再写一遍三档引号字面量（M5-A 的"词表第二落点"同一把尺；加第四档只改 `NODE_ROLES`）。
+ */
+export const NODE_ROLE = Object.fromEntries(NODE_ROLES.map((r) => [r, r])) as Record<NodeRole, NodeRole>;
+
+/**
  * 角色的人话名——与 `NODE_ROLES` **同处**（M5）。
  *
  * 为何不放渲染层：角色的**取值域**在 `NODE_ROLES`，这里再列一遍三个键即"词表的第二落点"——
@@ -42,13 +48,20 @@ export const NODE_ROLE_LABEL: Record<NodeRole, string> = {
 /**
  * **可派单**判据（M5）——"谁承得住派单"的**唯一处**（M12 的选目标、面板的角标都读它）。
  *
- * 两条都要满足：
+ * 三条都要满足：
  *  - `participate` —— 用户在面板上关掉"参与"即郑重地退出派单（观察者之外，工作节点也能退）；
- *  - `role !== 'observer'` —— 观察者**只上报不承接**（K-11），即便误把 participate 置真也不派。
+ *  - `role !== 'observer'` —— 观察者**只上报不承接**（K-11），即便误把 participate 置真也不派；
+ *  - `weight > 0`（zx_20261107_1 B10a）——**权重 0＝不参与协同**；与 ANS `DISPATCHABLE_WHERE`
+ *    的 `weight > 0` 同义，面板角标、编排器预查、ANS 选目标三处不会各说各的。
+ *    `weight` 缺省（非台账行）按"未声明"放行，保持旧调用形状可用。
  *
- * 取 `Pick<AnsNode,…>`（而非整个 `AnsNode`）⇒ 台账行/入参皆可喂，判据不绑在某个具体的取数形状上。
+ * 取 `Pick<AnsNode,…>` + `Partial<weight>`（而非整个 `AnsNode`）⇒ 台账行/入参皆可喂，
+ *   判据不绑在某个具体的取数形状上。
  */
-export function isDispatchable(node: Pick<AnsNode, 'role' | 'participate'>): boolean {
+export function isDispatchable(
+  node: Pick<AnsNode, 'role' | 'participate'> & Partial<Pick<AnsNode, 'weight'>>,
+): boolean {
+  if (typeof node.weight === 'number' && node.weight <= 0) return false;
   return node.participate && node.role !== 'observer';
 }
 
@@ -225,6 +238,9 @@ export type NodeCardDeviceCategory = {
 /** 节点卡上的意图词（id/label；参数属协议细节，不上能力卡）。 */
 export type NodeCardIntent = { id: string; label: string };
 
+/** 节点卡上的岗位（id/名称/版本；说明、知识、经验均不跨机）。 */
+export type NodeCardPosition = { id: string; name: string; version: number };
+
 export type NodeCard = {
   name: string;
   node_id: string;
@@ -238,6 +254,11 @@ export type NodeCard = {
   device_categories?: NodeCardDeviceCategory[];
   /** zx_20261029_2 M3：本机可接的意图词（id/label）。同上，旧卡可能没有。 */
   intents?: NodeCardIntent[];
+  /**
+   * zx_20261112_1 B5「衡」：本机已启用岗位（**只** id/名称/版本，最多 50 条）。
+   * **可选**：旧版心跳没有该字段 ⇒ 读端按「未上报」处理（不是「没有岗位」）。
+   */
+  positions?: NodeCardPosition[];
 };
 
 // ==================== M12 中转队列（AI 终端 → ANS → 工蚁 → 回传） ====================

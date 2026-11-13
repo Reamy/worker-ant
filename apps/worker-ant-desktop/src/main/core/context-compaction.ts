@@ -18,6 +18,15 @@ export interface ConvRow {
 }
 
 /**
+ * zx_20261110_2 B5「损」：**一次上下文压缩的总预算**（跨 chunk 累计，ms）——一处真源。
+ *
+ * 病根：`compressConversations` 每段各自 `AbortSignal.timeout(30s)`，段数无界 ⇒ 总等待无界
+ * （真标本：收口段压缩 150 条历史，多个 30s 段串起来，界面陪着等）。整批给一个截止时刻，
+ * 到点即放弃压缩、回退规则摘要且**不推进边界**（下一轮再试），绝不"压一半就当作压完"。
+ */
+export const COMPACTION_BUDGET_MS = 25_000;
+
+/**
  * 按 maxRows 分段：每段即一次 LLM 调用的输入上限（沿用原 maxRows 的"限制单次输入规模"语义），
  * 各段并集**覆盖全部输入**且保持原序。空输入返回空数组。
  */
@@ -155,4 +164,24 @@ export function estimateContentTokens(content: unknown): number {
 /** 同上，折算回**字符**口径（×4）——与 `CTX_*_MAX_CHARS` 同尺，供 `ctxAssembledChars` 这类现场记账用。 */
 export function contentChars(content: unknown): number {
   return estimateContentTokens(content) * 4;
+}
+
+/**
+ * zx_20261113_2 M12：合并新旧压缩摘要，**不重复拼接同一段**。
+ *
+ * 病根：多次 resume 时 `prev + [续]next` 无条件拼接；若模型这轮产出的摘要与上一份相同
+ *   （或上一份已包含本轮），摘要会按 resume 次数线性膨胀——而 `[压缩]` 会话行又把膨胀后的
+ *   摘要再喂回下一轮，形成重复注入。
+ *
+ * 口径：完全相同 / 旧的是新的后缀 / 新的是旧的前缀 ⇒ 不重复；否则按 `[续]` 拼接。
+ * 超长截断仍由调用方负责（本函数只做"是否重复"这一件事）。
+ */
+export function mergeCompactionSummaries(prev: string, next: string): string {
+  const p = (prev || '').trim();
+  const n = (next || '').trim();
+  if (!p) return n;
+  if (!n) return p;
+  if (p === n || p.endsWith(n)) return p;
+  if (n.startsWith(p)) return n;
+  return `${p}\n[续]${n}`;
 }

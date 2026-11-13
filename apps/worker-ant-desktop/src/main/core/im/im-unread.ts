@@ -69,6 +69,19 @@ export function computeImUnreadByChannel(db: Database.Database): Record<string, 
   } catch { return {}; }
 }
 
+/**
+ * zx_20261112_1 B3「答」: 该渠道该用户**此前是否来过**（首聊欢迎的判据）。
+ *
+ * ⚠ 入站计数读点仍**只在本模块**——rr 的结构钉（`rr_zx_20260914_2`）要求 `direction='inbound'`
+ *   的 COUNT 读点全落在 `im-unread.ts`；路由经本函数问，不自留一份 SQL。
+ */
+export function hasPriorInbound(db: Database.Database, channelId: string, externalUser: string): boolean {
+  const r = db.prepare(
+    "SELECT COUNT(*) AS c FROM wa_im_conversations WHERE channel_id = ? AND external_user_id = ? AND direction = 'inbound'",
+  ).get(channelId, externalUser) as { c?: number } | undefined;
+  return Number(r?.c ?? 0) > 0;
+}
+
 /** 把当前未读数同步给显示端。任何会改变未读的时刻都应调它：入站落库后 / 标记已读后 / 启动时。 */
 export function refreshImUnread(db: Database.Database): number {
   const n = computeImUnread(db);

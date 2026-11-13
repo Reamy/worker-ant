@@ -95,8 +95,9 @@ const budgetBlock = (exe.match(/<budget-context>[\s\S]*?<\/budget-context>/) || 
     ok(/ctxJson\.cost_gate_reason = costGateReasonOf\(costSrc, costGateActive\);/.test(exe),
       '★三态原因与布尔同处落库（旧布尔保留，新字段不替旧读方）');
     ok(budgetBlock.includes('费用闸不生效'), '★且对模型也如实说（提示词内按 costGateActive 条件追加）');
-    const td = stripComments(rd('apps/worker-ant-desktop/renderer/src/pages/TaskDetailPage.tsx'));
-    ok(td.includes('费用闸未生效'), '★GUI 同源提示（用户可见，不只落库）');
+    // zx_20261107_1 B9：费用卡抽进 `TaskCost`，同源提示随卡片落地（判据钉的仍是"用户可见"，只是换了载体）。
+    const tc = stripComments(rd('apps/worker-ant-desktop/renderer/src/components/task/TaskCost.tsx'));
+    ok(tc.includes('费用闸未生效'), '★GUI 同源提示（用户可见，不只落库）');
   }
 
   console.log('S5 X4 档位文案归正');
@@ -117,10 +118,10 @@ const budgetBlock = (exe.match(/<budget-context>[\s\S]*?<\/budget-context>/) || 
     ok(!budgetBlock.includes('费用上限: $'), '★未漂回 $');
     const pd = stripComments(rd('apps/worker-ant-desktop/renderer/src/pages/ProjectDetailPage.tsx'));
     const pp = stripComments(rd('apps/worker-ant-desktop/renderer/src/pages/ProjectsPage.tsx'));
-    const td = stripComments(rd('apps/worker-ant-desktop/renderer/src/pages/TaskDetailPage.tsx'));
+    const tc = stripComments(rd('apps/worker-ant-desktop/renderer/src/components/task/TaskCost.tsx'));
     ok(pd.includes('费用上限(¥)/任务'), '项目详情·展示行标签 (¥)/任务');
     ok(pp.includes('单任务费用上限¥(如3.6)'), '项目列表·编辑占位符 ¥');
-    ok(td.includes('费用预算（¥ 人民币/任务）'), '任务详情·编辑标签 ¥（人民币/任务）');
+    ok(tc.includes('费用预算（¥ 人民币/任务）'), '任务详情·编辑标签 ¥（人民币/任务）');
   }
 
   console.log('S7 接口一致（GUI ↔ main 链路未断）');

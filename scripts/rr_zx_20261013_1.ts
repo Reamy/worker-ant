@@ -311,13 +311,15 @@ async function main(): Promise<void> {
     const stp = CODE(`${A}/renderer/src/pages/SettingsPage.tsx`);
     ok(/boolSetting\(all\['engine\.model_capability_gate'\]\)/.test(stp),
       'C-6a ★GUI **读**口：`boolSetting(all[\'engine.model_capability_gate\'])`（面板显示真值，不自造缺省）');
-    ok(/invoke\('settings:set', 'engine\.model_capability_gate'/.test(stp),
-      'C-6b ★GUI **写**口：`settings:set \'engine.model_capability_gate\'`（无写口 ⇒ "一键回退"只存在于 DB 直改）');
+    // zx_20261108_1 B5：写口收敛到统一 `saveSetting`——按钮一跳仍绑定该键，`settings:set` 只在写口内发出。
+    const CAP_GATE_WRITE_RE = /saveSetting\('能力硬需把关', 'engine\.model_capability_gate'/;
+    ok(CAP_GATE_WRITE_RE.test(stp) && stp.includes("invoke('settings:set', key, value)"),
+      'C-6b ★GUI **写**口：经统一写口 `saveSetting` 绑定 `engine.model_capability_gate`（无写口 ⇒ "一键回退"只存在于 DB 直改）');
     ok(stp.includes('启用能力把关'),
       'C-6c ★用户可见文案「启用能力把关」在册（入口可达，不只是背面接线）');
     // 反证：抹掉写口 ⇒ 同判据为否 ⇒ 判据抓得住"一键回退不可达"
-    ok(!/invoke\('settings:set', 'engine\.model_capability_gate'/.test(
-        stp.replace(/invoke\('settings:set', 'engine\.model_capability_gate'/, '')),
+    ok(!CAP_GATE_WRITE_RE.test(
+        stp.replace(/saveSetting\('能力硬需把关', 'engine\.model_capability_gate'[^\n]*/, '')),
       'C-6d ★反证：抹掉写口后同判据为否 ⇒ 抓得住"一键回退不可达"');
   }
 
@@ -490,10 +492,17 @@ async function main(): Promise<void> {
     ok(/data-tour=\{to\}/.test(layout),
       'E-6 ★侧栏 NavLink 带 `data-tour={to}`（锚点由**同一份** `to` 派生，不另写第二套路由串）');
 
-    // ── E-7 ★零依赖：闸模块不引任何东西（渲染层引不炸 ∧ rr 直跑得动）─────────────────────
+    // ── E-7 ★零依赖：闸模块只引**零依赖纯判据**（渲染层引不炸 ∧ rr 直跑得动）──────────────
+    // zx_20261108_1 B5：三写法解析收敛到 `settings-bool.parseTriState`（唯一一份）⇒ tourGate 由
+    //   "零 import"变为"只引那一个纯谓词"；判据随之钉**链上每环都零依赖**（而不是把尺子删了）。
     const gateSrc = CODE(`${A}/renderer/src/lib/tourGate.ts`);
-    ok(!/^\s*import\s/m.test(gateSrc),
-      'E-7 ★`tourGate` 零 import（rr 直跑真实现、渲染层引不炸——与 `attachment-kinds` 同款）');
+    const gateImports = gateSrc.match(/^\s*import\s[^\n]*$/gm) ?? [];
+    const sbSrc = CODE(`${A}/src/main/core/settings-bool.ts`);
+    ok(gateImports.length === 1
+      && /from '\.\.\/\.\.\/\.\.\/src\/main\/core\/settings-bool\.js';/.test(gateImports[0]!)
+      && !/^\s*import\s/m.test(sbSrc),
+      'E-7 ★`tourGate` 仅引零依赖纯判据 `settings-bool`（其自身零 import ⇒ rr 直跑真实现、渲染层引不炸——与 `attachment-kinds` 同款）',
+      `imports=${gateImports.length}`);
   }
 
   // ═══ F｜批五 · 适配层首切片（真跑生产实现；假 IO ⇒ 不触网；两侧标本 + 反证）═══════════════

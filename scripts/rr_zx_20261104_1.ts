@@ -603,9 +603,12 @@ function sectionK(): void {
   eq(reasonSites, ['core/exec-step.ts'], 'K-7 三态原因一处写点（不出现第二份各自判）');
 
   const td = readCode(`${A}/renderer/src/pages/TaskDetailPage.tsx`);
-  ok(td.includes('cost_gate_reason') && td.includes("costGateReason === 'no_price'"),
+  // zx_20261107_1 B9: 费用区按关节抽成 `TaskCost`——判据按符号重定向到渲染真源（只移动位置，不放宽）：
+  //   页面仍须把 `cost_gate_reason` 读出来并做三态派生；三态比较与文案在组件里。
+  const tdCost = readCode(`${A}/renderer/src/components/task/TaskCost.tsx`);
+  ok(td.includes('cost_gate_reason') && tdCost.includes("costGateReason === 'no_price'"),
     'K-8 任务详情按三态显示（不是只看布尔）');
-  ok(td.includes('费用闸未生效') && td.includes('模型管理'),
+  ok(tdCost.includes('费用闸未生效') && tdCost.includes('模型管理'),
     'K-9 no_price 文案如实指出原因并指向模型管理');
   ok(td.includes("ctx?.cost_gate_reason") && td.includes('costGateActive === true'),
     'K-10 旧任务无新字段时按既有两字段回退（不显示"未知"）');
@@ -682,11 +685,17 @@ async function sectionL(): Promise<void> {
   const ws = readCode(`${MAIN}/world-snapshot.ts`);
   ok(ws.includes('describeSnapshotCoverage(snap).coverageText'),
     'L-12 覆盖率文案一处派生（compareSnapshots 不手抄样本量）');
-  ok(ws.includes('listFilesWrittenSince(workingDir, opts.runStartedAtMs)'),
-    'L-13 第二通道复用不截断的窗口盘点（不是另一套采样）');
+  // zx_20261109_1 B2：取数口由 `listFilesWrittenSince` **原位换成本 run 的一次扫描**（同一份同时供
+  //   第二通道与 after 快照使用）。断言钉**两处同源**，不钉旧函数名——它如今只作无扫描时的退路。
+  ok(ws.includes("typeof f.mtimeMs === 'number' && f.mtimeMs >= since")
+    && ws.includes('snapshotFromScan(db, projectId, await ensureScan())'),
+    'L-13 第二通道与 after 快照复用**同一份**工作目录扫描（B2：不再各扫一遍；窗口判定仍按 mtime ≥ 本轮起始时刻）');
   const ae = readCode(`${MAIN}/agent-executor.ts`);
-  ok(ae.includes('auditWorldConsistency(') && ae.includes('{ dataDir: ctx.dataDir, runStartedAtMs, fileMutationCount }'),
-    'L-14 接线：收口把本轮起始时刻与改写计数交给审计');
+  // zx_20261109_1 B5 按符号重定向：同一处注入面再添 `runId`（审计行前缀与完成事件同源同一 run），
+  //   钉的仍是"完整形状同处一次注入"，多第五项而非放宽。
+  ok(ae.includes('auditWorldConsistency(') && ae.includes('{ dataDir: ctx.dataDir, runStartedAtMs, fileMutationCount, scan: auditScan, runId: ctx.runId }')
+    && ae.includes('runWorldAudit = () => {'),
+    'L-14 接线：收口把本轮起始时刻、改写计数、**本 run 的同一份扫描**与 run_id 交给审计；且由 `runWorldAudit` 在收口落定后触发（B2 延后，不阻塞完成路径）');
 }
 
 // ══════════════════════════════════════════════════════════════════════

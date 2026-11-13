@@ -32,6 +32,25 @@ export function boolSetting(value: string | undefined | null): boolean {
 }
 
 /**
+ * zx_20261108_1 B5：**缺省关**键族的三态解析——唯一一份。
+ *
+ * 历史写法有三种开（`'true'`/`'1'`/`'on'`）与三种关（`'false'`/`'0'`/`'off'`），
+ * 其余（含空/脏值）如实返回 `'unknown'`，由调用方按该键缺省决定回落方向——
+ * **不**在这里替调用方猜"没设置算开还是算关"。
+ *
+ * 此前渲染层与 main 各手写 `=== 'true' || === '1' || === 'on'`（至少三处），
+ * 任一处漏一种写法，界面与引擎就会对同一个库值读出相反结论。
+ */
+export type TriState = 'true' | 'false' | 'unknown';
+
+export function parseTriState(value: string | undefined | null): TriState {
+  const v = String(value ?? '').trim().toLowerCase();
+  if (v === 'true' || v === '1' || v === 'on') return 'true';
+  if (v === 'false' || v === '0' || v === 'off') return 'false';
+  return 'unknown';
+}
+
+/**
  * 受 boolSetting 判定的键白名单——**唯一一份**。迁移只能动这些键，故与判据同文件同源，
  * 防「判据一份、名单另一份」再次分家。
  *
@@ -59,6 +78,11 @@ export const BOOL_SETTING_KEYS: readonly string[] = [
   'memory.receipt_dedup',
   'memory.exemplar_effect_rank',
   'memory.consolidation_idle_skip',
+  // zx_20261113_4 B1「成」（道德经·自知者明）：**项目画像首次自动成型**（**缺省即开**）。
+  //   开 ⇒ 夜间巩固时，有事实且无画像的项目自动生成一份（确定性、零 LLM、≤200 token）；
+  //   关 ⇒ 逐字回 `zx_20261027_3 M6b` 的「不新建，首次由用户点」旧行为（一键回退，非删代码）。
+  //   ⚠ 只建「本项目自身事实压缩成的画像」；**外来领域包仍永不自动启用**（那是另一条纪律）。
+  'profile_auto_bootstrap',
   // zx_20260930 M7-f：图式重构召回（缺省即开）。关 ⇒ 任务相关记忆回"纯逐字/语义"旧口径，
   //   供与巴特莱特那跳 A/B（两口径的差别只在该段的**条序**，成员集不动）。
   'memory.schema_recall',
@@ -160,8 +184,7 @@ export function readBoolSetting(db: BoolSettingDb, key: string): boolean {
 export function readBoolSettingDefaultOff(db: BoolSettingDb, key: string): boolean {
   try {
     const row = db.prepare('SELECT value FROM wa_settings WHERE key = ?').get(key) as { value?: string } | undefined;
-    const v = row?.value;
-    return v === 'true' || v === '1' || v === 'on';
+    return parseTriState(row?.value) === 'true';
   } catch { return false; }
 }
 

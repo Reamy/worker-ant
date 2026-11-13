@@ -61,6 +61,8 @@ CREATE TABLE wa_tasks (
   status TEXT DEFAULT 'pending', context_json TEXT DEFAULT '{}', workflow_config TEXT DEFAULT '{}',
   priority INTEGER DEFAULT 0, depends_on TEXT DEFAULT '', parent_task_id TEXT DEFAULT '',
   source TEXT DEFAULT 'user', acceptance_criteria TEXT DEFAULT '', aggregate_version INTEGER DEFAULT 0,
+  -- zx_20261112_2: 生产迁移列（IM 建单会写它）；夹具不许比生产窄。
+  position_id TEXT NOT NULL DEFAULT '',
   created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now'))
 );
 CREATE TABLE wa_task_conversations (
@@ -107,6 +109,11 @@ const jobCount = (db: AnyDb): number => countOf(db, 'SELECT COUNT(*) c FROM wa_j
 /** 把一条消息接到**真 routeImMessage**上（生产入站链路），收集回话。 */
 function send(db: AnyDb, from: string, text: string): { replies: string[]; run: () => Promise<void> } {
   const replies: string[] = [];
+  // zx_20261112_1 B3「答」：首聊欢迎只发给"本渠道第一次来"的用户（`hadPriorInbound === false`）。
+  //   本套件验的是**指令路由**（照帮助做真能成），故每位标本先落一条入站行、处"老用户"态——
+  //   首聊欢迎本身及其 1→0 反证在 `rr_zx_20261112_1` C 组，不在这里重复。
+  db.prepare("INSERT INTO wa_im_conversations (id, channel_id, external_user_id, direction) VALUES (?, 'ch-1', ?, 'inbound')")
+    .run(crypto.randomUUID(), from);
   const ctx = { db, channelId: 'ch-1', channelType: CH, sendReply: async (_to: string, t: string) => { replies.push(t); } };
   return { replies, run: () => routeImMessage(ctx as never, from, text, 'p2p', 'ctx-0', undefined) };
 }
@@ -134,8 +141,11 @@ function s1(): void {
 
   // zx_20261016_1 批三：新增「接入审批」一条（外部终端配对审批走 IM）——逐成员枚举**回填**，非放宽。
   // zx_20261101_1 M1：新增「授权待办」一条（设备授权 / 跨机问答的 IM 授权台）——同样逐成员枚举回填。
-  eq(BUILTIN_IM_COMMANDS.map((c) => c.name), ['创建任务', '启动任务', '系统状态', '审批回复', '记住偏好', '接入审批', '授权待办'],
-    '表内恰这七条、顺序即帮助里的展示顺序（纯编号选择/项目关键词不在内）');
+  // zx_20261111_3 B4：新增「撤销刚建的任务」一条（建单回执里承诺的纠正路径必须真能执行）——同样逐成员回填。
+  // zx_20261112_1 B3「答」：新增「暂停任务」「继续任务」两条（IM 里能停能续，不必回电脑前点 GUI）——
+  //   同样逐成员枚举回填：既是帮助里的顺序，也是谓词判定顺序。
+  eq(BUILTIN_IM_COMMANDS.map((c) => c.name), ['创建任务', '启动任务', '暂停任务', '继续任务', '撤销刚建的任务', '系统状态', '审批回复', '记住偏好', '接入审批', '授权待办'],
+    '表内恰这十条、顺序即帮助里的展示顺序（纯编号选择/项目关键词不在内）');
 }
 
 // ====== §B1.2 帮助 = 表派生（真跑路由器） ======

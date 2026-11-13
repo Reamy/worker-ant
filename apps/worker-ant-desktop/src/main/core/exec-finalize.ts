@@ -20,7 +20,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { eventBus } from './event-bus.js';
 import { pauseTask } from './pause-task.js';
-import { PAUSE_REASON_ACCEPTANCE_FAILED, PAUSE_REASON_ACCEPTANCE_UNJUDGED, PAUSE_REASON_CHILDREN_INCOMPLETE } from './pause-reason.js';
+import { PAUSE_REASON_ACCEPTANCE_FAILED, PAUSE_REASON_ACCEPTANCE_UNJUDGED, PAUSE_REASON_AWAITING_INPUT, PAUSE_REASON_CHILDREN_INCOMPLETE } from './pause-reason.js';
 import { isTerminalStatus } from './task-jobs.js';
 import { readBoolSetting } from './settings-bool.js';
 import { promoteTaskFileDeliverables, selectProbeDeliverables, disposeProbeDeliverables } from './deliverable-lifecycle.js';
@@ -29,11 +29,18 @@ import { buildTaskOutcome } from './task-outcome.js';
 import { adjustProjectStrategy, recordStrategyOutcome, type ExecutionMetrics } from './feedback-engine.js';
 import { createLogger } from './logger.js';
 import type { AdaptiveStrategy, TaskArchetype } from './task-archetype.js';
-import { UNVERIFIED_REASON_LABEL } from './acceptance-check.js';
-import type { AcceptanceSummary, AcceptanceUnverifiedReason, AcceptanceVerdict } from './acceptance-check.js';
+import { unverifiedReasonText } from './acceptance-check.js';
+import { claimCompletedEmit, mergeFinalizeChecks } from './run-trace.js';
+// zx_20261113_2 M15：收口时只提示 Git 未提交，不自动提交。
+import { gitWorkingTreeAdvice } from './git-advisory.js';
+// zx_20261110_2 B5：后置账的身份与去重口（零依赖模块，与 `task-jobs` 同形）。
+import { markCompletedRun } from './postlude.js';
+import type { AcceptanceSummary, AcceptanceVerdict } from './acceptance-check.js';
 import {
-  blockFailedChildrenCompletion, blockNoOutputCompletion, realOutputEvidence,
+  blockFailedChildrenCompletion, blockNoOutputCompletion, persistAwaitingInput, realOutputEvidence,
 } from './agent-executor.js';
+// zx_20261113_2 M4「通」：用户侧动作请求的识别（零依赖纯模块）。
+import { looksLikeUserSideRequest } from './user-side-request.js';
 import type { AgentContext } from './agent-executor.js';
 import { writeMilestoneDone, backfillBoardRemainderToSelf, type MilestoneChangedEvent } from './task-accounting.js';
 import { writeSubagentResult } from './subagent-result.js';
@@ -57,6 +64,8 @@ export function finalizeRunClose(o: {
   ctx: AgentContext;
   taskId: string;
   projectId: string;
+  /** zx_20261113_2 M15：收口时只读一次 `git status` 作未提交提示（非 git 目录返回 null）。 */
+  workingDir: string;
   archetype: TaskArchetype;
   adaptiveStrategy: AdaptiveStrategy;
   /** 本 run 的写类工具命中次数——「无产出证据」闸的豁免判据之一（`runMutations`）。 */
@@ -78,7 +87,7 @@ export function finalizeRunClose(o: {
   prematureNote?: string;
 }): RunCloseFinalizeResult {
   const {
-    db, ctx, taskId, projectId, archetype, adaptiveStrategy, fileMutationCount, finalContent,
+    db, ctx, taskId, projectId, workingDir, archetype, adaptiveStrategy, fileMutationCount, finalContent,
     stepCount, qualityScore, closeVerdict, closeTotal, closeFailedN, closeAcceptance,
     title, modelName, maxSteps, totalTokensUsed, toolCallCount, rawCost, prematureNote,
   } = o;
@@ -87,8 +96,34 @@ export function finalizeRunClose(o: {
   //   归档路现在会 abort 在途 run，但收尾段可能在 abort 生效前就已进入——两道网都要。
   const statusAtClose = (db.prepare('SELECT status FROM wa_tasks WHERE id = ?').get(taskId) as { status?: string } | undefined)?.status;
   if (isTerminalStatus(statusAtClose)) {
+    // zx_20261110_2 B8「恒」（维特根斯坦·意义即用法 / 毛选「抓而不紧，等于不抓」）:
+    //   本早退口此前把**成果归位**一并跳过，于是留下一条只在这里才成立的漏洞——
+    //   `finalize_task` 会先把任务标 completed 并把成果推进 completed；同一 run 若在**那之后**再写几个文件，
+    //   `ensureDocDeliverable` 会把这几个已归位的行**回调成 `draft`**（“又写了一版，待重新核定”是它的本意）。
+    //   随后 run_close 走到本口，见“已终态”直接 return ⇒ 再没有第二处归位 ⇒ 这几件永久草稿。
+    //   真库实证（2026-11-10，四个 ERP 任务、8 件 doc）：行上 `acceptance_verified=1`（说明确曾被提升）、
+    //   `status='draft'`、`updated_at` 恰晚于任务完成 3–8s（即“收口后又写了一遍”），C8 只读自证因此转红。
+    //
+    //   治法是**补上那一笔归位**，不是放宽判据：归位是幂等的「成果随任务交付」，与“不改写状态”不冲突
+    //   （它只把 doc/code 草稿推进 completed，不动任务终态）。**只有 `completed` 才归位**：
+    //   archived/failed 等终态不是“交付”，不得凭“终态”二字提升成果。
+    //   via 用 `run_close_terminal` 与正常收口的 `run_close` 分开，账上可倒查这一笔是谁补的。
+    if (statusAtClose === 'completed') {
+      try { promoteTaskFileDeliverables(db, taskId, 'run_close_terminal'); } catch { /* 归位 best-effort，不阻断早退 */ }
+    }
     return { content: `任务已处于终态（${statusAtClose}），收口段不改写状态`, steps: stepCount };
   }
+  // zx_20261113_2 M15：收口时只**提示** Git 未提交（项目约定要求提交），不自动 add/commit。
+  //   放在终态早退之后、各暂停/完成分支之前 ⇒ 无论本次是 completed 还是 paused，账上都留这一行。
+  try {
+    const advice = gitWorkingTreeAdvice(workingDir);
+    if (advice) {
+      const row = db.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get(taskId) as { context_json?: string } | undefined;
+      const c = JSON.parse(row?.context_json || '{}') as Record<string, unknown>;
+      c.finalize_checks = mergeFinalizeChecks(c.finalize_checks, [advice], ctx.runId);
+      db.prepare('UPDATE wa_tasks SET context_json = ? WHERE id = ?').run(JSON.stringify(c), taskId);
+    }
+  } catch { /* 提示失败不阻断收口 */ }
   // zx_20260913 M3-6(名实相符 / 同一把尺): run_close 达标收尾此前**直标 completed**——哪怕子任务还在跑/未跑，
   // 父任务也会"先完成"，里程碑达成与成果汇总随之失真。现与 finalize_task 同尺查未完成子任务；
   // 有则置 paused 并如实记账，等既有 checkParentTaskAfterChildDone 在子任务完成后自动恢复（不新增机制）。
@@ -111,6 +146,21 @@ export function finalizeRunClose(o: {
   // 判据（豁免/开关/副作用）全在 blockNoOutputCompletion 内，与 finalize 收口同尺。
   if (blockNoOutputCompletion(db, taskId, { archetype, runMutations: fileMutationCount })) {
     return { content: '任务暂停：未发现真实产出证据', steps: stepCount };
+  }
+  // zx_20261113_2 M4「通」：收尾话术若在**请用户在本机执行并回报结果**，语义是"等用户"而非"验收未通过"。
+  //   此前这类收尾没有调 ask_user，run 收口后验收门禁判未达 ⇒ 用户看到「验收未通过」，方向反了。
+  //   本口只改**暂停因由**（awaiting_input），不伪造验收结论、不跳过既有产出闸；恢复后用户附言即可续跑。
+  if (looksLikeUserSideRequest(finalContent)) {
+    const question = '任务需要你在本机执行并回报结果（详见最后一条回复）。执行后点「恢复」，可附上结果，或让它直接读日志复核。';
+    db.prepare("INSERT INTO wa_task_conversations (id, task_id, role, content, token_count, created_at) VALUES (?, ?, 'system', ?, 0, datetime('now'))")
+      .run(crypto.randomUUID(), taskId, `[等待用户输入] ${question}`);
+    const askedAt = persistAwaitingInput(db, taskId, { question, options: [], decision_type: 'user_side_action' });
+    pauseTask(db, { taskId, reason: PAUSE_REASON_AWAITING_INPUT, note: '等用户在本机执行并回报结果' });
+    eventBus.emit('task.awaiting_input', {
+      taskId, task_id: taskId, projectId, question, decision_type: 'user_side_action', options: [], context: {}, asked_at: askedAt,
+    }).catch(() => {});
+    logger.info({ taskId: taskId.slice(0, 8) }, 'run_close 检测到用户侧动作请求，置 awaiting_input 而非 acceptance_failed');
+    return { content: finalContent, steps: stepCount };
   }
   // zx_20260915 P0-2(b)（同一把尺·两个出口同一笔账）: run_close 此前**从不跑验收**——只有 finalize 路跑，
   //   于是"走 finalize 收口的任务"与"走 run_close 收口的任务"在验收账上不同尺：真库 66 个已完成 doc 仅 7 个已验收。
@@ -146,7 +196,7 @@ export function finalizeRunClose(o: {
   //   ⚠ 位置受同一条既定约束：本分支不写第二笔账、不再压分（同 zx_20260916_3 M4 对本函数的约束）。
   //   ⚠ 也不得排在 `promoteTaskFileDeliverables` 之后——停在 paused 就不该提升成果（本 return 天然早于它）。
   if (closeVerdict === 'unjudged') {
-    const unjudgedWhy = UNVERIFIED_REASON_LABEL[closeAcceptance?.reason as AcceptanceUnverifiedReason] || '原因未记录';
+    const unjudgedWhy = unverifiedReasonText(closeAcceptance as Parameters<typeof unverifiedReasonText>[0]);
     db.prepare("INSERT INTO wa_task_conversations (id, task_id, role, content, token_count, created_at) VALUES (?, ?, 'system', ?, 0, datetime('now'))")
       .run(crypto.randomUUID(), taskId, `[未达交付·验收未判成] 本任务有验收判据，但本轮未取得核对结论（${unjudgedWhy}），完成分 ${qualityScore.score} 分（**未压分**——「没判成」不是「没达成」）。任务未标完成，已暂停待人工：请核验产出后"恢复继续"（模型恢复即会重新判卷）或"标记完成"。`);
     pauseTask(db, { taskId, reason: PAUSE_REASON_ACCEPTANCE_UNJUDGED, note: `有验收判据但本轮未取得核对结论（${unjudgedWhy}），未标完成` });
@@ -154,6 +204,9 @@ export function finalizeRunClose(o: {
     return { content: finalContent, steps: stepCount };
   }
   db.prepare("UPDATE wa_tasks SET status = 'completed', updated_at = datetime('now') WHERE id = ?").run(taskId);
+  // zx_20261110_2 B5「损」：记下"这一 run 完成了"——后置账（通知/记忆强化）凭它去重、凭它重放；
+  //   与 `finalize_task` 出口（`agent-executor.ts` 同一写点）**同一函数**，不在两处各拼一个键名。
+  markCompletedRun(db, taskId, ctx.runId);
   // zx_20261105_1 M4（知行合一）：子代理的结论、证据、限定条件分开落——终态收口处一次性成文。
   //   只对 `context_json.type === 'subagent'` 生效（内部判据），best-effort，不阻断收口。
   //   ⚠ 必须排在标 completed **之后**：结论描述的是"这次收口"，不是"跑完了还没定终态"。
@@ -204,7 +257,10 @@ export function finalizeRunClose(o: {
   } catch { /* 处置 best-effort，不阻断收口 */ }
   // zx_20260915 P0-2(d): 完成事件带上验收三态之一（无标准/未通过/已验证）——此前事件里**完全没有**验收，
   //   下游只能各自去猜（或干脆不猜）。`criteria_total/passed_total` 取自落库载荷，不另算一份。
-  eventBus.emit('task.completed', { taskId, task_id: taskId, projectId, ...buildTaskOutcome(db, taskId, fileMutationCount), acceptance: closeAcceptance ?? undefined }).catch(() => {});
+  // zx_20261109_1 B5：同一 run 只发一次（本路与 finalize_task 路共用 `ctx.completedRuns`）；载荷带 `run_id`。
+  if (claimCompletedEmit(ctx)) {
+    eventBus.emit('task.completed', { taskId, task_id: taskId, projectId, run_id: ctx.runId, ...buildTaskOutcome(db, taskId, fileMutationCount), acceptance: closeAcceptance ?? undefined }).catch(() => {});
+  }
   // zx_20260906 批1: 成果随任务交付——达标收尾把本任务 doc 草稿产出物推进 completed（未达标 forced 场景内部跳过）
   promoteTaskFileDeliverables(db, taskId, 'run_close');
   console.log(`[Agent] 任务完成: ${title.slice(0, 50)} steps=${stepCount} quality=${qualityScore.score}分`);

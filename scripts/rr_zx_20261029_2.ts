@@ -989,9 +989,13 @@ async function main(): Promise<void> {
 
   {
     const pj = readCode(`${MAIN}/ipc/project.ipc.ts`);
-    ok(pj.includes('autoDispatchPolicy(db as unknown as NodeSettingDb & LicenseSettingDb)'), 'G-27 建单取三态策略一次');
-    ok(pj.includes('autoDispatchSource: autoPolicy.source'), 'G-28 来由随准入事实传入');
-    ok(pj.includes('localHasFreeSlot: localHasFreeSlot(db)'), 'G-29 余力取与心跳/Peers 同一真源');
+    // zx_20261112_2 B1：建单准入事实收成**一处具名组装**（IPC 与 E2E 共用）⇒ 三钉重定向到那个载体，
+    //   并额外钉"建单路确实调了它"（只建函数不接，等于没做）。
+    const cd = readCode(`${MAIN}/core/collab-dispatch.ts`);
+    ok(pj.includes('buildCreatedTaskDispatchFacts(db,') && cd.includes('autoDispatchPolicy(db as unknown as NodeSettingDb & LicenseSettingDb)'),
+      'G-27 建单取三态策略一次（具名组装 + 建单路真调用）');
+    ok(cd.includes('autoDispatchSource: policy.source'), 'G-28 来由随准入事实传入');
+    ok(cd.includes('localHasFreeSlot: localHasFreeSlot(db)'), 'G-29 余力取与心跳/Peers 同一真源');
     const i1 = pj.indexOf('const dispatchOutcome = await dispatchCreatedTask(');
     const i2 = pj.indexOf('task.dispatch = dispatchOutcome;');
     ok(i1 > 0 && i2 > i1, 'G-30 派单结局如实附在回执（失败不阻断建单）');

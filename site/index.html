@@ -21,7 +21,7 @@
     <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png" />
     <link rel="icon" href="/favicon-16.png" sizes="16x16" type="image/png" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-    <link rel="stylesheet" href="/styles.css?v=0.4.0" />
+    <link rel="stylesheet" href="/styles.css?v=0.6.0" />
   </head>
   <body>
     <header class="nav">
@@ -58,7 +58,7 @@
           <div class="cta-row">
             <a
               class="btn btn-primary"
-              href="https://github.com/Reamy/worker-ant/releases/download/v0.5.0/worker-ant-0.5.0-mac-arm64.dmg"
+              href="https://github.com/Reamy/worker-ant/releases/download/v0.6.0/worker-ant-0.6.0-mac-arm64.dmg"
               rel="noopener"
               >下载 macOS 版</a
             >
@@ -134,9 +134,12 @@
               </p>
             </article>
             <article class="card">
-              <h3>③ 成果一等公民 —— 干了什么，看得见</h3>
+              <h3>③ 成果与经验都是一等公民 —— 看得见，也留得住</h3>
               <p>产出是<strong>登记在册的可交付资产</strong>（文件、报告、草稿），不是一段会滚走的聊天。</p>
               <p>事件溯源引擎记录<strong>每一步动作</strong>，可暂停、可恢复、可重放、可审计。</p>
+              <p>
+                同一个项目第二次开工不用从头讲（项目画像自动成型）；同类活的经验沉淀到<strong>岗位</strong>上，够格的晋升成规范 / 技能 / 知识，也能撤回。这是<strong>确定性蒸馏，零训练</strong>。
+              </p>
             </article>
             <article class="card">
               <h3>④ 机器们开始互相认识 —— 你不用再决定「哪台来干」</h3>
@@ -221,21 +224,22 @@
                 版本暂未提供。
               </p>
               <p class="muted">
-                v0.5.0 新增：多机协同按能力优先派活（Team）、跨机进度可见与父任务失败收口、通用 AI
-                终端发现与双模协商；IM
-                授权台、七维容量、设备云多账号与三平台打包均包含在本版。自动更新尚未启用，已装旧版的用户请手动下载覆盖安装。
+                v0.6.0 新增：<strong>岗位（角色）</strong>与岗位知识（经验可晋升 / 可撤回，Pro 可导出导入知识包）、<strong
+                  >项目业务知识</strong
+                >（画像自动成型、候选按相似度推荐、注入按相关性排序）、团队共享库可预览、任务级跨机真派、IM
+                歧义澄清与岗位认领。多机协同能力优先派活、IM 授权台、八维容量、设备云多账号均包含在本版。自动更新尚未启用，已装旧版的用户请手动下载覆盖安装。
               </p>
               <p>
                 <a
                   class="link"
-                  href="https://github.com/Reamy/worker-ant/releases/download/v0.5.0/worker-ant-0.5.0-mac-arm64.dmg"
+                  href="https://github.com/Reamy/worker-ant/releases/download/v0.6.0/worker-ant-0.6.0-mac-arm64.dmg"
                   rel="noopener"
                   >macOS dmg →</a
                 >
                 &nbsp;·&nbsp;
                 <a
                   class="link"
-                  href="https://github.com/Reamy/worker-ant/releases/download/v0.5.0/worker-ant-0.5.0-mac-arm64.zip"
+                  href="https://github.com/Reamy/worker-ant/releases/download/v0.6.0/worker-ant-0.6.0-mac-arm64.zip"
                   rel="noopener"
                   >macOS zip</a
                 >
@@ -243,27 +247,27 @@
               <p>
                 <a
                   class="link"
-                  href="https://github.com/Reamy/worker-ant/releases/download/v0.5.0/worker-ant-0.5.0-win-x64.exe"
+                  href="https://github.com/Reamy/worker-ant/releases/download/v0.6.0/worker-ant-0.6.0-win-x64.exe"
                   rel="noopener"
                   >Windows 安装包 →</a
                 >
                 &nbsp;·&nbsp;
                 <a
                   class="link"
-                  href="https://github.com/Reamy/worker-ant/releases/download/v0.5.0/worker-ant-0.5.0-linux-x86_64.AppImage"
+                  href="https://github.com/Reamy/worker-ant/releases/download/v0.6.0/worker-ant-0.6.0-linux-x86_64.AppImage"
                   rel="noopener"
                   >Linux AppImage</a
                 >
                 &nbsp;·&nbsp;
                 <a
                   class="link"
-                  href="https://github.com/Reamy/worker-ant/releases/download/v0.5.0/worker-ant-0.5.0-linux-amd64.deb"
+                  href="https://github.com/Reamy/worker-ant/releases/download/v0.6.0/worker-ant-0.6.0-linux-amd64.deb"
                   rel="noopener"
                   >Linux deb</a
                 >
               </p>
               <p>
-                <a class="link" href="https://github.com/Reamy/worker-ant/releases/tag/v0.5.0" rel="noopener"
+                <a class="link" href="https://github.com/Reamy/worker-ant/releases/tag/v0.6.0" rel="noopener"
                   >校验值（SHA-256）与发布说明</a
                 >
               </p>
@@ -354,7 +358,7 @@ cd apps/worker-ant-desktop &amp;&amp; bash run.sh    # 终端 2：桌面端</cod
                   </td>
                   <td>
                     <strong>并发 8 · 不限项目 · 协同节点 1 台</strong>；项目知识包导出 /
-                    导入、图片与视频理解、长文档、领域包、优先支持
+                    导入、<strong>岗位知识包导出 / 导入</strong>、图片与视频理解、长文档、领域包、产出物批量导出（CSV）、优先支持
                   </td>
                 </tr>
                 <tr>
@@ -388,13 +392,13 @@ cd apps/worker-ant-desktop &amp;&amp; bash run.sh    # 终端 2：桌面端</cod
           <p class="note">
             主推<strong>年付</strong>；免费版给得起，但<strong>并发 / 项目数有天花板</strong>；<strong>BYO Key</strong
             >——模型账单你直接付给模型厂商，我们不抽成。<br />
-            各档另有七维容量上限（设备登记 / 外部终端 / A2A 服务 / 每项目知识卡 / 团队共享记忆 / IM 渠道 /
-            任务模板）：社区 5 / 1 / 1 / 8 / 200 / 2 / 5，Pro 30 / 3 / 3 / 24 / 2000 / 5 / 30，Team 200 / 20 / 10 / 60 /
-            不限 / 不限 / 不限——<strong>只拦新增，已有记录不受影响</strong>。<br />
+            各档另有八维容量上限（设备登记 / 外部终端 / A2A 服务 / 每项目知识卡 / 团队共享记忆 / IM 渠道 /
+            任务模板 / 设备云账号）：社区 5 / 1 / 1 / 8 / 200 / 2 / 5 / 0（需专业版），Pro 30 / 3 / 3 / 24 / 2000 / 5 / 30 /
+            2，Team 200 / 20 / 10 / 60 / 不限 / 不限 / 不限 / 不限——<strong>只拦新增，已有记录不受影响</strong>。<br />
             <strong>授权与安装包都已就绪</strong>：Pro、早鸟终身与 Team 授权包已在
             <a class="link" href="https://mbd.pub/o/author-bW2ZlHFtZg==/work" rel="noopener">面包多店铺</a>
             开售，企业版暂不售卖；macOS 版已完成 Developer ID 签名与 Apple 公证，Windows 与 Linux 版未签名但可正常安装，
-            <a class="link" href="https://github.com/Reamy/worker-ant/releases/tag/v0.5.0" rel="noopener"
+            <a class="link" href="https://github.com/Reamy/worker-ant/releases/tag/v0.6.0" rel="noopener"
               >三平台安装包均已在 GitHub Releases 发布</a
             >。桌面端自带 <strong>14 天团队版试用</strong>。
           </p>
@@ -430,6 +434,18 @@ cd apps/worker-ant-desktop &amp;&amp; bash run.sh    # 终端 2：桌面端</cod
               </p>
             </details>
             <details>
+              <summary>「岗位」是什么？会不会替代人做管理？</summary>
+              <p>
+                岗位是<strong>知识载体 + 派活标签</strong>：同一类活干过之后，可迁移的教训沉淀到这个岗位上；任务可以按岗位派活。经验要<strong>你确认</strong>才晋升成规范 / 技能 / 知识，也能随时撤回。它不做组织管理，也不替你决定人事——不是「自动学会」，是确定性蒸馏、零训练。
+              </p>
+            </details>
+            <details>
+              <summary>项目知识和岗位经验会上传到你们服务器吗？</summary>
+              <p>
+                不会。项目画像、知识卡、岗位经验都落在你本机的库里；岗位经验不跨机、不回传。团队共享库只有在你<strong>主动分享</strong>后团队内才可见，已删除的内容不会再出现在候选里。
+              </p>
+            </details>
+            <details>
               <summary>能操作网页吗（点按钮、填表单）？</summary>
               <p>目前不内置浏览器自动化。当前定位是<strong>文件 / 命令 / API 类任务</strong>；浏览器能力在路线图上。</p>
             </details>
@@ -456,7 +472,7 @@ cd apps/worker-ant-desktop &amp;&amp; bash run.sh    # 终端 2：桌面端</cod
                   开售</strong
                 >；企业版暂不售卖。<strong>安装包已发布</strong>——macOS 版（Apple Silicon）已完成 Developer ID 签名与
                 Apple 公证；Windows 10/11 与 Linux x86_64 版未做代码签名，首次运行可能被系统提示。均可从
-                <a class="link" href="https://github.com/Reamy/worker-ant/releases/tag/v0.5.0" rel="noopener"
+                <a class="link" href="https://github.com/Reamy/worker-ant/releases/tag/v0.6.0" rel="noopener"
                   >GitHub Releases</a
                 >
                 下载。Intel Mac 版本暂未提供。桌面端自带 14 天团队版试用，可以先试再买。

@@ -161,6 +161,8 @@ const hmacApi = new Elysia()
         preferredProvider: t.Optional(t.String()),
         excludeCapabilities: t.Optional(t.Array(t.String())),
         minContextWindow: t.Optional(t.Number()),
+        // zx_20261111_1 B2: 远端优先（不传则行为与旧版逐字一致）
+        preferRemote: t.Optional(t.Boolean()),
       }),
     },
   );

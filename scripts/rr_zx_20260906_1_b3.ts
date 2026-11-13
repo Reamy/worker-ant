@@ -60,7 +60,9 @@ ok(!adm.includes("file_path NOT LIKE '%/_verify%'"), 'admin.ipc 不再内联探�
 ok(prj.includes('countDeliverablesByType(db, { projectId: id })'), 'knowledgePanorama delivStats 经共享取数范围真源分组(zx_20260930 M4-1 进一步上收)');
 
 console.log('S3 3a 列表数据位/updated_at 语义');
-ok(prj.includes('t.quality_score as task_quality_score'), 'deliverable:list JOIN 回传 task_quality_score');
+// zx_20261108_1 B6：列表取数搬到 core/deliverable-query.ts（IPC 只剩一跳），按符号重定向。
+ok(app('src/main/core/deliverable-query.ts').includes('t.quality_score as task_quality_score'),
+  'deliverable:list JOIN 回传 task_quality_score');
 ok(engineSrc().includes("UPDATE wa_deliverables SET updated_at = datetime('now') WHERE id = ?"), 'write_file 覆盖写 bump updated_at');
 
 console.log('S4 3a/3b 页面能力(静态)');
@@ -81,7 +83,11 @@ console.log('S6 3e 信息差闭环(静态)');
 const rcSql = /const retiredCount = \(db\.prepare\(`([^`]*)`\)/.exec(prj)?.[1] || '';
 ok(rcSql.includes("status = 'retired'") && /task_id IN \(\$\{ownerIds/.test(rcSql), 'task:get 回传 retiredCount(与成果列表同集合 task_id IN ownerIds)', rcSql.slice(0, 140));
 const td = app('renderer/src/pages/TaskDetailPage.tsx');
-ok(td.includes('retiredCount') && td.includes('项旧成果已退休'), 'TaskDetail 空成果退休透出');
+// zx_20261107_1 B9：退休提示随统计卡抽进 `TaskHeader`——判据按符号重定向，且同时钉"页面确实把它传下去"
+//   （只搬组件不接线同样是假绿）。
+const taskHeader = app('renderer/src/components/task/TaskHeader.tsx');
+ok(td.includes('retiredCount') && td.includes('retiredCount={retiredCount}')
+  && taskHeader.includes('项旧成果已退休'), 'TaskDetail 空成果退休透出（TaskHeader + 页面传参）');
 const pdPage = app('renderer/src/pages/ProjectDetailPage.tsx');
 ok(pdPage.includes('m.impl') && pdPage.includes('打开落地任务'), 'ProjectDetail M chip 可点进落地任务');
 const dash = app('renderer/src/pages/DashboardPage.tsx');

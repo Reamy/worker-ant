@@ -13,6 +13,7 @@
  */
 import type { AnsDevice, DeviceDb, DiscoveredDevice } from './device-registry.js';
 import { findDeviceByIdentity, upsertDiscovered } from './device-registry.js';
+import { lanAddressRefusal } from './device-address.js';
 import type { SsdpHeaders } from 'node-ssdp';
 
 /** 发现 IO 的**可注入**接口——真网络与受控回归跑的是同一个 `startDeviceDiscovery` 主体。 */
@@ -21,6 +22,35 @@ export interface DiscoveryIo {
   start(onFound: (dev: DiscoveredDevice) => void): void;
   /** 停止监听并释放 socket。 */
   stop(): void;
+}
+
+/**
+ * 默认 mDNS 浏览的服务类型（bonjour-service 的 `type` 不带 `_tcp` 后缀）。
+ * zx_20261107_1 B1：从单一 `http` 扩到常见局域网设备自述——仍只认**自述**，不按品牌猜。
+ */
+export const MDNS_SERVICE_TYPES: readonly string[] = ['http', 'hap', 'esphomelib', 'home-assistant'];
+
+/** SSDP 描述文档里我们真正用得到的字段（不认识的一律不猜）。 */
+export interface DeviceDescription {
+  friendlyName?: string;
+  modelName?: string;
+  deviceType?: string;
+  manufacturer?: string;
+}
+
+/** 从 UPnP 描述 XML 里取少量自述字段；解析失败/缺字段即缺省，不伪造。 */
+export function parseDeviceDescription(xml: string): DeviceDescription {
+  const pick = (tag: string): string | undefined => {
+    const m = new RegExp(`<${tag}>([^<]*)</${tag}>`, 'i').exec(xml);
+    const v = m?.[1]?.trim();
+    return v ? v.slice(0, 200) : undefined;
+  };
+  return {
+    friendlyName: pick('friendlyName'),
+    modelName: pick('modelName'),
+    deviceType: pick('deviceType'),
+    manufacturer: pick('manufacturer'),
+  };
 }
 
 export interface DiscoveryOpts {
@@ -140,14 +170,19 @@ export function deriveDeviceKind(text: string): string {
   return 'unknown';
 }
 
-function mdnsToDiscovered(svc: MdnsService): DiscoveredDevice | null {
+export function mdnsToDiscovered(svc: MdnsService): DiscoveredDevice | null {
   const address = svc.referer?.address || svc.addresses?.[0] || svc.host;
   if (!address) return null;
   const txtKeys = svc.txt && typeof svc.txt === 'object' ? Object.keys(svc.txt) : [];
+  // zx_20261107_1 B1：TXT 的**值**也是设备自述（HA/HAP 常把型号放 md/mdl），归类别时一并读；
+  //   仍只读自述，不按品牌猜。
+  const txtValues = svc.txt && typeof svc.txt === 'object'
+    ? Object.values(svc.txt).filter((v): v is string => typeof v === 'string')
+    : [];
   const capabilities = [svc.type, ...txtKeys].filter((s): s is string => typeof s === 'string' && s.length > 0);
   return {
     name: svc.name || svc.host || address,
-    kind: deriveDeviceKind(`${svc.type ?? ''} ${txtKeys.join(' ')}`),
+    kind: deriveDeviceKind(`${svc.type ?? ''} ${txtKeys.join(' ')} ${txtValues.join(' ')}`),
     protocol: 'mdns',
     address,
     port: typeof svc.port === 'number' ? svc.port : null,
@@ -156,7 +191,11 @@ function mdnsToDiscovered(svc: MdnsService): DiscoveredDevice | null {
   };
 }
 
-function ssdpToDiscovered(headers: SsdpHeaders, address: string): DiscoveredDevice | null {
+export function ssdpToDiscovered(
+  headers: SsdpHeaders,
+  address: string,
+  description?: DeviceDescription | null,
+): DiscoveredDevice | null {
   if (!address) return null;
   const st = typeof headers.ST === 'string' ? headers.ST : '';
   const nt = typeof headers.NT === 'string' ? headers.NT : '';
@@ -170,52 +209,107 @@ function ssdpToDiscovered(headers: SsdpHeaders, address: string): DiscoveredDevi
       /* LOCATION 不是合法 URL：端口如实留 null */
     }
   }
-  const capabilities = [st, nt, server].filter((s) => s.length > 0);
+  const descText = description
+    ? [description.deviceType, description.modelName, description.manufacturer].filter(Boolean).join(' ')
+    : '';
+  const capabilities = [st, nt, server, descText].filter((s) => s.length > 0);
   const usn = typeof headers.USN === 'string' ? headers.USN : '';
   return {
-    name: server || st || usn || address,
-    kind: deriveDeviceKind(`${st} ${nt} ${server}`),
+    name: description?.friendlyName || server || st || usn || address,
+    kind: deriveDeviceKind(`${st} ${nt} ${server} ${descText}`),
     protocol: 'ssdp',
     address,
     port,
     capabilities,
-    controllable: hasControlHint([st, nt, server]),
+    controllable: hasControlHint([st, nt, server, descText]),
   };
 }
 
+/**
+ * 有界取 SSDP 描述：只对**私网/链路本地**的 `LOCATION` 发一次请求，1.5s 超时、响应截 8192 字符。
+ * 任何失败都回 `null`（发现仍可用头部信息），不把发现面变成任意出站通道。
+ */
+async function fetchDescription(
+  location: string,
+  fetchImpl: typeof fetch,
+): Promise<DeviceDescription | null> {
+  try {
+    const url = new URL(location);
+    if (lanAddressRefusal(url.hostname) != null) return null;
+    const res = await fetchImpl(location, {
+      method: 'GET',
+      signal: AbortSignal.timeout(1_500),
+      headers: { Accept: 'text/xml, application/xml' },
+    });
+    if (!res.ok) return null;
+    const text = (await res.text()).slice(0, 8_192);
+    const desc = parseDeviceDescription(text);
+    return Object.values(desc).some(Boolean) ? desc : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 真 IO 的可注入面（默认值即真网络；rr 不传 ⇒ 不触网）。 */
+export interface DefaultDiscoveryIoOpts {
+  /** mDNS 服务类型；缺省 `MDNS_SERVICE_TYPES`。 */
+  mdnsServiceTypes?: readonly string[];
+  /** 描述抓取的 fetch 实现（rr 可注入假实现）。 */
+  fetchImpl?: typeof fetch;
+}
+
 /** 真 IO：mDNS（bonjour-service）+ SSDP（node-ssdp）。任一路不可用**如实降级**为只剩另一路。
- *  （zx_20261013_1 批五起对外导出——`devices:discover` 须把它与 MQTT 发现**并联**。） */
-export function defaultDiscoveryIo(): DiscoveryIo {
+ *  （zx_20261013_1 批五起对外导出——`devices:discover` 须把它与 MQTT 发现**并联**。）
+ *  zx_20261107_1 B1：mDNS 多服务类型 + SSDP 描述解析（仍只读自述）。 */
+export function defaultDiscoveryIo(opts: DefaultDiscoveryIoOpts = {}): DiscoveryIo {
   let stopped = false;
   const cleanups: Array<() => void> = [];
+  const serviceTypes = opts.mdnsServiceTypes ?? MDNS_SERVICE_TYPES;
+  const fetchImpl = opts.fetchImpl ?? fetch;
   return {
     start(onFound) {
       const emit = (dev: DiscoveredDevice | null): void => {
         if (!dev || stopped) return;
         try { onFound(dev); } catch { /* 单条上报失败：忽略 */ }
       };
-      // mDNS
+      // mDNS：每个服务类型一个 browser（同一 bonjour 实例）
       void (async () => {
         try {
           const mod = (await import('bonjour-service')) as unknown as { default?: MdnsBonjourCtor } & MdnsBonjourCtor;
           const Bonjour = (mod.default ?? mod) as MdnsBonjourCtor;
           const bonjour = new Bonjour();
-          const browser = bonjour.find({ type: 'http' });
-          browser.on('up', (svc) => emit(mdnsToDiscovered(svc)));
+          for (const type of serviceTypes) {
+            try {
+              const browser = bonjour.find({ type });
+              browser.on('up', (svc) => emit(mdnsToDiscovered(svc)));
+              cleanups.push(() => {
+                try { browser.stop(); } catch { /* 已停 */ }
+              });
+            } catch {
+              /* 单个服务类型起不来：其余照跑 */
+            }
+          }
           cleanups.push(() => {
-            try { browser.stop(); } catch { /* 已停 */ }
             try { bonjour.destroy(); } catch { /* 已销毁 */ }
           });
         } catch {
           /* 无 mDNS 能力（缺依赖/端口占用）：如实降级，SSDP 仍试 */
         }
       })();
-      // SSDP
+      // SSDP：先按头部落一条，再异步补描述（失败不影响头部那条）
       void (async () => {
         try {
           const { Client } = await import('node-ssdp');
           const client = new Client();
-          client.on('response', (headers, _statusCode, rinfo) => emit(ssdpToDiscovered(headers, rinfo?.address ?? '')));
+          client.on('response', (headers, _statusCode, rinfo) => {
+            const address = rinfo?.address ?? '';
+            emit(ssdpToDiscovered(headers, address));
+            const loc = typeof headers.LOCATION === 'string' ? headers.LOCATION : '';
+            if (!loc) return;
+            void fetchDescription(loc, fetchImpl).then((desc) => {
+              if (desc) emit(ssdpToDiscovered(headers, address, desc));
+            });
+          });
           cleanups.push(() => {
             try { client.stop(); } catch { /* 已停 */ }
           });

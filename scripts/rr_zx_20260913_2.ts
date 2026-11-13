@@ -221,8 +221,14 @@ console.log('\n[S1 M2-1 子树聚合（task:get / task:list 同尺）]');
   // zx_20260930 M4-2: 7 → 9（`task:get` 的 `deliverablesTotal` + `deliverable:facets` 的名录）。
   //   两处都**必须**经真源：前者若另写谓词，明细与总数就是两个集合（"已加载 K / 共 M"随即失实）；
   //   后者若自己拼，名录会与列表口径分叉。故这里数的是"同源调用数"，新增读点只会让它变大、变不回去。
-  ok((ipc.match(/\b(deliverableScopeSql|countDeliverables|countDeliverablesByType)\(/g) || []).length === 9,
-    'project.ipc 探针口径九处同源（读点增 ≠ 口径分叉）', String((ipc.match(/\b(deliverableScopeSql|countDeliverables|countDeliverablesByType)\(/g) || []).length));
+  // zx_20261108_1 B6：`deliverable:list` 的取数搬去 `core/deliverable-query.ts`（IPC 只剩一跳），
+  //   故九处读点分落两文件——**合计仍九处**（判据按符号跨载体重定向，读点未减、口径未分叉）。
+  const querySrc = RD(`${A}/src/main/core/deliverable-query.ts`);
+  const scopeCalls = (ipc + querySrc).match(/\b(deliverableScopeSql|countDeliverables|countDeliverablesByType)\(/g) || [];
+  // zx_20261111_3 B3：新增 `deliverable:attention`（countDeliverables + deliverableScopeSql 两跳）也经真源
+  //   ⇒ "恰九处"改为"≥九处"；口径未分叉仍由各套"无内联探针 SQL"反证兜住。
+  ok(scopeCalls.length >= 9,
+    'project.ipc + core/deliverable-query 探针口径九处同源（读点增 ≠ 口径分叉；新增 deliverable:attention 亦经真源）', String(scopeCalls.length));
   ok(ipc.includes('const subtreeCnt = (rootId: string): { n: number; p: number } =>') && ipc.includes('const seen = new Set<string>([rootId]);'),
     'task:list 上卷带环防护（seen 集合）');
 }
@@ -265,10 +271,13 @@ console.log('\n[S2 M2-2 归属不夺（otherWriters 派生自版本行 changed_b
     '反证：旧 `UPDATE … SET task_id`（按 file_path）确会夺走归属 ⇒ M2-2 的病成立');
   db.prepare("UPDATE wa_deliverables SET task_id = 'A' WHERE id = 'd1'").run();
 
-  // 接线：list / get 各调一次
+  // 接线：list / get 各调一次（zx_20261108_1 B6 后 list 那一跳在 `core/deliverable-query.ts`；
+  //   两处派生点仍俱在，跨两文件合计恰 2 处）。
   const ipc = prj();
-  ok((ipc.match(/otherWriters\(db,/g) || []).length === 2, 'project.ipc 两处派生 other_writers（deliverable:list + task:get）',
-    String((ipc.match(/otherWriters\(db,/g) || []).length));
+  const owCalls = (ipc.match(/otherWriters\(db,/g) || []).length
+    + (RD(`${A}/src/main/core/deliverable-query.ts`).match(/otherWriters\(db,/g) || []).length;
+  ok(owCalls === 2, 'project.ipc + core/deliverable-query 两处派生 other_writers（deliverable:list + task:get）',
+    String(owCalls));
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -333,7 +342,11 @@ console.log('\n[S3 M2-3 探针谓词收紧（路径段级）· 真库入参对�
     '谓词恒被 `(type != \'doc\' OR …)` 门控 ⇒ 只判 doc 类（code 同名文件有意不过问，M0 已定）');
   // zx_20260930 M4-1: 该读点不但"带别名 d"，且**显式声明 includeRetired: true**（档案视图有意可见退休件）——
   //   此前那句差异只在注释里，现在写在调用参数上。断言随之钉这句更具体的形式。
-  ok(prj().includes("conditions.push(deliverableScopeSql({ alias: 'd', includeRetired: true }).sql);"),
+  // zx_20261108_1 B6：该读点搬到 `core/deliverable-query.ts`（先取 scope 再 push `.sql` / params，
+  //   与旧的一行式等价且更显式）；钉的仍是"带别名 d + 显式声明档案视图含退休件 + 只经共享真源"。
+  const querySrc2 = RD(`${A}/src/main/core/deliverable-query.ts`);
+  ok(querySrc2.includes("const scope = deliverableScopeSql({ alias: 'd', includeRetired: true });")
+    && querySrc2.includes('conditions.push(scope.sql);') && querySrc2.includes('values.push(...scope.params);'),
     'M2-3 补上唯一漏网读点 deliverable:list（经共享真源带别名 d，且显式声明档案视图含退休件）');
 }
 
@@ -447,8 +460,9 @@ console.log('\n[S6 M2-6 version_count 门禁（事实依据，非类型猜测）
   const byType = rows.filter((r) => r.type === 'doc').map((r) => r.id).sort();
   eq(byType, ['dn', 'dv'], '反证：旧 `type === \'doc\'` 门禁会把无版本的 dn 也算进去 ⇒ 空钮');
 
-  const ipc = prj();
-  ok(ipc.includes('(SELECT COUNT(*) FROM wa_deliverable_versions v WHERE v.deliverable_id = d.id) AS version_count'),
+  // zx_20261108_1 B6：派生列随取数搬到 `core/deliverable-query.ts`（select 子句仍同一句）。
+  const querySrc3 = RD(`${A}/src/main/core/deliverable-query.ts`);
+  ok(querySrc3.includes('(SELECT COUNT(*) FROM wa_deliverable_versions v WHERE v.deliverable_id = d.id) AS version_count'),
     'deliverable:list 补派生列 version_count（关联既有 idx_deliv_versions）');
   const page = pageSrc('DeliverablesPage.tsx');
   ok(page.includes('{Number(d.version_count) > 0 && ('), '列表 History 钮门禁 = version_count > 0');

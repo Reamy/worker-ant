@@ -38,14 +38,76 @@ import { isRemoteBlocked, countRemoteAssignedPending, type OrchestrateDb } from 
 // zx_20261022_2 批二: 计划超时读时刻走**既有唯一真源** `dbTimeMs`（带 Z 原样、空格补 Z）——
 //   旧写法 `new Date(updated_at + 'Z')` 遇到 ISO 串（本身已带 Z）得到 `Invalid Date`，超时永不触发。
 import { dbTimeMs } from './memory-decay.js';
+// zx_20261110_2 B2（老子·功遂身退 / 帕累托·先治大头）：在途键是否**真有执行体**由这一处回答——
+//   事故 339ef167 的 73 分钟里，55 分钟压在"键在、run 早没了"这件事上。
+import { hasTaskRun } from './task-run-registry.js';
 
 const logger = createLogger('scheduler');
 
 type JobHandler = (payload: Record<string, unknown>) => Promise<void>;
 
+/**
+ * zx_20261110_2 B2：一条**在途键**的全部事实。
+ *
+ * 病根：`inflight` 原为 `Set<string>`，只在 handler 的 `finally` 删。
+ * handler 不返回（abort 没兑现）⇒ 键永在 ⇒ 同任务后续作业在 `processPending` 被静默跳过（事故 55 分钟在队）。
+ * 记账三件：`startedAt`（判龄）、`runToken`（旧 run 不得删新 run 的键）、`jobId/type/payload`（释放后能重排）。
+ */
+interface InflightEntry {
+  taskId: string;
+  jobId?: string;
+  type: string;
+  payload: Record<string, unknown>;
+  startedAt: number;
+  runToken: string;
+  requeues: number;
+}
+
+/** 在途键超龄宽限（ms）：无真实 run 且超龄 ⇒ 可释放重排。 */
+const DEFAULT_INFLIGHT_ORPHAN_MS = 60_000;
+/**
+ * zx_20261111_1 B3（治大国若烹小鲜）：**无 taskId** 作业的超龄宽限保守缺省 10 分钟。
+ * 这类作业（`embed-memory` / `consolidate-memories` …）没有任务 run 可对账，60s 就翻面会
+ * 把合法长作业反复重排。有 taskId 的作业仍走全局 60s（真挂死要能被发现）。
+ */
+const DEFAULT_NO_TASK_ORPHAN_MS = 600_000;
+/** 同一键最多重排几次（无上界即成"卡死—重排"风暴）。 */
+const INFLIGHT_MAX_REQUEUES = 2;
+
+function inflightOrphanMs(): number {
+  const n = Number(String(process.env.INFLIGHT_ORPHAN_SEC ?? '').trim());
+  return Number.isFinite(n) && n > 0 ? Math.round(n * 1000) : DEFAULT_INFLIGHT_ORPHAN_MS;
+}
+
 // A1/A2/A3 (2026-09-04) 的四个"作业-任务一致性"helpers 已迁 `./task-jobs.js`
 // （zx_20260917 M5：`task-chain` 也要用 `hasPendingExecutionJob`，留在本文件会与它互引成环）。
 // 调用方（`ipc/project.ipc.ts`）同批改从新模块引——**不**在此留转发，免生第二处真源。
+
+/**
+ * zx_20261113_2 M18：**收口后**才该跑的作业类型（任务此时已是终态，恰恰是它们的运行前提）。
+ * 启动恢复时不得按"任务已终态"把它们作废——那会把完成通知/复盘永久吞掉。
+ */
+export const POST_TERMINAL_JOB_TYPES = ['task-postlude', 'background-review'] as const;
+export function isPostTerminalJobType(type: string): boolean {
+  return (POST_TERMINAL_JOB_TYPES as readonly string[]).includes(type);
+}
+
+/**
+ * zx_20261113_2 M18：内存 pending 队列的键。
+ *
+ * 病根（2026-11-13 真标本 `0396cfbc`）：此前所有作业一律以 `taskId` 为键。同一任务在收口后
+ *   同时入队 `task-postlude` 与 `background-review`，后者的 `pending.set(taskId, …)` 把前者的条目
+ *   **覆盖掉**；后者跑完删键，前者的 `wa_jobs` 行永远停在 `pending` ⇒ IM 完成通知从未发出。
+ *
+ * 口径：只有 `ai-task` / `resume-ai-task` 继续以 `taskId` 为键（`scanReadyTasks` 的
+ *   `pending.has(taskId)` 与它同域）；其余类型一律 `type:taskId`，不同作业互不覆盖。
+ */
+export function jobPendingKey(type: string, jobId: string, payload: unknown): string {
+  const tid = (payload as { taskId?: unknown } | null)?.taskId;
+  if (typeof tid !== 'string' || tid === '') return jobId;
+  if (type === 'ai-task' || type === 'resume-ai-task') return tid;
+  return `${type}:${tid}`;
+}
 
 export class TaskScheduler {
   private db: Database.Database;
@@ -57,7 +119,18 @@ export class TaskScheduler {
    * `scanReadyTasks`（10s 一跳、只查 `pending.has`）以为"没在跑"，按软闸再入队一份 ⇒ 一次派发拆两遍。
    * 键在"取到 handler"那一刻加入、`finally` 里移除；在途期间任何再入队都会被本闸挡下。
    */
-  private inflight = new Set<string>();
+  /**
+   * zx_20261110_2 B2：在途**账**（原为 `Set<string>`，见 `InflightEntry` 注记）。
+   * 键域不变（同 `pendingKey`），值从"只是一个键"升级为"一条可对账的事实"。
+   */
+  private inflight = new Map<string, InflightEntry>();
+  /**
+   * zx_20261111_1 B3：**按作业类型登记的运行上界**（ms）。只影响"无真实执行体"的超龄判据，
+   * 不改变作业自身超时，也不改变 `hasTaskRun` 判活。未登记的类型回落全局宽限。
+   */
+  private orphanGrace = new Map<string, number>();
+  /** 时钟注入（rr 用假时钟；生产缺省真实墙钟）——对账判据不得依赖真实墙钟。 */
+  private _now: () => number = Date.now;
   private running = false;
   /**
    * zx_20260930 M14-3：**调度器活体脉冲**——`processPending` 每秒被 `setInterval` 唤起，
@@ -92,9 +165,8 @@ export class TaskScheduler {
    * **本就不写 `wa_jobs`**（只是内存 `pending`），对它做 `WHERE id = <taskId>` 的更新恒命中 0 行：
    * 不出错但也不做事，属"沉默的空转"，故显式区分而非继续假装有作业行。
    */
-  private pendingKey(jobId: string, payload: unknown): string {
-    const tid = (payload as { taskId?: unknown } | null)?.taskId;
-    return typeof tid === 'string' && tid !== '' ? tid : jobId;
+  private pendingKey(jobId: string, payload: unknown, type: string): string {
+    return jobPendingKey(type, jobId, payload);
   }
 
   /** A1: 注册项目的cron定时作业（支持多个表达式，用换行或分号分隔） */
@@ -163,9 +235,30 @@ export class TaskScheduler {
     return this._lastTickAt;
   }
 
-  /** 注册作业处理器 */
-  register(type: string, handler: JobHandler): void {
+  /**
+   * 注册作业处理器。
+   *
+   * zx_20261111_1 B3：`opts.orphanGraceMs` 声明该类型作业的合法运行上界——调度器在此之前
+   * **不**把它当"无真实执行体"释放重排；与全局宽限取较大者。声明值应来自作业自身超时
+   * （如 `project-init-brief` = `BRIEF_GENERATE_TIMEOUT_MS + 30s`），而非拍脑袋。
+   */
+  register(type: string, handler: JobHandler, opts: { orphanGraceMs?: number } = {}): void {
     this.handlers.set(type, handler);
+    const grace = Number(opts.orphanGraceMs ?? 0);
+    if (Number.isFinite(grace) && grace > 0) this.orphanGrace.set(type, Math.round(grace));
+    else this.orphanGrace.delete(type);
+  }
+
+  /**
+   * zx_20261111_1 B3：该作业类型的超龄宽限（ms）。
+   * 声明值优先（与全局取较大者）；未声明且**无 taskId** 用保守缺省；其余走全局。
+   */
+  private orphanMsOf(type: string, hasTaskId: boolean): number {
+    const global = inflightOrphanMs();
+    const declared = this.orphanGrace.get(type) ?? 0;
+    if (declared > 0) return Math.max(global, declared);
+    if (!hasTaskId) return Math.max(global, DEFAULT_NO_TASK_ORPHAN_MS);
+    return global;
   }
 
   /**
@@ -182,7 +275,7 @@ export class TaskScheduler {
     this.db.prepare(
       'INSERT INTO wa_jobs (id, type, payload, status) VALUES (?, ?, ?, ?)',
     ).run(id, type, JSON.stringify(finalPayload), 'pending');
-    this.pending.set(this.pendingKey(id, finalPayload), { type, payload: finalPayload, jobId: id });
+    this.pending.set(this.pendingKey(id, finalPayload, type), { type, payload: finalPayload, jobId: id });
     return id;
   }
 
@@ -206,20 +299,25 @@ export class TaskScheduler {
     this.running = true;
     // M14-3: 起手就给脉冲一个初值——否则"启动后头 1 秒内被问健康"会读出 1970 年那种陈旧。
     this._lastTickAt = Date.now();
+    // zx_20261110_2 B2（损之又损）：**先合并重复**再谈恢复——同一 (type, taskId) 的多条 pending
+    //   只留最新一条，其余置 done + `superseded_by_dedupe`（事故里三条 resume 同任务并存）。
+    try { this.dedupePendingJobs(); } catch (e) { logger.warn({ err: e }, '启动去重失败（不阻断恢复）'); }
     // 恢复未完成作业：running状态的job转为resume处理
     const stale = this.db.prepare("SELECT * FROM wa_jobs WHERE status IN ('pending','running')").all() as Array<Record<string, unknown>>;
     for (const job of stale) {
       const payload = JSON.parse(job.payload as string || '{}') as { taskId?: string };
-      // A3 (2026-09-04): 恢复时若任务已是终态（completed/failed/archived）则作业不复活、直接收尾
-      if (payload.taskId && isTerminalTask(this.db, payload.taskId)) {
+      // A3 (2026-09-04): 恢复时若任务已是终态（completed/failed/archived）则作业不复活、直接收尾。
+      // zx_20261113_2 M18：收口后才该跑的 `task-postlude` / `background-review` **例外**——
+      //   任务已终态正是它们的运行前提；不作废，否则完成通知/复盘在重启后被永久吞掉。
+      if (payload.taskId && isTerminalTask(this.db, payload.taskId) && !isPostTerminalJobType(String(job.type))) {
         this.db.prepare("UPDATE wa_jobs SET status = 'done', completed_at = datetime('now'), error = 'superseded_by_terminal' WHERE id = ?").run(job.id as string);
         continue;
       }
       if (job.status === 'running' && job.type === 'ai-task') {
         // 运行时中断的AI任务，转为resume
-        this.pending.set(this.pendingKey(job.id as string, payload), { type: 'resume-ai-task', payload, jobId: job.id as string });
+        this.pending.set(this.pendingKey(job.id as string, payload, 'resume-ai-task'), { type: 'resume-ai-task', payload, jobId: job.id as string });
       } else {
-        this.pending.set(this.pendingKey(job.id as string, payload), { type: job.type as string, payload, jobId: job.id as string });
+        this.pending.set(this.pendingKey(job.id as string, payload, String(job.type)), { type: job.type as string, payload, jobId: job.id as string });
       }
     }
     logger.info({ recovered: stale.length, running: stale.filter(j => j.status === 'running').length }, '调度器已启动，恢复未完成作业');
@@ -247,6 +345,8 @@ export class TaskScheduler {
         const n = this.reconcileOrphanRunningTasks(2, 'periodic_reconcile_running');
         if (n > 0) logger.info({ orphanRunning: n }, '周期对账：孤立的 running 任务已重新入队 ai-task');
       } catch (e) { logger.warn({ err: e }, '周期核对孤立 running 任务失败'); }
+      // zx_20261110_2 B2：在途键对账——"键在、run 早没了"的键必须被释放并重排（事故那 55 分钟）。
+      try { this.reconcileInflight(); } catch (e) { logger.warn({ err: e }, '在途键对账失败'); }
     }, 10_000);
     // P0.4 矛盾驱动优先级：每30分钟重新分析瓶颈
     this._bottleneckTimer = setInterval(() => this.runBottleneckAnalysis(), 30 * 60 * 1000);
@@ -266,7 +366,7 @@ export class TaskScheduler {
       const jid = randomUUID();
       this.db.prepare("INSERT INTO wa_jobs (id, type, payload, status, created_at) VALUES (?, 'ai-task', ?, 'pending', datetime('now'))")
         .run(jid, JSON.stringify(payload));
-      this.pending.set(this.pendingKey(jid, payload), { type: 'ai-task', payload, jobId: jid });
+      this.pending.set(this.pendingKey(jid, payload, 'ai-task'), { type: 'ai-task', payload, jobId: jid });
     }
     return orphans.length;
   }
@@ -630,12 +730,36 @@ export class TaskScheduler {
       const handler = this.handlers.get(job.type);
       if (!handler) return;
       // zx_20261028_1 M1：同键已在跑 ⇒ 本轮不动，条目**留在 `pending`**（下一跳再看），不并发两份。
-      if (this.inflight.has(key)) return;
+      // zx_20261110_2 B2（功遂身退）：**"键在"不再等于"在跑"**——必须有一个真实执行体兑现它。
+      //   三者任一为真即让位：① 该任务有在途 run（`hasTaskRun`，真在跑）；② 键龄未超宽限（刚起跑）。
+      //   否则（键在、run 早没了、还超了宽限）⇒ **释放该键并继续处理当前作业**，不再静默 return。
+      //   这一条正是事故 339ef167 那 55 分钟的直接成因：三条恢复作业排在同一把"死钥匙"后面。
+      const taskIdOfJob = (job.payload as { taskId?: string } | null | undefined)?.taskId;
+      const existing = this.inflight.get(key);
+      if (existing) {
+        const stillLive = !!taskIdOfJob && hasTaskRun(taskIdOfJob);
+        const age = this._now() - existing.startedAt;
+        const graceMs = this.orphanMsOf(existing.type, !!taskIdOfJob);
+        if (stillLive || age < graceMs) return;
+        this.releaseInflight(key, 'inflight_orphan_released', { requeue: false });
+        logger.warn({ key, ageMs: age, graceMs, taskId: String(taskIdOfJob ?? '').slice(0, 8) },
+          '在途键无真实执行体且已超宽限——已释放该键，继续处理当前作业');
+      }
       // zx_20260929 M5-d: `pending` 的键已归一（见 pendingKey），真实作业行 id 只在 `jobId` 里。
       //   软闸（scanReadyTasks）那条路**不写 wa_jobs**，其条目无 jobId ⇒ 下列三条 UPDATE 一律跳过，
       //   不再假装"有作业行可更新"（此前用 taskId 当 id 去更新，恒 0 行、沉默空转）。
       const jobId = (job as { jobId?: string }).jobId;
-      this.inflight.add(key);
+      // zx_20261110_2 B2：本次处理持有**自己的** runToken——`finally` 只删自己那一把（旧 run 不得删新键）。
+      const runToken = randomUUID();
+      this.inflight.set(key, {
+        taskId: String(taskIdOfJob ?? ''),
+        jobId,
+        type: job.type,
+        payload: job.payload,
+        startedAt: this._now(),
+        runToken,
+        requeues: Math.max(existing?.requeues ?? 0, this._requeues.get(key) ?? 0),
+      });
       this.pending.delete(key);
       if (jobId) this.db.prepare("UPDATE wa_jobs SET status = ?, started_at = datetime('now') WHERE id = ?").run('running', jobId);
       try {
@@ -662,10 +786,154 @@ export class TaskScheduler {
         logger.error({ id: jobId, key, type: job.type, retries, backoffMs, error: String(err) }, '作业执行失败');
       } finally {
         // 无论成败/重试，键在本次处理结束时归零——重试条目已由 catch 里的 setTimeout 重新入 `pending`。
-        this.inflight.delete(key);
+        // zx_20261110_2 B2：**只删自己的那一把**（按 runToken 比对）——
+        //   旧 run 收尾时新 run 可能已占住同一个键（resume/重试交叠），无脑 delete 会把新键删掉。
+        this.releaseInflightToken(key, runToken, 'finished');
       }
     });
     await Promise.all(promises);
+  }
+
+  /** zx_20261110_2 B2: 仅在**仍是自己**时移除该键（按 runToken 比对）。 */
+  private releaseInflightToken(key: string, runToken: string, reason: string): void {
+    const cur = this.inflight.get(key);
+    if (!cur || cur.runToken !== runToken) return;
+    this.inflight.delete(key);
+    if (reason !== 'finished') logger.info({ key }, '在途键已释放');
+  }
+
+  /**
+   * zx_20261110_2 B2: 释放一条在途键（**唯一释放口**——守卫处与周期对账共用）。
+   *
+   * `requeue=true` ⇒ 把对应的 `wa_jobs` 行放回 `pending` 并塞回内存队列（周期对账用：没有新作业时自己重排）；
+   * `requeue=false` ⇒ 该行如实收尾为 `done` 并带因由（守卫处用：马上就有新作业接手，旧行不该再跑一遍）。
+   * 重排次数以 `INFLIGHT_MAX_REQUEUES` 封顶，超限 ⇒ 该行记 `failed` + `error='stalled_after_requeue'`，
+   * 不再无限"卡死—重排"。
+   */
+  private releaseInflight(key: string, reason: string, opts: { requeue: boolean }): void {
+    const entry = this.inflight.get(key);
+    if (!entry) return;
+    this.inflight.delete(key);
+    const jobId = entry.jobId;
+    if (!jobId) { logger.info({ key, reason }, '在途键已释放（无作业行）'); return; }
+    if (opts.requeue) {
+      const next = entry.requeues + 1;
+      if (next > INFLIGHT_MAX_REQUEUES) {
+        try {
+          this.db.prepare("UPDATE wa_jobs SET status = 'failed', completed_at = datetime('now'), error = ? WHERE id = ?")
+            .run('stalled_after_requeue', jobId);
+        } catch { /* best-effort */ }
+        logger.error({ key, jobId, requeues: entry.requeues, reason }, '在途作业重排次数到顶，如实置为失败（不再重排）');
+        eventBus.emit('job.requeue_exhausted', { jobId, taskId: entry.taskId, type: entry.type, requeues: entry.requeues }).catch(() => {});
+        return;
+      }
+      try {
+        this.db.prepare("UPDATE wa_jobs SET status = 'pending', completed_at = NULL, error = ? WHERE id = ?").run(reason, jobId);
+        this.pending.set(key, { type: entry.type, payload: entry.payload, jobId });
+      } catch { /* best-effort */ }
+      // 计数挂在**新条目**上（键已被删，故不能读旧值）——下次释放仍从这里继续累加。
+      this._requeues.set(key, next);
+      logger.warn({ key, jobId, requeues: next, reason }, '在途作业无真实执行体，已释放并重排');
+      eventBus.emit('job.inflight_requeued', { jobId, taskId: entry.taskId, type: entry.type, requeues: next, reason }).catch(() => {});
+      return;
+    }
+    try {
+      this.db.prepare("UPDATE wa_jobs SET status = 'done', completed_at = datetime('now'), error = ? WHERE id = ? AND status = 'running'")
+        .run(reason, jobId);
+    } catch { /* best-effort */ }
+    logger.warn({ key, jobId, reason }, '在途键如实收尾（无真实执行体）');
+    eventBus.emit('job.inflight_released', { jobId, taskId: entry.taskId, type: entry.type, reason }).catch(() => {});
+  }
+
+  /** 各键累计重排次数（键被删后仍要记住——否则封顶形同虚设）。 */
+  private _requeues = new Map<string, number>();
+
+  /**
+   * zx_20261110_2 B2: **周期对账**——把"键在、run 早没了、还超龄"的在途键释放并重排。
+   * 返回本轮释放数（供日志与断言）。不碰有真实 run 的键（那是合法在跑）。
+   */
+  reconcileInflight(): number {
+    const now = this._now();
+    let released = 0;
+    for (const [key, e] of Array.from(this.inflight.entries())) {
+      if (e.taskId && hasTaskRun(e.taskId)) continue;
+      if (now - e.startedAt < this.orphanMsOf(e.type, !!e.taskId)) continue;
+      const requeues = Math.max(e.requeues, this._requeues.get(key) ?? 0);
+      this.inflight.set(key, { ...e, requeues });
+      this.releaseInflight(key, 'inflight_orphan_reconcile', { requeue: true });
+      released++;
+    }
+    if (released > 0) logger.warn({ released }, '周期对账：在途键无真实执行体，已释放并重排');
+    return released;
+  }
+
+  /**
+   * zx_20261110_2 B7: **用户"释放并重排"的落点**——把该任务的全部在途键与残留执行作业一次性清掉。
+   *
+   * 与 `reconcileInflight` 同一把尺（都按 `hasTaskRun` 判），差别只在**由谁发起**：
+   * 一个自己发现，一个由 GUI 的 `task:releaseAndRequeue` 点名。返回被清的作业 id（审计用）。
+   */
+  releaseTaskRun(taskId: string, reason = 'released_by_user'): string[] {
+    const jobIds: string[] = [];
+    for (const [key, e] of Array.from(this.inflight.entries())) {
+      if (e.taskId !== taskId) continue;
+      if (e.jobId) jobIds.push(e.jobId);
+      this.inflight.delete(key);
+    }
+    // 残留的 pending/running 执行作业一并作废——否则 `hasPendingExecutionJob` 仍会挡住后续恢复。
+    try {
+      const rows = this.db.prepare(
+        "SELECT id FROM wa_jobs WHERE status IN ('pending','running') AND type IN ('ai-task','resume-ai-task') AND payload LIKE ?",
+      ).all(`%"taskId":"${taskId}"%`) as Array<{ id: string }>;
+      for (const r of rows) jobIds.push(r.id);
+      this.db.prepare(
+        "UPDATE wa_jobs SET status = 'done', completed_at = datetime('now'), error = ? WHERE status IN ('pending','running') AND type IN ('ai-task','resume-ai-task') AND payload LIKE ?",
+      ).run(reason, `%"taskId":"${taskId}"%`);
+    } catch { /* best-effort */ }
+    // 内存队列里同键的条目也一并清（否则下一秒又被取起来跑）
+    this.pending.delete(taskId);
+    // 去重后返回（同一条 running 作业会先经在途键、再经库查出，审计列表不该出现两遍）
+    const unique = Array.from(new Set(jobIds));
+    logger.warn({ taskId: taskId.slice(0, 8), jobIds: unique.length, reason }, '按任务释放了在途键与残留执行作业');
+    return unique;
+  }
+
+  /** 仅供 rr：注入假时钟（生产不调用）。 */
+  setClock(fn: () => number): void {
+    this._now = fn;
+  }
+
+  /**
+   * zx_20261110_2 B2（损之又损）：**启动去重**——同一 `(type, taskId)` 的多条 pending/running 只留最新一条。
+   *
+   * 病根：事故里同一任务三条 `resume-ai-task`（13:48:54 / 13:53:49 / 13:56:53）并存，
+   * 前两条被 `superseded_by_*` 收尾、第三条在队 55 分钟；重复本身把"一次恢复"变成"三份排队"。
+   * 只合并**带 taskId** 的作业（`embed-memory` 这类无归属作业不受影响）；保留**最新**一条，
+   * 其余置 `done` + `error='superseded_by_dedupe'`（不物理删，事后可查）。
+   * @returns 实际合并掉的条数
+   */
+  dedupePendingJobs(): number {
+    let rows: Array<{ id: string; type: string; payload: string; created_at: string }>;
+    try {
+      rows = this.db.prepare(
+        "SELECT id, type, payload, created_at FROM wa_jobs WHERE status IN ('pending','running') ORDER BY created_at DESC, rowid DESC",
+      ).all() as Array<{ id: string; type: string; payload: string; created_at: string }>;
+    } catch { return 0; }
+    const seen = new Set<string>();
+    let merged = 0;
+    for (const r of rows) {
+      let taskId = '';
+      try { taskId = String((JSON.parse(r.payload || '{}') as { taskId?: unknown }).taskId ?? ''); } catch { /* 坏载荷不参与去重 */ }
+      if (!taskId) continue;
+      const gk = `${r.type}\u0000${taskId}`;
+      if (!seen.has(gk)) { seen.add(gk); continue; }
+      try {
+        this.db.prepare("UPDATE wa_jobs SET status = 'done', completed_at = datetime('now'), error = 'superseded_by_dedupe' WHERE id = ?").run(r.id);
+        merged++;
+      } catch { /* best-effort */ }
+    }
+    if (merged > 0) logger.warn({ merged }, '启动去重：同 (type, taskId) 的重复待执行作业已合并（保留最新一条）');
+    return merged;
   }
 
   /** zx_20261028_1 M1：`pending` 里各条目的优先级一次批量取（`SQLITE_MAX_VARIABLE_NUMBER` 友好，400 一批）。 */
@@ -692,7 +960,7 @@ export class TaskScheduler {
     const due = this.db.prepare("SELECT * FROM wa_jobs WHERE status = 'pending' AND scheduled_at IS NOT NULL AND scheduled_at <= ?").all(now) as Array<Record<string, unknown>>;
     for (const job of due) {
       const payload = JSON.parse(job.payload as string || '{}');
-      this.pending.set(this.pendingKey(job.id as string, payload), { type: job.type as string, payload, jobId: job.id as string });
+      this.pending.set(this.pendingKey(job.id as string, payload, String(job.type)), { type: job.type as string, payload, jobId: job.id as string });
     }
   }
 }

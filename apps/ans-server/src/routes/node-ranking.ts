@@ -55,11 +55,32 @@ export interface RankableNode {
   reliability?: NodeReliability | null;
 }
 
+/** zx_20261108_1 B1：余力瓶颈来源（与心跳 `capacity_basis.bottleneck` 同一词表）。 */
+export type CapacityBottleneck = 'cpu' | 'mem' | 'slot' | 'disk';
+
+/** 四源余量（0..1；未知为 `null`）——只用于解释"哪一项最紧"，不参与排序。 */
+export interface CapacityBasis {
+  cpu: number | null;
+  mem: number | null;
+  slot: number | null;
+  disk: number | null;
+}
+
 export interface ParsedCapacity {
   /** 已知空闲比例 0..1；`null` = 未知或非法。`0` 是**已知满负荷**，与 `null` 不同。 */
   ratio: number | null;
   /** 已知剩余槽位（非负整数）；`null` = 未知或非法。 */
   freeSlots: number | null;
+  /**
+   * B1：最紧的那一项（心跳 `capacity_basis.bottleneck`）。
+   * 旧客户端/坏值 ⇒ **键缺省**（不是 `null` 值），使旧调用的深比较不变。
+   */
+  bottleneck?: CapacityBottleneck;
+  /** B1：四源余量快照（与 `bottleneck` 同来同去）。 */
+  basis?: CapacityBasis;
+  /** B1：磁盘字节（仅当合法时出现），用于人话"可用 X / Y"。 */
+  diskFree?: number;
+  diskTotal?: number;
 }
 
 export interface RankedCandidate<T> {
@@ -74,6 +95,13 @@ export interface RankedCandidate<T> {
   score: number;
   /** 历史可靠性（缺省时 `samples: 0` 的中性态）。 */
   reliability: NodeReliability;
+  /** B1：最紧的一项（仅解释用，不参与排序）；未知 ⇒ `null`。 */
+  bottleneck: CapacityBottleneck | null;
+  /** B1：四源余量快照（仅解释用）；未知 ⇒ `null`。 */
+  basis: CapacityBasis | null;
+  /** B1：磁盘字节（仅当心跳给出）；用于"可用 X / Y"。 */
+  diskFree: number | null;
+  diskTotal: number | null;
 }
 
 export interface SelectionSnapshot {
@@ -84,6 +112,8 @@ export interface SelectionSnapshot {
   freeSlots: number | null;
   /** zx_20261030_1 M1：历史可靠性快照（样本不足时为中性态，`samples` 照实）。 */
   reliability: NodeReliability;
+  /** B1：最紧的一项（仅解释用）；心跳未给 ⇒ `null`。 */
+  bottleneck: CapacityBottleneck | null;
   /** 人话理由——面板/日志可答「为什么派给它」。 */
   reason: string;
 }
@@ -100,16 +130,50 @@ function parseJsonObject(raw: string | null | undefined): Record<string, unknown
   }
 }
 
+function ratio01(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1 ? v : null;
+}
+
+function bytes(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : undefined;
+}
+
+/**
+ * B1：从心跳 status 里读**瓶颈**与四源快照。只在字段合法时**加上键**——旧客户端没有这些字段，
+ * 返回的形状与旧版逐键相同（既有深比较断言不受影响）。
+ */
+function parseBasis(obj: Record<string, unknown>): Pick<ParsedCapacity, 'bottleneck' | 'basis'> {
+  const raw = obj.capacity_basis;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const b = raw as Record<string, unknown>;
+  const basis: CapacityBasis = {
+    cpu: ratio01(b.cpu),
+    mem: ratio01(b.mem),
+    slot: ratio01(b.slot),
+    disk: ratio01(b.disk),
+  };
+  const bn = b.bottleneck;
+  const bottleneck: CapacityBottleneck | undefined =
+    bn === 'cpu' || bn === 'mem' || bn === 'slot' || bn === 'disk' ? bn : undefined;
+  return { basis, ...(bottleneck ? { bottleneck } : {}) };
+}
+
 export function parseCapacity(statusJson: string | null | undefined): ParsedCapacity {
   const obj = parseJsonObject(statusJson);
   if (!obj) return { ratio: null, freeSlots: null };
   const rawRatio = obj.capacity_free_ratio;
-  const ratio =
-    typeof rawRatio === 'number' && Number.isFinite(rawRatio) && rawRatio >= 0 && rawRatio <= 1 ? rawRatio : null;
+  const ratio = ratio01(rawRatio);
   const rawSlots = obj.free_slots;
   const freeSlots =
     typeof rawSlots === 'number' && Number.isFinite(rawSlots) && rawSlots >= 0 ? Math.floor(rawSlots) : null;
-  return { ratio, freeSlots };
+  const diskFree = bytes(obj.disk_free);
+  const diskTotal = bytes(obj.disk_total);
+  return {
+    ratio,
+    freeSlots,
+    ...parseBasis(obj),
+    ...(diskFree !== undefined && diskTotal !== undefined ? { diskFree, diskTotal } : {}),
+  };
 }
 
 function safeWeight(weight: number): number {
@@ -214,7 +278,8 @@ function effectiveReliability(raw: NodeReliability | null | undefined): NodeReli
 
 /** 单节点 → 排序候选（层级/分数口径唯一处）。 */
 function toCandidate<T extends RankableNode>(item: T): RankedCandidate<T> {
-  const { ratio, freeSlots } = parseCapacity(item.status_json);
+  const capacity = parseCapacity(item.status_json);
+  const { ratio, freeSlots } = capacity;
   const weight = safeWeight(item.weight);
   const group = groupOf(ratio);
   const score = group === 'free' && ratio !== null ? weight * ratio : weight;
@@ -228,6 +293,10 @@ function toCandidate<T extends RankableNode>(item: T): RankedCandidate<T> {
     lastSeenAt: item.last_seen_at,
     score,
     reliability: effectiveReliability(item.reliability),
+    bottleneck: capacity.bottleneck ?? null,
+    basis: capacity.basis ?? null,
+    diskFree: capacity.diskFree ?? null,
+    diskTotal: capacity.diskTotal ?? null,
   };
 }
 
@@ -264,6 +333,22 @@ function pct(ratio: number): string {
   return `${Math.round(ratio * 100)}%`;
 }
 
+const BOTTLENECK_LABEL: Record<CapacityBottleneck, string> = {
+  cpu: 'CPU',
+  mem: '内存',
+  slot: '槽位',
+  disk: '磁盘',
+};
+
+/** 字节 → 人话（1 位小数；单位到 GB/TB 为止）。只用于理由文案。 */
+function fmtBytes(n: number): string {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v.toFixed(i === 0 ? 0 : 1)}${units[i]}`;
+}
+
 export function explainSelection<T>(candidate: RankedCandidate<T>): SelectionSnapshot {
   const slots = candidate.freeSlots === null ? '' : `，剩余槽位 ${candidate.freeSlots}`;
   let reason: string;
@@ -282,6 +367,16 @@ export function explainSelection<T>(candidate: RankedCandidate<T>): SelectionSna
   } else if (rel.samples > 0) {
     reason += `；历史 ${rel.samples} 单（样本不足，按中性 50% 排序）`;
   }
+  // B1：说明"这个余力数是被哪一项压低的"——未知不编（没有 bottleneck 就不加这句话）。
+  if (candidate.bottleneck) {
+    const spare = candidate.basis?.[candidate.bottleneck] ?? null;
+    const pieces: string[] = [];
+    if (spare != null) pieces.push(`余量 ${pct(spare)}`);
+    if (candidate.bottleneck === 'disk' && candidate.diskFree != null && candidate.diskTotal != null) {
+      pieces.push(`可用 ${fmtBytes(candidate.diskFree)} / ${fmtBytes(candidate.diskTotal)}`);
+    }
+    reason += `；瓶颈：${BOTTLENECK_LABEL[candidate.bottleneck]}${pieces.length ? `（${pieces.join('，')}）` : ''}`;
+  }
   return {
     nodeId: candidate.nodeId,
     group: candidate.group,
@@ -289,6 +384,7 @@ export function explainSelection<T>(candidate: RankedCandidate<T>): SelectionSna
     ratio: candidate.ratio,
     freeSlots: candidate.freeSlots,
     reliability: rel,
+    bottleneck: candidate.bottleneck,
     reason,
   };
 }

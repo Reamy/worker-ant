@@ -1,16 +1,16 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 // zx_20260914 M2-4: ACCEPT_REASON_TEXT 与抽屉同源——失败说明一处映射，两处出口不许各写一份中文
-import { deliverables, invoke, projects as projectsApi, tasks as tasksApi, ACCEPT_REASON_TEXT } from '../lib/ipc';
+import { deliverables, invoke, license, projects as projectsApi, tasks as tasksApi, ACCEPT_REASON_TEXT } from '../lib/ipc';
 import { useActivity } from '../lib/activity';
-import { Search, RefreshCw, RotateCcw, Eye, Copy, Play, Square, Pencil, Check, X, Trash2, History, Package, ExternalLink, Upload, Star, FolderOpen, Plus } from 'lucide-react';
+import { Search, RefreshCw, RotateCcw, Eye, Copy, Play, Square, Pencil, Check, X, Trash2, History, Package, ExternalLink, Upload, Star, FolderOpen, Plus, Download } from 'lucide-react';
 import { useSettings } from '../lib/settingsStore';
 // zx_20260911_5 M3-1(得鱼忘筌): 列表行点开**既有**就地抽屉——此前该页是全仓 5 个成果入口里唯一不接抽屉的（E5）
 import { useDeliverableDrawer } from '../lib/deliverableDrawer';
 // zx_20260909 X1(可判定): diff 抽为共享工具(与成果抽屉同源)
 import { simpleLineDiff } from '../lib/diff';
 // 产出物展示的单一真源（类型/状态词表 / 大小换算 / 库内时间）——本页不再自带第二份
-import { DELIVERABLE_TYPE_LABEL, DELIVERABLE_STATUS_LABEL, formatDbTime, formatBytes, parseDbTime, versionSizeText } from '../lib/deliverable-view';
+import { DELIVERABLE_TYPE_LABEL, DELIVERABLE_STATUS_LABEL, formatDbTime, formatBytes, versionSizeText, isLocalAbsolutePath as isLocalPath } from '../lib/deliverable-view';
 // zx_20260930 M4-2: 列表批次大小（本页/项目页/任务详情共用一份，见该模块头注）
 import { LIST_PAGE_SIZE, pageExhausted } from '../lib/list-page';
 // zx_20261018_2 批六「见新」：运行态以事件驱动为主，轮询只作兜底——节拍一处真源。
@@ -24,7 +24,16 @@ import { UNVERIFIED_REASON_LABEL } from '../../../src/main/core/acceptance-check
 const ACCEPTANCE_REASON_LABEL: Record<string, string> = UNVERIFIED_REASON_LABEL;
 // zx_20260913 M2-6(G8 教训·renderer 是词表的第二个落点): 类型集合判据也走**跨 root 同一份代码**——
 // 此前本页 `d.type === 'doc'` 手抄 3 处(验收徽标/版本钮/预览钮)，主进程改口径渲染层不会跟着动。
-import { isAcceptanceType, isPreviewType } from '../../../src/main/core/deliverable-types.js';
+import { DELIVERABLE_TASK_NONE, isAcceptanceType, isPreviewType } from '../../../src/main/core/deliverable-types.js';
+// zx_20261108_1 B6: 导出按钮先按 main 侧裁定**禁用**（`license:pro_feature`）——不让用户点了才看报错；
+//   拒因文案直接取 main 的 `detail`，渲染层不拼"需要专业版"。
+import type { ProFeatureGatePayload } from '../../../src/main/ipc/license.ipc.js';
+// zx_20261110_1 B5：读取失败如实带因由（与其它页同一实现）。
+import { messageOf } from '../lib/action-feedback';
+import LoadFailure from '../components/LoadFailure';
+// zx_20261111_3「显」：第一行的唯一真源在 main 纯模块。
+import NextActionBar from '../components/NextActionBar';
+import { nextActionForDeliverables, type NextActionId } from '../../../src/main/core/next-action.js';
 // zx_20260914 M2-1(王阳明·知行合一): 正文「读得动」——本页**两处**预览(版本快照 :535 / 当前内容 :597)
 // 与抽屉、任务详情共用同一渲染器（上轮"能翻开"但只有 `<pre>`，打开≠读得动）。
 import MarkdownSubset from '../lib/markdown-subset';
@@ -50,8 +59,10 @@ const TYPE_COLORS: Record<string, string> = { mcp: 'bg-blue-100 text-blue-700', 
 // zx_20260906 批3 (3e): 软退休状态 chip 灰色兜底（重试旧成果）
 const STATUS_CLS: Record<string, string> = { retired: 'bg-gray-200 text-gray-500 line-through', stale: 'bg-yellow-100 text-yellow-600', failed: 'bg-red-100 text-red-600', running: 'bg-green-100 text-green-700', registered: 'bg-blue-100 text-blue-700', stopped: 'bg-orange-100 text-orange-600' };
 
-/** 任务筛选的"项目级"哨兵值：`task_id IS NULL`（手工成果/项目级成果）也须可选，故不用空串占位。 */
-const TASK_NONE = '__none__';
+/** 任务筛选的"项目级"哨兵值：`task_id IS NULL`（手工成果/项目级成果）也须可选，故不用空串占位。
+ *  zx_20261108_1 B6: 字面量真源在 main 侧零依赖模块 `deliverable-types`（服务端 `deliverable-query` 同引），
+ *  渲染层只起别名——不再各写一份 `'__none__'`。 */
+const TASK_NONE = DELIVERABLE_TASK_NONE;
 
 // zx_20260930 M4-2: 批次大小取渲染层的**唯一真源**（成果页/项目页/任务详情三处同一份，
 //   免得各写一个字面量；它与 main 侧 `PAGE_DEFAULT` 同值而**不同义**，理由写在该模块头注里）。
@@ -76,6 +87,10 @@ export default function DeliverablesPage() {
   const [facetTasks, setFacetTasks] = useState<Array<{ id: string; title: string | null }>>([]);
   const [facetNoTaskCount, setFacetNoTaskCount] = useState(0);
   const [runtime, setRuntime] = useState<Map<string, RuntimeInfo>>(new Map());
+  // zx_20261111_3「显」：第一行要的三个数由 main 现算（与列表同一 scope、同一验收判据）。
+  //   `null` = 没取到 ⇒ 第一行说"读不到"，不数已加载行。
+  const [attention, setAttention] = useState<{ total: number; unverified: number; acceptanceEnabled: boolean } | null>(null);
+  const [attentionErr, setAttentionErr] = useState('');
   const [loading, setLoading] = useState(true);
   const [filterProj, setFilterProj] = useState('');
   const [filterType, setFilterType] = useState('');
@@ -111,6 +126,15 @@ export default function DeliverablesPage() {
   const [versions, setVersions] = useState<Array<{ id: string; version: number; size: number; created_at: string; content_snapshot?: string; changed_by?: string }>>([]);
   const [versionDelivId, setVersionDelivId] = useState('');
   const [versionName, setVersionName] = useState('');
+  // zx_20261110_1 B5：版本历史读取失败与「确实没有版本」分家（失败带因由 + 重试）。
+  const [versionsErr, setVersionsErr] = useState('');
+  const [versionsBusy, setVersionsBusy] = useState(false);
+  // zx_20261110_1 B5：预览读取失败如实上屏（不再 `catch {}` 后毫无反应）。
+  const [previewErr, setPreviewErr] = useState('');
+  const [previewErrDeliv, setPreviewErrDeliv] = useState<Deliverable | null>(null);
+  // zx_20261110_1 B5：列表/「加载更多」/筛选名录读取失败——不再以空列表冒充"没有产出物"。
+  const [listErr, setListErr] = useState('');
+  const [facetsErr, setFacetsErr] = useState('');
   const [selectedVersion, setSelectedVersion] = useState<{ content: string; version: number; created_at?: string; size?: number; changed_by?: string } | null>(null);
   const [diffView, setDiffView] = useState<Array<{ type: 'same' | 'add' | 'del'; line: string }> | null>(null);
   // 预览
@@ -125,6 +149,10 @@ export default function DeliverablesPage() {
   const [cTasks, setCTasks] = useState<Array<{ id: string; title: string }>>([]);
   const [cBusy, setCBusy] = useState(false);
   const [cErr, setCErr] = useState('');
+  // zx_20261108_1 B6: CSV 导出的 Pro 闸裁定（`license:pro_feature`）。`null` = 尚在取/取不到 ⇒ 不禁用，
+  //   真正的拦截仍在 main（`deliverable:exportCsv` 先过 `proFeatureRefusal`）——界面只是**提前**告知。
+  const [exportGate, setExportGate] = useState<ProFeatureGatePayload | null>(null);
+  const [exporting, setExporting] = useState(false);
 
   const showToast = (msg: string, type: 'success' | 'error') => { setToast({ msg, type }); setTimeout(() => setToast(null), 3000); };
   // zx_20260908 M2(B2b): primary 主要成果星标（deliverable.primary_marker 开关；展示+人工可标，供项目成果交付单聚合）
@@ -153,11 +181,32 @@ export default function DeliverablesPage() {
   //   这正是把名录从"列表的副产品"改成"服务端名录"的意义。
   const projects = facetProjects.map(p => [p.id, p.name || '未知项目'] as const);
 
+  // zx_20261108_1 B6: **当前筛选 + 排序**的唯一装配处（首屏/加载更多/导出三处共引）。
+  //   `since` 由"近 N 天"换算成 ISO 时刻（服务端 `toSqlUtc` 取 UTC 部分，与库内 `datetime('now')` 同尺）；
+  //   `showRetired` 显式下发——缺省 `false` 时服务端会在**未显式选状态**的前提下把 retired 挡在列表外。
+  const buildParams = useCallback((limit: number, offset: number) => ({
+    projectId: filterProj || undefined,
+    type: filterType || undefined,
+    status: filterStatus || undefined,
+    keyword: appliedKeyword || undefined,
+    taskId: filterTask || undefined,
+    since: recentDays > 0 ? new Date(Date.now() - recentDays * 86400_000).toISOString() : undefined,
+    primary: onlyPrimary || undefined,
+    showRetired,
+    // `created`/`updated` 是既有界面短名，服务端 `normalizeSort` 按别名接受——不在此另写映射。
+    sort: sortBy,
+    order: sortAsc ? 'asc' : 'desc',
+    limit,
+    offset,
+  }), [filterProj, filterType, filterStatus, appliedKeyword, filterTask, recentDays, onlyPrimary, showRetired, sortBy, sortAsc]);
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
       // zx_20260930 M4-2: 筛选一变即**回到第 0 页**（不追加）——否则换了筛选还在翻上一轮的页。
-      const d = await deliverables.list(filterProj || undefined, filterType || undefined, appliedKeyword || undefined, { limit: PAGE_SIZE, offset: 0 });
+      // zx_20261108_1 B6: 筛选/排序**全部下沉服务端**——`total` 与 `rows` 同一 WHERE，故页脚
+      //   "共 M 条"就是"当前筛选条件下的全量条数"，不再是"已加载页里的数"。
+      const d = await deliverables.list(buildParams(PAGE_SIZE, 0));
       const rows = (d?.rows ?? []) as unknown as Deliverable[];
       const total = Number(d?.total) || 0;
       setItems(rows);
@@ -165,9 +214,10 @@ export default function DeliverablesPage() {
       setItemsRetiredCount(Number(d?.retiredCount) || 0);
       // 取空 / 已取到总数 ⇒ 没有下一页（判据与另两处共用同一函数，不各写一遍）
       setItemsExhausted(pageExhausted(rows.length, total));
-    } catch {}
+      setListErr('');
+    } catch (e) { setListErr(messageOf(e)); }
     setLoading(false);
-  }, [filterProj, filterType, appliedKeyword]);
+  }, [buildParams]);
 
   // zx_20260930 M4-2: 名录与主列表**分开取**（各打各的 IPC，互不牵连）。它不随筛选/分页变化，
   //   故只在挂载后取一次 + 成果增删时随 `load()` 一并刷新（名录会变，但不需要每次翻页都取）。
@@ -177,7 +227,8 @@ export default function DeliverablesPage() {
       setFacetProjects(f?.projects ?? []);
       setFacetTasks(f?.tasks ?? []);
       setFacetNoTaskCount(Number(f?.noTaskCount) || 0);
-    } catch {}
+      setFacetsErr('');
+    } catch (e) { setFacetsErr(messageOf(e)); }
   }, []);
 
   // zx_20260930 M4-2: 「加载更多」——按**已列出的条数**取下一页，并按 id 去重合并。
@@ -186,7 +237,7 @@ export default function DeliverablesPage() {
   const loadMoreItems = useCallback(async () => {
     setMoreBusy(true);
     try {
-      const d = await deliverables.list(filterProj || undefined, filterType || undefined, appliedKeyword || undefined, { limit: PAGE_SIZE, offset: items.length });
+      const d = await deliverables.list(buildParams(PAGE_SIZE, items.length));
       const more = (d?.rows ?? []) as unknown as Deliverable[];
       setItems(prev => {
         const seen = new Set(prev.map(r => r.id));
@@ -196,9 +247,10 @@ export default function DeliverablesPage() {
       setItemsTotal(total);
       setItemsRetiredCount(Number(d?.retiredCount) || 0);
       setItemsExhausted(pageExhausted(items.length + more.length, total));
-    } catch {}
+      setListErr('');
+    } catch (e) { setListErr(messageOf(e)); }
     setMoreBusy(false);
-  }, [filterProj, filterType, appliedKeyword, items.length]);
+  }, [buildParams, items.length]);
 
   const loadRuntime = useCallback(async () => {
     const map = new Map<string, RuntimeInfo>();
@@ -219,6 +271,10 @@ export default function DeliverablesPage() {
   // zx_20260930 M4-2: 名录**不随筛选/翻页变化**，故单独取一次（挂载后）。它只在成果增删后需要重取，
   //   由下面的事件订阅（成果注册/状态变更）与新建/删除两处显式再取，不跟 `load()` 走"每次换筛选都重取"。
   useEffect(() => { void loadFacets(); }, [loadFacets]);
+  // zx_20261108_1 B6: 取一次导出能力裁定（失败就不禁用——真闸仍在 main，界面不因读不到档位把功能藏掉）。
+  useEffect(() => {
+    void license.proFeature('deliverable_export').then(g => setExportGate(g)).catch(() => setExportGate(null));
+  }, []);
   // zx_20260929 M12: 依赖由 `items.length` 改成 `items` 本身。启动/停止前后列表**长度常常相同**
   // （draft→running 只是同一行换字段），长度没变 ⇒ 本效应不重跑 ⇒ ▶/绿点最多滞后到下一次 10s 轮询，
   // 用户读成"启动了但状态没变"，于是反复点（实测两次点击相隔 7.1s，正落在 10s 窗口内）。
@@ -244,13 +300,30 @@ export default function DeliverablesPage() {
         || t === 'task.completed' || t === 'task.failed' || t === 'task.status_changed')) return;
       if (loadTimer.current !== undefined) return;
       // 成果增删/改名都会动名录（新项目/新产出任务进下拉），故与列表一并重取——它是一次 `DISTINCT` 小查询。
-      loadTimer.current = window.setTimeout(() => { loadTimer.current = undefined; load(); void loadFacets(); }, 600);
+      loadTimer.current = window.setTimeout(() => { loadTimer.current = undefined; load(); void loadFacets(); void loadAttention(); }, 600);
     });
     return () => {
       if (loadTimer.current !== undefined) { window.clearTimeout(loadTimer.current); loadTimer.current = undefined; }
       unsubscribe();
     };
   }, [subscribe, load]);
+
+  // zx_20261111_3「显」：第一行的取数（读失败带因由，页面据此说"读不到"而不是报 0 件）。
+  const loadAttention = useCallback(async () => {
+    try {
+      const d = await invoke<{ total?: number; unverified?: number; acceptanceEnabled?: boolean }>('deliverable:attention');
+      setAttention({
+        total: Number(d?.total) || 0,
+        unverified: Number(d?.unverified) || 0,
+        acceptanceEnabled: d?.acceptanceEnabled === true,
+      });
+      setAttentionErr('');
+    } catch (e) {
+      setAttention(null);
+      setAttentionErr(messageOf(e));
+    }
+  }, []);
+  useEffect(() => { void loadAttention(); }, [loadAttention]);
 
   // zx_20260929 M11：失败**如实带因**——原 `catch { showToast('启动失败') }` 把主进程回的具体原因（NO_ENTRY/
   //   START_FAILED 及子进程 stderr）丢弃，与 handleRegister 不同尺。启动不了时用户看不到"为什么"。
@@ -321,6 +394,7 @@ export default function DeliverablesPage() {
 
   // 预览
   const handlePreview = async (d: Deliverable) => {
+    setPreviewErr('');
     // UI类型：用系统默认浏览器打开
     if (d.type === 'ui') {
       try {
@@ -331,7 +405,7 @@ export default function DeliverablesPage() {
           try { await invoke('shell:openExternal', previewUrl); } catch { window.open(previewUrl, '_blank'); }
           return;
         }
-      } catch {}
+      } catch (e) { showToast(`预览失败：${messageOf(e)}`, 'error'); }
     }
     // Doc/其他类型：弹窗预览
     try {
@@ -343,80 +417,73 @@ export default function DeliverablesPage() {
       const fileExists = pd.file_exists === true;
       // zx_20260911_5 M3-4(夏克特·错误归属): 截断/回落来源随载荷抵达，界面据此如实标注
       setPreview({ id: d.id, name: d.name, type: d.type, content, version, filePath, fileExists, contentTruncated: pd.content_truncated === true, contentSource: pd.content_source as string | undefined });
-    } catch {}
+    } catch (e) { setPreviewErr(messageOf(e)); setPreviewErrDeliv(d); showToast(`预览失败：${messageOf(e)}`, 'error'); }
   };
+
+  // zx_20261110_1 B5：本地绝对路径判据覆盖盘符/UNC/POSIX（此前只认 `/`，Windows 盘符恒假）。
+  //   与抽屉同源——真身在 `lib/deliverable-view.ts` 的 `isLocalAbsolutePath`。
 
   // 复制预览链接
   const handleCopyLink = (d: Deliverable) => {
-    const url = d.type === 'ui' && d.file_path ? d.file_path : `file://${d.file_path || ''}`;
+    if (!d.file_path) { showToast('该成果未记录文件路径', 'error'); return; }
+    if (d.type !== 'ui' && !isLocalPath(d.file_path)) {
+      // 相对路径是「工作目录相对路径」，拼 file:// 只会得到一个打不开的假链接——如实说明。
+      showToast('工作目录相对路径，无法直接打开（请用「在文件夹中显示」或复制原文路径）', 'error');
+      return;
+    }
+    const url = d.type === 'ui' ? d.file_path : `file://${d.file_path}`;
     navigator.clipboard.writeText(url).then(() => showToast('链接已复制', 'success')).catch(() => {});
   };
 
-  // zx_20260911_5 M3-3: 仅本地绝对路径可「在文件夹中显示」（与 main handler 同一判据，不让用户点了才知失败）
-  const isLocalPath = (p?: string | null): boolean => !!p && p.startsWith('/');
-
-  const handleShowInFolder = async (p: string) => {
-    const api = window.electronAPI;
-    if (!api?.showItemInFolder) { showToast('当前环境不支持在文件夹中显示', 'error'); return; }
+  // zx_20261108_1 B6: 「打开 / 在文件夹中显示」改走 `deliverable:open`——**只递 id**，
+  //   路径由 main 从库内取并过 `dataDir` + 项目工作目录围栏（渲染层手里的 file_path 只是展示值，不作授权依据）。
+  //   失败时 main 已按成因分好词（越界/缺文件/是链接…），此处原样上屏，不再笼统说"打不开"。
+  const handleOpen = async (id: string, mode: 'open' | 'reveal') => {
     try {
-      const r = await api.showItemInFolder(p) as { error?: { message?: string } } | undefined;
-      const msg = r?.error?.message;
-      if (msg) showToast(`无法打开：${msg}`, 'error');
-    } catch { showToast('无法打开文件管理器', 'error'); }
+      await deliverables.open(id, mode);
+    } catch (e) {
+      showToast(`${mode === 'reveal' ? '无法定位' : '无法打开'}：${(e as Error).message}`, 'error');
+    }
+  };
+
+  // zx_20261108_1 B6: 按**当前筛选条件**导出 CSV（服务端同一次 `queryDeliverables(all:true)` 取数）。
+  //   取消不是错误；成功如实报条数与落点，失败直显 main 的拒因/写盘错误。
+  const handleExportCsv = async () => {
+    if (exportGate && !exportGate.unlocked) { showToast(exportGate.detail, 'error'); return; }
+    setExporting(true);
+    try {
+      const r = await deliverables.exportCsv(buildParams(0, 0));
+      if (r?.cancelled) showToast('已取消导出', 'success');
+      else showToast(`已导出 ${r?.count ?? 0} 条：${r?.path ?? ''}`, 'success');
+    } catch (e) {
+      showToast(`导出失败：${(e as Error).message}`, 'error');
+    }
+    setExporting(false);
   };
 
   // 版本历史（zx_20260906 批3/3b: 保留 content_snapshot/changed_by——版本弹窗真实快照预览，不再剥快照占位"查看中"）
   const loadVersions = async (delivId: string) => {
+    setVersionsBusy(true);
     try {
       const r = await invoke<{ versions?: Array<{ id: string; version: number; size: number; created_at: string; content_snapshot?: string; changed_by?: string }> }>('deliverable:preview', delivId);
       const vs = (r as unknown as { versions?: Array<{ id: string; version: number; size: number; created_at: string; content_snapshot?: string; changed_by?: string }> }).versions || [];
       setVersions(vs.map((v) => ({ id: v.id, version: v.version, size: v.size, created_at: v.created_at, content_snapshot: v.content_snapshot, changed_by: v.changed_by })));
-    } catch { setVersions([]); }
+      setVersionsErr('');
+    } catch (e) { setVersions([]); setVersionsErr(messageOf(e)); }
+    setVersionsBusy(false);
     setSelectedVersion(null);
     setDiffView(null);
   };
 
   // zx_20260906_1 3b: 状态/时间窗筛选 + 可排序列头（3a 质量/最近变更排序）——取代固定 项目→名称→类型 重排
   const toggleSort = (field: typeof sortBy) => { if (sortBy === field) setSortAsc(v => !v); else { setSortBy(field); setSortAsc(false); } };
-  const sortVal = (d: Deliverable, f: typeof sortBy): number | string => {
-    if (f === 'name') return (d.name || '').toLowerCase();
-    if (f === 'type') return d.type || '';
-    if (f === 'status') return d.status || '';
-    if (f === 'project') return (d.project_name || '').toLowerCase();
-    if (f === 'quality') return d.task_quality_score == null ? -1 : Number(d.task_quality_score);
-    // zx_20260924_1 M5-b: 大小列可排——未知大小记 -1（升序时垫底，不冒充 0）
-    if (f === 'size') return d.size_bytes == null ? -1 : Number(d.size_bytes);
-    if (f === 'updated') return parseDbTime(d.updated_at || d.created_at)?.getTime() ?? 0;
-    return parseDbTime(d.created_at)?.getTime() ?? 0;
-  };
-  // zx_20260930 M4-2: 下面这一组筛选/排序**在渲染层**完成，因此只作用于**已加载的行**（分页前它们是全量）。
-  //   界面须如实说明这一点（页脚提示 + 空态换口），不得用"已加载页的结论"冒充"全表的结论"。
-  //   之所以没有一并搬到服务端：`size` 排序依赖 main 侧**现场 stat** 得出的 `size_bytes`（库内无此列），
-  //   服务端排序就意味着"为排序把全表逐行 stat 一遍"——那正是本轮要治的开销。故保留渲染层排序，
-  //   并把它的**作用范围**写进界面（见页脚与空态）。
-  const sorted = [...items].filter(d => {
-    if (recentDays > 0) { const t = parseDbTime(d.created_at)?.getTime() ?? 0; if (t < Date.now() - recentDays * 86400_000) return false; }
-    // zx_20260924_1 M5-b: 只认 is_primary 列本身，不自带第二套"算什么才叫主要"的判据
-    if (onlyPrimary && d.is_primary !== 1) return false;
-    // zx_20260924_1 M5-b: 按产出任务筛——空串=全部；TASK_NONE=项目级（task_id IS NULL）
-    if (filterTask === TASK_NONE) { if (d.task_id) return false; }
-    else if (filterTask) { if (d.task_id !== filterTask) return false; }
-    if (filterStatus) { if (d.status !== filterStatus) return false; return true; }
-    return d.status !== 'retired' || showRetired;
-  }).sort((a, b) => {
-    const va = sortVal(a, sortBy); const vb = sortVal(b, sortBy);
-    let c = 0;
-    if (typeof va === 'number' && typeof vb === 'number') c = va - vb;
-    else c = String(va).localeCompare(String(vb));
-    if (c !== 0) return sortAsc ? c : -c;
-    return (parseDbTime(a.created_at)?.getTime() ?? 0) - (parseDbTime(b.created_at)?.getTime() ?? 0);
-  });
-  // zx_20260906 批3 (3e): 已退休默认过滤 + 计数提示（计数与 filterStatus 无关）
-  // zx_20260930 M4-2: 计数改取**服务端** `retiredCount`——它是"当前筛选条件下全表的已退休条数"。
-  //   若仍数 `items`（已加载的那一页），提示会从"全表有 N 项已退休"退化成"这一页有 N 项"，
-  //   而这条提示的用途恰恰是告诉用户"整档里有多少被隐藏了"。
+  // zx_20261108_1 B6: 筛选/排序已整体下沉服务端（`core/deliverable-query.ts`），此处**不再**有第二份
+  //   客户端的 filter/sort。`items` 就是"当前筛选 + 当前排序 + 当前页"的结果；页脚 `itemsTotal` 是同一
+  //   WHERE 下的全量条数——两者同尺，"共 M 条"不再受"已加载多少"影响。
+  // zx_20260930 M4-2: 已退休计数取**服务端** `retiredCount`（当前筛选条件下全表的已退休条数），
+  //   不数 `items`（那只是当页）。
   const retiredCount = itemsRetiredCount;
-  const visibleRows = sorted;
+  const visibleRows = items;
   // zx_20260913 M2-7: 行内项目名一律走此判据——缺失即「未知项目」，不再抛 uuid 片段给用户
   const projLabel = (d: Deliverable) => d.project_name || '未知项目';
   // zx_20260924_1 M5-b(一处真源): **两种视图、一份行渲染**——平铺表与目录树吐出的都是本序列，
@@ -453,8 +520,9 @@ export default function DeliverablesPage() {
   //   那份全集要么被页大小截断（下拉静默缺项，E15 换个入口复发），要么首屏为两个下拉再读整表。
   const taskOptions = facetTasks.map(t => [t.id, t.title || '未知任务'] as const);
   const noTaskCount = facetNoTaskCount;
-  // 本轮新增的筛选是否生效（空态文案据此换口，与既有 filterStatus/recentDays 同判）
-  const anyExtraFilter = onlyPrimary || !!filterTask;
+  // zx_20261108_1 B6: 是否有**任一筛选**生效（空态据此区分"库里没有"与"筛不出来"——服务端已筛，
+  //   故这两句话现在是同一个集合上的两种解释，不再受"加载了几页"影响）。
+  const anyFilterActive = !!(filterProj || filterType || filterStatus || appliedKeyword || filterTask || recentDays > 0 || onlyPrimary);
   // zx_20260924_1 M5-b: 目录树视图的渲染序列——**树本身由 `buildDeliverableTree` 算**（与任务详情同一份），
   //   本页只把它的结果摊成行。三条规则（剥公共前缀/无路径单列/单子目录链并段）一行都不在这里重写。
   const treeNodes: RenderRow[] = (() => {
@@ -494,11 +562,34 @@ export default function DeliverablesPage() {
     setDiffView(simpleLineDiff(String(prev.content_snapshot || ''), String(selectedVersion.content)));
   };
 
+  // zx_20261111_3「显」：第一行——事实来自 `deliverable:attention`（与列表同一 scope），优先级在 core。
+  const deliverableNextAction = nextActionForDeliverables({
+    loadError: attentionErr || null,
+    total: attention?.total ?? null,
+    unverified: attention?.unverified ?? null,
+    acceptanceEnabled: attention?.acceptanceEnabled ?? null,
+  });
+  function handleNextAction(aid: NextActionId): void {
+    if (aid === 'view_tasks') navigate('/tasks');
+  }
+
   if (loading) return <div className="flex justify-center py-12"><div className="animate-spin h-8 w-8 border-2 border-blue-500 border-t-transparent rounded-full" /></div>;
   return (
     <div>
       {/* Toast */}
       {toast && <div className={`fixed top-4 right-4 z-50 px-4 py-2 rounded shadow-lg text-sm ${toast.type === 'success' ? 'bg-green-600 text-white' : 'bg-red-600 text-white'}`}>{toast.msg}</div>}
+
+      {previewErr && (
+        <div className="mb-3 flex items-start gap-2">
+          <div className="flex-1">
+            <LoadFailure what="「成果预览」" reason={previewErr} onRetry={() => { if (previewErrDeliv) void handlePreview(previewErrDeliv); }} />
+          </div>
+          <button onClick={() => { setPreviewErr(''); setPreviewErrDeliv(null); }} className="p-1 hover:bg-gray-100 rounded shrink-0" title="关闭"><X className="w-4 h-4 text-gray-400" /></button>
+        </div>
+      )}
+
+      {/* zx_20261111_3「显」：第一行——此刻是什么 / 凭什么 / 下一步点哪个 */}
+      <div className="mb-3"><NextActionBar action={deliverableNextAction} onAction={handleNextAction} /></div>
 
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-xl font-bold">产出物管理</h2>
@@ -566,16 +657,38 @@ export default function DeliverablesPage() {
             className="flex items-center gap-1 text-sm px-3 py-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700">
             <Plus className="w-3.5 h-3.5" />新建成果
           </button>
+          {/* zx_20261108_1 B6: 按当前筛选导出 CSV（Pro 能力 `deliverable_export`）。
+              `exportGate` 只用于**先禁用**并提前给出拒因；真正的闸在 main（`deliverable:exportCsv`）。
+              读不到裁定（`null`）时不禁用——不因读档失败把功能藏掉。 */}
+          <button onClick={handleExportCsv} disabled={exporting || exportGate?.unlocked === false}
+            title={exportGate ? exportGate.detail : '按当前筛选条件导出 CSV（需专业版）'}
+            className={`flex items-center gap-1 text-sm px-3 py-1.5 rounded-lg border ${exportGate?.unlocked === false ? 'bg-gray-50 text-gray-400 border-gray-200 cursor-not-allowed' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'} disabled:opacity-60`}>
+            <Download className="w-3.5 h-3.5" />{exporting ? '导出中…' : '导出 CSV'}
+          </button>
           <button onClick={load} className="p-2 hover:bg-gray-100 rounded-lg"><RefreshCw className="w-4 h-4" /></button>
         </div>
       </div>
 
+      {/* zx_20261110_1 B5：读失败 ≠ 没有——列表/「加载更多」/筛选名录各自带因由与重试 */}
+      {facetsErr && <div className="mb-3"><LoadFailure what="「筛选名录」" reason={facetsErr} onRetry={() => void loadFacets()} /></div>}
+      {listErr && <div className="mb-3"><LoadFailure what="「产出物列表」" reason={listErr} onRetry={() => void (items.length > 0 ? loadMoreItems() : load())} busy={moreBusy} /></div>}
+
       {items.length === 0 ? (
+        listErr ? null : (
         <div className="bg-white rounded-lg border p-12 text-center text-gray-400">
           <Package className="w-12 h-12 mx-auto mb-3 opacity-30" />
-          <p className="text-lg mb-2">{appliedKeyword ? '无匹配产出物' : '暂无产出物'}</p>
-          {appliedKeyword && <p className="text-xs text-gray-300">试试换关键词，或清空搜索 / 项目 / 类型筛选</p>}
+          {/* zx_20261108_1 B6: 服务端已按当前筛选算过全量（`total === 0`），故这里两句话是**同一个集合**
+              的两种解释：「库里没有」vs「筛不出来」。已退休提示同尺（`retiredCount` 来自同一 WHERE）。 */}
+          <p className="text-lg mb-2">
+            {anyFilterActive ? '无匹配产出物' : retiredCount > 0 ? '当前产出物均已退休' : '暂无产出物'}
+          </p>
+          {anyFilterActive
+            ? <p className="text-xs text-gray-300">当前筛选条件下没有结果——试试清空搜索 / 项目 / 类型 / 状态 / 时间 / 任务 / 主成果筛选</p>
+            : retiredCount > 0
+              ? <p className="text-xs text-gray-300">全部 {retiredCount} 项产出物均已退休（重试后旧成果）。点击右上角「已退休 {retiredCount} 项」查看。</p>
+              : null}
         </div>
+        )
       ) : (
         <div className="bg-white rounded-lg border overflow-hidden">
           <table className="w-full text-sm">
@@ -593,21 +706,8 @@ export default function DeliverablesPage() {
               </tr>
             </thead>
             <tbody>
-              {visibleRows.length === 0 && (
-                <tr className="border-t"><td colSpan={9} className="p-6 text-center text-sm text-gray-400">
-                  {/* zx_20260930 M4-2: 这几条筛/排序只作用于**已加载的行**，故"本页无匹配"与"全表无匹配"
-                      是两句不同的话。`!itemsExhausted` 时只能说前者——否则界面会断言一件它没查过的事。 */}
-                  {filterStatus || recentDays > 0 || anyExtraFilter
-                    ? (itemsExhausted
-                      ? '无匹配产出物（当前筛选条件）'
-                      : `已加载的 ${items.length} 条中无匹配（共 ${itemsTotal} 条，另有 ${Math.max(itemsTotal - items.length, 0)} 条未加载——状态/时间窗/主成果/任务筛选只作用于已加载的行）`)
-                    : !itemsExhausted
-                      ? `已加载的 ${items.length} 条均为已退休（默认隐藏）· 另有 ${Math.max(itemsTotal - items.length, 0)} 条未加载`
-                      : retiredCount > 0
-                        ? `全部 ${retiredCount} 项产出物均已退休（重试后旧成果）。点击右上角「已退休 ${retiredCount} 项」查看。`
-                        : '暂无当前产出物'}
-                </td></tr>
-              )}
+              {/* zx_20261108_1 B6: 原先的"本页无匹配 / 全表无匹配"两句话已无意义——筛选在服务端完成，
+                  `items.length === 0` 时走的是上面的整块空态；此处不再有"已加载行里筛空"的分支。 */}
               {renderRows.map((g, gi) => {
                 // zx_20260924_1 M5-b: 目录树的两种非成果行——说明行 / 目录行（目录自带后代件数，点开前先看得见分量）
                 if (g.kind === 'note') return (
@@ -786,9 +886,14 @@ export default function DeliverablesPage() {
                         {d.type === 'ui' && d.file_path && (
                           <button onClick={() => handleCopyLink(d)} className="p-1 hover:bg-gray-50 rounded" title="复制链接"><Copy className="w-3.5 h-3.5 text-gray-400" /></button>
                         )}
-                        {/* zx_20260911_5 M3-3(上手状态): 本地直达——免"复制路径→再翻目录"；仅本地绝对路径出此按钮 */}
-                        {isLocalPath(d.file_path) && (
-                          <button onClick={() => handleShowInFolder(d.file_path!)} className="p-1 hover:bg-gray-50 rounded" title="在文件夹中显示"><FolderOpen className="w-3.5 h-3.5 text-gray-400" /></button>
+                        {/* zx_20261108_1 B6: 打开 / 在文件夹中显示——**只递 id**，路径围栏在 main
+                            （`core/deliverable-path.ts`：dataDir + 项目工作目录，`..` 与链接越界拒）。
+                            「打开」用系统默认程序，服务型成果（mcp/a2a/daemon）不适用——那是脚本不是文档。 */}
+                        {d.file_path && !isServiceType && d.type !== 'ui' && (
+                          <button onClick={() => handleOpen(d.id, 'open')} className="p-1 hover:bg-gray-50 rounded" title="用系统默认程序打开"><ExternalLink className="w-3.5 h-3.5 text-gray-400" /></button>
+                        )}
+                        {d.file_path && (
+                          <button onClick={() => handleOpen(d.id, 'reveal')} className="p-1 hover:bg-gray-50 rounded" title="在文件夹中显示"><FolderOpen className="w-3.5 h-3.5 text-gray-400" /></button>
                         )}
                         {/* 运行时端口/端点信息 */}
                         {rt?.endpoint && <span className="text-[10px] text-gray-400 truncate max-w-[100px]">{rt.endpoint}</span>}
@@ -807,16 +912,15 @@ export default function DeliverablesPage() {
           </table>
           {/* zx_20260930 M4-2: 分页页脚——「已加载 K / 共 M」+「加载更多」。
               `M` 取**服务端**总数（与当页明细同集合、同范围真源），**不是**当页长度：本轮的靶心就是
-              "计数与明细两个口径"（同上一条 M4-3）。"另有 N 条"与"筛选/排序仅覆盖已加载行"两句只在
-              **还有未加载行时**才出现——取全了就无需声明作用范围（那时它等于全表）。 */}
+              "计数与明细两个口径"（同上一条 M4-3）。
+              zx_20261108_1 B6: 筛选/排序已下沉服务端 ⇒ 不再需要"筛选仅覆盖已加载行"的免责声明——
+              `total` 就是"当前筛选条件下的全量"，翻页只影响**已取到多少条**。 */}
           <div className="flex items-center justify-between gap-3 border-t px-3 py-2 bg-gray-50/60 text-xs text-gray-500">
-            <span>已加载 {items.length} / 共 {itemsTotal} 条</span>
+            <span>已加载 {items.length} / 共 {itemsTotal} 条（当前筛选）</span>
             <div className="flex items-center gap-2">
               {!itemsExhausted && (
                 <>
-                  <span className="text-gray-400">
-                    另有 {Math.max(itemsTotal - items.length, 0)} 条未加载 · 列排序与状态/时间窗/主成果/任务筛选仅覆盖已加载的行
-                  </span>
+                  <span className="text-gray-400">另有 {Math.max(itemsTotal - items.length, 0)} 条未加载</span>
                   <button onClick={loadMoreItems} disabled={moreBusy}
                     title="取下一页（按已列出的条数作偏移，同一条不会重复列出）"
                     className="px-2 py-1 rounded border border-gray-300 bg-white text-gray-600 hover:bg-gray-50 disabled:opacity-50">
@@ -940,6 +1044,8 @@ export default function DeliverablesPage() {
                   <button onClick={() => setSelectedVersion(null)} className="px-3 py-1 border rounded text-sm hover:bg-gray-50">返回列表</button>
                 </div>
               </div>
+            ) : versionsErr ? (
+              <LoadFailure what="「版本历史」" reason={versionsErr} onRetry={() => void loadVersions(versionDelivId)} busy={versionsBusy} />
             ) : versions.length > 0 ? (
               <div className="space-y-2">
                 {versions.map(v => {
@@ -973,7 +1079,7 @@ export default function DeliverablesPage() {
               </div>
               <div className="flex items-center gap-2">
                 {preview.filePath && <button onClick={() => { navigator.clipboard.writeText(preview.filePath || ''); showToast('路径已复制', 'success'); }} className="p-1 hover:bg-gray-100 rounded" title="复制路径"><Copy className="w-4 h-4 text-gray-400" /></button>}
-                {isLocalPath(preview.filePath) && <button onClick={() => handleShowInFolder(preview.filePath!)} className="p-1 hover:bg-gray-100 rounded" title="在文件夹中显示"><FolderOpen className="w-4 h-4 text-gray-400" /></button>}
+                {isLocalPath(preview.filePath) && <button onClick={() => handleOpen(preview.id, 'reveal')} className="p-1 hover:bg-gray-100 rounded" title="在文件夹中显示"><FolderOpen className="w-4 h-4 text-gray-400" /></button>}
                 {preview.type === 'ui' && preview.filePath && <button onClick={async () => { try { await invoke('shell:openExternal', preview.filePath || ''); } catch {} }} className="p-1 hover:bg-blue-100 rounded" title="在浏览器中打开"><ExternalLink className="w-4 h-4 text-blue-500" /></button>}
                 <button onClick={() => setPreview(null)} className="p-1 hover:bg-gray-100 rounded"><X className="w-5 h-5" /></button>
               </div>

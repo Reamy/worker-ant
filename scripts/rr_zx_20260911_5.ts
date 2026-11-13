@@ -95,7 +95,8 @@ async function m1(): Promise<void> {
   {
     const db = mkdb(); seedReal(db, { blocked: 2, pending: 1 });
     const s = outboxStats(db);
-    eq(s, { pending: 1, blocked_quota: 2, dead: 3, sent: 1, other: 0 }, '真库 4 行 + 2 blocked + 1 pending 逐态计数');
+    // zx_20261110_1 B7：`dismissed` 单列一档（不再混进 other）⇒ 整对象断言按更强形状核。
+    eq(s, { pending: 1, blocked_quota: 2, dead: 3, sent: 1, dismissed: 0, other: 0 }, '真库 4 行 + 2 blocked + 1 pending 逐态计数（dismissed 单列）');
     // 未知态也须被兜住（康德·范畴穷尽：不得有"看不见"的行）
     db.prepare("INSERT INTO wa_im_outbox (id, status) VALUES ('u1', 'weird_state')").run();
     eq(outboxStats(db).other, 1, '未知状态计入 other，不静默消失');
@@ -370,9 +371,32 @@ async function m3(): Promise<void> {
     ok(preload.includes("ipcRenderer.invoke('shell:showItemInFolder', filePath)"), 'preload 白名单挂桥');
     ok(stripComments(rd(`${A}/src/preload/types.ts`)).includes('showItemInFolder'), 'preload 类型声明补齐');
     ok(stripComments(rd(`${A}/renderer/src/types/electron.d.ts`)).includes('showItemInFolder'), 'renderer 全局类型声明补齐');
-    for (const f of ['renderer/src/pages/DeliverablesPage.tsx', 'renderer/src/components/DeliverableDrawer.tsx']) {
+    // zx_20261108_1 B6: 列表与抽屉**同走** `deliverable:open`——只递成果 id，
+    //   路径授权在 main（从库内取 + dataDir/项目工作目录围栏）；渲染层不再把 file_path
+    //   直接递给 `shell:showItemInFolder`（旧实现即"渲染层手里的展示值当授权凭据"）。
+    // zx_20261110_1 B5：展示判据收口到一份真源（POSIX 根 / Windows 盘符 / UNC 三形）。
+    //   此前列表页与抽屉各写一份、抽屉停在「只认 `/`」⇒ Windows 盘符恒假、按钮永不出。
+    //   钉**行为**不钉字面：从真源取表达式实跑五种输入。
+    const libSrc = stripComments(rd(`${A}/renderer/src/lib/deliverable-view.ts`));
+    const predExpr = extractExpr(libSrc, /export const isLocalAbsolutePath[^\n]*=>\s*([^;]+);/);
+    let predOk = false;
+    if (predExpr) {
+      try {
+        // 取到的是箭头函数的**体**（`=>` 之后），入参就是 `p`。
+        const pred = new Function('p', `return (${predExpr});`) as (p?: string | null) => boolean;
+        predOk = pred('/tmp/x') === true && pred('C:\\tmp\\x') === true && pred('\\\\srv\\share\\x') === true
+          && pred('rel/path') === false && pred('') === false;
+      } catch { predOk = false; }
+    }
+    ok(predOk, '本地绝对路径判据一处真源：POSIX/盘符/UNC 皆真，相对路径与空值皆假');
+    for (const [f, entry] of [
+      ['renderer/src/pages/DeliverablesPage.tsx', /deliverables\.open\(id, mode\)/],
+      ['renderer/src/components/DeliverableDrawer.tsx', /deliverables\.open\(data\.id, 'reveal'\)/],
+    ] as const) {
       const src = stripComments(rd(`${A}/${f}`));
-      ok(src.includes("p.startsWith('/')") && src.includes('showItemInFolder'), `${f} 列表/抽屉本地直达入口（同判据）`);
+      ok(src.includes('isLocalAbsolutePath as isLocalPath') && src.includes('isLocalPath(')
+        && entry.test(src) && !src.includes('showItemInFolder'),
+        `${f} 本地直达入口经 main 围栏（展示判据取自真源，路径不再直递 shell）`);
     }
   }
 

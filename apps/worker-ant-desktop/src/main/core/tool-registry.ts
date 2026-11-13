@@ -48,7 +48,7 @@ export const SHELL_EXPLORE_QUOTA_KEY = 'shell_explore';
 export const SHELL_EXPLORE_QUOTA: ToolQuota = {
   soft: 12,
   hard: 20,
-  softMsg: '[探索配额] 探索类命令已调用 12 次（bash 与 execute_command 共用这一本账；跑测试/构建/git 提交等收尾命令不计入）。立即停止探索——用 write_file 直接写入产出文件。',
+  softMsg: '[探索配额] 探索类命令已调用 12 次（bash 与 execute_command 共用这一本账；跑测试/构建/git 提交等收尾命令不计入）。硬线 20 次；立即停止探索——用 write_file 直接写入产出文件。',
   hardMsg: '[探索配额告警] 探索类命令已调用 20 次（bash 与 execute_command 共用这一本账；收尾命令不计入），已达上限：探索类调用将被拒绝（跑测试/构建/git 提交等收尾命令照常放行）。请立即用 write_file 保存成果，不要再执行探索命令。',
 };
 
@@ -67,7 +67,7 @@ export function deriveShellExploreQuota(maxSteps: number, archetype?: string): T
   return {
     soft,
     hard,
-    softMsg: `[探索配额] 探索类命令已调用 ${soft} 次（bash 与 execute_command 共用这一本账；跑测试/构建/git 提交等收尾命令不计入）。立即停止探索——用 write_file 直接写入产出文件。`,
+    softMsg: `[探索配额] 探索类命令已调用 ${soft} 次（bash 与 execute_command 共用这一本账；跑测试/构建/git 提交等收尾命令不计入）。硬线 ${hard} 次；立即停止探索——用 write_file 直接写入产出文件。`,
     hardMsg: `[探索配额告警] 探索类命令已调用 ${hard} 次（bash 与 execute_command 共用这一本账；收尾命令不计入），已达上限：探索类调用将被拒绝（跑测试/构建/git 提交等收尾命令照常放行）。请立即用 write_file 保存成果，不要再执行探索命令。`,
   };
 }

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import Database from 'better-sqlite3';
-import { matchOptimalModel, EP_FUNNEL_ANY_CAPABILITY } from '../services/resource-matcher.js';
+import { matchOptimalModel, EP_FUNNEL_ANY_CAPABILITY, isLocalEndpoint, orderRemoteFirst } from '../services/resource-matcher.js';
 import { capabilityContextFloor, effectiveContextFloor } from '../services/model-context-floor.js';
 
 describe('Resource Matcher', () => {
@@ -449,5 +449,75 @@ describe('zx_20261018_3 批四: 请求侧上下文门槛（能力下限与任务
     expect(effectiveContextFloor(['chat'], Number.NaN)).toBe(capabilityContextFloor(['chat']));
     expect(effectiveContextFloor(['chat'], Number.POSITIVE_INFINITY)).toBe(capabilityContextFloor(['chat']));
     expect(effectiveContextFloor(['__no_such_cap__'], 0)).toBe(0);
+  });
+});
+
+/**
+ * zx_20261111_1 B2「择」: 辅助路远端优先。
+ * 病根：加权随机（balanced）会把本地 Ollama 选进辅助路，实测 2 分 50 秒才回（或超时）。
+ * 判据两侧：池中有远端 ⇒ 必选远端（哪怕本地 priority 更高）；只有本地 ⇒ 选本地并如实标记降级。
+ */
+describe('B2: 远端优先（preferRemote）', () => {
+  function seedMixed(localPriority = 99): Database.Database {
+    const db = new Database(':memory:');
+    db.exec(`
+      CREATE TABLE ans_ai_providers (id TEXT PRIMARY KEY, name TEXT, base_url TEXT, status TEXT DEFAULT 'active', enabled INTEGER DEFAULT 1);
+      CREATE TABLE ans_ai_models (id TEXT PRIMARY KEY, provider_id TEXT, name TEXT, capabilities TEXT DEFAULT '[]', context_window INTEGER, max_output_tokens INTEGER, input_price_per_1k REAL, output_price_per_1k REAL, status TEXT DEFAULT 'active', enabled INTEGER DEFAULT 1);
+      CREATE TABLE ans_model_endpoints (id TEXT PRIMARY KEY, model_id TEXT, url TEXT, api_key_ref TEXT, priority INTEGER DEFAULT 0, weight REAL DEFAULT 1.0, status TEXT DEFAULT 'active', last_latency_ms INTEGER DEFAULT 0);
+      INSERT INTO ans_ai_providers VALUES ('p','p','https://x','active',1);
+      INSERT INTO ans_ai_models VALUES ('mRemote','p','remote-model','["chat"]',128000,4096,0.005,0.015,'active',1);
+      INSERT INTO ans_ai_models VALUES ('mLocal','p','local-model','["chat"]',128000,4096,0,0,'active',1);
+      -- 本地 priority 故意更高：不加 preferRemote 时 balanced 会随机点到它
+      INSERT INTO ans_model_endpoints VALUES ('eLocal','mLocal','http://127.0.0.1:11434/v1','kl',${localPriority},1.0,'active',0);
+      INSERT INTO ans_model_endpoints VALUES ('eRemote','mRemote','https://api.example/v1','kr',0,1.0,'active',0);
+    `);
+    return db;
+  }
+
+  it('池中有远端 ⇒ 选远端（本地 priority 更高也不选），usedLocalFallback=false', () => {
+    const db = seedMixed();
+    try {
+      for (let i = 0; i < 20; i++) {
+        const r = matchOptimalModel(db, { capabilities: ['chat'], strategy: 'balanced', preferRemote: true });
+        expect(r.primary?.id).toBe('eRemote');
+        expect(r.usedLocalFallback).toBe(false);
+      }
+    } finally { db.close(); }
+  });
+
+  it('池中只有本地 ⇒ 仍选本地，usedLocalFallback=true（如实降级，不报无模型）', () => {
+    const db = seedMixed();
+    try {
+      db.prepare("UPDATE ans_model_endpoints SET status='inactive' WHERE id='eRemote'").run();
+      const r = matchOptimalModel(db, { capabilities: ['chat'], strategy: 'balanced', preferRemote: true });
+      expect(r.primary?.id).toBe('eLocal');
+      expect(r.usedLocalFallback).toBe(true);
+    } finally { db.close(); }
+  });
+
+  it('不带 preferRemote ⇒ 回包无 usedLocalFallback 键（旧调用方形状不变）', () => {
+    const db = seedMixed();
+    try {
+      const r = matchOptimalModel(db, { capabilities: ['chat'], strategy: 'balanced' });
+      expect('usedLocalFallback' in r).toBe(false);
+    } finally { db.close(); }
+  });
+
+  it('IPv6 本机回环也按本地认（否则会被当远端选进去）', () => {
+    expect(isLocalEndpoint('http://[::1]:11434/v1')).toBe(true);
+    expect(isLocalEndpoint('http://localhost:11434/v1')).toBe(true);
+    expect(isLocalEndpoint('http://127.0.0.1:8080')).toBe(true);
+    expect(isLocalEndpoint('http://0.0.0.0:3000')).toBe(true);
+    expect(isLocalEndpoint('https://api.openai.com/v1')).toBe(false);
+  });
+
+  it('orderRemoteFirst 是稳定分区：远端在前、组内相对序不变', () => {
+    const rows = [
+      { id: 'a', url: 'http://localhost:1' },
+      { id: 'b', url: 'https://r1' },
+      { id: 'c', url: 'http://127.0.0.1:2' },
+      { id: 'd', url: 'https://r2' },
+    ];
+    expect(orderRemoteFirst(rows).map((r) => r.id)).toEqual(['b', 'd', 'a', 'c']);
   });
 });

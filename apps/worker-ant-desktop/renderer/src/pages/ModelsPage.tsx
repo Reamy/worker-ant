@@ -1,16 +1,31 @@
 import { useState, useEffect, type ReactNode } from 'react';
-import { ansProxy } from '../lib/ipc';
+import { ansProxy, invoke } from '../lib/ipc';
 import { parseCapabilities } from '../lib/model-caps';
+// zx_20261107_1 B9: 成本/token 展示与全站同尺（币种真源仍待 B6 从推荐目录取）
+import { formatMoney, formatTokens } from '../lib/format';
 // zx_20261011_5: 端点增删改后作废首启缓存——否则"配好模型"后首启判据/首屏 banner 仍按旧态（缺模型）拦人/提示。
 import { invalidateNeedsSetup } from '../lib/firstRun';
+// zx_20261108_1 B5：动作路径的可见结果——删除/切换/测试/指南失败不再静默吞掉。
+import { ActionFeedback, useActionFeedback, messageOf } from '../lib/action-feedback';
 import { Cpu, RefreshCw, Plus, Trash2, Link, Pencil, ChevronRight, ChevronDown, Lightbulb, X, Scale } from 'lucide-react';
+// zx_20261111_3「显」：第一行的唯一真源在 main 纯模块；"能不能跑"的判据复用 `model-availability`
+//   （`hasChat` = 有可用端点且能力含 chat——首启判据用的同一把尺，不在这里另判一次）。
+import NextActionBar from '../components/NextActionBar';
+import { nextActionForModels, type NextActionId } from '../../../src/main/core/next-action.js';
+import { deriveModelAvailability } from '../../../src/main/core/model-availability.js';
+// zx_20261112_1 B4「诊」：单模型徽标的唯一真源在 `lib/model-availability`（五因一字不差地说清）；
+//   测试结果的一句话文案在 `lib/probe-models`（成功带延迟、失败带原因）。
+import { describeModelAvailability } from '../lib/model-availability';
+import { endpointTestLine } from '../lib/probe-models';
 
 interface ModelStats { call_count?: number; success_rate?: number | null; avg_latency_ms?: number | null; total_cost?: number; total_tokens?: number; }
 interface Model { id: string; name: string; provider_id?: string; provider_name?: string; capabilities?: string; context_window?: number; max_output_tokens?: number; input_price_per_1k?: number; output_price_per_1k?: number; enabled?: number; status?: string; description?: string; source?: string; has_endpoint?: boolean; available?: boolean; endpoint_count?: number; stats?: ModelStats; quality_score?: number | null; }
-interface Provider { id: string; name: string; base_url?: string; enabled?: number; status?: string; available?: boolean; available_models?: number; stats?: ModelStats; }
+interface Provider { id: string; name: string; base_url?: string; enabled?: number; status?: string; available?: boolean; available_models?: number; stats?: ModelStats; /** zx_20261107_1 B6: 币种真源（ANS `/providers` 由推荐目录 `provider_currency` 派生；自建 provider 为 null）。 */ currency?: string | null; }
 interface Endpoint { id: string; url?: string; priority?: number; weight?: number; status?: string; api_key?: string; health_status?: string; last_latency_ms?: number; health_check_at?: string; }
 interface EpTestResult { success: boolean; latency_ms: number; error: string | null; at: string; }
-interface RecData { recommended?: { scenario: string; primary: string; fallback: string; note: string }[]; use_cases?: Record<string, unknown>[]; }
+/** zx_20261107_1 B6: ANS `/models/recommended` 的**真实信封**——元数据是 `data` 的兄弟键，故经 `getRaw` 取。 */
+interface RecUseCase { scenario: string; primary: string; fallback?: string; note?: string; }
+interface RecEnvelope { data?: Array<Record<string, unknown>>; use_cases?: RecUseCase[]; provider_currency?: Record<string, string>; }
 
 // ── 词表**单源**（zx_20260929 M6-3）────────────────────────────────────────────
 // 本页此前**手抄三份**镜像（`CAPABILITIES` / `PROVIDER_CAP_HINTS` / `MODEL_NAME_HINTS`），
@@ -46,14 +61,6 @@ const PROVIDER_CAP_HINTS: Record<string, string[]> = PROVIDER_CAPABILITY_HINTS;
 const MODEL_NAME_HINTS: { pattern: RegExp; caps: string[]; remove?: string[]; tip: string }[] =
   MODEL_NAME_CAPABILITY_HINTS.map((h) => ({ pattern: h.pattern, caps: h.add, remove: h.remove, tip: h.tip }));
 
-// ⚠ 本表**没有**真源：它只驱动价格前缀（¥/$）的显示，属本页私有的展示映射。
-//   与 `recommended-models.json` 的 `provider_currency` 同值不同落点——新增推荐供应商时两处都要补。
-const PROVIDER_CURRENCY: Record<string, string> = {
-  openai: 'USD', anthropic: 'USD', google: 'USD', xai: 'USD', mistral: 'USD', openrouter: 'USD',
-  deepseek: 'CNY', qwen: 'CNY', zhipu: 'CNY', moonshot: 'CNY', bytedance: 'CNY', minimax: 'CNY',
-  stepfun: 'CNY', tencent: 'CNY', longcat: 'CNY',
-};
-
 function formatContext(n: number | undefined): string {
   if (!n) return '—';
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -66,11 +73,22 @@ function parseContext(s: string): number {
   if (s.endsWith('K')) return Math.round(parseFloat(s) * 1_000);
   return parseInt(s) || 0;
 }
-/** C2: 模型可用性状态徽标——已禁用/待配置端点/可用（无端点模型默认不可用） */
-function modelStatusBadge(m: Model): { label: string; cls: string } {
-  if (m.enabled === 0) return { label: '已禁用', cls: 'bg-gray-100 text-gray-500' };
-  if (!m.has_endpoint) return { label: '待配置端点', cls: 'bg-orange-100 text-orange-700' };
-  return { label: '可用', cls: 'bg-green-100 text-green-700' };
+/**
+ * zx_20261112_1 B4「诊」：模型徽标不再把"看不见的原因"压成最后一档——五因（已禁用/供应商已禁用/
+ *   待配置端点/缺 chat 能力/未知）由 `describeModelAvailability` 一处判，本页只补"所属供应商是否启用"
+ *   这一行上下文。`available` 缺失（旧 ANS 未返回）如实显示「未返回钥匙状态」，不当成"可用"。
+ */
+function availabilityOf(m: Model, providers: Provider[], opts?: { requireChat?: boolean }) {
+  return describeModelAvailability({
+    enabled: m.enabled,
+    available: m.available,
+    has_endpoint: m.has_endpoint,
+    capabilities: m.capabilities,
+    providerEnabled: providers.find((p) => p.id === m.provider_id)?.enabled ?? null,
+    // zx_20261113_2 M5：默认**不**要求 chat——「配置可用」与「可跑 chat 任务」是两把尺。
+    //   只有显式问"能不能跑任务"（筛选 `task-capable`）时才要求 chat。
+    requireChat: opts?.requireChat ?? false,
+  });
 }
 /** C2: 供应商可用性状态徽标——已禁用/无可用模型/可用 */
 function providerStatusBadge(p: Provider): { label: string; cls: string } {
@@ -78,14 +96,18 @@ function providerStatusBadge(p: Provider): { label: string; cls: string } {
   if (!p.available_models || p.available_models === 0) return { label: '无可用模型', cls: 'bg-orange-100 text-orange-700' };
   return { label: '可用', cls: 'bg-green-100 text-green-700' };
 }
-/** C1: 使用统计展示文案（无数据返回空串则 UI 不显示） */
-function fmtStats(s?: ModelStats): string {
+/**
+ * C1: 使用统计展示文案（无数据返回空串则 UI 不显示）。
+ * zx_20261107_1 B6: 成本**必须带真实币种**——此前省略币种 ⇒ 落到 `formatMoney` 的 CNY 缺省，
+ *   于是 USD 供应商的成本也印 ¥（G8 的 ¥ 写死病）。币种未知（自建 provider）显式传 `null` ⇒ 不印符号。
+ */
+function fmtStats(s?: ModelStats, currency?: string | null): string {
   if (!s || !(s.call_count ?? 0)) return '';
   const parts = [`${s.call_count} 次调用`];
   if (s.success_rate != null) parts.push(`成功率 ${(s.success_rate * 100).toFixed(0)}%`);
   if (s.avg_latency_ms) parts.push(`均延迟 ${s.avg_latency_ms}ms`);
-  if ((s.total_cost ?? 0) > 0) parts.push(`成本 ¥${(s.total_cost || 0).toFixed(4)}`);
-  if (s.total_tokens) parts.push(`${s.total_tokens >= 1000 ? (s.total_tokens / 1000).toFixed(0) + 'K' : s.total_tokens} tokens`);
+  if ((s.total_cost ?? 0) > 0) parts.push(`成本 ${formatMoney(s.total_cost, { digits: 4, currency })}`);
+  if (s.total_tokens) parts.push(`${formatTokens(s.total_tokens)} tokens`);
   return parts.join(' · ');
 }
 /** C2: 模型质量分徽标（0-100 色阶；null 无使用数据不显示） */
@@ -96,6 +118,8 @@ function qualityBadge(q?: number | null): { label: string; cls: string } | null 
 }
 
 export default function ModelsPage() {
+  // zx_20261108_1 B5：动作失败可见（含原因），不再用 `alert`/空 catch 把失败咽掉。
+  const fb = useActionFeedback();
   const [tab, setTab] = useState<'providers' | 'models'>('providers');
   const [providers, setProviders] = useState<Provider[]>([]);
   const [models, setModels] = useState<Model[]>([]);
@@ -107,7 +131,9 @@ export default function ModelsPage() {
   const [epsModelId, setEpsModelId] = useState<string | null>(null);
   const [showEpForm, setShowEpForm] = useState(false);
   const [editEp, setEditEp] = useState<Endpoint | null>(null);
-  const [recommended, setRecommended] = useState<RecData | null>(null);
+  const [recommended, setRecommended] = useState<RecEnvelope | null>(null);
+  // zx_20261107_1 B6: 全局默认模型（`wa_settings['model.default_model']`；空串 = 未指定 ⇒ 自动选型）。
+  const [defaultModel, setDefaultModel] = useState('');
   const [providerGuides, setProviderGuides] = useState<Record<string, Record<string, unknown>>>({});
   const [expandedGuide, setExpandedGuide] = useState<string | null>(null);
   // DataTable 排序
@@ -123,33 +149,52 @@ export default function ModelsPage() {
   async function loadData() {
     setLoading(true); setError('');
     try {
-      const [p, m] = tab === 'providers'
-        ? [await ansProxy.get<Provider[]>('/api/v1/models/providers'), []]
-        : [await ansProxy.get<Provider[]>('/api/v1/models/providers'), await ansProxy.get<Model[]>('/api/v1/models')];
+      // zx_20261111_3「显」：两个 tab 都取模型目录——第一行要回答"本机到底有没有能跑的对话模型"，
+      //   在供应商 tab 上拿不到模型时只能沉默（而沉默会被读成"没事"）。
+      const [p, m] = [await ansProxy.get<Provider[]>('/api/v1/models/providers'), await ansProxy.get<Model[]>('/api/v1/models')];
       setProviders(p as Provider[]);
-      if (tab === 'models') setModels(m as Model[]);
-      try { const rm = await ansProxy.get<RecData>('/api/v1/models/recommended'); setRecommended(rm as RecData); } catch {}
+      setModels(m as Model[]);
+      // zx_20261107_1 B6: 用 `getRaw` 取完整信封——`get` 会剥掉 `data` 之外的 `use_cases`，场景速查因此永空白（G8）。
+      try { const rm = await ansProxy.getRaw<RecEnvelope>('/api/v1/models/recommended'); setRecommended(rm); } catch {}
     } catch (e) { setError((e as Error).message); }
+    try { const dm = await invoke<string | null>('settings:get', 'model.default_model'); setDefaultModel(dm || ''); } catch {}
     setLoading(false);
   }
-  async function handleDelete(type: string, id: string) { if (!confirm('确定删除？')) return; try { await ansProxy.delete(`/api/v1/${type}/${id}`); loadData(); } catch {} }
+  /** 设/清全局默认模型（空串 ⇒ **删掉这一项**，回落自动选型）。与 `model-preference.ts` 的键逐字一致。 */
+  async function setDefaultModelTo(name: string | null) {
+    try {
+      await invoke('settings:set', 'model.default_model', name || '');
+      setDefaultModel(name || '');
+      fb.ok(name ? `默认模型已设为「${name}」` : '已清除默认模型（回落自动选型）');
+    } catch (e) { fb.fail('「默认模型」未保存', e); }
+  }
+  async function handleDelete(type: string, id: string) {
+    if (!confirm('确定删除？')) return;
+    try { await ansProxy.delete(`/api/v1/${type}/${id}`); loadData(); }
+    catch (e) { fb.fail(type === 'providers' ? '「供应商」删除失败' : '「模型」删除失败', e); }
+  }
   async function handleToggleProvider(id: string, enabled: boolean) {
-    try { await ansProxy.put(`/api/v1/models/providers/${id}`, { enabled: enabled ? 1 : 0 }); loadData(); } catch {}
+    try { await ansProxy.put(`/api/v1/models/providers/${id}`, { enabled: enabled ? 1 : 0 }); loadData(); }
+    catch (e) { fb.fail(`「供应商」${enabled ? '启用' : '禁用'}未生效`, e); }
   }
   async function handleToggleModel(id: string, enabled: boolean) {
-    try { await ansProxy.put(`/api/v1/models/${id}`, { enabled: enabled ? 1 : 0 }); loadData(); } catch {}
+    try { await ansProxy.put(`/api/v1/models/${id}`, { enabled: enabled ? 1 : 0 }); loadData(); }
+    catch (e) { fb.fail(`「模型」${enabled ? '启用' : '禁用'}未生效`, e); }
   }
   async function loadEndpoints(modelId: string) {
     if (epsModelId === modelId) { setEpsModelId(null); setEps([]); return; }
     setEpsModelId(modelId); setEps([]);
-    try { const d = await ansProxy.get<Endpoint[]>(`/api/v1/models/${modelId}/endpoints`); setEps(d as Endpoint[]); } catch {}
+    try { const d = await ansProxy.get<Endpoint[]>(`/api/v1/models/${modelId}/endpoints`); setEps(d as Endpoint[]); }
+    catch (e) { fb.fail('「端点列表」加载失败', e); }
   }
   async function refreshEndpoints(modelId: string) {
-    try { const d = await ansProxy.get<Endpoint[]>(`/api/v1/models/${modelId}/endpoints`); setEps(d as Endpoint[]); } catch {}
+    try { const d = await ansProxy.get<Endpoint[]>(`/api/v1/models/${modelId}/endpoints`); setEps(d as Endpoint[]); }
+    catch (e) { fb.fail('「端点列表」刷新失败', e); }
   }
   async function handleDeleteEp(id: string) {
     if (!confirm('确定删除此端点？')) return;
-    try { await ansProxy.delete(`/api/v1/models/endpoints/${id}`); invalidateNeedsSetup(); setEps(prev => prev.filter(e => e.id !== id)); } catch {}
+    try { await ansProxy.delete(`/api/v1/models/endpoints/${id}`); invalidateNeedsSetup(); setEps(prev => prev.filter(e => e.id !== id)); }
+    catch (e) { fb.fail('「端点」删除失败', e); }
   }
   // C4 (2026-09-01): 端点连通性测试——POST /endpoints/:id/test，结果徽标 + 持久化 health 状态
   const [testingEp, setTestingEp] = useState<string | null>(null);
@@ -164,7 +209,14 @@ export default function ModelsPage() {
       setEpTest(prev => ({ ...prev, [id]: res }));
       if (modelId) setModelTest(prev => ({ ...prev, [modelId]: res }));
       if (epsModelId) refreshEndpoints(epsModelId);
-    } catch {}
+    } catch (e) {
+      // 测试请求本身没跑成（网络/鉴权），也要落成一条**可见的失败结果**——不能只剩"转了一圈没反应"。
+      const at = new Date().toISOString().slice(0, 19).replace('T', ' ');
+      const res: EpTestResult = { success: false, latency_ms: 0, error: messageOf(e), at };
+      setEpTest(prev => ({ ...prev, [id]: res }));
+      if (modelId) setModelTest(prev => ({ ...prev, [modelId]: res }));
+      fb.fail('端点测试未完成', e);
+    }
     setTestingEp(null);
   }
   async function testModel(m: Model) {
@@ -179,7 +231,11 @@ export default function ModelsPage() {
       } else {
         await handleTestEp(first.id, m.id);
       }
-    } catch {}
+    } catch (e) {
+      const at = new Date().toISOString().slice(0, 19).replace('T', ' ');
+      setModelTest(prev => ({ ...prev, [m.id]: { success: false, latency_ms: 0, error: messageOf(e), at } }));
+      fb.fail('模型测试未完成', e);
+    }
     setTestingModel(null);
   }
   async function loadProviderGuide(providerId: string) {
@@ -187,15 +243,18 @@ export default function ModelsPage() {
     try {
       const r = await ansProxy.get<Record<string, unknown>>(`/api/v1/models/providers/${providerId}/guide`);
       setProviderGuides(prev => ({ ...prev, [providerId]: r as Record<string, unknown> }));
-    } catch {}
+    } catch (e) { fb.fail('「接入指南」加载失败', e); }
   }
 
-  const getCurrency = (pid?: string) => {
-    if (!pid) return '$';
-    const p = providers.find(x => x.id === pid);
-    const name = (p?.name || '').toLowerCase();
-    for (const [key, cur] of Object.entries(PROVIDER_CURRENCY)) { if (name.includes(key)) return cur === 'CNY' ? '¥' : '$'; }
-    return '$';
+  /**
+   * zx_20261107_1 B6: 币种**只从 ANS 的 provider 行取**（真源 = 推荐目录 `provider_currency`）。
+   * 查不到 ⇒ `null`（自建 provider/旧 ANS）——不臆造、不按名字子串猜，更不默认 `$` 或 `¥`。
+   */
+  const currencyOf = (pid?: string): string | null => providers.find(x => x.id === pid)?.currency ?? null;
+  /** 价格格：两侧单价同为该 provider 币种；未知币种不印符号（`formatMoney` 对 `null` 的契约）。 */
+  const priceCell = (m: Model) => {
+    const c = currencyOf(m.provider_id);
+    return `${formatMoney(m.input_price_per_1k, { currency: c, digits: 4 })} / ${formatMoney(m.output_price_per_1k, { currency: c, digits: 4 })}`;
   };
   // DataTable 排序：模型列表按列排序
   const sortedModels = [...models].sort((a, b) => {
@@ -208,11 +267,15 @@ export default function ModelsPage() {
     return sortAsc ? cmp : -cmp;
   });
   const sortedProviders = [...providers].sort((a, b) => (sortAsc ? a.name.localeCompare(b.name) : b.name.localeCompare(a.name)));
-  // C3: 筛选匹配——模型状态语义与 modelStatusBadge 一致（已禁用优先 / 待配置端点 / 可用）
+  // C3: 筛选匹配——**同一把尺**：用徽标的原因枚举判，不另写一组"看起来差不多"的条件
+  //   （旧写法把供应商禁用/缺 chat 的模型筛进"可用"，与徽标自相矛盾）。
   const matchModelFilters = (m: Model) => {
-    if (filter.status === 'available' && !(m.enabled !== 0 && m.has_endpoint)) return false;
-    if (filter.status === 'no-endpoint' && !(m.enabled !== 0 && !m.has_endpoint)) return false;
-    if (filter.status === 'disabled' && m.enabled !== 0) return false;
+    const av = availabilityOf(m, providers);
+    if (filter.status === 'available' && !av.usable) return false;
+    // zx_20261113_2 M5：旧「可用」= 能跑 chat；现拆成独立筛选，旧语义仍可达。
+    if (filter.status === 'task-capable' && !availabilityOf(m, providers, { requireChat: true }).usable) return false;
+    if (filter.status === 'no-endpoint' && av.reason !== 'no_endpoint') return false;
+    if (filter.status === 'disabled' && av.reason !== 'disabled') return false;
     if (filter.provider && m.provider_id !== filter.provider) return false;
     if (filter.cap && !parseCapabilities(m.capabilities).includes(filter.cap)) return false;
     if (filter.hasEp === 'yes' && !m.has_endpoint) return false;
@@ -232,10 +295,33 @@ export default function ModelsPage() {
   const resetFilter = () => setFilter({ status: 'all', provider: '', cap: '', hasEp: 'all' });
 
   if (loading) return <div className="flex justify-center py-12"><div className="animate-spin h-8 w-8 border-2 border-blue-500 border-t-transparent rounded-full" /></div>;
+  // zx_20261111_3「显」：第一行——"能不能跑"用首启判据同一把尺（`deriveModelAvailability.hasChat`）。
+  const modelAvailability = deriveModelAvailability(models);
+  const modelNextAction = nextActionForModels({
+    loadError: error || null,
+    read: error ? 'error' : 'ok',
+    readNote: error || null,
+    hasChat: modelAvailability.hasChat,
+    available: modelAvailability.available,
+    catalog: modelAvailability.catalog,
+  });
+  function handleModelNextAction(aid: NextActionId): void {
+    if (aid === 'open_models') { setShowAdd(true); setEditItem(null); }
+  }
   return (
     <div>
+      {/* zx_20261108_1 B5：动作失败在此如实上屏（含原因） */}
+      <ActionFeedback note={fb.note} onClose={() => fb.setNote(null)} />
       <div className="flex items-center justify-between mb-6">
-        <h2 className="text-xl font-bold">AI 模型管理</h2>
+        <div>
+          <h2 className="text-xl font-bold">AI 模型管理</h2>
+          <p className="text-xs text-gray-500 mt-1">
+            全局默认模型：{defaultModel
+              ? <span className="font-medium text-gray-700">{defaultModel}</span>
+              : <span className="text-gray-400">未指定（按任务自动选型）</span>}
+            {defaultModel && <button onClick={() => setDefaultModelTo(null)} className="ml-2 text-blue-600 hover:underline">取消默认</button>}
+          </p>
+        </div>
         <div className="flex items-center gap-2">
           {tab === 'models' && (
             <select value={sortBy} onChange={e => setSortBy(e.target.value as typeof sortBy)} className="px-2 py-1.5 border rounded-lg text-sm bg-white">
@@ -250,6 +336,9 @@ export default function ModelsPage() {
           <button onClick={() => { setShowAdd(true); setEditItem(null); }} className="flex items-center gap-1 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"><Plus className="w-3.5 h-3.5" />添加{tab === 'providers' ? '供应商' : '模型'}</button>
         </div>
       </div>
+      {/* zx_20261111_3「显」：第一行——此刻是什么 / 凭什么 / 下一步点哪个 */}
+      <div className="mb-3"><NextActionBar action={modelNextAction} onAction={handleModelNextAction} /></div>
+
       <div className="flex gap-2 mb-4">
         {(['providers', 'models'] as const).map(t => (
           <button key={t} onClick={() => setTab(t)} className={`px-4 py-1.5 rounded-lg text-sm font-medium ${tab === t ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>{t === 'providers' ? '供应商' : '模型列表'}</button>
@@ -262,7 +351,8 @@ export default function ModelsPage() {
           <option value="all">全部状态</option>
           {tab === 'models' ? (
             <>
-              <option value="available">可用</option>
+              <option value="available">可用（配置就绪）</option>
+              <option value="task-capable">可跑任务（需 chat）</option>
               <option value="no-endpoint">待配置端点</option>
               <option value="disabled">已禁用</option>
             </>
@@ -296,19 +386,19 @@ export default function ModelsPage() {
       </div>
       {error && <p className="text-red-500 text-sm mb-4">错误: {error}</p>}
 
-      {/* 使用场景速查 */}
-      {tab === 'models' && recommended?.recommended && (recommended.recommended.length > 0 || recommended.use_cases) && (
+      {/* 使用场景速查——zx_20261107_1 B6: 按 ANS 真实信封的 `use_cases` 渲染（此前读的是不存在的 `recommended.recommended` ⇒ 永不显示）。 */}
+      {tab === 'models' && (recommended?.use_cases?.length ?? 0) > 0 && (
         <details className="mb-4 bg-white rounded-lg border">
-          <summary className="px-4 py-2 text-sm font-medium text-gray-700 cursor-pointer hover:bg-gray-50 select-none">使用场景速查</summary>
+          <summary className="px-4 py-2 text-sm font-medium text-gray-700 cursor-pointer hover:bg-gray-50 select-none">使用场景速查（推荐目录，共 {recommended!.use_cases!.length} 项）</summary>
           <div className="px-4 pb-3 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-            {(recommended.recommended || recommended.use_cases || []).map((uc: Record<string, unknown>, i: number) => (
+            {recommended!.use_cases!.map((uc, i) => (
               <div key={i} className="border rounded-lg p-3 text-sm">
-                <p className="font-medium text-gray-800">{uc.scenario as string}</p>
+                <p className="font-medium text-gray-800">{uc.scenario}</p>
                 <p className="text-xs text-gray-500 mt-1">
-                  <span className="text-blue-600 font-medium">首选：{uc.primary as string}</span>
-                  <span className="mx-1">|</span>
-                  <span className="text-gray-400">备选：{uc.fallback as string}</span>
+                  <span className="text-blue-600 font-medium">首选：{uc.primary}</span>
+                  {uc.fallback ? <><span className="mx-1">|</span><span className="text-gray-400">备选：{uc.fallback}</span></> : null}
                 </p>
+                {uc.note ? <p className="text-[11px] text-gray-400 mt-1">{uc.note}</p> : null}
               </div>
             ))}
           </div>
@@ -323,7 +413,7 @@ export default function ModelsPage() {
               <div>
                 <h3 className="font-medium">{p.name}</h3>
                 <p className="text-xs text-gray-400 font-mono mt-0.5">{p.base_url || '—'}</p>
-                {fmtStats(p.stats) ? <p className="text-[11px] text-gray-500 mt-0.5" title="基于该供应商全部模型的真实使用日志">{fmtStats(p.stats)}</p> : null}
+                {fmtStats(p.stats, p.currency) ? <p className="text-[11px] text-gray-500 mt-0.5" title="基于该供应商全部模型的真实使用日志">{fmtStats(p.stats, p.currency)}</p> : null}
               </div>
               <div className="flex items-center gap-2">
                 {(() => { const b = providerStatusBadge(p); return <span className={`text-xs px-2 py-0.5 rounded-full ${b.cls}`}>{b.label}</span>; })()}
@@ -355,12 +445,12 @@ export default function ModelsPage() {
                 </div>
                 {row('模型', m => <span className="font-medium">{m.description || m.name}</span>)}
                 {row('供应商', m => m.provider_name || m.provider_id || '—')}
-                {row('状态', m => { const b = modelStatusBadge(m); return <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${b.cls}`}>{b.label}</span>; })}
+                {row('状态', m => { const b = availabilityOf(m, providers); return <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${b.cls}`} title={b.title}>{b.label}</span>; })}
                 {row('能力', m => { const c = parseCapabilities(m.capabilities); return c.length > 0 ? c.join(', ') : '—'; })}
                 {row('上下文', m => formatContext(m.context_window))}
-                {row('价格/1K', m => `${getCurrency(m.provider_id)}${m.input_price_per_1k || '—'} / ${getCurrency(m.provider_id)}${m.output_price_per_1k || '—'}`)}
+                {row('价格/1K', m => priceCell(m))}
                 {row('质量分', m => m.quality_score != null ? String(m.quality_score) : '—')}
-                {row('使用统计', m => fmtStats(m.stats) || '暂无数据')}
+                {row('使用统计', m => fmtStats(m.stats, currencyOf(m.provider_id)) || '暂无数据')}
               </div>
             );
           })()}
@@ -383,29 +473,34 @@ export default function ModelsPage() {
                         {/* C5: 端点数量角标 */}
                         <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${(m.endpoint_count ?? 0) > 0 ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-gray-100 text-gray-400'}`} title="端点数量">{m.endpoint_count ?? 0} 端点</span>
                       </div>
-                      <p className="text-xs text-gray-400">{m.provider_name || m.provider_id || '—'} · {caps.length > 0 ? caps.map(c => <span key={c} className="inline-block text-[10px] px-1 py-0.5 bg-gray-200 rounded mr-0.5">{c}</span>) : '—'} · {formatContext(m.context_window)}</p>
+                      <p className="text-xs text-gray-400">{m.provider_name || m.provider_id || '—'} · {caps.length > 0 ? caps.map(c => <span key={c} className="inline-block text-[10px] px-1 py-0.5 bg-gray-200 rounded mr-0.5">{c}</span>) : '—'} · <span title={caps.length === 1 && caps[0] === 'embedding' ? '嵌入模型：上下文/最大输出不参与对话选型，以模型实际能力为准' : undefined}>{formatContext(m.context_window)}</span></p>
                       {/* C1/C2: 使用统计 + 质量分（源自真实 quality_logs/billing_records 聚合） */}
                       <div className="flex items-center gap-2 flex-wrap mt-1">
                         {(() => { const q = qualityBadge(m.quality_score); return q ? <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${q.cls}`} title="综合成功率/延迟/token效率的质量分">{q.label}</span> : null; })()}
-                        {fmtStats(m.stats) ? <span className="text-[11px] text-gray-500" title="基于实际使用日志的统计">{fmtStats(m.stats)}</span> : <span className="text-[11px] text-gray-300">暂无使用数据</span>}
+                        {fmtStats(m.stats, currencyOf(m.provider_id)) ? <span className="text-[11px] text-gray-500" title="基于 ANS 记账与质量账的统计（本机直连与网关调用都计入）">{fmtStats(m.stats, currencyOf(m.provider_id))}</span> : <span className="text-[11px] text-gray-300" title="没有找到经 ANS 记账的调用；不等于没被用过（旧账或未上报的调用不在内）">暂无经 ANS 记账的调用</span>}
                       </div>
                     </div>
                   </div>
                   <div className="flex items-center gap-2 flex-shrink-0">
-                    <p className="text-xs text-gray-500">{getCurrency(m.provider_id)}{m.input_price_per_1k || '—'} / {getCurrency(m.provider_id)}{m.output_price_per_1k || '—'} /1K</p>
+                    <p className="text-xs text-gray-500">{priceCell(m)} /1K</p>
                     {/* zx_20261104_1 M6: 两侧单价均缺 ⇒ 费用无法计量，任务侧费用闸不生效。只提示，不替用户填价。 */}
                     {Number(m.input_price_per_1k || 0) === 0 && Number(m.output_price_per_1k || 0) === 0 && (
                       <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200" title="input/output_price_per_1k 均为 0：费用无法计量，使用该模型的任务费用闸不生效（仅 Token 闸）">缺单价·费用闸不生效</span>
                     )}
                     <button onClick={() => loadEndpoints(m.id)} className="p-1 hover:bg-blue-50 rounded" title="端点">{isExpanded ? <ChevronDown className="w-4 h-4 text-blue-500" /> : <ChevronRight className="w-4 h-4 text-blue-500" />}</button>
-                    {(() => { const b = modelStatusBadge(m); return <span className={`text-xs px-2 py-0.5 rounded-full ${b.cls}`}>{b.label}</span>; })()}
-                    {modelTest[m.id] && (
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${modelTest[m.id].success ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-600'}`} title={`${modelTest[m.id].error || ''} @ ${modelTest[m.id].at || ''}`}>
-                        {modelTest[m.id].success ? `✓ ${modelTest[m.id].latency_ms}ms` : '✗ 不可用'}
-                      </span>
-                    )}
+                    {(() => { const b = availabilityOf(m, providers); return <span className={`text-xs px-2 py-0.5 rounded-full ${b.cls}`} title={b.title}>{b.label}</span>; })()}
+                    {(() => {
+                      const r = modelTest[m.id];
+                      if (!r) return null;
+                      const line = endpointTestLine(r);
+                      return <span className={`text-[10px] px-1.5 py-0.5 rounded-full max-w-[220px] truncate ${line.ok ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-600'}`} title={`${line.text}${r.at ? ` @ ${r.at}` : ''}`}>{line.text}</span>;
+                    })()}
+                    {/* zx_20261107_1 B6: 全局默认模型入口（键与 `model-preference.ts` 逐字一致） */}
+                    {m.name === defaultModel
+                      ? <span className="text-[10px] px-1.5 py-0.5 bg-indigo-100 text-indigo-700 rounded-full" title="全局默认模型：未指定项目级覆盖时优先用它">默认</span>
+                      : <button onClick={() => setDefaultModelTo(m.name)} className="text-xs px-2 py-0.5 rounded bg-indigo-50 text-indigo-600 hover:bg-indigo-100" title={`把 ${m.name} 设为全局默认模型`}>设为默认</button>}
                     <button onClick={() => toggleCompare(m.id)} className={`text-xs px-2 py-0.5 rounded flex items-center gap-1 ${compareSel.includes(m.id) ? 'bg-blue-600 text-white' : 'bg-gray-100 hover:bg-gray-200'}`} title={compareSel.includes(m.id) ? '取消对比' : '加入对比（最多 4 个）'}><Scale className="w-3 h-3" />{compareSel.includes(m.id) ? '已选' : '对比'}</button>
-                    <button onClick={() => testModel(m)} disabled={testingModel === m.id} className="text-xs px-2 py-0.5 rounded bg-blue-50 text-blue-600 hover:bg-blue-100 disabled:opacity-50" title="测试首选端点连通性">{testingModel === m.id ? '测试中...' : '测试'}</button>
+                    <button onClick={() => testModel(m)} disabled={testingModel === m.id} className="text-xs px-2 py-0.5 rounded bg-blue-50 text-blue-600 hover:bg-blue-100 disabled:opacity-50" title="测试首选端点连通性（结果显示在右侧）">{testingModel === m.id ? '测试中...' : '测试连接'}</button>
                     <button onClick={() => handleToggleModel(m.id, m.enabled !== 1)} className="text-xs px-2 py-0.5 rounded bg-gray-100 hover:bg-gray-200">{m.enabled === 1 ? '禁用' : '启用'}</button>
                     <button onClick={() => { setEditItem(m); setShowAdd(true); }} className="p-1 hover:bg-blue-50 rounded" title="编辑"><Pencil className="w-3.5 h-3.5 text-blue-500" /></button>
                     <button onClick={() => handleDelete('models', m.id)} className="p-1 hover:bg-red-50 rounded" title="删除"><Trash2 className="w-3.5 h-3.5 text-red-400" /></button>
@@ -444,11 +539,10 @@ export default function ModelsPage() {
                               )}
                               {e.health_check_at && <span className="text-gray-400 flex-shrink-0" title="上次检测">@ {e.health_check_at}</span>}
                             </div>
-                            {epTest[e.id] && (
-                              <span className={`flex-shrink-0 mx-1 ${epTest[e.id].success ? 'text-green-600' : 'text-red-500'}`}>
-                                {epTest[e.id].success ? `✓ ${epTest[e.id].latency_ms}ms` : `✗ ${epTest[e.id].error}`}
-                              </span>
-                            )}
+                            {epTest[e.id] && (() => {
+                              const line = endpointTestLine(epTest[e.id]);
+                              return <span className={`flex-shrink-0 mx-1 ${line.ok ? 'text-green-600' : 'text-red-500'}`}>{line.text}</span>;
+                            })()}
                             <button onClick={() => handleTestEp(e.id!, epsModelId ?? undefined)} disabled={testingEp === e.id} className="px-1.5 py-0.5 rounded bg-blue-50 text-blue-600 hover:bg-blue-100 disabled:opacity-50 flex-shrink-0">{testingEp === e.id ? '测试中...' : '测试'}</button>
                             <span className="text-gray-400 mx-2 flex-shrink-0">P{e.priority ?? 0} W{e.weight ?? 1}</span>
                             <button onClick={() => { setEditEp(e); setShowEpForm(true); }} className="p-0.5 hover:bg-blue-50 rounded"><Pencil className="w-3 h-3 text-blue-500" /></button>
@@ -509,11 +603,13 @@ function ProviderDialog({ provider, onClose, onSuccess }: { provider?: Provider;
   const [baseUrl, setBaseUrl] = useState(provider?.base_url || '');
   const [enabled, setEnabled] = useState(provider?.enabled !== 0); // C5: 启用/禁用开关（创建默认启用）
   const [saving, setSaving] = useState(false);
+  // zx_20261108_1 B5：保存失败要留在对话框里说清楚——此前空 catch 让弹窗静默不动。
+  const [err, setErr] = useState('');
   const isEdit = !!provider;
 
   async function submit() {
     if (!name) return;
-    setSaving(true);
+    setSaving(true); setErr('');
     try {
       if (isEdit) {
         await ansProxy.put(`/api/v1/models/providers/${provider!.id}`, { name, base_url: baseUrl || undefined, enabled: enabled ? 1 : 0 });
@@ -521,7 +617,7 @@ function ProviderDialog({ provider, onClose, onSuccess }: { provider?: Provider;
         await ansProxy.post('/api/v1/models/providers', { name, base_url: baseUrl || undefined });
       }
       onSuccess(); onClose();
-    } catch {}
+    } catch (e) { setErr(messageOf(e)); }
     setSaving(false);
   }
 
@@ -536,6 +632,7 @@ function ProviderDialog({ provider, onClose, onSuccess }: { provider?: Provider;
             启用（关闭后该供应商模型不参与匹配）
           </label>
         )}
+        {err && <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-2 py-1 mt-3 whitespace-pre-wrap break-words">{err}</p>}
       </div>
       <div className="flex justify-end gap-2 mt-6">
         <button onClick={onClose} className="px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">取消</button>
@@ -550,10 +647,12 @@ function ModelDialog({ model, providers, onClose, onSuccess }: { model?: Model; 
   const [name, setName] = useState(model?.name || '');
   const [desc, setDesc] = useState(model?.description || '');
   const [caps, setCaps] = useState<string[]>(parseCapabilities(model?.capabilities));
-  const [context, setContext] = useState(formatContext(model?.context_window || 128000));
-  const [maxTokens, setMaxTokens] = useState(formatContext(model?.max_output_tokens || 4096));
-  const [inp, setInp] = useState(String(model?.input_price_per_1k ?? '0.035'));
-  const [out, setOut] = useState(String(model?.output_price_per_1k ?? '0.105'));
+  // zx_20261110_1 B5（G16）：原先新建时预填 `128000/4096/0.035/0.105` 并全量提交——
+  //   用户没填也会被当成"这是该模型的事实"入库。现缺值留空（占位符显示「未设置」），提交时只带用户真填的字段。
+  const [context, setContext] = useState(model?.context_window ? formatContext(model.context_window) : '');
+  const [maxTokens, setMaxTokens] = useState(model?.max_output_tokens ? formatContext(model.max_output_tokens) : '');
+  const [inp, setInp] = useState(model?.input_price_per_1k != null ? String(model.input_price_per_1k) : '');
+  const [out, setOut] = useState(model?.output_price_per_1k != null ? String(model.output_price_per_1k) : '');
   const [enabled, setEnabled] = useState(model?.enabled !== 0); // C5: 启用/禁用开关（创建默认启用）
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
@@ -585,8 +684,16 @@ function ModelDialog({ model, providers, onClose, onSuccess }: { model?: Model; 
     //   以前这里 `catch {}` 把拒绝**吞掉** ⇒ 取消勾选全部能力后点保存，界面毫无反应（既没保存也没报错）。
     if (caps.length === 0) { setErr('至少要选一项能力——"能力为空"的模型无法参与匹配。'); return; }
     setSaving(true); setErr('');
+    const body: Record<string, unknown> = { name, provider_id: pid, description: desc, capabilities: caps };
+    // zx_20261110_1 B5（G16）：空值**不带**——ANS 侧 `?? 4096` 是它自己的缺省，不能由界面把占位默认值冒充成用户事实。
+    //   带 K/M 的写法照旧解析；填了却解析不出数就当场报错，不静默落 0。
+    const ctx = context.trim();
+    if (ctx) { const n = parseContext(ctx); if (!n) { setErr('上下文窗口请填数字（可带 K/M，如 128K）'); setSaving(false); return; } body.context_window = n; }
+    const mt = maxTokens.trim();
+    if (mt) { const n = parseContext(mt); if (!n) { setErr('最大输出 tokens 请填数字（可带 K，如 4K）'); setSaving(false); return; } body.max_output_tokens = n; }
+    if (inp.trim() && Number.isFinite(Number(inp))) body.input_price_per_1k = Number(inp);
+    if (out.trim() && Number.isFinite(Number(out))) body.output_price_per_1k = Number(out);
     try {
-      const body: Record<string, unknown> = { name, provider_id: pid, description: desc, capabilities: caps, context_window: parseContext(context), max_output_tokens: parseContext(maxTokens), input_price_per_1k: Number(inp), output_price_per_1k: Number(out) };
       if (isEdit) body.enabled = enabled ? 1 : 0;
       if (isEdit) {
         await ansProxy.put(`/api/v1/models/${model!.id}`, body);
@@ -624,12 +731,17 @@ function ModelDialog({ model, providers, onClose, onSuccess }: { model?: Model; 
             })}
           </div>
           {modelHint && <p className="text-xs mt-1 flex items-center gap-1 text-amber-700 bg-amber-50 px-2 py-1 rounded"><Lightbulb className="w-3 h-3" />{modelHint.tip}（*建议能力）</p>}
+          {caps.length > 0 && caps.every(c => c === 'embedding') && (
+            <p className="text-xs mt-1 text-sky-700 bg-sky-50 px-2 py-1 rounded">
+              嵌入模型：只用于向量/记忆检索，不参与对话选型；上下文/最大输出上限对它不生效，可留空。
+            </p>
+          )}
         </div>
         <div className="grid grid-cols-2 gap-3">
-          <div><label className="block text-sm font-medium mb-1">上下文窗口</label><input value={context} onChange={e => setContext(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="128K" /></div>
-          <div><label className="block text-sm font-medium mb-1">最大输出tokens</label><input value={maxTokens} onChange={e => setMaxTokens(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="4K" /></div>
-          <div><label className="block text-sm font-medium mb-1">输入价格/1K tokens</label><input type="number" step="0.0001" value={inp} onChange={e => setInp(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="0.0050" /></div>
-          <div><label className="block text-sm font-medium mb-1">输出价格/1K tokens</label><input type="number" step="0.0001" value={out} onChange={e => setOut(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="0.0150" /></div>
+          <div><label className="block text-sm font-medium mb-1">上下文窗口</label><input value={context} onChange={e => setContext(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="未设置（如 128K）" /></div>
+          <div><label className="block text-sm font-medium mb-1">最大输出tokens</label><input value={maxTokens} onChange={e => setMaxTokens(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="未设置（如 4K）" /></div>
+          <div><label className="block text-sm font-medium mb-1">输入价格/1K tokens</label><input type="number" step="0.0001" value={inp} onChange={e => setInp(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="未设置" /></div>
+          <div><label className="block text-sm font-medium mb-1">输出价格/1K tokens</label><input type="number" step="0.0001" value={out} onChange={e => setOut(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="未设置" /></div>
         </div>
         {isEdit && (
           <label className="flex items-center gap-2 text-sm text-gray-700">
@@ -653,23 +765,25 @@ function EndpointDialog({ modelId, endpoint, providerUrl, onClose, onSuccess }: 
   const [priority, setPriority] = useState(String(endpoint?.priority ?? '0'));
   const [weight, setWeight] = useState(String(endpoint?.weight ?? '1'));
   const [saving, setSaving] = useState(false);
+  // zx_20261108_1 B5：保存失败留在对话框里说清楚（含缺 Key 的情形，不再用 alert）。
+  const [err, setErr] = useState('');
   const isEdit = !!endpoint;
 
   async function submit() {
     if (!url) return;
-    setSaving(true);
+    setSaving(true); setErr('');
     try {
       if (isEdit) {
         const body: Record<string, unknown> = { url, priority: Number(priority), weight: Number(weight) };
         if (key) body.api_key = key;
         await ansProxy.put(`/api/v1/models/endpoints/${endpoint!.id}`, body);
       } else {
-        if (!key) { alert('请提供API Key'); setSaving(false); return; }
+        if (!key) { setErr('请提供 API Key'); setSaving(false); return; }
         await ansProxy.post(`/api/v1/models/${modelId}/endpoints`, { url, api_key: key, priority: Number(priority), weight: Number(weight) });
       }
       invalidateNeedsSetup();
       onSuccess();
-    } catch {}
+    } catch (e) { setErr(messageOf(e)); }
     setSaving(false);
   }
 
@@ -684,6 +798,7 @@ function EndpointDialog({ modelId, endpoint, providerUrl, onClose, onSuccess }: 
           <div><label className="block text-sm font-medium mb-1">权重</label><input type="number" step="0.1" value={weight} onChange={e => setWeight(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" /></div>
         </div>
       </div>
+      {err && <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-2 py-1 mt-3 whitespace-pre-wrap break-words">{err}</p>}
       <div className="flex justify-end gap-2 mt-6">
         <button onClick={onClose} className="px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">取消</button>
         <button onClick={submit} disabled={!url || saving} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50">{saving ? '保存中...' : '保存'}</button>

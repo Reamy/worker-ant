@@ -63,6 +63,14 @@ mac:
     - dmg
     - zip
   artifactName: ${productName}-${version}-mac-${arch}.${ext}
+  # zx_20261113_2 M2「通」：macOS 15+ 本地网络隐私要求 app 声明用途；缺这个键时
+  #   系统不弹授权框、GUI 直接拒绝 LAN 访问（表现为 EHOSTUNREACH）。mDNS 广播/浏览
+  #   另需 NSBonjourServices，服务名与 core/inbound-gate.ts、core/lan-terminals.ts 同源。
+  extendInfo:
+    NSLocalNetworkUsageDescription: 工蚁需要访问局域网，以发现设备、连接本地服务与调试目标
+    NSBonjourServices:
+      - _workerant._tcp
+      - _workerant-terminal._tcp
   entitlements: build/entitlements.mac.plist
   hardenedRuntime: true
   # 2026-10-24：Apple 开发者账号已通过，Developer ID 证书已导入本机钥匙串。

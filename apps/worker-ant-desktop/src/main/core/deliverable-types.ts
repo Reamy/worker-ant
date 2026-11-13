@@ -17,6 +17,13 @@
 import { IMAGE_MAX_BYTES } from './attachment-kinds.js';
 
 /**
+ * zx_20261108_1 B6: 「项目级（无产出任务）」哨兵——`task_id IS NULL`。
+ *   放在**零依赖**的 `deliverable-types`（而不是 `deliverable-query`）是因为渲染层要引它：
+ *   `deliverable-query` 运行期依赖 node:fs/node:crypto，跨 root 引值会把 main 的运行时拖进 renderer。
+ */
+export const DELIVERABLE_TASK_NONE = '__none__';
+
+/**
  * 「可记录/透出验收」的成果类型。
  *
  * zx_20260913 M2-6 裁定（用户 D2）：由仅 `doc` 扩到 `doc`+`code`——真库 4 条 type='code' 成果
@@ -92,6 +99,19 @@ export function isDocPath(filePath: unknown): boolean {
  */
 export function isModuleFilePath(filePath: unknown): boolean {
   return /(^|\/)(tools|modules|lib|plugins)\//.test(String(filePath ?? '').replace(/\\/g, '/'));
+}
+
+/**
+ * zx_20261113_2 M13：运行期产物**不是交付物**——日志 / pid / rc / 临时 / 缓存 / 依赖目录。
+ *
+ * 病根（2026-11-13 真标本）：命令窗口的补登记把 `.log/.pid/.rc` 也登记成 `doc` 交付物，
+ *   17 条里有 5 条是这类垃圾。判据只认**文件名后缀与目录名**，不猜内容。
+ */
+export function isRuntimeArtifactPath(filePath: unknown): boolean {
+  const p = String(filePath ?? '').replace(/\\/g, '/').toLowerCase();
+  if (!p) return false;
+  if (/(^|\/)(node_modules|\.git|\.cache|__pycache__)(\/|$)/.test(p)) return true;
+  return /\.(log|pid|rc|tmp|cache)$/.test(p);
 }
 
 /**

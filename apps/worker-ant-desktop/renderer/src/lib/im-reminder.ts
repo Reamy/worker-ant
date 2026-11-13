@@ -12,7 +12,11 @@
  *   - 窗口不可见（最小化/被遮挡）⇒ 原生系统横幅（`AppLayout.tsx` 调 `showNotification`）；
  *   - 可见但不在 IM 页 ⇒ 应用内 toast（`lib/toast.tsx`），点击即回 IM 页；
  *   - 可见且在 IM 页 ⇒ 不提醒（正在看）。
+ *
+ * zx_20261107_1 B9: 字节换算取 `lib/format`（纯展示换算，无副作用）——本模块仍是纯函数，
+ *   只是"零 import"这一条改为"零运行时依赖"（`format` 只依赖 shared-types 的纯时间解析）。
  */
+import { formatBytes } from './format';
 
 export type ImReminderChannel = 'native' | 'toast' | 'none';
 
@@ -41,11 +45,10 @@ export function kindLabelOf(kind: unknown): string {
   return KIND_LABEL[k] ?? (k ? '件' : '新消息');
 }
 
-export function formatBytes(n: unknown): string {
-  if (typeof n !== 'number' || !Number.isFinite(n) || n < 0) return '';
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+// zx_20261107_1 B9: 字节换算统一取 `lib/format`（本模块此前自带第二份）。
+// 与通用版唯一的差别是"未知/空"在这里**不显示**（返回空串），故由调用点先判有效性。
+function sizeTextOrEmpty(n: unknown): string {
+  return typeof n === 'number' && Number.isFinite(n) && n >= 0 ? formatBytes(n) : '';
 }
 
 export interface ImInboundNotice {
@@ -65,7 +68,7 @@ export function imInboundNotice(raw: Record<string, unknown>): ImInboundNotice {
   const from = String(raw.fromUser ?? raw.from_user_id ?? '').trim() || '未知联系人';
   const fileName = String(raw.fileName ?? raw.file_name ?? '').trim();
   const preview = String(raw.preview ?? '').trim();
-  const size = formatBytes(raw.sizeBytes ?? raw.size_bytes);
+  const size = sizeTextOrEmpty(raw.sizeBytes ?? raw.size_bytes);
   const kind = String(raw.kind ?? '');
   const body = fileName
     ? `${kindLabelOf(kind)} ${fileName}${size ? `（${size}）` : ''}${preview ? ` · ${preview}` : ''}`

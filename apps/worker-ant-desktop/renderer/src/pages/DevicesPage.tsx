@@ -43,6 +43,8 @@ import type { AnsDevice, DeviceActionRow, DeviceControlOutcome, DeviceShadow, Ta
 // zx_20261014_1 批一/批二: "我们叫它什么"（别名优先、回退自述名）——**运行期**取零依赖真源，
 //   与 main 侧同一份实现（若各处自写一份，改名后就会出现"面板叫 A、留痕叫 B"）。
 import { deviceCallName } from '../../../src/main/core/device-name.js';
+// zx_20261112_2 B3：传动分档零依赖真源（渲染层与 main 同引一份）。
+import { DEVICE_CONTROL_CHANNEL_LABEL, deviceControlChannel } from '../../../src/main/core/device-transport.js';
 // zx_20261013_1 批五: MQTT 配置态形状取自 main 侧零依赖适配层真源（仅类型，打包期擦除）。
 import type { MqttStatusPayload } from '../../../src/main/core/device-mqtt.js';
 // zx_20261022_3 批三: 实时状态投影/摘要与发现错误聚合取**零依赖**真源（运行期，不拉 node:crypto/DB），
@@ -252,6 +254,18 @@ function DeviceRow({ dev, onChanged, locked, selected, onToggleSelect }: {
           {dev.controllable ? <><ShieldCheck className="w-3 h-3" />自述可控</> : <><ShieldOff className="w-3 h-3" />仅只读</>}
         </span>
         <span className={`text-[10px] px-1.5 py-0.5 rounded ${dev.authorized ? 'bg-blue-50 text-blue-600' : 'bg-gray-100 text-gray-500'}`}>{dev.authorized ? '已授权控制' : '未授权'}</span>
+        {/* zx_20261112_2 B3：**本机有没有可用传动**与"自述可控"是两件事——没有传动就明说仅发现。 */}
+        {(() => {
+          const ch = deviceControlChannel(dev);
+          return (
+            <span
+              className={`text-[10px] px-1.5 py-0.5 rounded ${ch === 'none' ? 'bg-amber-50 text-amber-700' : 'bg-gray-50 text-gray-500'}`}
+              title="本机对这台设备的可用传动（只看协议；与授权/在线是两件事）"
+            >
+              {ch === 'none' ? '仅发现' : `传动：${DEVICE_CONTROL_CHANNEL_LABEL[ch]}`}
+            </span>
+          );
+        })()}
         <OnlineBadge online={dev.online} />
         <span className="text-[11px] text-gray-400 ml-auto">最近见到 {formatDbTime(dev.last_seen)}</span>
       </div>
@@ -1374,6 +1388,11 @@ export default function DevicesPage() {
       <HaConfigBlock locked={discoveryLocked} />
 
       <CloudConfigBlock locked={discoveryLocked} />
+
+      <div className="mb-3 rounded-lg border bg-white px-3 py-2 text-[11px] text-gray-600">
+        <b>局域网直连</b>：发现会浏览 mDNS（http / hap / esphomelib / home-assistant）并解析 SSDP 描述；
+        设备自述可控且已授权后，控制经私网 HTTP JSON 或米家 miIO 下发。只向私网地址出站，不触公网。
+      </div>
 
       <IntentSceneBlock devices={devices} locked={locked} />
 

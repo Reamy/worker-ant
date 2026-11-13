@@ -11,7 +11,13 @@ import type { EventStore } from './event-store.js';
 
 const logger = createLogger('event-bus');
 
-export type EventType = 'task.completed' | 'task.failed' | 'task.remote_redispatched' | 'task.status_changed' | 'task.awaiting_input' | 'task.answer_recorded' | 'task.step_finished' | 'task.step_streaming' | 'task.memory_injected' | 'task.goal_identified' | 'task.goal_deviation' | 'task.execution_signal' | 'task.estimated' | 'task.heartbeat' | 'presence.update' | 'project.status_changed' | 'project.milestone_changed' | 'channel.started' | 'channel.stopped' | 'channel.status_changed' | 'deliverable.registered' | 'deliverable.status_changed' | 'file.created' | 'file.updated' | 'file.edited' | 'im.message_inbound' | 'im.message_outbound' | 'memory.changed' | 'node.presence_changed' | 'node.heartbeat' | 'device.discovered' | 'device.status_changed' | 'node.request_received' | 'node.request_completed' | 'node.request_dispatched' | 'node.request_result' | 'node.request_question' | 'node.request_answered'
+export type EventType = 'task.completed' | 'task.failed' | 'task.remote_redispatched' | 'task.status_changed' | 'task.awaiting_input' | 'task.answer_recorded' | 'task.step_finished' | 'task.step_streaming' | 'task.memory_injected' | 'task.goal_identified' | 'task.goal_reused' | 'task.goal_deviation' | 'task.execution_signal' | 'task.estimated' | 'task.heartbeat'
+  // zx_20261110_2 B1/B2/B7：**中止四笔账**与"用户释放"——发（sent）与观测（observed）**分开记**，
+  //   并与调度侧的键释放/重排同表可查。设计见 `core/exec-watchdog.ts`。
+  | 'run.abort_sent' | 'run.abort_observed' | 'run.orphaned' | 'run.watchdog_fired'
+  | 'job.inflight_released' | 'job.inflight_requeued' | 'job.requeue_exhausted'
+  | 'task.released_by_user'
+  | 'presence.update' | 'project.status_changed' | 'project.milestone_changed' | 'channel.started' | 'channel.stopped' | 'channel.status_changed' | 'deliverable.registered' | 'deliverable.status_changed' | 'file.created' | 'file.updated' | 'file.edited' | 'im.message_inbound' | 'im.message_outbound' | 'memory.changed' | 'node.presence_changed' | 'node.heartbeat' | 'device.discovered' | 'device.status_changed' | 'node.request_received' | 'node.request_completed' | 'node.request_dispatched' | 'node.request_result' | 'node.request_question' | 'node.request_answered'
   // zx_20261018_2 批六「见新」：GUI 事件驱动刷新的三个**瞬态**类型。
   //   刻意**不进**下方那张聚合映射表：运行态/门态/一次门内调用是"此刻的投影"，
   //   真相已在 `wa_deliverables.status` / `wa_external_terminals` / `wa_external_calls`，
@@ -48,9 +54,25 @@ const EVENT_AGGREGATE_MAP: Record<string, { aggregate_type: string; idField: str
   'task.step_finished': { aggregate_type: 'task', idField: 'taskId' },
   'task.memory_injected': { aggregate_type: 'task', idField: 'taskId' },
   'task.goal_identified': { aggregate_type: 'task', idField: 'taskId' },
+  // zx_20261113_2 M11：复用缓存目标（不是每轮重识别）——与 identified 分开落账，复盘不误判成本。
+  'task.goal_reused': { aggregate_type: 'task', idField: 'taskId' },
   'task.goal_deviation': { aggregate_type: 'task', idField: 'taskId' },
   'task.execution_signal': { aggregate_type: 'task', idField: 'taskId' },
   'task.estimated': { aggregate_type: 'task', idField: 'taskId' },
+  // zx_20261110_2（王阳明·知行合一 / 事故 339ef167）：**"发了 abort" 与 "abort 真被看到" 是两件事**，
+  //   故两笔账分开落；`run.orphaned` 记"喊了没人应"，`run.watchdog_fired` 记影子模式下的判定。
+  //   ⚠ 与 `channel.status_changed` 相反：这几笔低频且是事故的唯一物证 ⇒ 必须进不可变事件日志。
+  //   ⚠ 只加 union 不加本映射 ⇒ emit() 走「无聚合映射，跳过持久化」，事件一行都不落库（静默）。
+  'run.abort_sent': { aggregate_type: 'task', idField: 'taskId' },
+  'run.abort_observed': { aggregate_type: 'task', idField: 'taskId' },
+  'run.orphaned': { aggregate_type: 'task', idField: 'taskId' },
+  'run.watchdog_fired': { aggregate_type: 'task', idField: 'taskId' },
+  // 调度侧：键被释放 / 被重排 / 重排到顶——与上面两笔账同表可查（"谁把钥匙交出来了"）。
+  'job.inflight_released': { aggregate_type: 'task', idField: 'taskId' },
+  'job.inflight_requeued': { aggregate_type: 'task', idField: 'taskId' },
+  'job.requeue_exhausted': { aggregate_type: 'task', idField: 'taskId' },
+  // 用户在界面上点「释放并重排」（zx_20261110_2 B7）——人的意志要留痕。
+  'task.released_by_user': { aggregate_type: 'task', idField: 'taskId' },
   'project.status_changed': { aggregate_type: 'project', idField: 'projectId' },
   // zx_20260909 X2①(维特根斯坦·可判定): 方案里程碑状态变更事件——前端交付单/里程碑卡订阅即刷(终结前端虚构 'milestone.done' 死监听)
   'project.milestone_changed': { aggregate_type: 'project', idField: 'projectId' },

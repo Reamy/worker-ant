@@ -26,6 +26,10 @@ import { buildPauseNotice, recordedPauseReason } from './pause-reason.js';
 import { parseDepIds } from './dep-graph.js';
 import { MAX_CHILD_BREADTH, countActiveChildren } from './task-accounting.js';
 import type { GoalEvidence } from './acceptance-check.js';
+// zx_20261110_1 B6: 推送正文净化与"做了什么"要点抽取（与完成摘要同一份纯函数）。
+import { plainTextSnippet, extractKeyPoints } from './im-reply.js';
+// 产出物计数的**同一把尺**：范围谓词仍从成果生命周期模块取，不在这里另写一份"非退休/非探针"。
+import { deliverableScopeSql } from './deliverable-lifecycle.js';
 
 /**
  * 最小库接口（同 settings-bool 范式：可脱 better-sqlite3 跑真实现）。
@@ -149,6 +153,40 @@ function parentSlotSaturation(db: TaskNoticeDb, parentId: string | null): { acti
   } catch {
     return null;
   }
+}
+
+/** 完成账里的质量分（`completion_quality.score`）；无账/坏 JSON/非数 ⇒ null（不猜）。 */
+function qualityScoreOf(ctxJson: string | null): number | null {
+  try {
+    const cq = (JSON.parse(ctxJson || '{}') as { completion_quality?: { score?: unknown } }).completion_quality;
+    const sc = cq?.score;
+    return typeof sc === 'number' && Number.isFinite(sc) ? sc : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 本任务产出物件数；读不到（老库无表/列）返回 null——**少说**胜过编一个 0。
+ * 范围与列表/交付单同源（`deliverableScopeSql`），不在这里另写"非退休/非探针"。
+ */
+function countTaskDeliverables(db: TaskNoticeDb, taskId: string): number | null {
+  try {
+    const scope = deliverableScopeSql({ taskIds: [String(taskId)] });
+    const row = db.prepare(`SELECT COUNT(*) AS c FROM wa_deliverables WHERE ${scope.sql}`).get(...scope.params) as
+      | { c?: number }
+      | undefined;
+    return Number(row?.c) || 0;
+  } catch {
+    return null;
+  }
+}
+
+/** 完成推送尾行：任务短 ID（8 位）+ 产出物件数（件数未知则只报 ID）。 */
+function completionFooter(db: TaskNoticeDb, taskId: string): string {
+  const count = countTaskDeliverables(db, taskId);
+  const id = taskId.slice(0, 8);
+  return count === null ? `任务 ID：${id}` : `任务 ID：${id} · 产出物 ${count} 件`;
 }
 
 /** 完成账的「真值」——通知措辞据此决定是否给产出背书（zx_20261106_1 M2）。 */
@@ -284,7 +322,10 @@ export function buildTaskNotice(
       // zx_20261106_1 M2（维特根斯坦·意义即使用 / 毛选·实事求是）: 完成通知与完成账同口径——
       //   账上是 `goal_achieved=false` 或被迫收尾（`premature`）时，**不得**说"已完成/主要成果"。
       //   没有完成账（旧库/坏 JSON）⇒ 走原句，不误报。
+      // zx_20261110_1 B6（维特根斯坦·意义即使用）: 固定四段——结论 / 做了什么 / 下一步 / 任务 ID+产出物数。
+      //   收件人只看一条推送就能判断"发生了什么、我该不该动手、去哪看"。
       const truth = completionTruthOf(ctxJson);
+      const done = status === 'completed';
       if (truth.goalAchieved === false || truth.premature) {
         level = 'warn';
         titleOverride = `任务未达目标：${name}`;
@@ -292,21 +333,53 @@ export function buildTaskNotice(
           truth.premature ? '（步数/预算触顶，被迫结束）' : '',
           truth.evidence === 'acceptance_failed' ? '；验收未通过' : '',
         ].join('');
-        body = `任务「${name}」已收口，但未达成目标${why}。`
-          + (detail ? `\n本轮产出（未达目标）：${detail}` : '请到任务详情查看收口报告。');
+        const produced = detail ? plainTextSnippet(detail, 220) : '';
+        body = [
+          `任务「${name}」已收口，但未达成目标${why}。`,
+          produced ? `本轮产出（未达目标）：${produced}` : '本轮产出（未达目标）：详见任务详情收口报告。',
+          '下一步：到桌面任务详情查看收口报告，补足后可点「继续」追加要求。',
+          completionFooter(db, taskId),
+        ].join('\n');
       } else {
-        body = `任务「${name}」${word}。${detail ? `\n${detail}` : ''}`;
+        const score = done ? qualityScoreOf(ctxJson) : null;
+        const points = extractKeyPoints(detail, 3);
+        const lines = [`任务「${name}」${word}${score !== null ? `（质量 ${score}/100）` : ''}。`];
+        if (points.length) {
+          lines.push('做了什么：');
+          for (const p of points) lines.push(`- ${p}`);
+        } else {
+          lines.push('做了什么：本轮未附摘要，明细见任务详情。');
+        }
+        lines.push(done ? '下一步：无需操作，详情见桌面。' : '下一步：到桌面任务详情查看当前情况。');
+        lines.push(completionFooter(db, taskId));
+        body = lines.join('\n');
       }
       message = `${ICON[level]} ${body}`;
       break;
     }
-    case 'failed':
-      body = `任务「${name}」${word}${detail ? `：${detail}` : '，请查看详情处理。'}`;
+    case 'failed': {
+      // 账上（或回退开关关时的 kind）确为失败，才用失败框架；否则沿用状态词原句——
+      //   "账上 completed + 谎报 failed"时正文不得出现「失败」（S6 反证）。
+      const isFailure = status === 'failed' || (!singleSource && kind === 'failed');
+      if (isFailure) {
+        const reason = plainTextSnippet(detail, 200);
+        body = [
+          `任务「${name}」${word}。`,
+          `失败原因：${reason || '未提供失败原因'}`,
+          '建议动作：到桌面任务详情查看日志；修复后可点「恢复」重试。',
+        ].join('\n');
+      } else {
+        body = `任务「${name}」${word}${detail ? `：${detail}` : '，请查看详情处理。'}`;
+      }
       message = `${ICON[level]} ${body}`;
       break;
+    }
     case 'paused': {
       // 正文构造**抽出**到 `pause-reason.buildPauseNotice`（词表所在、零 import，故受控回归能直调真实现）。
       // 因由与补充说明**并列**而非二选一；拦住了谁、占没占满父的槽位一并说——三件事缺一件这通知就白发了。
+      const waitingChildren = (() => {
+        try { return countActiveChildren(db, taskId); } catch { return undefined; }
+      })();
       body = buildPauseNotice({
         name,
         word,
@@ -314,6 +387,7 @@ export function buildTaskNotice(
         note: detail,
         blockedDownstream: countBlockedDownstream(db, taskId),
         parentSlots: parentSlotSaturation(db, parentId),
+        waitingChildren,
       });
       message = `${ICON[level]} ${body}`;
       break;

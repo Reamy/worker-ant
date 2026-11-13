@@ -16,13 +16,14 @@
  * ⚠ 删除只在**本机分享的**行上出现（`source_node_id === localNodeId`）。
  */
 import { useEffect, useState } from 'react';
-import { BookOpen, Download, RefreshCw, Share2, ShieldCheck, Trash2, Upload, UserRound } from 'lucide-react';
+import { BookOpen, Download, Eye, RefreshCw, Share2, ShieldCheck, Trash2, Upload, UserRound } from 'lucide-react';
 import {
   projects as projectsApi,
   team as teamApi, IpcError, type TeamItem, type TeamItemsPayload, type LocalTeamItem,
 } from '../lib/ipc';
 import { useLiveQuery } from '../lib/useLiveQuery';
 import { FreshnessPill } from '../components/FreshnessPill';
+import TeamItemPreview, { type PreviewView } from '../components/TeamItemPreview';
 import {
   TEAM_ITEM_KINDS, TEAM_ITEM_KIND_LABEL, type TeamItemKind,
 } from '../../../../../packages/shared-types/src/team.js';
@@ -51,9 +52,11 @@ interface ColumnProps {
   onShare: (kind: TeamItemKind, localId: string) => void;
   onImport: (item: TeamItem) => void;
   onDelete: (item: TeamItem) => void;
+  onPreview: (kind: TeamItemKind, localId: string) => void;
+  onPreviewRemote: (item: TeamItem) => void;
 }
 
-function KindColumn({ kind, payload, busy, onShare, onImport, onDelete }: ColumnProps) {
+function KindColumn({ kind, payload, busy, onShare, onImport, onDelete, onPreview, onPreviewRemote }: ColumnProps) {
   const remote = payload.remote
     .filter((it) => it.kind === kind)
     .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
@@ -86,6 +89,14 @@ function KindColumn({ kind, payload, busy, onShare, onImport, onDelete }: Column
                       {item.created_at ? ` · ${formatWhen(item.created_at)}` : ''}
                     </span>
                     <span className="flex items-center gap-1">
+                      <button
+                        onClick={() => onPreviewRemote(item)}
+                        disabled={busy !== null}
+                        className="flex items-center gap-1 text-[11px] px-2 py-1 rounded bg-gray-50 text-gray-600 hover:bg-gray-100 disabled:opacity-50"
+                        title={`查看${label}内容（只读）`}
+                      >
+                        <Eye className="w-3 h-3" />查看
+                      </button>
                       <button
                         onClick={() => onImport(item)}
                         disabled={busy !== null}
@@ -127,13 +138,23 @@ function KindColumn({ kind, payload, busy, onShare, onImport, onDelete }: Column
                   <span className="text-xs text-gray-700 block truncate" title={row.title}>{row.title}</span>
                   {row.subtitle && <span className="text-[10px] text-gray-400 block truncate">{row.subtitle}</span>}
                 </span>
-                <button
-                  onClick={() => onShare(kind, row.localId)}
-                  disabled={busy !== null}
-                  className="flex items-center gap-1 text-[11px] px-2 py-1 rounded bg-blue-50 text-blue-700 hover:bg-blue-100 disabled:opacity-50 shrink-0"
-                >
-                  <Share2 className="w-3 h-3" />分享
-                </button>
+                <span className="flex items-center gap-1 shrink-0">
+                  <button
+                    onClick={() => onPreview(kind, row.localId)}
+                    disabled={busy !== null}
+                    className="flex items-center gap-1 text-[11px] px-2 py-1 rounded bg-gray-50 text-gray-600 hover:bg-gray-100 disabled:opacity-50"
+                    title={`查看${label}内容（只读，与分享载荷同源）`}
+                  >
+                    <Eye className="w-3 h-3" />查看
+                  </button>
+                  <button
+                    onClick={() => onShare(kind, row.localId)}
+                    disabled={busy !== null}
+                    className="flex items-center gap-1 text-[11px] px-2 py-1 rounded bg-blue-50 text-blue-700 hover:bg-blue-100 disabled:opacity-50"
+                  >
+                    <Share2 className="w-3 h-3" />分享
+                  </button>
+                </span>
               </li>
             ))}
           </ul>
@@ -150,6 +171,10 @@ export default function TeamLibraryPage() {
   // 画像导入的落点：目标项目 id（默认第一个项目；读不到列表时留空并在导入时如实拦下）。
   const [targetProjectId, setTargetProjectId] = useState('');
   const [projectOptions, setProjectOptions] = useState<Array<{ id: string; name: string }>>([]);
+  // zx_20261113_5 M2「见」：只读预览（本机候选与远端条目共用同一个弹层/同一份映射）。
+  const [preview, setPreview] = useState<PreviewView | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
 
   useEffect(() => {
     void projectsApi.list().then((rows) => {
@@ -219,6 +244,26 @@ export default function TeamLibraryPage() {
       await teamApi.remove(item.id);
       return `已删除：${item.title || '(无标题)'}`;
     });
+  }
+
+  function openPreview(kind: TeamItemKind, localId: string): void {
+    setPreview(null);
+    setPreviewError(null);
+    setPreviewLoading(true);
+    void teamApi.localPreview(kind, localId)
+      .then((v) => setPreview({ title: v.title, rows: v.rows, sections: v.sections, note: v.note }))
+      .catch((e) => setPreviewError((e as Error).message))
+      .finally(() => setPreviewLoading(false));
+  }
+
+  function openRemotePreview(item: TeamItem): void {
+    setPreview(null);
+    setPreviewError(null);
+    setPreviewLoading(true);
+    void teamApi.preview(item.kind, item.title || '', item.body)
+      .then((v) => setPreview({ title: item.title || v.title, rows: v.rows, sections: v.sections, note: v.note }))
+      .catch((e) => setPreviewError((e as Error).message))
+      .finally(() => setPreviewLoading(false));
   }
 
   if (q.loading && q.data == null) {
@@ -313,11 +358,26 @@ export default function TeamLibraryPage() {
                   onShare={handleShare}
                   onImport={handleImport}
                   onDelete={handleDelete}
+                  onPreview={openPreview}
+                  onPreviewRemote={openRemotePreview}
                 />
               ))}
             </div>
           )}
         </>
+      )}
+
+      {(preview || previewLoading || previewError) && (
+        <TeamItemPreview
+          view={preview}
+          loading={previewLoading}
+          error={previewError}
+          onClose={() => {
+            setPreview(null);
+            setPreviewError(null);
+            setPreviewLoading(false);
+          }}
+        />
       )}
     </div>
   );

@@ -179,6 +179,10 @@ export const BENEFIT_COVERAGE: Record<LicenseTier, BenefitCoverageEntry[]> = {
     { benefit: capacityBenefit('任务模板', TIER_LIMITS.pro.maxTaskTemplates, '套'), target: { kind: 'quota', field: 'maxTaskTemplates', rule: 'positive' } },
     // zx_20261029_2 M6：安装动作口有真闸；「浏览不限」是同一句里的边界说明，不另登记一条。
     { benefit: '市场插件安装（浏览不限）', target: { kind: 'capability', keys: ['plugin_install'] } },
+    // zx_20261108_1 B6：真闸在 `deliverable:exportCsv`；单件打开/定位不挂闸（同一句边界说明）。
+    { benefit: '产出物批量导出（CSV；单件打开不限档）', target: { kind: 'capability', keys: ['deliverable_export'] } },
+    // zx_20261113_1 B6「商」：真闸在 `positions:export` / `positions:import`；本机生成/注入/晋升不挂闸。
+    { benefit: '岗位知识包导出/导入（跨机带走经验）', target: { kind: 'capability', keys: ['position_transfer'] } },
     { benefit: '优先支持', target: { kind: 'service', reason: '支持优先级是交付承诺，不在代码中设闸' } },
   ],
   team: [

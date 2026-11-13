@@ -107,6 +107,16 @@ export function registerIpcHandlers(): void {
     const r = raw as { data?: unknown[]; total?: number; limit?: number | null; offset?: number; has_more?: boolean };
     return { data: { rows: r.data ?? [], total: r.total ?? 0, limit: r.limit ?? null, offset: r.offset ?? 0, has_more: r.has_more ?? false } };
   });
+  // zx_20261107_1 B6「信」: **完整信封**读取——与 `getPaged` 同一病根的另一副面孔。
+  //   `ans-proxy:get` 经 `ipcCall` 剥一层 `.data` 后只剩数组，`/models/recommended` 的
+  //   `use_cases`（场景速查的唯一真源）与 `provider_currency`（币种真源）都是 `data` 的兄弟键 ⇒ 被静默丢掉。
+  //   本通道把 ANS 原始回包整体放进 `data`：剥一层后正是 `{ data, use_cases, provider_currency }`。
+  //   调用方据此**不解析、不手抄**这两份词表。
+  ipcMain.handle('ans-proxy:getRaw', async (_event, path: string) => {
+    const raw = await ansCall('get', path);
+    if (raw && typeof raw === 'object' && 'error' in raw) return raw;
+    return { data: raw };
+  });
 
   // 文件对话框
   ipcMain.handle('dialog:openDirectory', async () => {

@@ -18,6 +18,7 @@
  * ⚠ 零 electron 依赖，rr 可直跑真判据。
  */
 import type { DeviceProtocol } from './device-registry.js';
+import type { CloudAccountProvider } from './device-cloud-accounts.js';
 import { PRO_FEATURES, PRO_FEATURE_LABEL, type ProFeature } from './pro-gate.js';
 import { TEAM_FEATURES, TEAM_FEATURE_LABEL, type TeamFeature } from './team-gate.js';
 
@@ -66,11 +67,19 @@ export interface DeviceChannel {
    * 那是设备行的第二步，不是渠道层的前置条件）。
    */
   configKeys: string[];
+  /**
+   * zx_20261107_1 B2：该渠道的凭据存放在**设备云账号表**（一账号一 Provider），
+   * 而不是固定 settings 键。预检据此把"账号行已配置"也算作已就绪——
+   * 否则用户在「设备云账号」里配好了，向导仍说"缺凭据"（说了点不到）。
+   */
+  accountProvider?: CloudAccountProvider;
   capabilities: ChannelCapabilities;
 }
 
 /**
- * 内置五渠道（**注册表的全部初始内容**）。
+ * 内置六渠道（**注册表的全部初始内容**）。
+ * zx_20261107_1 B2：补 `homeassistant-rest`——HA 有两条真实接入路（MQTT 发现 / REST 账号），
+ *   目录须如实列两条，不能只列其一让用户以为 REST 账号不可达。
  *
  * ⚠ HA 与 MQTT 共用传输：HA 设备入账即 `protocol='mqtt'`，故 `protocols` 也写 `mqtt`
  *   （**用途是设备行归属**）。`channelForProtocol` 按注册顺序取首个命中——`mqtt` 在前，
@@ -134,6 +143,21 @@ const BUILTIN_CHANNELS: DeviceChannel[] = [
     settingsKeys: ['device.tuya.region', 'device.tuya.access_id', 'device.tuya.access_secret'],
     credentialKeys: ['device.tuya.access_secret'],
     configKeys: ['device.tuya.access_id', 'device.tuya.access_secret'],
+    accountProvider: 'tuya',
+    capabilities: { discover: true, control: true, state: true },
+  },
+  {
+    id: 'homeassistant-rest',
+    label: 'Home Assistant（REST）',
+    kind: 'cloud',
+    requires: 'credentials',
+    protocols: ['cloud'],
+    requiredFeatures: ['device_discovery'],
+    summary: '填你自己的 HA 地址与长期令牌；经 HA REST 同步可控实体，控制走服务调用（不经 MQTT）。',
+    settingsKeys: [],
+    credentialKeys: [],
+    configKeys: [],
+    accountProvider: 'homeassistant',
     capabilities: { discover: true, control: true, state: true },
   },
   {

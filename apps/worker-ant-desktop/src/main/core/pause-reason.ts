@@ -110,6 +110,22 @@ export const PAUSE_REASON_STARTUP_SWEEP = 'startup_sweep';
 export const PAUSE_REASON_ABNORMAL_END = 'abnormal_end';
 /** 执行体（AI）经 `update_task_status` 工具主动置暂停 */
 export const PAUSE_REASON_AGENT_PAUSED = 'agent_paused';
+/**
+ * zx_20261110_2 B3「恒」：**幽灵循环封顶**——状态词写着在跑、实则无执行体，恢复后又一次变成幽灵，
+ * 连续 `GHOST_REQUEUE_CAP` 次 ⇒ 老实停下，由人看（否则"自动恢复"就成了永动的假动作）。
+ * 与 `PAUSE_REASON_NO_PROGRESS` 不同：那是**跑着但不出活**，这是**根本没跑起来**。
+ */
+export const PAUSE_REASON_GHOST_LOOP = 'ghost_loop_cap';
+
+/**
+ * zx_20261110_2 B6（G9）「无产出 ≠ 无工作」：跑了足够多步、盘上**确有改动**，但一条产出物都没登记。
+ *
+ * 与 `no_output` 的区别在**该做什么**：`no_output` 是"没东西可交"（判失败）；
+ * 本因是"活干了、账没记"——要人补登记或确认改动无关，故置 `paused` 而不是 `failed`。
+ * 与 `output_missing` 的区别在**证据面**：那个是"声明要落的文件没落盘"，本因是"落了一堆文件、
+ * 却没被登记为交付物"。证据取不到时**不**落本因（宁可照旧判失败，也不假装知道有改动）。
+ */
+export const PAUSE_REASON_OUTPUT_INSUFFICIENT_BUT_CHANGED = 'output_insufficient_but_changed';
 
 /**
  * 暂停之因的**取值域**——`pauseTask` 的 `reason` 取此类型，故"无因暂停"在类型层**不可表达**。
@@ -140,7 +156,9 @@ export type PauseReason =
   | typeof PAUSE_REASON_STALE_TIMEOUT
   | typeof PAUSE_REASON_STARTUP_SWEEP
   | typeof PAUSE_REASON_ABNORMAL_END
-  | typeof PAUSE_REASON_AGENT_PAUSED;
+  | typeof PAUSE_REASON_AGENT_PAUSED
+  | typeof PAUSE_REASON_GHOST_LOOP
+  | typeof PAUSE_REASON_OUTPUT_INSUFFICIENT_BUT_CHANGED;
 
 /** 暂停原因 → 人话（GUI 横幅 / IM 通知 / 系统会话行共用；**词表只此一份**） */
 export const PAUSE_REASON_LABEL: Record<string, string> = {
@@ -167,6 +185,8 @@ export const PAUSE_REASON_LABEL: Record<string, string> = {
   [PAUSE_REASON_STARTUP_SWEEP]: '应用启动时清理残留执行态',
   [PAUSE_REASON_ABNORMAL_END]: '执行未能正常收口',
   [PAUSE_REASON_AGENT_PAUSED]: '执行体主动暂停',
+  [PAUSE_REASON_GHOST_LOOP]: '状态显示在运行、实则无执行体（连续多次自动恢复未成功，已停止自动重试）',
+  [PAUSE_REASON_OUTPUT_INSUFFICIENT_BUT_CHANGED]: '有文件改动但未登记产出物（待补登记或确认无关）',
 };
 
 /** 取暂停原因的人话说法；未知原因**原文回显**（不吞、不编） */
@@ -255,6 +275,8 @@ export interface PauseNoticeFacts {
   blockedDownstream: number;
   /** 本任务占着父任务的在途槽位且**父已满**（父因此建不出后续子任务）；未满传 null */
   parentSlots?: { active: number; max: number } | null;
+  /** 等子暂停时，尚有 N 个子任务未到终态（调用方查好再传；未知传 undefined ⇒ 不报数） */
+  waitingChildren?: number;
 }
 
 /**
@@ -282,5 +304,16 @@ export function buildPauseNotice(f: PauseNoticeFacts): string {
   if (f.parentSlots) {
     facts.push(`它还占着父任务的槽位（${f.parentSlots.active}/${f.parentSlots.max} 已满），父因此建不出后续子任务`);
   }
+  // zx_20261110_1 B6（维特根斯坦·意义即使用 / 毛选·实事求是）: **按因由分两族**。
+  //   等子暂停是**时序**问题：判据与调度器 `isChildrenIncompletePause` 同源（常量本身），
+  //   子任务一到终态即自动恢复。把它写成「待复核…可在桌面处理/恢复」是**自相矛盾**且
+  //   误导用户去点一个什么都不用点的按钮（基线 C8/C11 原文即此形态）。
+  if (f.pauseReason === PAUSE_REASON_CHILDREN_INCOMPLETE) {
+    const wait = typeof f.waitingChildren === 'number' && f.waitingChildren > 0
+      ? `等待 ${f.waitingChildren} 个子任务完成后自动继续，无需操作。`
+      : '子任务完成后将自动继续，无需操作。';
+    return `任务「${f.name}」${f.word}：${facts.join(' · ')}。${wait}`;
+  }
+  // 需人工族：原样保留「待复核 + 可在桌面处理/恢复」——这些停不会自己走。
   return `任务「${f.name}」${f.word}，待复核：${facts.join(' · ')}——可在桌面处理/恢复`;
 }

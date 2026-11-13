@@ -786,7 +786,7 @@ export function isHighRiskKind(kind: string): boolean {
 /** 控制闸的裁定——`ok:false` 时 `how` 是**可行动的下一步**（照 `run_privileged` 的引导形状，不自造文案壳）。 */
 export type DeviceControlVerdict =
   | { ok: true }
-  | { ok: false; reason: 'unknown_device' | 'high_risk' | 'not_controllable' | 'not_authorized'; how: string };
+  | { ok: false; reason: 'unknown_device' | 'high_risk' | 'not_controllable' | 'offline' | 'not_authorized'; how: string };
 
 /**
  * 一次控制的**结果形状**（工具返回体 / 面板返回体**同形**；编排在 `tools/device.ts` 的 `runDeviceControl`）。
@@ -809,6 +809,12 @@ export function deviceControlVerdict(dev: AnsDevice | null): DeviceControlVerdic
   if (!dev.controllable) {
     return { ok: false, reason: 'not_controllable', how: `「${dev.name}」自述不具备可控能力（只读设备），无法下发控制命令。` };
   }
+  // zx_20261112_2 B3：**离线设备不再进控制链路**。`online=null`（未知）不拦——未知不等于离线；
+  //   只有平台/可用性事件明确说 `false` 才拒，并给可行动的下一步（查供电/网络/刷新）。
+  if (dev.online === false) {
+    // 在线态来自设备/平台的可用性上报（`applyAvailability`）；刷新列表**不会**凭空改它——文案不承诺"刷新即恢复"。
+    return { ok: false, reason: 'offline', how: `「${dev.name}」当前不在线（设备/平台上报为离线）。请确认供电与网络；设备恢复上报后状态会自动变为在线，再重试。` };
+  }
   if (!dev.authorized) {
     // zx_20261101_1 M2「授」: 教人**两条路**——在电脑前用面板，不在电脑前用 IM 授权台（团队版）。
     //   短码不在这里算（`shortCode` 的唯一实现在 `im/approval-inbox.ts`；本模块不反向依赖它）：
@@ -817,3 +823,6 @@ export function deviceControlVerdict(dev: AnsDevice | null): DeviceControlVerdic
   }
   return { ok: true };
 }
+
+// zx_20261112_2 B3「安」：传动分档在**零依赖**模块里（渲染层同引，不引 main 链）。
+export { DEVICE_CONTROL_CHANNEL_LABEL, deviceControlChannel, type DeviceControlChannel } from './device-transport.js';

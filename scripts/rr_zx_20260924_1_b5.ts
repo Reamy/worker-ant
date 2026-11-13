@@ -276,10 +276,13 @@ function sliceBraced(src: string, iBrace: number): number {
   }
   return -1;
 }
-const iFn = ipcSrc.indexOf('function statSizeBytes(');
-const iFnBrace = iFn >= 0 ? ipcSrc.indexOf('{', iFn) : -1;
-const iFnEnd = iFnBrace > 0 ? sliceBraced(ipcSrc, iFnBrace) : -1;
-let fnText = iFn >= 0 && iFnEnd > iFn ? ipcSrc.slice(iFn, iFnEnd + 1) : '';
+// zx_20261108_1 B6：`statSizeBytes` 已从 IPC 上提到 `core/deliverable-size.ts`（列表/导出同一取数点）。
+//   按符号切函数体，扫描面随真源迁移，判据（盘上字节、失败 null、trim）一字未改。
+const sizeSrc = rd(`${A}/src/main/core/deliverable-size.ts`);
+const iFn = sizeSrc.indexOf('function statSizeBytes(');
+const iFnBrace = iFn >= 0 ? sizeSrc.indexOf('{', iFn) : -1;
+const iFnEnd = iFnBrace > 0 ? sliceBraced(sizeSrc, iFnBrace) : -1;
+let fnText = iFn >= 0 && iFnEnd > iFn ? sizeSrc.slice(iFn, iFnEnd + 1) : '';
 fnText = fnText.replace(/\(filePath:\s*unknown\)/, '(filePath)').replace(/\):\s*number\s*\|\s*null\s*\{/, ') {');
 ok(fnText.length > 0 && /fs\.statSync/.test(fnText) && /isFile\(\)/.test(fnText) && !/:\s*(unknown|number)\b/.test(fnText),
   'C-0a `statSizeBytes` 函数原文可按符号切出、且 TS 注解已剥净（跑的是文件原文，不是手抄等价物）',
@@ -321,12 +324,14 @@ ok(dirVal === null, 'C-4 目录路径 ⇒ null（`isFile()` 那一支；"不知�
 ok(statSizeBytes(`  ${realPath}  `) === expectBytes,
   'C-5 首尾空白路径先 trim 再 stat（同一标本的改写形，证明 trim 那段真的在跑）', String(statSizeBytes(`  ${realPath}  `)));
 
-// C-6 接线在册：列表 handler 里**逐行**补 size_bytes（静态，按符号锚定在 handler 体内）
-const iList = ipcSrc.indexOf("ipcMain.handle('deliverable:list'");
-const iListEnd = ipcSrc.indexOf("ipcMain.handle('deliverable:create'", iList);
-const listSrc = iList >= 0 && iListEnd > iList ? ipcSrc.slice(iList, iListEnd) : '';
-ok(listSrc.length > 0 && /for \(const r of data\) r\.size_bytes = statSizeBytes\(r\.file_path\);/.test(listSrc),
-  'C-6 `deliverable:list` handler 体内逐行接线 `r.size_bytes = statSizeBytes(r.file_path)`（挂上才算数）',
+// C-6 接线在册：列表取数里**逐行**补 size_bytes（zx_20261108_1 B6 后真源在 `core/deliverable-query.ts`；
+//   按符号切出 `queryDeliverables` 函数体，仍钉"挂上才算数"，且大小列在 `size` 排序与普通两路都打）。
+const querySrc = rd(`${A}/src/main/core/deliverable-query.ts`);
+const iList = querySrc.indexOf('export function queryDeliverables(');
+const listSrc = iList >= 0 ? querySrc.slice(iList) : '';
+ok(listSrc.length > 0 && /for \(const r of rows\) r\.size_bytes = statSizeBytes\(r\.file_path\);/.test(listSrc)
+  && /r\.size_bytes = statSizeBytes\(r\.file_path\);\n\s*const sign/.test(listSrc),
+  'C-6 `queryDeliverables` 内逐行接线 `r.size_bytes = statSizeBytes(r.file_path)`（挂上才算数）',
   `${listSrc.length} 字符`);
 
 // ─────────────────────────────────────────────────────────────
@@ -335,38 +340,52 @@ ok(listSrc.length > 0 && /for \(const r of data\) r\.size_bytes = statSizeBytes\
 console.log('\n【D】成果页归一：与任务详情**同一份** buildDeliverableTree；版本大小按 V-9(b) 展示层换算（M5-b / M9-d）');
 
 const dpageSrc = rd(`${A}/renderer/src/pages/DeliverablesPage.tsx`);
-const tdpSrc = rd(`${A}/renderer/src/pages/TaskDetailPage.tsx`);
 // zx_20260929 M7: 字节换算/字符数展示/库内时间解析已抽成 renderer 侧**一份共享真源**。
 //   D-4x 的判据随之改钉该真源（打在本页会随迁移变假红），并**反钉本页不再留第二份实现**。
 const viewSrc = rd(`${A}/renderer/src/lib/deliverable-view.ts`);
 const drawerSrc = rd(`${A}/renderer/src/components/DeliverableDrawer.tsx`);
+// zx_20261107_1 B9：任务侧的目录树随产出物块抽进 `TaskArtifacts`（相对前缀因此多两级），
+//   故 D-0 由"说明符逐字相同"改钉**解析后的绝对路径相同**——证明的仍是"同一个模块、只有一份实现"，
+//   且不再因搬迁目录层级而假红（更强：不依赖两文件在同一深度）。
+const taSrc = rd(`${A}/renderer/src/components/task/TaskArtifacts.tsx`);
 const specOf = (src: string) => (src.match(/import\s*\{[^}]*\}\s*from\s*'([^']*deliverable-tree\.js)'/) ?? [])[1] ?? '';
-const specTdp = specOf(tdpSrc);
+const resolveSpec = (spec: string, holder: string) => spec ? path.resolve(path.dirname(path.join(root, holder)), spec) : '';
+const specTa = specOf(taSrc);
 const specDp = specOf(dpageSrc);
-ok(specTdp !== '' && specDp === specTdp,
-  'D-0 两页的 import 说明符**逐字相同**（期望值从任务详情页读出，非本脚本手抄）⇒ 引的是同一个模块',
-  `tdp=${specTdp} / dp=${specDp}`);
+const modTa = resolveSpec(specTa, `${A}/renderer/src/components/task/TaskArtifacts.tsx`);
+const modDp = resolveSpec(specDp, `${A}/renderer/src/pages/DeliverablesPage.tsx`);
+ok(specTa !== '' && specDp !== '' && modTa === modDp && /core\/deliverable-tree\.js$/.test(modDp),
+  'D-0 两处（任务侧 TaskArtifacts / 成果页）**解析到同一模块文件**⇒ 引的是同一个模块（非本脚本手抄路径）',
+  `ta=${modTa} / dp=${modDp}`);
 
 // D-1 引了还要**真的用**：树必须由共享实现算，且两种视图**共用一份已筛序列**（否则筛只对一种视图生效）
 ok(/buildDeliverableTree<Deliverable>\(visibleRows\)/.test(dpageSrc),
   'D-1a 产出物页真的调了 `buildDeliverableTree<Deliverable>(visibleRows)`（不是引而不用）');
-ok(/const visibleRows = sorted;/.test(dpageSrc) && /if \(!groupByProject\) return visibleRows\.map\(/.test(dpageSrc)
-  && !/buildDeliverableTree<Deliverable>\(sorted\)/.test(dpageSrc),
-  'D-1b **两视图一份已筛序列**：平铺与目录树都吃 `visibleRows`（= sorted）⇒ 筛选对两种视图同时生效');
+// zx_20261108_1 B6：筛选/排序下沉服务端后，页面手里已是**服务端筛好的一页**；两视图仍吃同一份序列
+//   （`visibleRows = items`），只是上游从"客户端 sorted"换成"服务端同尺结果"——判据按符号重定向。
+ok(/const visibleRows = items;/.test(dpageSrc) && /if \(!groupByProject\) return visibleRows\.map\(/.test(dpageSrc)
+  && !/buildDeliverableTree<Deliverable>\(items\)/.test(dpageSrc),
+  'D-1b **两视图一份已筛序列**：平铺与目录树都吃 `visibleRows`（= 服务端已筛序列）⇒ 筛选对两种视图同时生效');
 ok(/walk\(tree\.root, 0, ''\)/.test(dpageSrc) && /tree\.commonPrefix\.length > 0/.test(dpageSrc) && /tree\.noPath/.test(dpageSrc),
   'D-1c 页面只把共享实现的结果**摊成行**（消费 root/commonPrefix/noPath 三件，不自己造树）');
 
 // D-2 ★ 筛选 / 大小列 / 任务筛选（用户可达的三个新口）
-ok(/if \(onlyPrimary && d\.is_primary !== 1\) return false;/.test(dpageSrc),
+// zx_20261108_1 B6：筛选下沉服务端——渲染层只下发 `primary`，SQL 仍只认 `is_primary` 列本身；
+//   两跳都钉（只钉一处会放过"界面发了但服务端没筛"或"服务端筛了但界面没发"）。
+ok(/primary: onlyPrimary \|\| undefined,/.test(dpageSrc)
+  && /if \(p\.primary === true\) conditions\.push\('d\.is_primary = 1'\);/.test(rd(`${A}/src/main/core/deliverable-query.ts`)),
   'D-2a 「仅显示主成果」按 `is_primary` 列本身过滤（不自带第二套"算什么才叫主要"的判据）');
 ok(/'仅显示主成果'/.test(dpageSrc) && /\[\s*'size'\s*,\s*'大小'\s*\]/.test(dpageSrc) && /formatBytes\(d\.size_bytes\)/.test(dpageSrc),
   'D-2b 新增用户可见文案三件到齐：筛选名「仅显示主成果」/ 表头「大小」/ 单元格走 `formatBytes(d.size_bytes)`');
 // zx_20260930 M4-2: 载体由 `allItems`（无参全表）换成服务端 `facets`。判据的**意图不变**——下拉候选
 //   必须来自"未过滤全集"（选定后不坍缩）；换载体后该保证更强（连分页也不影响名录）。
 //   「项目级」那一组的计数同样改由服务端 `noTaskCount` 给，故反钉页面**不再**自己 filter 出一份全集。
-ok(/const TASK_NONE = '__none__';/.test(dpageSrc) && /项目级（无产出任务/.test(dpageSrc)
-  && /filterTask === TASK_NONE/.test(dpageSrc) && /const taskOptions = facetTasks\.map\(/.test(dpageSrc)
-  && /const noTaskCount = facetNoTaskCount;/.test(dpageSrc) && !/allItems\.filter\(i => !i\.task_id\)/.test(dpageSrc),
+// zx_20261108_1 B6：哨兵改由**零依赖共享模块**定义（渲染层跨 root 引值，不再手抄 '__none__'），
+//   且服务端真的按 `task_id IS NULL` 收口——两跳同钉。
+ok(/const TASK_NONE = DELIVERABLE_TASK_NONE;/.test(dpageSrc) && /项目级（无产出任务/.test(dpageSrc)
+  && /taskId: filterTask \|\| undefined,/.test(dpageSrc) && /const taskOptions = facetTasks\.map\(/.test(dpageSrc)
+  && /const noTaskCount = facetNoTaskCount;/.test(dpageSrc) && !/allItems\.filter\(i => !i\.task_id\)/.test(dpageSrc)
+  && /if \(p\.taskId === DELIVERABLE_TASK_NONE\) conditions\.push\('d\.task_id IS NULL'\);/.test(rd(`${A}/src/main/core/deliverable-query.ts`)),
   'D-2c 任务筛选含「项目级」（task_id IS NULL）一组，且下拉候选取**未过滤全集**（M4-2 起由服务端 facets 给，选定后不坍缩）');
 
 // D-3 共享模块的三条规则按**两侧标本**钉住（跑真实现）
@@ -392,15 +411,21 @@ ok(leafCount(tree.root) + tree.noPath.length === treeItems.length,
 //     判据取**结构**而非某一行文字：K/M 换算若复活在版本弹窗等处（正是原病根的位置），计数立刻不等。
 //     zx_20260929 M7: 实现已迁入共享真源 `lib/deliverable-view.ts` ⇒ 锚点随之迁移，
 //       并加"本页/抽屉零实现"的反向钉子（两件一起才叫"只有一个落点"）。
-const fbStart = viewSrc.indexOf('function formatBytes(');
-const fbEnd = fbStart >= 0 ? sliceBraced(viewSrc, viewSrc.indexOf('{', fbStart)) : -1;
-const fbBody = fbStart >= 0 && fbEnd > fbStart ? viewSrc.slice(fbStart, fbEnd + 1) : '';
-const nFixAll = (viewSrc.match(/\.toFixed\(1\)/g) ?? []).length;
+// zx_20261107_1 B9：字节换算真源由 `lib/deliverable-view.ts` 上收到 `lib/format.ts`（renderer 唯一格式化落点；
+//   deliverable-view 只 `export { formatBytes }` 转发）。判据随之改钉新真源，且把病根形从"`.toFixed(1)` 总数"
+//   收窄为**字节换算的两样特征**（`/1024` 与 `.toFixed(1)`）不得在 `formatBytes` 之外出现——
+//   format.ts 里的 `formatTokens/formatDuration` 也有 `.toFixed(1)`，但它们不除 1024，不是本病的第二落点。
+const formatSrc = rd(`${A}/renderer/src/lib/format.ts`);
+const fbStart = formatSrc.indexOf('function formatBytes(');
+const fbEnd = fbStart >= 0 ? sliceBraced(formatSrc, formatSrc.indexOf('{', fbStart)) : -1;
+const fbBody = fbStart >= 0 && fbEnd > fbStart ? formatSrc.slice(fbStart, fbEnd + 1) : '';
+const kAll = (formatSrc.match(/\/\s*1024/g) ?? []).length;
+const kFb = (fbBody.match(/\/\s*1024/g) ?? []).length;
 const nFixFb = (fbBody.match(/\.toFixed\(1\)/g) ?? []).length;
 const nFixPage = (dpageSrc.match(/\.toFixed\(1\)/g) ?? []).length;
-ok(nFixAll > 0 && nFixAll === nFixFb && nFixPage === 0,
-  'D-4a `.toFixed(1)` **全部落在共享真源的 `formatBytes` 内**（>0 自证扫描面非空；产出物页零处）⇒ 版本大小换算没有第二处落点',
-  `真源 ${nFixAll} 处 / formatBytes 内 ${nFixFb} 处；页面 ${nFixPage}`);
+ok(fbBody.length > 0 && nFixFb > 0 && kAll > 0 && kAll === kFb && nFixPage === 0,
+  'D-4a 字节换算（`/1024` 与 `.toFixed(1)`）**只落在共享真源的 `formatBytes` 内**（>0 自证扫描面非空；产出物页零处）⇒ 版本大小换算没有第二处落点',
+  `/1024 真源 ${kAll} 处（formatBytes 内 ${kFb}）/ toFixed(1) ${nFixFb} 处；页面 ${nFixPage}`);
 const vstStart = viewSrc.indexOf('function versionSizeText(');
 const vstEnd = vstStart >= 0 ? sliceBraced(viewSrc, viewSrc.indexOf('{', vstStart)) : -1;
 const vstBody = vstStart >= 0 && vstEnd > vstStart ? viewSrc.slice(vstStart, vstEnd + 1) : '';

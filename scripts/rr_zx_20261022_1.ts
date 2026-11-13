@@ -204,7 +204,8 @@ function groupC(): void {
     'C-6 在册命中但文件缺失 ⇒ 注记点名在册路径', h5?.note);
 
   // 接线：生产代拟器注入工作目录基准（不是只有纯函数支持）
-  const ae = CODE(`${A}/src/main/core/agent-executor.ts`);
+  // zx_20261109_1 B6 按符号重定向：代拟器随验收判卷搬至 `exec-acceptance.ts`，扫描面取两文件之并。
+  const ae = CODE(`${A}/src/main/core/agent-executor.ts`) + CODE(`${A}/src/main/core/exec-acceptance.ts`);
   ok(/SELECT working_dir FROM wa_projects/.test(ae) && /resolveRelative: workingDir \? \(p\) =>/.test(ae),
     'C-7 接线：`proposeAcceptanceForTask` 从项目工作目录注入解析基准');
 }

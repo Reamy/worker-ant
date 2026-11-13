@@ -193,12 +193,14 @@ export function deriveRequesterNodeId(db: Database.Database, request: Request): 
  * 可派单判据的 **WHERE 片段唯一处**（M12 抽共用 / zx_20261011 M2）：`selectTargetNode`（自动选）
  * 与 `nodeQualifies`（手动目标校验）**同引此常量**，杜绝两处 SQL 各写一套而漂。
  * ⚠ 两个占位符顺序恒为 `(offlineMod, category)` —— 各调用点用 `?` 前的列上下文自行对齐。
- * 语义：可派单（`participate=1 ∧ role!='observer'`，与 `isDispatchable` 同义）∧ 在线（阈值读
+ * 语义：可派单（`participate=1 ∧ role!='observer' ∧ weight>0`，与 `isDispatchable` 同义；
+ * zx_20261107_1 B10a 增 `weight>0`——权重 0＝用户明确不参与协同）∧ 在线（阈值读
  * `NODE_OFFLINE_SEC` 同源常量，不写死数字）∧ 卡类目命中（`card_json.categories ∋ category`）。
  */
 const DISPATCHABLE_WHERE = `status = 'active'
        AND participate = 1
        AND role != 'observer'
+       AND weight > 0
        AND last_seen_at IS NOT NULL
        AND last_seen_at > datetime('now', ?)
        AND EXISTS (SELECT 1 FROM json_each(ans_nodes.card_json, '$.categories') WHERE json_each.value = ?)`;

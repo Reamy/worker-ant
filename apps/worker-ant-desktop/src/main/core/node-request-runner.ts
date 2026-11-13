@@ -37,6 +37,8 @@ import { archiveTask } from './task-archive.js';
 import type { AnsNodeRequest } from '@worker-ant/shared-types';
 // zx_20261023_5 批一：上游摘要的写入口径与读口（`exec-prelude`）同源——键名/上限/裁剪只此一处。
 import { UPSTREAM_SUMMARIES_KEY, sanitizeUpstreamSummaries, type UpstreamSummaryItem } from './exec-prelude.js';
+// zx_20261112_1 B5：跨机岗位上下文只落 `context_json.dispatch_position`（**不写** `wa_tasks.position_id`）。
+import { DISPATCH_POSITION_KEY, sanitizeDispatchPosition, type DispatchPosition } from './positions.js';
 // zx_20261027_3 M2「一单一跑」：同一 req.id 的执行账（回传失败后重拉不重建任务）。
 import {
   beginNodeRequestRun,
@@ -174,6 +176,16 @@ export function relayTaskFields(req: AnsNodeRequest): { description: string; acc
 export function relayUpstream(req: AnsNodeRequest): UpstreamSummaryItem[] {
   const raw = (req.payload as Record<string, unknown> | undefined)?.upstream;
   return sanitizeUpstreamSummaries(raw);
+}
+
+/**
+ * zx_20261112_1 B5：派单随行**岗位上下文**（接收端再洗一次，不信任发送端）。
+ * 只收 `{id,name,version,summary}`，`summary` 再截到 600；无该键/坏形 ⇒ `null`（不注入）。
+ * ⚠ 这**不是**本机指派——落 `context_json.dispatch_position`，绝不写 `wa_tasks.position_id`。
+ */
+export function relayPosition(req: AnsNodeRequest): DispatchPosition | null {
+  const raw = (req.payload as Record<string, unknown> | undefined)?.position;
+  return sanitizeDispatchPosition(raw);
 }
 
 /**
@@ -322,12 +334,16 @@ export function makeRelayRunner(deps: RelayRunnerDeps): RequestRunner {
         // zx_20261023_5 批一：上游摘要随单落在任务上下文里，**读者**＝`exec-prelude.buildUpstreamRequirementBlock`
         //   （远端任务没有本机 depends_on，这是它唯一的上游依据）。无该键 ⇒ 不写（不编造上游）。
         const upstream = relayUpstream(req);
+        // zx_20261112_1 B5：对端岗位摘要随单落 context（读者＝`exec-context` 的远端岗位块）。
+        //   只写 `dispatch_position`——本机岗位表没有对端岗位，写 `position_id` 会伪造本地指派。
+        const position = relayPosition(req);
         tasks.updateContext(taskId, {
           node_archetype: archetype,
           [NO_INTERACTION_KEY]: true,
           ...(peerDispatch ? { [NODE_REQUEST_ID_KEY]: req.id } : {}),
           ...(injectedAnswer ? { [NODE_ANSWER_KEY]: injectedAnswer } : {}),
           ...(upstream.length > 0 ? { [UPSTREAM_SUMMARIES_KEY]: upstream } : {}),
+          ...(position ? { [DISPATCH_POSITION_KEY]: position } : {}),
         });
         // zx_20261023_3 批四：作业来源如实落账（跨机中继拉起的执行）。
         enqueueJob(db, 'ai-task', { taskId, projectId, source: 'node_relay' });

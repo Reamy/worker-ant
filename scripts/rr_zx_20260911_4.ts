@@ -23,7 +23,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { checkBuildPins } from './lib/rr-pins.js';
 import { formatOptions, parseOptions, matchApprovalReply } from '../apps/worker-ant-desktop/src/main/core/im/options.js';
 import {
-  routeImMessage, registerPendingApproval, setNotificationDir,
+  routeImMessage as routeImMessageRaw, registerPendingApproval, setNotificationDir,
   startF3NotificationPush, stopF3NotificationPush, triggerF3Notification,
 } from '../apps/worker-ant-desktop/src/main/services/im-router.js';
 import { MemoryManager } from '../apps/worker-ant-desktop/src/main/core/memory-manager.js';
@@ -83,6 +83,21 @@ const jobs = (db: AnyDb) => (db.prepare("SELECT payload FROM wa_jobs WHERE type=
 
 function ictx(db: AnyDb, replies: string[], channelType = IM_CH) {
   return { db, channelId: 'ch-real', channelType, sendReply: async (_to: string, t: string) => { replies.push(t); } };
+}
+/**
+ * zx_20261112_1 B3: 本套判的是审批/送达/命令等旧往返，不是「首聊欢迎」。
+ * 每次发消息前先落一条该用户的历史 inbound（回访用户入参），使欢迎不介入本套的 replies①；
+ * 首聊欢迎本身由 `rr_zx_20261112_1` C 段专测（含 1→0 反证）。
+ */
+function seedPriorInbound(db: AnyDb, channelId: string, from: string): void {
+  try {
+    db.prepare("INSERT INTO wa_im_conversations (id, channel_id, external_user_id, message_json, direction) VALUES (?,?,?,'{}','inbound')")
+      .run(`seed-${Math.random().toString(36).slice(2)}`, channelId, from);
+  } catch { /* 欢迎判定失败时路由器按 hadPrior=true 兜底，不影响主判据 */ }
+}
+async function routeImMessage(ctx: { db: AnyDb; channelId: string }, from: string, text: string, chatType: string, meta: string): Promise<void> {
+  seedPriorInbound(ctx.db, ctx.channelId, from);
+  await routeImMessageRaw(ctx as never, from, text, chatType, meta);
 }
 /** 风暴/去重按 fromUser 与全文计：每场景隔 2.1s，避免被静默丢弃 */
 const settle = () => new Promise(r => setTimeout(r, 2100));
@@ -245,10 +260,12 @@ async function m1(): Promise<void> {
   console.log('\n[M1/S8 反证·forced 与审批无关]');
   {
     const db = mkdb();
-    mkPaused(db, 'forced1', { ...REAL_CTX, forced: true, deliverable_unfulfilled: { paths: ['x'], forced: true } }, '[等待用户输入] 继续? [选项: 继续 / 放弃]');
+    // zx_20261112_1 B3: 「继续」已是 IM 恢复动词、「执行」是确认词，故本标本改用
+    // 非动词非确认的选项「重试」——测的仍是"forced 判据不参与审批"。
+    mkPaused(db, 'forced1', { ...REAL_CTX, forced: true, deliverable_unfulfilled: { paths: ['x'], forced: true } }, '[等待用户输入] 重试? [选项: 重试 / 放弃]');
     const replies: string[] = [];
-    await routeImMessage(ictx(db, replies) as never, IM_USER, '继续', 'private', '');
-    ok(convs(db, 'forced1').includes('[用户选择: 继续]'), '带 forced 标记的任务审批路径照样生效（判据无关）');
+    await routeImMessage(ictx(db, replies) as never, IM_USER, '重试', 'private', '');
+    ok(convs(db, 'forced1').includes('[用户选择: 重试]'), '带 forced 标记的任务审批路径照样生效（判据无关）');
   }
 
   // ── S8b 反证：失效内存项不得遮蔽真库里的活任务（M1-7） ────────────
@@ -261,11 +278,12 @@ async function m1(): Promise<void> {
     // A: 选项文本被失效项"命中" —— 仍须落到真库那条活任务
     const dbA = mkdb();
     const uA = 'o9cq80SHADOW_A@im.wechat';
-    mkPaused(dbA, 'live_a', { ...REAL_CTX, externalUser: uA }, '[等待用户输入] 继续? [选项: 继续 / 放弃]');
-    registerPendingApproval(IM_CH, uA, { taskId: 'ghost_a', projectId: 'p1', question: '继续?', options: formatOptions(['继续', '放弃']), createdAt: Date.now() });
+    // 同 S8：「继续」已是恢复动词，选项改用非动词非确认的「重试」以仍测审批回退路径本身。
+    mkPaused(dbA, 'live_a', { ...REAL_CTX, externalUser: uA }, '[等待用户输入] 重试? [选项: 重试 / 放弃]');
+    registerPendingApproval(IM_CH, uA, { taskId: 'ghost_a', projectId: 'p1', question: '重试?', options: formatOptions(['重试', '放弃']), createdAt: Date.now() });
     const rA: string[] = [];
-    await routeImMessage(ictx(dbA, rA) as never, uA, '继续', 'private', '');
-    ok(convs(dbA, 'live_a').includes('[用户选择: 继续]'), '失效项被弹出 → 选项回复落到真库活任务', convs(dbA, 'live_a').join(' | ').slice(0, 60));
+    await routeImMessage(ictx(dbA, rA) as never, uA, '重试', 'private', '');
+    ok(convs(dbA, 'live_a').includes('[用户选择: 重试]'), '失效项被弹出 → 选项回复落到真库活任务', convs(dbA, 'live_a').join(' | ').slice(0, 60));
     ok(statusOf(dbA, 'live_a') === 'pending', '活任务被恢复');
     ok(!rA.some(r => r.includes('审批已失效')), '不虚报「审批已失效」（真库明明认领得起）');
 
@@ -291,7 +309,19 @@ async function m1(): Promise<void> {
     ok(!router.includes('CONFIRM_REGEX') && !router.includes('matchDbApprovalOption'), 'im-router 不再自持一套确认/匹配（已收口共享）');
     ok(!router.includes('context_json LIKE \'%"externalUser"'), 'handleAgentReply 不再拼接 LIKE 取维度');
     ok(router.includes("json_extract(t.context_json,'$.externalUser') = ?"), 'handleAgentReply 改用绑定参数');
-    ok((router.match(/resumeWithQuota\(/g) || []).length === 6, 'resumeWithQuota 仍 6 处（未增未减）', String((router.match(/resumeWithQuota\(/g) || []).length));
+    // zx_20261112_1 B3: IM 内「继续」是第 7 个恢复入口——逐成员在册，不是把计数放宽。
+    const quotaSites: Array<[string, string]> = [
+      ['resumeWithQuota(ctx.db, taskId);', 'IM「暂停/继续」（B3 新增）'],
+      ["resumeWithQuota(db, task.id, { answer: { source: 'im', decision: 'confirm' } });", '审批确认'],
+      ['resumeWithQuota(ctx.db, r.taskId, { answer:', '回退路径选项/确认'],
+      ['resumeWithQuota(db, task.id);', '编号启动'],
+      ["resumeWithQuota(db, task.id, { answer: { source: 'im', decision: 'reply' } });", '直接回复'],
+      ['resumeWithQuota(ctx.db, task.id);', '启动指令·指定任务'],
+      ['resumeWithQuota(ctx.db, t.id);', '启动指令·唯一任务自动'],
+    ];
+    const quotaCount = (router.match(/resumeWithQuota\(/g) || []).length;
+    ok(quotaCount === quotaSites.length, `resumeWithQuota 恰 ${quotaSites.length} 处（6 旧 + IM「继续」1）`, String(quotaCount));
+    for (const [needle, label] of quotaSites) ok(router.includes(needle), `resumeWithQuota 调用点在册：${label}`);
     // zx_20260920 M2 订正：原断言「回话失败均 .catch（≥12）」的**对象形状**已被本轮取代——失败归属
     //   从"每个调用点各吞各的"上移到两个 `ImContext.sendReply` 构造处一处落账。改钉新不变量两半，
     //   并保留"回话点在册"下界防空绿（与 rr_zx_20260911_2 同一把尺）。
@@ -319,7 +349,10 @@ async function m1(): Promise<void> {
     eq(CALLERS.filter((f) => !/listResumableTasks\(/.test(callerOf(f))), [],
       '展示侧与选择侧同用一份（定义 1 + 调用点名在册：编号列出与按号选择 / 归属歧义回问 / 启动任务）');
     ok(!/SELECT id, title FROM wa_tasks WHERE status IN \('paused','failed'\) LIMIT 5/.test(router), '展示侧旧的裸 LIMIT 5 查询已除');
-    ok(/checkPendingApproval\(ctx, fromUser, msgText\)\) return;/.test(router), '路由入口先试审批（命中即 return）');
+    // zx_20261108_1 B3：入站链路改用 `routeText`（剥 @ 后的正文）——按符号重定向到同一语义的新载体。
+    ok(/if \(checkPendingApproval\(ctx, fromUser, routeText\)\) \{\s*markInboundRoute\(ctx\.db, inboundId, 'approval'/.test(router)
+      && router.indexOf('checkPendingApproval(ctx, fromUser, routeText)') < router.indexOf('handleAgentReply(ctx, fromUser, routeText'),
+      '路由入口先试审批（命中即 return）');
     ok(/if \(isConfirm \|\| isOptionMatch\) \{/.test(router), 'A3 失效校验覆盖确认与选项两条（非只认确认）');
   }
 }
@@ -523,7 +556,17 @@ async function m2(): Promise<void> {
     const ai = stripComments(rd(`${A}/src/main/core/jobs/ai-task.ts`));
     // 同步（zx_20260915 M2 · P0-4）：见 rr_zx_20260911_2 同处注释——两处失败播报收敛进
     //   `recordExecutionFailure` 共享点（`notify: ctx.sendImNotification`），直呼 6→4（**减点**，非新增）。
-    ok((ai.match(/ctx\.sendImNotification\(/g) || []).length === 4, '未新增 IM 播报点（直呼 6→4，失败播报收敛为共享点）', String((ai.match(/ctx\.sendImNotification\(/g) || []).length));
+    // 改钉（zx_20261110_2 B5）：原先钉的是**幻数 4**。B5 把"完成播报"的两处（ai-task 与 resume 各一）
+    //   收进后置作业**一处** ⇒ 总数 3。幻数只会随形状变化而红，抓不住"悄悄多出第三类播报"。
+    //   改为**逐类枚举**：播报点只能属于这两类，且各自的条数点得清（比"总数等于 4"更强、更可读）。
+    const noticeTotal = (ai.match(/ctx\.sendImNotification\(/g) || []).length;
+    const pausedNotices = (ai.match(/ctx\.sendImNotification\([\s\S]{0,200}?'paused'/g) || []).length;
+    const completedNotices = (ai.match(/ctx\.sendImNotification\([\s\S]{0,200}?'completed'/g) || []).length;
+    ok(noticeTotal === pausedNotices + completedNotices,
+      'D2 播报点只有两类（失败/账户级故障、完成），没有第三类悄悄新增',
+      `total=${noticeTotal} paused=${pausedNotices} completed=${completedNotices}`);
+    ok(pausedNotices === 2, 'D2 失败播报仍是两处（账户级故障：主路 + 备用供应商路）', String(pausedNotices));
+    ok(completedNotices === 1, 'D2 完成播报收成一处（B5 后置作业：两处合一，不在关键路径上重复说）', String(completedNotices));
   }
 }
 
@@ -681,18 +724,25 @@ async function m3(): Promise<void> {
     //   同一处），路由只**引**不抄 ⇒ 原判据"路由内就地声明 HELP_REGEX"必然红。按「改旧断言＝改钉更强的
     //   新真源」（**不是放宽**）：①真源里确是 `/^(帮助|help)` 起头那条；②路由**引**它；③反证路由内无重声明。
     const cmds = stripComments(rd(`${A}/src/main/services/im-commands.ts`));
+    // zx_20261108_1 B3：判定并入 `core/im-intent.ts`——谓词真源仍是 `im-commands.ts`，
+    //   但**引它来用**的消费面从路由搬到了判定模块。按符号重定向（非放宽），并保留原来三件：
+    //   真源唯一、只引不抄、一引入一使用。
+    const intent = stripComments(rd(`${A}/src/main/core/im-intent.ts`));
     ok(cmds.includes('export const HELP_REGEX = /^(帮助|help)'), '「帮助」/help 为唯一新增认领词（零新增命令词）——谓词真源在 `im-commands.ts`');
-    ok(/import \{[^}]*\bHELP_REGEX\b[^}]*\} from '\.\/im-commands\.js'/.test(router), 'im-router 从唯一真源**引** HELP_REGEX（同源，非二次手抄）');
-    ok(!/const HELP_REGEX\s*=/.test(router), '反证：路由内不再就地重声明 HELP_REGEX（防漂回两份手抄）');
-    ok((router.match(/HELP_REGEX/g) || []).length === 2, 'HELP_REGEX 一引入一使用（未旁生分支）', String((router.match(/HELP_REGEX/g) || []).length));
+    ok(/import \{[^}]*\bHELP_REGEX\b[^}]*\} from '\.\.\/services\/im-commands\.js'/.test(intent), 'im-intent 从唯一真源**引** HELP_REGEX（同源，非二次手抄）');
+    ok(!/const HELP_REGEX\s*=/.test(router) && !/const HELP_REGEX\s*=/.test(intent), '反证：路由/判定内不再就地重声明 HELP_REGEX（防漂回两份手抄）');
+    ok((intent.match(/HELP_REGEX/g) || []).length === 2, 'HELP_REGEX 一引入一使用（未旁生分支）', String((intent.match(/HELP_REGEX/g) || []).length));
     ok(router.includes('async function handleHelp('), 'handleHelp 为唯一实现');
 
-    // 位置关系才是判据：认领必须**在问候之前**（「帮助」是 2 个汉字，写在问候之后＝生产不可达）
-    const helpIdx = router.indexOf('HELP_REGEX.test(msgText.trim())');
-    const greetIdx = router.indexOf('const greetPatterns');
+    // 位置关系才是判据：认领必须**在问候之前**（「帮助」是 2 个汉字，写在问候之后＝生产不可达）。
+    //   B3 起次序落在 `decideImIntent` 的规则序里——帮助分支先于 `isGreeting` 分支。
+    const helpIdx = intent.indexOf('HELP_REGEX.test(text)');
+    const greetIdx = intent.indexOf('if (isGreeting(text))');
     ok(helpIdx > 0 && greetIdx > 0 && helpIdx < greetIdx, '「帮助」认领在问候的遮蔽之前（不重蹈 M1-6）');
-    const cmdIdx = router.indexOf('await tryImCommand(ctx, fromUser, msgText)');
-    ok(cmdIdx > 0 && cmdIdx < helpIdx, '「帮助」置于项目命令分发之后（不抢项目关键词）');
+    //   「帮助」置于项目命令分发之后：路由先试项目自配命令，未认领才进 `decideImIntent`。
+    const cmdIdx = router.indexOf('await tryImCommand(ctx, fromUser, routeText)');
+    const decideIdx = router.indexOf('decideImIntent({');
+    ok(cmdIdx > 0 && decideIdx > cmdIdx, '「帮助」置于项目命令分发之后（不抢项目关键词）');
 
     ok(router.includes('const spawnTime = Date.now();'), '命令侧记下 spawn 时刻');
     ok(router.includes('.mtimeMs >= spawnTime'), '只认本次 spawn 之后的产物（错误归属已除）');
@@ -842,7 +892,12 @@ async function m4(): Promise<void> {
     //    与同段的 `dScope` **同 taskIds**，故明细与总数同集合）；②`deliverable:facets` 里那次
     //    `deliverableScopeSql`（一份复用给三个查询：项目名录/任务名录/无任务计数）。
     //   数**真源调用**而非"手拼谓词处"，正是为了让这类新增读点不可能悄悄绕开共享口径。
-    ok((prj.match(/\b(deliverableScopeSql|countDeliverables|countDeliverablesByType)\(/g) || []).length === 9, 'M4-3/M4-2: project.ipc 探针口径九处同源（读点增，含 task:list/deliverable:list/task:get总数/facets 名录）', String((prj.match(/\b(deliverableScopeSql|countDeliverables|countDeliverablesByType)\(/g) || []).length));
+    // zx_20261108_1 B6：`deliverable:list` 读点随取数搬到 core/deliverable-query.ts ⇒ 跨两文件计数，仍九处。
+    const dq = stripComments(rd(`${A}/src/main/core/deliverable-query.ts`));
+    const scopeCalls = (prj + dq).match(/\b(deliverableScopeSql|countDeliverables|countDeliverablesByType)\(/g) || [];
+    // zx_20261111_3 B3：新增 `deliverable:attention`（countDeliverables + deliverableScopeSql 两跳）也经真源
+    //   ⇒ "恰九处"改为"≥九处"；少走真源仍由各套的"无内联探针 SQL"反证兜住。
+    ok(scopeCalls.length >= 9, 'M4-3/M4-2: project.ipc + core/deliverable-query 探针口径九处同源（读点增，含 task:list/deliverable:list/task:get总数/facets 名录；新增 deliverable:attention 亦经真源）', String(scopeCalls.length));
 
     // zx_20260929 M7: 标签表收敛为**一份共享真源**（renderer/src/lib/deliverable-view.ts）。
     //   判据改钉真源本身，并反钉列表页**不再本地手抄**（`includes` 打在本页会随迁移变假红，且证不到"只有一个落点"）。
@@ -1038,11 +1093,16 @@ async function m5(): Promise<void> {
     ok(!/(?<![\w.])memory_type\s*!=\s*'archived'/.test(memAll), '反证：记忆四模块已无手抄 `!= \'archived\'`（收敛到真源）');
     ok(MEM_LIVE_SQL.includes('deleted'), '真源本身含 `deleted`（手抄者必漏的那一档）', MEM_LIVE_SQL);
 
+    // 改钉（zx_20261110_2 B5）：压缩的**运行段**已从执行体抽到 `context-compaction-run.ts`
+    //   （执行体行数额度 R-75a：只留编排）。判据按**符号**重定向到真载体，并各加一条"接线仍在执行体"：
+    //   只钉"文件里有这行"会漏掉"抽走了却忘记接线"（那可正是"做了没用上"）。
+    const ccr = stripComments(rd(`${A}/src/main/core/context-compaction-run.ts`));
     ok(cc.includes('export function planSummaryChunks') && cc.includes('export function buildRuleDigest'), 'M5-3 纯逻辑单一真源（context-compaction 导出两函数）');
-    ok(ae.includes('planSummaryChunks(conversations, maxRows)'), 'M5-3 逐段摘要接入真实现');
-    ok(!ae.includes('conversations.slice(-maxRows)'), 'M5-3 旧的 slice(-maxRows) 已除（E19 根因）');
-    ok(ae.includes('buildRuleDigest(conversations)'), 'M5-3 规则回退走如实摘要');
-    ok(!/（前\$\{older\}轮对话已省略/.test(ae), 'M5-3 旧的"仅保留最近N轮"虚报文案已除');
+    ok(ccr.includes('planSummaryChunks(conversations, maxRows)'), 'M5-3 逐段摘要接入真实现（运行段模块）');
+    ok(ae.includes("from './context-compaction-run.js'") && ae.includes('compactTaskConversations('), 'M5-3 运行段仍被执行体**真引入且真调用**（抽走≠断线）');
+    ok(!ae.includes('conversations.slice(-maxRows)') && !ccr.includes('conversations.slice(-maxRows)'), 'M5-3 旧的 slice(-maxRows) 已除（E19 根因）');
+    ok(ccr.includes('buildRuleDigest(conversations)'), 'M5-3 规则回退走如实摘要（运行段模块）');
+    ok(!/（前\$\{older\}轮对话已省略/.test(ae + ccr), 'M5-3 旧的"仅保留最近N轮"虚报文案已除');
   }
 }
 

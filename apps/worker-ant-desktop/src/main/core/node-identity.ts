@@ -35,6 +35,11 @@ export const NODE_SETTING_KEYS = {
   role: 'node.role',
   weight: 'node.weight',
   participate: 'node.participate',
+  /**
+   * zx_20261112_2 B1：`participate='0'` 是**谁**关的——`'license'`（许可锁替用户关）或 `'user'`（用户手关）。
+   * 许可恢复时只自动恢复 `'license'` 的那种；用户手关的永不覆盖。空/未知按"用户意志"处理（不自动改）。
+   */
+  participateOffReason: 'node.participate_off_reason',
   heartbeatSec: 'node.heartbeat_sec',
   /** zx_20261011_2 M3: 向上游（派活方）等作答的上限（秒）；未配时回落 `CLARIFY_WAIT_SEC_DEFAULT`。 */
   clarifyWaitSec: 'node.clarify_wait_sec',

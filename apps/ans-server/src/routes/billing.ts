@@ -1,6 +1,8 @@
 import type Database from 'better-sqlite3';
 import { Elysia, t } from 'elysia';
 import { randomUUID } from 'node:crypto';
+// zx_20261112_2 B4：模型引用归一（名字 → 唯一 id），写端一处。
+import { resolveModelId } from '../services/model-ref.js';
 
 export function billingRoutes(db: Database.Database) {
   return (
@@ -48,7 +50,7 @@ export function billingRoutes(db: Database.Database) {
           ).run(
             id,
             body.endpoint_id,
-            body.model_id,
+            resolveModelId(db, body.model_id),
             body.project_id ?? null,
             body.tokens_in ?? 0,
             body.tokens_out ?? 0,
@@ -133,7 +135,7 @@ export function billingRoutes(db: Database.Database) {
             'INSERT INTO ans_model_quality_logs (id, model_id, project_id, task_type, capability, success, output_accepted, token_efficiency, latency_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
           ).run(
             id,
-            body.model_id,
+            resolveModelId(db, body.model_id),
             body.project_id || null,
             body.task_type || null,
             body.capability || 'chat',

@@ -14,6 +14,7 @@
  *   故受控回归可**直引真实现**直跑（同 `node-identity.ts` / `node-card.ts` 范式）。
  */
 import { NODE_SETTING_KEYS, readNodeSetting, type NodeSettingDb } from './node-identity.js';
+import { REMOTE_ASSIGN_NODE_KEY } from './remote-assign-key.js';
 
 /** 读设置 / 读写 `wa_tasks` 的最小库接口（使本模块可脱 better-sqlite3 被 rr 直跑）。 */
 export interface OrchestrateDb extends NodeSettingDb {
@@ -30,7 +31,7 @@ export interface OrchestrateDb extends NodeSettingDb {
  *   - `assigned_request_id`：对应的 ANS `ans_node_requests.id`（远端驱动据它读回；它**非空即"单已出去"**）。
  *   - `assigned_at`：外派时刻（ISO8601，UTC）——远端驱动的**超时收回**据此判定。
  */
-export const REMOTE_ASSIGN_NODE_KEY = 'assigned_node_id';
+export { REMOTE_ASSIGN_NODE_KEY };
 export const REMOTE_ASSIGN_REQUEST_KEY = 'assigned_request_id';
 export const REMOTE_ASSIGN_AT_KEY = 'assigned_at';
 

@@ -156,6 +156,74 @@ function round4(n: number): number {
   return Math.round(n * 10_000) / 10_000;
 }
 
+/** 目标项目证据不足（无术语、无卡、无产出）⇒ 不给任何推荐（不拿"随机的三个"凑数）。 */
+function tooThin(target: FeatureSet): boolean {
+  return target.terms.size === 0 && target.cardKinds.size === 0 && target.delivTypes.size === 0;
+}
+
+/**
+ * zx_20261113_4 B2「荐」：**两个项目之间**的相似度（不取 top-N、不截断）。
+ * 与 `similarProjects` 同一套权重、阈值与理由；只是调用方已知道"要和谁比"。
+ * 无据（分数不足或三类交集全无）⇒ `null`，调用方如实说"无相似依据"。
+ */
+function scoreAgainst(target: FeatureSet, other: FeatureSet): SimilarProject | null {
+  if (target.projectId === other.projectId) return null;
+  const sharedTerms = sharedValues(target.terms, other.terms);
+  const minTerm = Math.min(target.terms.size, other.terms.size);
+  const termScore = minTerm > 0 ? sharedTerms.length / minTerm : 0;
+
+  const sharedKw = sharedValues(target.keywords, other.keywords);
+  const kwUnion = new Set([...target.keywords, ...other.keywords]).size;
+  const kwScore = kwUnion > 0 ? sharedKw.length / kwUnion : 0;
+
+  const cardScore = cosine(target.cardKinds, other.cardKinds);
+  const delivScore = cosine(target.delivTypes, other.delivTypes);
+
+  const score = 0.5 * termScore + 0.2 * kwScore + 0.15 * cardScore + 0.15 * delivScore;
+  if (score < SIMILAR_MIN_SCORE) return null;
+
+  const sharedCards = sharedValues(
+    new Set([...target.cardKinds.keys()]),
+    new Set([...other.cardKinds.keys()]),
+  );
+  const sharedDelivs = sharedValues(
+    new Set([...target.delivTypes.keys()]),
+    new Set([...other.delivTypes.keys()]),
+  );
+  // 有据：至少要有一类真实交集（分数可以因分布相近而虚高，逐类交集才是"为什么像"）。
+  if (sharedTerms.length === 0 && sharedDelivs.length === 0 && sharedCards.length === 0) return null;
+
+  const reasons: string[] = [];
+  if (sharedTerms.length > 0) {
+    reasons.push(`共同术语：${sharedTerms.slice(0, 5).join('、')}`);
+  }
+  if (sharedDelivs.length > 0) {
+    reasons.push(`共同产出类型：${sharedDelivs.slice(0, 4).join(' / ')}`);
+  }
+  if (sharedCards.length > 0) {
+    reasons.push(`知识卡构成相近：${sharedCards
+      .map((k) => KNOWLEDGE_CARD_KIND_LABEL[k as KnowledgeCardKind] ?? k)
+      .join(' / ')}`);
+  }
+
+  return { projectId: other.projectId, name: other.name, score: round4(score), reasons };
+}
+
+/**
+ * zx_20261113_4 B2「荐」：**指定两项目**的相似度（供候选领域包排序——包来自哪个项目，
+ * 就先问"那个项目与当前项目像不像"）。语义与 `similarProjects` 的逐对比较完全同源。
+ */
+export function scoreProjectPair(db: SimDb, targetId: string, otherId: string): SimilarProject | null {
+  const pid = String(targetId ?? '');
+  const oid = String(otherId ?? '');
+  if (!pid || !oid || pid === oid) return null;
+  const target = featuresOf(db, pid);
+  if (!target || tooThin(target)) return null;
+  const other = featuresOf(db, oid);
+  if (!other) return null;
+  return scoreAgainst(target, other);
+}
+
 /**
  * 与 `projectId` 最相似的前 N 个项目。
  *   · 输入不足（目标项目无术语/无卡/无产出）⇒ `[]`；
@@ -171,7 +239,7 @@ export function similarProjects(
   const target = featuresOf(db, pid);
   if (!target) return [];
   // 输入不足：连名称/描述都判不出词，且没有卡与产出 ⇒ 不给推荐（不拿"随机的三个"凑数）。
-  if (target.terms.size === 0 && target.cardKinds.size === 0 && target.delivTypes.size === 0) return [];
+  if (tooThin(target)) return [];
 
   const lim = Math.min(
     Math.max(1, Math.floor(Number(opts.limit) || SIMILAR_TOP_N)),
@@ -188,45 +256,9 @@ export function similarProjects(
     const f = featuresOf(db, cid);
     if (!f) continue;
 
-    const sharedTerms = sharedValues(target.terms, f.terms);
-    const minTerm = Math.min(target.terms.size, f.terms.size);
-    const termScore = minTerm > 0 ? sharedTerms.length / minTerm : 0;
-
-    const sharedKw = sharedValues(target.keywords, f.keywords);
-    const kwUnion = new Set([...target.keywords, ...f.keywords]).size;
-    const kwScore = kwUnion > 0 ? sharedKw.length / kwUnion : 0;
-
-    const cardScore = cosine(target.cardKinds, f.cardKinds);
-    const delivScore = cosine(target.delivTypes, f.delivTypes);
-
-    const score = 0.5 * termScore + 0.2 * kwScore + 0.15 * cardScore + 0.15 * delivScore;
-    if (score < SIMILAR_MIN_SCORE) continue;
-
-    const sharedCards = sharedValues(
-      new Set([...target.cardKinds.keys()]),
-      new Set([...f.cardKinds.keys()]),
-    );
-    const sharedDelivs = sharedValues(
-      new Set([...target.delivTypes.keys()]),
-      new Set([...f.delivTypes.keys()]),
-    );
-    // 有据：至少要有一类真实交集（分数可以因分布相近而虚高，逐类交集才是"为什么像"）。
-    if (sharedTerms.length === 0 && sharedDelivs.length === 0 && sharedCards.length === 0) continue;
-
-    const reasons: string[] = [];
-    if (sharedTerms.length > 0) {
-      reasons.push(`共同术语：${sharedTerms.slice(0, 5).join('、')}`);
-    }
-    if (sharedDelivs.length > 0) {
-      reasons.push(`共同产出类型：${sharedDelivs.slice(0, 4).join(' / ')}`);
-    }
-    if (sharedCards.length > 0) {
-      reasons.push(`知识卡构成相近：${sharedCards
-        .map((k) => KNOWLEDGE_CARD_KIND_LABEL[k as KnowledgeCardKind] ?? k)
-        .join(' / ')}`);
-    }
-
-    out.push({ projectId: cid, name: f.name, score: round4(score), reasons });
+    const scored = scoreAgainst(target, f);
+    if (!scored) continue;
+    out.push(scored);
   }
 
   out.sort((a, b) =>

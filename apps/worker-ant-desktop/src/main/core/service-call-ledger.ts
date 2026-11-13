@@ -15,6 +15,8 @@
  *      但"不抛"不等于"可以不写"——真写了没有，由 rr 的 0→1 正面断言看住（"计数器类断言须有值从 0 变 1"）。
  */
 import type Database from 'better-sqlite3';
+// zx_20261113_3 B2：占位名单与 MCP 前置**同一份**（不各写一条正则）。
+import { isPlaceholderMcpServerName } from './mcp-server-registry.js';
 
 /**
  * 行 id。**不用 `node:crypto`**——`SERVICE_CALL_KIND_LABEL` 要出给渲染层，
@@ -88,6 +90,11 @@ export interface ServiceCallKindAggregate {
   lastAt: string | null;
   /** 该类最近一次**失败**的原因（没失败过则 null——不编造）。 */
   lastError: string | null;
+  /** zx_20261113_3 B1：最近一次失败的时刻——历史失败不冒充“当前故障”。 */
+  lastErrorAt: string | null;
+  /** zx_20261113_3 B1：最近一次调用（不论成败）的结论与时刻。 */
+  lastOutcome: 'ok' | 'failed' | null;
+  lastOutcomeAt: string | null;
 }
 
 export interface ServiceCallRecentRow {
@@ -98,6 +105,24 @@ export interface ServiceCallRecentRow {
   durationMs: number;
   error: string;
   createdAt: string;
+  /** zx_20261113_3 B1：产生该调用的任务（可空）。 */
+  taskId: string;
+  /** 任务存在或无 taskId ⇒ true；taskId 非空但 `wa_tasks` 无此行 ⇒ false（“任务已删除”）。 */
+  taskExists: boolean;
+  taskTitle: string | null;
+  /** 占位/探针服务器名（只标注，不删账）。 */
+  probe: boolean;
+}
+
+/**
+ * zx_20261113_3 B1/B2：占位/探针服务器名——**窄口径**，只认明确的占位声明。
+ * `nonexistent-probe` / `probe` / `test-probe` / `example` / `fake` / `placeholder` / `unknown` 命中；
+ * `probe-api` 这类正常名**不**命中（避免把真服务误标成探针）。
+ * 真源在 `mcp-server-registry.ts`（与 `call_mcp_tool` 前置同一份），此处只按 `server/tool` 取 server 段。
+ */
+export function isProbeServiceCallTarget(target: string): boolean {
+  const server = String(target || '').split('/')[0]?.trim() || '';
+  return isPlaceholderMcpServerName(server);
 }
 
 export interface ServiceCallReport {
@@ -126,14 +151,23 @@ export function describeServiceCalls(db: Database.Database, projectId: string): 
   const byKindMap = new Map(stats.map(s => [s.kind, s]));
 
   // 最近失败原因：每类取**最新**那一笔（`created_at` 秒级 ⇒ 同秒并列时按 `rowid` 定序，即真插入序）。
-  const lastErrors = new Map<string, string>();
+  const lastErrors = new Map<string, { error: string; at: string | null }>();
   const errRows = db.prepare(
-    `SELECT kind, error FROM wa_service_calls WHERE project_id = ? AND ok = 0 ORDER BY rowid DESC`,
-  ).all(projectId) as Array<{ kind: string; error: string | null }>;
-  for (const r of errRows) if (!lastErrors.has(r.kind)) lastErrors.set(r.kind, r.error || '');
+    `SELECT kind, error, created_at FROM wa_service_calls WHERE project_id = ? AND ok = 0 ORDER BY rowid DESC`,
+  ).all(projectId) as Array<{ kind: string; error: string | null; created_at: string | null }>;
+  for (const r of errRows) if (!lastErrors.has(r.kind)) lastErrors.set(r.kind, { error: r.error || '', at: r.created_at || null });
+
+  // zx_20261113_3 B1：“最近一次调用”与“最近一次失败”分开——后来成功过就不该只显示旧失败。
+  const lastOutcomes = new Map<string, { ok: number; at: string | null }>();
+  const outcomeRows = db.prepare(
+    `SELECT kind, ok, created_at FROM wa_service_calls WHERE project_id = ? ORDER BY rowid DESC`,
+  ).all(projectId) as Array<{ kind: string; ok: number; created_at: string | null }>;
+  for (const r of outcomeRows) if (!lastOutcomes.has(r.kind)) lastOutcomes.set(r.kind, { ok: r.ok, at: r.created_at || null });
 
   const byKind: ServiceCallKindAggregate[] = SERVICE_CALL_KINDS.map((kind) => {
     const s = byKindMap.get(kind);
+    const e = lastErrors.get(kind);
+    const o = lastOutcomes.get(kind);
     return {
       kind,
       calls: s?.calls ?? 0,
@@ -142,14 +176,23 @@ export function describeServiceCalls(db: Database.Database, projectId: string): 
       avgMs: s?.avg_ms == null ? null : Math.round(s.avg_ms),
       maxMs: s?.max_ms ?? null,
       lastAt: s?.last_at ?? null,
-      lastError: lastErrors.get(kind) ?? null,
+      lastError: e?.error ?? null,
+      lastErrorAt: e?.at ?? null,
+      lastOutcome: o ? (o.ok === 1 ? 'ok' : 'failed') : null,
+      lastOutcomeAt: o?.at ?? null,
     };
   });
 
   const recent = db.prepare(
-    `SELECT kind, target, operation, ok, duration_ms, error, created_at
-     FROM wa_service_calls WHERE project_id = ? ORDER BY rowid DESC LIMIT ?`,
-  ).all(projectId, RECENT_LIMIT) as Array<{ kind: string; target: string | null; operation: string | null; ok: number; duration_ms: number | null; error: string | null; created_at: string | null }>;
+    `SELECT s.kind, s.target, s.operation, s.ok, s.duration_ms, s.error, s.created_at,
+            s.task_id, t.id AS task_id_exists, t.title AS task_title
+       FROM wa_service_calls s
+       LEFT JOIN wa_tasks t ON t.id = s.task_id
+      WHERE s.project_id = ? ORDER BY s.rowid DESC LIMIT ?`,
+  ).all(projectId, RECENT_LIMIT) as Array<{
+    kind: string; target: string | null; operation: string | null; ok: number; duration_ms: number | null;
+    error: string | null; created_at: string | null; task_id: string | null; task_id_exists: string | null; task_title: string | null;
+  }>;
 
   return {
     projectId,
@@ -165,6 +208,11 @@ export function describeServiceCalls(db: Database.Database, projectId: string): 
       durationMs: r.duration_ms ?? 0,
       error: r.error || '',
       createdAt: r.created_at || '',
+      taskId: r.task_id || '',
+      // 无 taskId（A2A/守护进程等）不算“已删除”；只有 taskId 非空且 JOIN 不到才标 false。
+      taskExists: !r.task_id || r.task_id_exists != null,
+      taskTitle: r.task_title || null,
+      probe: isProbeServiceCallTarget(r.target || ''),
     })),
   };
 }

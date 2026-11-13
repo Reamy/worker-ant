@@ -30,17 +30,76 @@ import { matchApprovalReply } from '../core/im/options.js';
 import { parsePairReply } from '../core/external-terminals.js';
 // zx_20261101_1 M1「授」: IM 授权台的谓词真源在 `core/im/approval-inbox.ts`（`parseApprovalCommand`），此处不另抄正则。
 import { parseApprovalCommand } from '../core/im/approval-inbox.js';
+// zx_20261110_1 B1: 建单判定与 `core/im-intent.ts` 共用同一份词表（`classifyImText`）——
+//   软研究词（分析/搜索/写…）单独出现**不授权建单**，不再由本表另立一套 `CREATE_REGEX`。
+import { classifyImText } from '../core/im-intent-rules.js';
+// zx_20261111_3「证」: 撤销触发词与路由器同一份（一处真源；帮助里的承诺必须真能执行）。
+import { UNDO_COMMAND_RE } from '../core/im-echo.js';
 
 // ====== 四个内置动词的谓词（**自 `im-router.ts` 逐字迁入**，语义一字未改）======
 
 /** 启动/恢复类动词的**整句开头**（裸「开始」也算——它走"列编号"分支）。 */
 export const START_REGEX = /^(开始|启动|执行|运行|run|start|resume)/i;
-/** 查询类**子串**（不限于整句开头：`QUERY_REGEX` 与 `CREATE_REGEX` 的先后决定它是否是纯查询）。 */
+/** 查询类**子串**（不限于整句开头：是否算"纯查询"由 `core/im-intent-rules.ts` 的分类决定）。 */
 export const QUERY_REGEX = /(查看|查询|进展|状态|情况|告诉|status|progress|list|show|get|帮助|help)/i;
 /** 「帮助」的**认领式**：整句匹配，不吃带"帮助"的自由文本（zx_20260911_4 M3-1，零新增命令词）。 */
 export const HELP_REGEX = /^(帮助|help)[!！。.?？\s]*$/i;
-/** 建任务类**子串**。 */
-export const CREATE_REGEX = /(创建|新建|做一个|帮我|build|create|make|写|生成|分析|搜索|查一下|帮我做|调查)/i;
+// zx_20261112_1 B3「答」: 暂停/继续的**整句开头**谓词（与 `START_REGEX` 同形，不认子串）。
+//   冲突已核对：「继续/恢复」不在确认词表（`CONFIRM_RE`/`CANCEL_RE`）、`HELP_REGEX`、`START_REGEX` 内；
+//   「取消」仍只属于确认问句的答复，本表**不抢**。
+export const PAUSE_REGEX = /^(暂停|停下)/i;
+export const RESUME_REGEX = /^(继续|恢复)/i;
+
+/**
+ * 「暂停/继续 + 任务名」→ `{ action, query }`；不是这两个动词 → `null`。
+ * 任务名部分去掉引导标点、引号与 `@项目` mention（项目归属由路由层另判，不在名字里猜）。
+ */
+/**
+ * zx_20261112_2 B2：**非句首**的暂停/继续（「把刚才那个任务暂停」「那个任务继续」）。
+ *
+ * 病根：旧判据只锚句首 ⇒ 这类句子既不命中暂停/继续，也不在指令样表里 ⇒ 落进 `handleAgentReply`
+ *   当成"用户回复"写进在途任务并**重启执行**——一句暂停变成一次重启。
+ *
+ * 保守取法：只认两种明确形状——`把/将 … 暂停|继续`，或`…任务/它 暂停|继续`。
+ *   单纯的「继续」仍归确认/回复链（执行中的任务可能真在等用户说"继续"）。
+ */
+const EMBEDDED_PAUSE_BY_RE = /^(?:请|麻烦)?(?:把|将)\s*(.{1,24}?)\s*(?:暂停|停下|停下来|停一下)$/;
+const EMBEDDED_RESUME_BY_RE = /^(?:请|麻烦)?(?:把|将)\s*(.{1,24}?)\s*(?:继续|恢复)(?:执行|跑|做|工作)?$/;
+const EMBEDDED_PAUSE_TASK_RE = /^(.{1,24}?(?:任务|它))\s*(?:暂停|停下|停下来|停一下)$/;
+const EMBEDDED_RESUME_TASK_RE = /^(.{1,24}?(?:任务|它))\s*(?:继续|恢复)(?:执行|跑|做|工作)?$/;
+
+/** 任务名清洗：去掉引导词/引号/`@项目`/指代词与"任务"后缀；清成空串 = 让用户按编号选。 */
+function cleanTaskQuery(rest: string): string {
+  return rest
+    .replace(/^[\s：:，,、+]+/, '')
+    .replace(/[""“”「『」』]/g, '')
+    .replace(/@[^\s@，。,\.！!？?：:；;、]+/g, '')
+    .replace(/^(?:刚才|刚刚|那个|这个|该|上面的?|前面的?)+/, '')
+    .replace(/^任务[：:，,\s]*/, '')
+    .replace(/(?:这个|那个)?任务$/, '')
+    .replace(/^[\s：:，,、+]+|[\s。！!？?]+$/g, '')
+    .trim();
+}
+
+export function parseTaskPauseResume(msgText: string): { action: 'pause' | 'resume'; query: string } | null {
+  let action: 'pause' | 'resume' | null = null;
+  let rest = '';
+  if (PAUSE_REGEX.test(msgText)) { action = 'pause'; rest = msgText.replace(PAUSE_REGEX, ''); }
+  else if (RESUME_REGEX.test(msgText)) { action = 'resume'; rest = msgText.replace(RESUME_REGEX, ''); }
+  if (!action) {
+    const text = msgText.trim();
+    const byPause = EMBEDDED_PAUSE_BY_RE.exec(text) ?? EMBEDDED_PAUSE_TASK_RE.exec(text);
+    if (byPause) { action = 'pause'; rest = byPause[1] ?? ''; }
+    else {
+      const byResume = EMBEDDED_RESUME_BY_RE.exec(text) ?? EMBEDDED_RESUME_TASK_RE.exec(text);
+      if (byResume) { action = 'resume'; rest = byResume[1] ?? ''; }
+    }
+  }
+  if (!action) return null;
+  return { action, query: cleanTaskQuery(rest) };
+}
+// 建任务判定（zx_20261110_1 B1）：已收进 `core/im-intent-rules.ts` 的 `classifyImText`，
+//   本文件不再保留第二套 `CREATE_REGEX`——帮助表的「创建任务」行与路由器共用同一份词表。
 
 // ====== 偏好类谓词（**唯一一份**；`handleRememberPreference` 与本表共用）======
 
@@ -122,13 +181,34 @@ export const BUILTIN_IM_COMMANDS: readonly BuiltinImCommand[] = [
     name: '创建任务',
     example: '「创建任务+标题」',
     probe: '创建任务+标题',
-    match: (s) => CREATE_REGEX.test(s),
+    match: (s) => classifyImText(s).kind === 'create',
   },
   {
     name: '启动任务',
     example: '「开始+任务名」；或先「开始」再回复编号',
     probe: '开始+任务名',
     match: (s) => START_REGEX.test(s),
+  },
+  {
+    // zx_20261112_1 B3「答」: 暂停/继续各一条——示例即帮助文案，谓词与路由同一份。
+    name: '暂停任务',
+    example: '「暂停+任务名」；或先「暂停」再回复编号',
+    probe: '暂停+任务名',
+    match: (s) => PAUSE_REGEX.test(s),
+  },
+  {
+    name: '继续任务',
+    example: '「继续+任务名」；或先「继续」再回复编号',
+    probe: '继续+任务名',
+    match: (s) => RESUME_REGEX.test(s),
+  },
+  {
+    // zx_20261111_3「证」: 建单回执里承诺的纠正路径——**帮助表必须真有这一条**（承诺过的动作要能点到）。
+    //   谓词取 `core/im-echo.ts` 的同一份正则，不在这里另写一份「撤销|撤回」。
+    name: '撤销刚建的任务',
+    example: '「撤销」或「撤回」',
+    probe: '撤销',
+    match: (s) => UNDO_COMMAND_RE.test(s),
   },
   {
     name: '系统状态',
@@ -166,3 +246,30 @@ export const BUILTIN_IM_COMMANDS: readonly BuiltinImCommand[] = [
     match: (s) => parseApprovalCommand(s) !== null,
   },
 ];
+
+/**
+ * 首聊欢迎里挑出来的 6 条（zx_20261112_1 B3「答」）。按**名字**从表里取——
+ *   文案与谓词仍只有一处真源；改表即改欢迎，不另抄一份话术。
+ */
+export const WELCOME_COMMAND_NAMES = [
+  '创建任务',
+  '系统状态',
+  '启动任务',
+  '暂停任务',
+  '继续任务',
+  '撤销刚建的任务',
+] as const;
+
+/**
+ * 首条私聊的欢迎语（每渠道每用户终身一次，由路由层的会话行判定）。
+ * 只列「照做真能用」的 6 条 + 一句看全部；表里某条被删就少一行，**不补假文案**。
+ */
+export function buildWelcomeText(): string {
+  const lines = ['👋 你好，我是工蚁。你把活儿说出来，我来安排：'];
+  for (const name of WELCOME_COMMAND_NAMES) {
+    const cmd = BUILTIN_IM_COMMANDS.find((c) => c.name === name);
+    if (cmd) lines.push(`· ${cmd.name} — ${cmd.example}`);
+  }
+  lines.push('回复「帮助」查看全部指令。');
+  return lines.join('\n');
+}

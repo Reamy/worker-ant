@@ -416,8 +416,12 @@ async function main(): Promise<void> {
     // 反证：**不得**把显示改成人民币而底层仍按美元筛（名实不符 ⇒ 红）
     ok(/模型单价上限（美元/.test(SP) && !/模型单价上限（[^）]*人民币/.test(SP),
       'D-2 ★反证（名实相符）：显示币种仍写「美元」——ANS 定价基准即美元，改显示而不改底层才是本仓反复点名的病');
-    ok(SP.includes('MAX_COST_PER_1K_KEY') && /settings:set['"],\s*MAX_COST_PER_1K_KEY/.test(SP),
-      'D-2b 且写入那一跳仍绑同一键（`MAX_COST_PER_1K_KEY`）——改的是文案，数据路一字未动');
+    // zx_20261108_1 B5：设置页写口收敛到统一 `saveSetting`（写失败回滚 + 可见原因），
+    //   故写入一跳不再逐键直调 `settings:set`——按符号重定向：键仍由 `MAX_COST_PER_1K_KEY` 绑定，
+    //   `settings:set` 只在写口内一处发出。数据路一字未动。
+    ok(SP.includes('MAX_COST_PER_1K_KEY') && /saveSetting\([^)]*MAX_COST_PER_1K_KEY/.test(SP)
+      && SP.includes("invoke('settings:set', key, value)"),
+      'D-2b 写入那一跳仍绑同一键（`MAX_COST_PER_1K_KEY`）并交给统一写口发出 `settings:set`——改的是文案，数据路一字未动');
     // ⚠ 读**原文**不是去注释面：该语义写在 JSDoc 里（承 feedback_static_sweep_comment_strip：
     //   "代码含 X"类判据仍读原文；此处判的正是**文档语义**本身，剥离注释就把它判没了）。
     ok(RD(`${A}/src/main/core/model-request.ts`).includes('美元/1k tokens'),

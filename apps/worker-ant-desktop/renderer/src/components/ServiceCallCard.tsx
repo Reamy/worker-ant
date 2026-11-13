@@ -17,6 +17,8 @@ import { SERVICE_CALL_KIND_LABEL, type ServiceCallReport } from '../../../src/ma
 export default function ServiceCallCard({ projectId }: { projectId: string }) {
   const [report, setReport] = useState<ServiceCallReport | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // zx_20261113_3 B1：只影响展示，不删账；默认显示（历史留痕）。
+  const [hideProbe, setHideProbe] = useState(false);
 
   const load = useCallback(async () => {
     if (!projectId) return;
@@ -40,6 +42,8 @@ export default function ServiceCallCard({ projectId }: { projectId: string }) {
 
   const byKind = report?.byKind ?? [];
   const total = report?.total ?? 0;
+  const probeCount = report ? report.recent.filter(r => r.probe || !r.taskExists).length : 0;
+  const shownRecent = report ? (hideProbe ? report.recent.filter(r => !(r.probe || !r.taskExists)) : report.recent) : [];
 
   return (
     <div className="mt-3 bg-white rounded-lg border p-4">
@@ -50,6 +54,9 @@ export default function ServiceCallCard({ projectId }: { projectId: string }) {
             <span className="text-[10px] font-normal px-1.5 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
               共 {total} 笔 · 成功 {report.ok} / 失败 {report.failed}
             </span>
+          )}
+          {probeCount > 0 && (
+            <span className="text-[10px] font-normal text-gray-400">含 {probeCount} 笔探针/孤账（历史留痕，未删除）</span>
           )}
         </h3>
         <div className="flex items-center gap-2">
@@ -81,18 +88,37 @@ export default function ServiceCallCard({ projectId }: { projectId: string }) {
                     : `均 ${k.avgMs ?? 0}ms${k.maxMs != null ? ` · 峰值 ${k.maxMs}ms` : ''}${k.lastAt ? ` · 最近 ${formatDbTime(k.lastAt)}` : ''}`}
                 </p>
                 {k.lastError != null && (
-                  <p className="text-[10px] text-red-500 mt-0.5 truncate" title={k.lastError}>最近失败：{k.lastError || '（原因未记录）'}</p>
+                  <p className="text-[10px] text-red-500 mt-0.5 truncate" title={k.lastError}>
+                    最近失败：{k.lastError || '（原因未记录）'}{k.lastErrorAt ? `（${formatDbTime(k.lastErrorAt)}）` : ''}
+                  </p>
+                )}
+                {k.lastOutcome && (
+                  <p className={`text-[10px] mt-0.5 ${k.lastOutcome === 'ok' ? 'text-green-600' : 'text-red-500'}`}>
+                    最近一次：{k.lastOutcome === 'ok' ? '成功' : '失败'}{k.lastOutcomeAt ? ` @ ${formatDbTime(k.lastOutcomeAt)}` : ''}
+                  </p>
                 )}
               </div>
             ))}
           </div>
 
-          <p className="text-[11px] text-gray-400 mb-1">最近 {report.recent.length} 笔</p>
+          <div className="flex items-center gap-2 mb-1">
+            <p className="text-[11px] text-gray-400">
+              最近 {shownRecent.length} 笔{hideProbe && report.recent.length > shownRecent.length ? `（已隐藏 ${report.recent.length - shownRecent.length} 笔探针/孤账）` : ''}
+            </p>
+            {probeCount > 0 && (
+              <label className="ml-auto flex items-center gap-1 text-[11px] text-gray-500 cursor-pointer">
+                <input type="checkbox" checked={hideProbe} onChange={e => setHideProbe(e.target.checked)} className="w-3 h-3" />
+                隐藏探针/孤账
+              </label>
+            )}
+          </div>
           <div className="space-y-0.5 max-h-48 overflow-y-auto">
-            {report.recent.map((r, i) => (
+            {shownRecent.map((r, i) => (
               <div key={i} className="flex items-center gap-2 text-xs py-0.5">
                 <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${r.ok ? 'bg-green-500' : 'bg-red-500'}`} />
                 <span className="text-gray-400 w-24 shrink-0">{SERVICE_CALL_KIND_LABEL[r.kind] ?? r.kind}</span>
+                {!r.taskExists && <span className="text-[10px] px-1 py-0.5 rounded bg-amber-50 text-amber-700 shrink-0" title="产生该调用的任务已被删除">任务已删除</span>}
+                {r.probe && <span className="text-[10px] px-1 py-0.5 rounded bg-gray-100 text-gray-500 shrink-0" title="占位/探针服务器名——历史留痕，未删除">探针</span>}
                 <span className="font-mono text-gray-700 truncate">{r.target || '—'}</span>
                 <span className="text-gray-400 shrink-0">{r.operation}</span>
                 <span className="text-gray-400 shrink-0">{r.durationMs}ms</span>

@@ -146,6 +146,7 @@ import { TEAM_FEATURE_LABEL, TEAM_FEATURES, teamFeatureRefusal } from '../apps/w
 import { TeamLibraryError, importItem, shareItem } from '../apps/worker-ant-desktop/src/main/core/team-library.js';
 import { buildMemoryContext } from '../apps/worker-ant-desktop/src/main/core/memory-context.js';
 import { MemoryManager } from '../apps/worker-ant-desktop/src/main/core/memory-manager.js';
+import { INJECTION_SOURCE } from '../apps/worker-ant-desktop/src/main/core/injection-sources.js';
 import { estimateTokensFromChars } from '../apps/worker-ant-desktop/src/main/core/token-estimate.js';
 import { TEAM_ITEM_KINDS, TEAM_ITEM_KIND_LABEL } from '../packages/shared-types/src/team.js';
 import { PRO_FEATURES, PRO_FEATURE_LABEL } from '../apps/worker-ant-desktop/src/main/core/pro-gate.js';
@@ -1257,7 +1258,11 @@ async function groupF(): Promise<void> {
       const page = read(SETTINGS_PAGE);
       ok(/toggleStrictFallback/.test(page), 'F-4h 设置页有严格备用的写入口');
       ok(/<Switch on=\{strictFallback\} onToggle=\{toggleStrictFallback\} \/>/.test(page), 'F-4i 设置页开关已渲染（承诺的开关须点得到）');
-      ok(/sf === 'true' \|\| sf === '1' \|\| sf === 'on'/.test(page), 'F-4j 面板读端与引擎同口径认三种"开"写法');
+      // zx_20261108_1 B5：面板不再手写三写法，改由 main 唯一判据 `parseTriState` 读回——
+      //   判据只此一处（设置页无 `sf === 'true' || …` 副本），三写法由该判据自身覆盖。
+      ok(/parseTriState\(all\['engine\.capability_strict_fallback'\]\) === 'true'/.test(page)
+        && /v === 'true' \|\| v === '1' \|\| v === 'on'/.test(sb),
+        'F-4j 面板读端经唯一判据 `parseTriState` 读回，三写法仍由该判据认');
       ok(/engine\.capability_strict_fallback', on \? 'true' : 'false'/.test(page), 'F-4k 面板写入 true/false 与规范化迁移同写法');
     }
   } finally {
@@ -1911,7 +1916,11 @@ function groupH(): void {
       && /profileRefId\(stored\.profile\)/.test(mc),
       'H-8i 注入段与逐段留账都调画像模块（不另写渲染/ref_id）');
     ok(/if \(stored\?\.enabled\)/.test(mc), 'H-8j 未启用 ⇒ 不入文（启用才是用户动作）');
-    ok(/'project_profile'/.test(strip(MEMORY_MANAGER_SRC)), 'H-8k 注入账写口认 project_profile 源');
+    // zx_20261107_1 B4：来源字面量收为单源词表 ⇒ 旧钉按符号重定向到**更强**形状
+    //   （写口真用常量 ∧ 常量值确为 project_profile），不是放宽。
+    ok(/INJECTION_SOURCE\.projectProfile/.test(strip(MEMORY_MANAGER_SRC))
+      && INJECTION_SOURCE.projectProfile === 'project_profile',
+      'H-8k 注入账写口认 project_profile 源（经来源词表单源）');
 
     const tlib = strip(TEAM_LIBRARY_SRC);
     ok(/kind === 'project_profile'/.test(tlib) && /insertImportedProfile\(db as never, projectId/.test(tlib),

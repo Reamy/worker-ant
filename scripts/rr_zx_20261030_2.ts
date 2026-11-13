@@ -285,9 +285,10 @@ CREATE UNIQUE INDEX idx_wa_knowledge_cards_key ON wa_knowledge_cards(project_id,
   ok(!!longRow && longRow.text.endsWith('（详见任务验收）'), 'A-10 超预算时以「（详见任务验收）」收口（不静默丢尾）', longRow?.text);
   ok(!!longRow && longRow.tokens <= 60, 'A-11 截断后仍不超 60 token 预算', String(longRow?.tokens));
 
-  const ae = readCode(`${MAIN}/agent-executor.ts`);
-  ok(/const failedItems = summarizeAcceptanceFailures\(payload\.failed\);/.test(ae)
-    && /recordPitfallCandidate\(db, taskRow\.project_id, \{ taskTitle: taskRow\.title, failedItems \}\)/.test(ae),
+  // zx_20261109_1 B6：验收判卷（含候选卡写口）搬至 `exec-acceptance.ts` ⇒ 随实现走。
+  const accept = readCode(`${MAIN}/exec-acceptance.ts`);
+  ok(/const failedItems = summarizeAcceptanceFailures\(payload\.failed\);/.test(accept)
+    && /recordPitfallCandidate\(db, taskRow\.project_id, \{ taskTitle: taskRow\.title, failedItems \}\)/.test(accept),
     'A-12 接线在册：摘要单源同喂记忆正文与候选卡写口');
 }
 

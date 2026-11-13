@@ -58,3 +58,30 @@ export function statusText(table: Record<string, string>, status: unknown): stri
   const s = String(status ?? '');
   return table[s] || s;
 }
+
+/**
+ * 任务状态章的**色调**真源（zx_20261107_1 B9）。
+ * 病根：`TaskDetailPage.STATUS_COLOR` 有 12 个键、`TasksPage.STATUS_COLOR` 只有 8 个——
+ * 同一张「准备中」的任务，详情页是蓝底、列表页落到兜底灰底。色调与文案同属「状态怎么显示」，
+ * 故与 `TASK_STATUS_LABEL` 放在一处、按同一取值域穷举。
+ * 只给类名，不给含义；未知取值按中性灰（不认识 ≠ 有某种颜色含义）。
+ */
+export const TASK_STATUS_TONE: Record<string, string> = {
+  pending: 'bg-gray-100 text-gray-600',
+  planning: 'bg-blue-50 text-blue-600',
+  preparing: 'bg-blue-100 text-blue-600',
+  executing: 'bg-yellow-100 text-yellow-700',
+  running: 'bg-yellow-100 text-yellow-700',
+  completed: 'bg-green-100 text-green-700',
+  failed: 'bg-red-100 text-red-600',
+  paused: 'bg-orange-100 text-orange-600',
+  investigating: 'bg-purple-50 text-purple-600',
+  stabilizing: 'bg-amber-50 text-amber-700',
+  archived: 'bg-gray-200 text-gray-600',
+};
+
+/** 任务状态章色调。未知取值取中性灰（与 `statusText` 的「如实回显」是两个维度，故分开）。 */
+export function taskStatusPill(status: unknown): string {
+  const s = String(status ?? '');
+  return TASK_STATUS_TONE[s] || 'bg-gray-100';
+}

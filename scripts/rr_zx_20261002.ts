@@ -36,8 +36,11 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { checkBuildPins } from './lib/rr-pins.js';
 // A · M1：通道判据/文案派生一律调**生产导出**（G-1：不自造一份等价实现再拿它自证）
+// zx_20261107_1 B9：字节换算统一到 `lib/format` 后，im-reminder 不再导出 `formatBytes`
+//   （它改为"先判有效性再调真源"，未知/空返回空串）。A3-g 因此改经**真实消费路径**
+//   `imInboundNotice` 证同一件事，而不是直接调一个本模块已不再拥有的函数。
 import {
-  imReminderChannel, isImRoute, imInboundNotice, formatBytes,
+  imReminderChannel, isImRoute, imInboundNotice,
 } from '../apps/worker-ant-desktop/renderer/src/lib/im-reminder.js';
 // B · M2：未读账**真实现**（模块 electron-free ⇒ rr 直跑生产函数，不切 handler 源码）
 import {
@@ -124,7 +127,11 @@ function groupA(): void {
   ok(media.body.includes('photo.png'), 'A3-d 媒体正文带件名');
   ok(media.body.includes('2.0 KB'), 'A3-e 媒体正文带大小');
   ok(imInboundNotice({}).title.includes('未知联系人'), 'A3-f ★字段缺失如实说"未知联系人"，不编造');
-  eq(formatBytes(undefined), '', 'A3-g 大小缺失 ⇒ 空串（不写 0 B 冒充有值）');
+  // A3-e 是"有大小 ⇒ 印大小"的正面标本；本条是同一判据的另一半：缺失 ⇒ 不印（不以 0 B 冒充）。
+  // 走 `imInboundNotice` 而非格式化函数本身——"缺字段不编造"是**文案层**的承诺，就该在文案上证。
+  const noSize = imInboundNotice({ fromUser: '王五', kind: 'file', fileName: 'a.pdf' });
+  ok(noSize.body.includes('a.pdf') && !noSize.body.includes('（') && !/\b0(\.0+)?\s*B\b/.test(noSize.body),
+    'A3-g 大小缺失 ⇒ 正文不印大小（不写 0 B 冒充有值）');
 
   // A4 接线形状（读**原文**，不去注释；锚点钉语句形状）
   const layout = RD(`${A}/renderer/src/components/AppLayout.tsx`);
