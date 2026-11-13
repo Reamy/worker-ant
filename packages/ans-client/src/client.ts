@@ -179,15 +179,20 @@ export class AnsClient {
     }
   }
 
-  async getOptimalModel(req: ModelRequirements): Promise<ModelEndpoint & { fallback?: ModelEndpoint; usedLocalFallback?: boolean }> {
+  async getOptimalModel(
+    req: ModelRequirements,
+  ): Promise<ModelEndpoint & { fallback?: ModelEndpoint; usedLocalFallback?: boolean }> {
     const cacheKey = JSON.stringify(req);
     const cached = this.modelCache.get(cacheKey);
     if (cached) return cached;
 
-    const result = await this.request<ModelEndpoint & { fallback?: ModelEndpoint; usedLocalFallback?: boolean }>('/api/v1/models/optimal', {
-      method: 'POST',
-      body: JSON.stringify(req),
-    });
+    const result = await this.request<ModelEndpoint & { fallback?: ModelEndpoint; usedLocalFallback?: boolean }>(
+      '/api/v1/models/optimal',
+      {
+        method: 'POST',
+        body: JSON.stringify(req),
+      },
+    );
     // zx_20260924 M6-e①: 只缓存**真的点到名**的那一份（成功路必带 `id`；零命中/解密失败的 `{error}` 体不带）。
     //   此前按 HTTP 200 一律入缓存，而 ANS 的零命中回的是 **200 + 错误体** ⇒ 一次瞬时漏斗空转
     //   被固化成一分钟内"这批能力没有模型"——可"没有模型"这件事，一分钟后可能就不成立了

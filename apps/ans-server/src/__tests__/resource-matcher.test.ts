@@ -1,6 +1,11 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import Database from 'better-sqlite3';
-import { matchOptimalModel, EP_FUNNEL_ANY_CAPABILITY, isLocalEndpoint, orderRemoteFirst } from '../services/resource-matcher.js';
+import {
+  matchOptimalModel,
+  EP_FUNNEL_ANY_CAPABILITY,
+  isLocalEndpoint,
+  orderRemoteFirst,
+} from '../services/resource-matcher.js';
 import { capabilityContextFloor, effectiveContextFloor } from '../services/model-context-floor.js';
 
 describe('Resource Matcher', () => {
@@ -482,7 +487,9 @@ describe('B2: 远端优先（preferRemote）', () => {
         expect(r.primary?.id).toBe('eRemote');
         expect(r.usedLocalFallback).toBe(false);
       }
-    } finally { db.close(); }
+    } finally {
+      db.close();
+    }
   });
 
   it('池中只有本地 ⇒ 仍选本地，usedLocalFallback=true（如实降级，不报无模型）', () => {
@@ -492,7 +499,9 @@ describe('B2: 远端优先（preferRemote）', () => {
       const r = matchOptimalModel(db, { capabilities: ['chat'], strategy: 'balanced', preferRemote: true });
       expect(r.primary?.id).toBe('eLocal');
       expect(r.usedLocalFallback).toBe(true);
-    } finally { db.close(); }
+    } finally {
+      db.close();
+    }
   });
 
   it('不带 preferRemote ⇒ 回包无 usedLocalFallback 键（旧调用方形状不变）', () => {
@@ -500,7 +509,9 @@ describe('B2: 远端优先（preferRemote）', () => {
     try {
       const r = matchOptimalModel(db, { capabilities: ['chat'], strategy: 'balanced' });
       expect('usedLocalFallback' in r).toBe(false);
-    } finally { db.close(); }
+    } finally {
+      db.close();
+    }
   });
 
   it('IPv6 本机回环也按本地认（否则会被当远端选进去）', () => {

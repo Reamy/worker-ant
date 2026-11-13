@@ -36,12 +36,14 @@ export function callCountOf(qualityCount: number, billingCount: number): number 
 export function backfillModelRefs(db: Db): void {
   for (const table of ['ans_billing_records', 'ans_model_quality_logs']) {
     try {
-      db.prepare(`
+      db.prepare(
+        `
         UPDATE ${table}
            SET model_id = (SELECT m.id FROM ans_ai_models m WHERE m.name = ${table}.model_id)
          WHERE model_id NOT IN (SELECT id FROM ans_ai_models)
            AND (SELECT COUNT(*) FROM ans_ai_models m WHERE m.name = ${table}.model_id) = 1
-      `).run();
+      `,
+      ).run();
     } catch {
       /* 该表未建（迁移早期）⇒ 跳过这一张；下次启动再试 */
     }
@@ -52,7 +54,9 @@ export function resolveModelId(db: Db, raw: unknown): string {
   const ref = String(raw ?? '').trim();
   if (!ref) return ref;
   try {
-    const byId = db.prepare('SELECT 1 AS hit FROM ans_ai_models WHERE id = ? LIMIT 1').get(ref) as { hit?: number } | undefined;
+    const byId = db.prepare('SELECT 1 AS hit FROM ans_ai_models WHERE id = ? LIMIT 1').get(ref) as
+      | { hit?: number }
+      | undefined;
     if (byId) return ref;
     const rows = db.prepare('SELECT id FROM ans_ai_models WHERE name = ? LIMIT 2').all(ref) as Array<{ id?: string }>;
     if (rows.length === 1 && typeof rows[0]?.id === 'string' && rows[0].id) return rows[0].id;

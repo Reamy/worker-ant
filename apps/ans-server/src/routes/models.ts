@@ -178,7 +178,8 @@ export function modelsRoutes(db: Database.Database) {
           .all(...paginationArgs(page)) as Array<Record<string, unknown>>;
         const data = rows.map((r) => {
           // zx_20261112_2 B4：调用数 = 计费行与质量行**取较大者**（同一批调用不双计，同 `GET /providers`）。
-          const { _quality_count, _billing_count, _success_rate, _avg_latency, _token_eff, _cost, _tokens, ...rest } = r;
+          const { _quality_count, _billing_count, _success_rate, _avg_latency, _token_eff, _cost, _tokens, ...rest } =
+            r;
           const qualityCount = (_quality_count as number) || 0;
           const callCount = callCountOf(qualityCount, _billing_count as number);
           const stats = {
@@ -405,7 +406,9 @@ export function modelsRoutes(db: Database.Database) {
           | { id: string; model_id: string; url: string; api_key_ref: string }
           | undefined;
         if (!ep) throw notFound('Endpoint', id);
-        const modelName = (db.prepare('SELECT name FROM ans_ai_models WHERE id = ?').get(ep.model_id) as { name?: string } | undefined)?.name || '';
+        const modelName =
+          (db.prepare('SELECT name FROM ans_ai_models WHERE id = ?').get(ep.model_id) as { name?: string } | undefined)
+            ?.name || '';
         let apiKey: string;
         try {
           apiKey = decryptApiKey(ep.api_key_ref);
@@ -427,9 +430,10 @@ export function modelsRoutes(db: Database.Database) {
           const testReq = buildEndpointTestRequest(ep.url, modelName);
           const r = await fetch(testReq.url, {
             method: testReq.method,
-            headers: testReq.body === undefined
-              ? { Authorization: `Bearer ${apiKey}` }
-              : { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+            headers:
+              testReq.body === undefined
+                ? { Authorization: `Bearer ${apiKey}` }
+                : { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
             body: testReq.body === undefined ? undefined : JSON.stringify(testReq.body),
             signal: AbortSignal.timeout(5_000),
           });

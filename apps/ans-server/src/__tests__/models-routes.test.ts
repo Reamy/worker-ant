@@ -343,12 +343,19 @@ describe('models routes', () => {
   });
 
   it('M6: 协议自适应纯函数——OpenAI 基址 GET /models；/v1/embeddings POST 原 URL', () => {
-    expect(buildEndpointTestRequest('https://api.openai.com/v1')).toEqual({ method: 'GET', url: 'https://api.openai.com/v1/models' });
+    expect(buildEndpointTestRequest('https://api.openai.com/v1')).toEqual({
+      method: 'GET',
+      url: 'https://api.openai.com/v1/models',
+    });
     expect(buildEndpointTestRequest('https://x/v1/embeddings', 'e')).toEqual({
-      method: 'POST', url: 'https://x/v1/embeddings', body: { model: 'e', input: 'ping' },
+      method: 'POST',
+      url: 'https://x/v1/embeddings',
+      body: { model: 'e', input: 'ping' },
     });
     expect(buildEndpointTestRequest('http://h/api/embeddings', 'e')).toEqual({
-      method: 'POST', url: 'http://h/api/embeddings', body: { model: 'e', prompt: 'ping' },
+      method: 'POST',
+      url: 'http://h/api/embeddings',
+      body: { model: 'e', prompt: 'ping' },
     });
   });
 });
@@ -376,7 +383,11 @@ describe('B6: 币种单源三出口', () => {
       INSERT INTO ans_ai_models (id, provider_id, name, capabilities, source) VALUES ('my-local', 'uuid-user', 'my-local', '["chat"]', 'user');
     `);
     const enc = encryptApiKey('sk-test');
-    b6db.prepare("INSERT INTO ans_model_endpoints (id, model_id, url, api_key_ref) VALUES ('e-openai', 'gpt-6-astra', 'https://api.openai.com/v1', ?)").run(enc);
+    b6db
+      .prepare(
+        "INSERT INTO ans_model_endpoints (id, model_id, url, api_key_ref) VALUES ('e-openai', 'gpt-6-astra', 'https://api.openai.com/v1', ?)",
+      )
+      .run(enc);
     b6app = modelsRoutes(b6db);
   });
 

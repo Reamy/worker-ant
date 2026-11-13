@@ -16,7 +16,7 @@ services:
     image: wa-headless:dev
     container_name: wa-headless
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - 'host.docker.internal:host-gateway'
     environment:
       # 容器内的 localhost 不是宿主；必须走 host.docker.internal。
       ANS_SERVER_URL: ${ANS_SERVER_URL:-http://host.docker.internal:27183}
@@ -27,8 +27,8 @@ services:
     volumes:
       - wa-headless-data:/data
     # 默认驻留 1 小时；`--work` 才会真正消费中继任务（否则只领活不执行）。
-    command: ["--duration", "${WA_DURATION:-3600}", "--heartbeat-sec", "${WA_HEARTBEAT_SEC:-5}", "--work"]
-    restart: "no"
+    command: ['--duration', '${WA_DURATION:-3600}', '--heartbeat-sec', '${WA_HEARTBEAT_SEC:-5}', '--work']
+    restart: 'no'
 
 volumes:
   wa-headless-data:
