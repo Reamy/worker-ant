@@ -314,7 +314,10 @@ async function main(): Promise<void> {
     ok(/PAUSE_REASON_OUTPUT_INSUFFICIENT_BUT_CHANGED\s*=\s*'output_insufficient_but_changed'/.test(pr), 'G-2e 因由码字面量在册');
     ok(typeof PAUSE_REASON_LABEL['output_insufficient_but_changed'] === 'string'
       && PAUSE_REASON_LABEL['output_insufficient_but_changed'].length > 0, 'G-2f 因由人有话可读（词表一处）');
-    ok(/PAUSE_REASON_OUTPUT_INSUFFICIENT_BUT_CHANGED;/.test(pr), 'G-2g 取值域收录（无因暂停在类型层不可表达）');
+    // zx_20261115_2 M1：取值域又增 `relay_tree_expired`——原判据"该常量恰在末尾带分号"会因新增成员而假红；
+    //   改为钉**整个联合体含这两个成员**（更强：既保旧成员在册，也要求新成员在册）。
+    ok(/export type PauseReason[\s\S]{0,3000}PAUSE_REASON_OUTPUT_INSUFFICIENT_BUT_CHANGED[\s\S]{0,200}PAUSE_REASON_RELAY_TREE_EXPIRED;/.test(pr),
+      'G-2g 取值域收录（旧成员 + relay_tree_expired 同在类型层）');
 
     const acc = CODE(`${A}/src/main/core/acceptance-check.ts`);
     ok(acc.includes('ambiguous_paths'), 'G-2h 载荷带 `ambiguous_paths`');

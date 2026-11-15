@@ -65,6 +65,8 @@ import {
   listAppliedDomainPacks,
   listSuggestedDomainPacks,
 } from '../core/domain-pack.js';
+// zx_20261115_3 M5「传」：按任务题面命中的候选包建议（只读；启用仍走 packs:apply）。
+import { suggestDomainPacksForTask } from '../core/domain-pack-suggest.js';
 
 type IpcFailure = { error: { code: string; message: string } };
 
@@ -320,6 +322,20 @@ export function initKnowledgeIpc(db: Database.Database, dataDir: string): void {
       if (!projectId) return { error: { code: 'INVALID_REQUEST', message: '缺少项目 id' } } satisfies IpcFailure;
       const limit = typeof input?.limit === 'number' ? input.limit : 5;
       return { data: { packs: listSuggestedDomainPacks(db as never, projectId, limit) } };
+    } catch (e) {
+      return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } } satisfies IpcFailure;
+    }
+  });
+
+  // zx_20261115_3 M5：**按任务题面**的候选包建议（建单弹窗用，≤2 条；0 命中返回空数组）。
+  //   只读：不写库、不启用；候选过滤复用 `listSuggestedDomainPacks`（已忽略/已启用/本项目派生都不出）。
+  ipcMain.handle('packs:suggestForTask', async (_event, input?: { projectId?: unknown; taskText?: unknown; limit?: unknown }) => {
+    try {
+      const projectId = projectIdOf(input);
+      if (!projectId) return { error: { code: 'INVALID_REQUEST', message: '缺少项目 id' } } satisfies IpcFailure;
+      const taskText = typeof input?.taskText === 'string' ? input.taskText.slice(0, 4000) : '';
+      const limit = typeof input?.limit === 'number' ? input.limit : 2;
+      return { data: { packs: suggestDomainPacksForTask(db, projectId, taskText, limit) } };
     } catch (e) {
       return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } } satisfies IpcFailure;
     }

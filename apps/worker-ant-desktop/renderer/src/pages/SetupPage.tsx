@@ -7,9 +7,12 @@
  *   那页是可跳过的偏好问卷，答的是"你习惯什么"。此前二者混为一页（旧 `OnboardingPage` 只采偏好），
  *   于是新用户装完看到一张 17 题问卷，却始终没跑出东西——漏斗第一跳就漏在这里。
  *
- * 四步（每一步都用**生产既有的** IPC，不自造接口）：
- *   ① 连接模型：填 ANS 地址/凭据（模型由 ANS 网关提供）→ ② ANS 自检（可达？有模型？）
- *   → ③ 选/建项目 → ④ 选模板建第一个任务。
+ * 三步（每一步都用**生产既有的** IPC，不自造接口）：
+ *   ① 接通 AI 资源：填 ANS 地址/凭据 → 就地自检（可达？有 chat 模型？）**同屏**呈现；
+ *   ② 选/建项目；③ 选模板建第一个任务。
+ *
+ * zx_20261115_4 M6「启」：原为四步（连接模型 / ANS 自检 / 项目 / 首成果）——但 "连接" 与 "自检"
+ *   是同一件事的两面，分两屏让人以为要配两次。今合为一屏一步，与用户点名的"三步引导"对齐。
  *
  * ⚠ 首启判据**不在此页**：真源在 main `core/first-run.ts`，渲染层经 `lib/firstRun.ts` 读。
  */
@@ -42,7 +45,7 @@ interface ProbeState {
 }
 const PROBE_IDLE: ProbeState = { phase: 'idle', reachable: false, note: '', read: 'ok', catalog: 0, available: 0, hasChat: false, hasEmbedding: false };
 
-const STEPS = ['连接模型', 'ANS 自检', '选 / 建项目', '跑出第一个成果'] as const;
+const STEPS = ['接通 AI 资源', '选 / 建项目', '跑出第一个成果'] as const;
 
 export default function SetupPage() {
   const navigate = useNavigate();
@@ -178,7 +181,7 @@ export default function SetupPage() {
       const st = await invoke<Record<string, boolean>>('settings:secretStatus').catch(() => ({} as Record<string, boolean>));
       setAnsSecretSet({ apiKey: st?.ans_api_key === true, secretKey: st?.ans_secret_key === true });
       setAnsForm((p) => ({ ...p, apiKey: '', secretKey: '' }));
-      setStep(1);
+      // zx_20261115_4 M6：自检结果同屏呈现，不再跳到下一屏（否则像分了两步）。
       await runProbe();
     } catch (e) {
       setErr((e as Error).message || '保存失败');
@@ -192,7 +195,7 @@ export default function SetupPage() {
     } catch { setProjects([]); }
   };
 
-  const goProjects = async () => { setErr(''); await loadProjects(); setStep(2); };
+  const goProjects = async () => { setErr(''); await loadProjects(); setStep(1); };
 
   const createProject = async () => {
     const name = newProjectName.trim();
@@ -222,7 +225,7 @@ export default function SetupPage() {
       const rows = await invoke<TemplateRow[]>('template:list');
       setTemplates(Array.isArray(rows) ? rows : []);
     } catch { setTemplates([]); }
-    setStep(3);
+    setStep(2);
   };
 
   const runFirstTask = async () => {
@@ -259,7 +262,7 @@ export default function SetupPage() {
       <div className="max-w-2xl mx-auto px-4 pt-8 pb-12">
         <div className="text-center">
           <h1 className="text-2xl font-bold text-gray-900">欢迎使用工蚁</h1>
-          <p className="text-sm mt-1 text-gray-500">四步跑出你的第一个成果</p>
+          <p className="text-sm mt-1 text-gray-500">三步跑出你的第一个成果</p>
         </div>
         {/* zx_20261011_5: 软跳过出口——不想现在配置也能先进桌面看看（判据不变，只免一次；首屏会如实提示缺模型）。 */}
         <div className="flex justify-end mt-3">
@@ -294,20 +297,9 @@ export default function SetupPage() {
                 <input value={ansForm.apiKey} onChange={(e) => setAnsForm({ ...ansForm, apiKey: e.target.value })} placeholder={ansSecretSet.apiKey ? '已配置（留空不修改）' : '未配置'} className={inputCls} /></div>
               <div><label className="block text-sm font-medium mb-1">Secret Key</label>
                 <input type="password" value={ansForm.secretKey} onChange={(e) => setAnsForm({ ...ansForm, secretKey: e.target.value })} placeholder={ansSecretSet.secretKey ? '已配置（留空不修改）' : '未配置'} className={inputCls} /></div>
-              <div className="flex justify-end">
-                <button onClick={saveAndProbe} disabled={saving} className="flex items-center gap-1 px-5 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50">
-                  {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <ChevronRight className="w-4 h-4" />}保存并自检
-                </button>
-              </div>
-            </div>
-          )}
-
-          {step === 1 && (
-            <div className="space-y-4">
-              <div className="flex items-center gap-2 text-gray-900"><ShieldCheck className="w-4 h-4" /><h2 className="font-semibold">ANS 自检</h2></div>
               {probe.phase === 'running' && <p className="flex items-center gap-2 text-sm text-gray-500"><Loader2 className="w-4 h-4 animate-spin" />正在探测 ANS 服务与模型…</p>}
               {probe.phase === 'done' && (
-                <div className="space-y-2">
+                <div className="space-y-2 rounded-lg border border-gray-200 bg-gray-50/60 p-3">
                   <p className={`flex items-center gap-2 text-sm ${probe.reachable ? 'text-green-600' : 'text-amber-600'}`}>
                     {probe.reachable ? <Check className="w-4 h-4" /> : <AlertTriangle className="w-4 h-4" />}
                     {probe.reachable ? 'ANS 服务可达' : `ANS 不可达：${probe.note || '未知原因'}`}
@@ -338,20 +330,26 @@ export default function SetupPage() {
                   </div>
                 </div>
               )}
-              <div className="flex justify-between">
-                <button onClick={() => setStep(0)} className="px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">上一步</button>
-                <div className="flex gap-2">
-                  <button onClick={runProbe} disabled={probe.phase === 'running'} className="px-4 py-2 border rounded-lg text-sm hover:bg-gray-50 disabled:opacity-50">重新自检</button>
-                  {/* 自检未过仍可继续——但如实标注"可能跑不出结果"，不假装通过（承「缺失即如实」纪律）。 */}
-                  <button onClick={goProjects} className={`px-5 py-2 rounded-lg text-sm text-white ${canRun ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-400 hover:bg-gray-500'}`}>
-                    {canRun ? '下一步' : '仍要继续'}
+              <div className="flex justify-end gap-2">
+                {probe.phase === 'done' && (
+                  <>
+                    <button onClick={runProbe} className="px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">重新自检</button>
+                    {/* 自检未过仍可继续——但如实标注"可能跑不出结果"，不假装通过（承「缺失即如实」纪律）。 */}
+                    <button onClick={goProjects} className={`px-5 py-2 rounded-lg text-sm text-white ${canRun ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-400 hover:bg-gray-500'}`}>
+                      {canRun ? '下一步' : '仍要继续'}
+                    </button>
+                  </>
+                )}
+                {probe.phase !== 'done' && (
+                  <button onClick={saveAndProbe} disabled={saving} className="flex items-center gap-1 px-5 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50">
+                    {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <ChevronRight className="w-4 h-4" />}保存并自检
                   </button>
-                </div>
+                )}
               </div>
             </div>
           )}
 
-          {step === 2 && (
+          {step === 1 && (
             <div className="space-y-4">
               <div className="flex items-center gap-2 text-gray-900"><FolderPlus className="w-4 h-4" /><h2 className="font-semibold">选择或新建项目</h2></div>
               {projects.length > 0 && (
@@ -371,13 +369,13 @@ export default function SetupPage() {
                 </div>
               </div>
               <div className="flex justify-between">
-                <button onClick={() => setStep(1)} className="px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">上一步</button>
+                <button onClick={() => setStep(0)} className="px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">上一步</button>
                 <button onClick={() => goTemplates()} disabled={!picked} className="px-5 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50">下一步</button>
               </div>
             </div>
           )}
 
-          {step === 3 && (
+          {step === 2 && (
             <div className="space-y-4">
               <div className="flex items-center gap-2 text-gray-900"><Rocket className="w-4 h-4" /><h2 className="font-semibold">跑出第一个成果</h2></div>
               <p className="text-xs text-gray-500">选一个开箱模板，工蚁会自动拆解并执行——这是你的第一个成果。</p>
@@ -395,11 +393,11 @@ export default function SetupPage() {
               {probe.phase === 'done' && !probe.hasChat && (
                 <p className="flex items-start gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
                   <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-                  <span>当前无可用 chat 模型——任务会创建，但**可能跑不出成果**（执行侧选不到模型会如实记 no_model）。回第 ② 步：在配置区为该模型填写端点与 Key。</span>
+                  <span>当前无可用 chat 模型——任务会创建，但**可能跑不出成果**（执行侧选不到模型会如实记 no_model）。回第 ① 步：在配置区为该模型填写端点与 Key。</span>
                 </p>
               )}
               <div className="flex justify-between">
-                <button onClick={() => setStep(2)} className="px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">上一步</button>
+                <button onClick={() => setStep(1)} className="px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">上一步</button>
                 <button onClick={runFirstTask} disabled={busy || !pickedTpl} className="flex items-center gap-1 px-5 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50">
                   {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Rocket className="w-4 h-4" />}创建并开始
                 </button>
@@ -411,7 +409,7 @@ export default function SetupPage() {
         </div>
 
         <p className="text-center mt-4">
-          <button onClick={() => { invalidateNeedsSetup(); navigate('/preferences-wizard'); }} className="text-xs text-gray-400 hover:text-gray-600">已完成设置？前往偏好向导 →</button>
+          <button onClick={() => { invalidateNeedsSetup(); navigate('/preferences-wizard'); }} className="text-xs text-gray-400 hover:text-gray-600">偏好设置（可选）→</button>
         </p>
       </div>
     </div>

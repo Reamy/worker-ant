@@ -31,7 +31,8 @@ import path from 'node:path';
 import { resolveChatCompletionsUrl } from '@worker-ant/ans-client';
 import { createLogger } from './logger.js';
 import { parseDepIds, resolveIndexDeps } from './dep-graph.js';
-import { MAX_TASK_DEPTH, MAX_CHILD_BREADTH, childBreadthRefusalFor, countActiveChildren, decomposePriority, alreadyDecomposed, milestoneRefsIn, milestoneTitledRefsIn, type AccountingDb } from './task-accounting.js';
+import { MAX_TASK_DEPTH, MAX_CHILD_BREADTH, childBreadthRefusalFor, countActiveChildren, decomposePriority, alreadyDecomposed, inheritedConstraintContext, milestoneRefsIn, milestoneTitledRefsIn, type AccountingDb } from './task-accounting.js';
+import { relayTreeRefusal } from './relay-tree.js';
 import { readBoolSetting, type BoolSettingDb } from './settings-bool.js';
 // zx_20261016_3 M32: 完成分带阈值取**一处真源**（`quality-gate.ts` 零 import，可安全直引）——低分族的降权判据不在本文件另写一份。
 import { QUALITY_BANDS } from './quality-gate.js';
@@ -591,10 +592,30 @@ export function planSubtasksFromTemplate(db: AccountingDb, opts: PlanSubtasksOpt
   const template = inferred.templates;
   const planned = template.length;
   const childDepth = opts.depth + 1;
+  /**
+   * zx_20261115_1 M6（真标本：跨机 E2E 首次跑到自动拆解）：
+   * **父任务"不可交互"必须传给子任务**。父任务由外部终端/对端派来（`no_interaction=true`），
+   * 拆出来的小孩却按"可交互"跑 ⇒ 一旦命中路径审批/提问就停在 `paused`，而远端根本没有人能批，
+   * 整条链就此卡死（真机上观察到的就是子任务 `pause_reason=awaiting_input`）。
+   * 只读一次父行；读不到 ⇒ false（**不因读不到而误抑制**）。
+   */
+  let parentCtx: Record<string, unknown> = {};
+  let parentPositionId = '';
+  try {
+    const prow = db.prepare('SELECT context_json, position_id FROM wa_tasks WHERE id = ?').get(opts.parentTaskId) as
+      | { context_json?: string | null; position_id?: string | null }
+      | undefined;
+    parentCtx = JSON.parse(prow?.context_json || '{}') as Record<string, unknown>;
+    parentPositionId = typeof prow?.position_id === 'string' ? prow.position_id : '';
+  } catch { parentCtx = {}; parentPositionId = ''; }
   const empty = { created: 0, planned, childIds: [] as string[], noDepCount: 0, droppedDeps: 0, droppedDepNotes: [] as string[], inferredDeps: inferred.inferred, preflight: null as DispatchPreflightRecord | null };
   if (childDepth > MAX_TASK_DEPTH) {
     return { ...empty, refusal: `子任务嵌套深度 ${childDepth} 超过上限 ${MAX_TASK_DEPTH}（父任务已在第 ${opts.depth} 层）` };
   }
+  // zx_20261115_2 M1：中继派单的任务树另有**相对深度 / 总任务数 / 总时窗**三道界——
+  //   与全局 MAX_TASK_DEPTH 是两把尺（后者管所有任务，前者只管派来的活），判据只在 relay-tree 一处。
+  const treeRefusal = relayTreeRefusal(db, parentCtx, childDepth);
+  if (treeRefusal) return { ...empty, refusal: treeRefusal };
   const active = countActiveChildren(db, opts.parentTaskId);
   const creatable = Math.min(planned, Math.max(0, MAX_CHILD_BREADTH - active));
   if (creatable === 0) {
@@ -685,10 +706,13 @@ export function planSubtasksFromTemplate(db: AccountingDb, opts: PlanSubtasksOpt
         // zx_20261106_3 B1：外派需求随子任务落库（读不到/坏值 ⇒ 派发时规则派生，向后兼容）。
         // zx_20261107_1 B5：预检结论随需求一并落库（"凭什么说它能派"可当场核对）。
         dispatch_requirements: preflightRecord ? { ...requirements, preflight: preflightRecord } : requirements,
+        // zx_20261115_1 M6：父任务不可交互 ⇒ 子任务同样不可交互。
+        // zx_20261115_2 M2：再随树带上 node_archetype / dispatch_position / relay_tree（显式 contextExtra 仍可覆盖）。
+        ...inheritedConstraintContext(parentCtx),
         ...(opts.contextExtra ?? {}),
       }, template[i]!.acceptance_source);
       db.prepare(
-        'INSERT INTO wa_tasks (id, project_id, title, description, status, priority, context_json, parent_task_id, source, acceptance_criteria, depends_on) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        'INSERT INTO wa_tasks (id, project_id, title, description, status, priority, context_json, parent_task_id, source, acceptance_criteria, depends_on, position_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       ).run(
         childIds[i]!, opts.projectId, template[i]!.title, template[i]!.description,
         // zx_20260924_1 M3-a（J-6）：priority 这一格装的是**拆解序号**（模板序），不是紧要度——
@@ -696,7 +720,7 @@ export function planSubtasksFromTemplate(db: AccountingDb, opts: PlanSubtasksOpt
         //   （`task-scheduler.getReadyTasks` / `control.exit_plan_mode`）同一口径 ⇒ 模板第 1 个最先起跑。
         //   改前写裸 `i` ⇒ 同批无前置子任务里**最后一个反而最先起跑**。换算只此一处（勿在别处重写算式）。
         'pending', decomposePriority(planned, i), JSON.stringify(ctx), opts.parentTaskId, opts.source,
-        template[i]!.acceptance_criteria || '', depsById[i]!,
+        template[i]!.acceptance_criteria || '', depsById[i]!, parentPositionId,
       );
     }
     db.prepare(`RELEASE ${PLAN_SAVEPOINT}`).run();

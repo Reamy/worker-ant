@@ -411,10 +411,19 @@ export default function DashboardPage() {
                   </div>
                 );
               })()}
-              <div className="flex justify-between py-2 border-b"><span className="text-gray-500">架构模式</span><span className="text-blue-600 font-medium">单进程 Electron + IPC</span></div>
-              <div className="flex justify-between py-2 border-b"><span className="text-gray-500">数据库引擎</span><span>better-sqlite3 (WAL)</span></div>
+              {/* zx_20261115_1 M7「真」：这几行**此前是写死的常量**（架构模式/数据库引擎/IPC「连接正常」），
+                  不探活也永远显示正常。没有探针就不显示——换成真正读到的两件事：本次数据什么时候读成功、读没读成。 */}
               <div className="flex justify-between py-2 border-b"><span className="text-gray-500">运行时间</span><span>{health?formatUptime(health.uptime):'—'}</span></div>
-              <div className="flex justify-between py-2"><span className="text-gray-500">IPC 状态</span><span className="text-green-600 font-medium">连接正常</span></div>
+              <div className="flex justify-between py-2 border-b">
+                <span className="text-gray-500">数据读取</span>
+                <span>{healthUpdatedAt ? `${new Date(healthUpdatedAt).toLocaleTimeString()} 成功` : '尚未读取'}</span>
+              </div>
+              <div className="flex justify-between py-2">
+                <span className="text-gray-500">IPC 状态</span>
+                {error
+                  ? <span className="text-red-600 font-medium">读取失败：{error}</span>
+                  : <span className="text-green-600 font-medium">{healthUpdatedAt ? '正常（最近一次读取成功）' : '未读取'}</span>}
+              </div>
             </div>
           </div>
 

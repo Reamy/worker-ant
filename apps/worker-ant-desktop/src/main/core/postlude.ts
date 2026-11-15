@@ -16,7 +16,7 @@
  *   `feedback_json_column_overwrite_wipes_siblings`）。坏 JSON 不覆盖——读不懂就**不写**，如实返回 false。
  */
 
-import { generatePositionLessonCandidate, type PositionDb } from './positions.js';
+import { explainNoLesson, generatePositionLessonCandidateDetailed, type PositionDb } from './positions.js';
 
 /** 后置账作业的类型名（`wa_jobs.type`）。 */
 export const POSTLUDE_JOB_TYPE = 'task-postlude';
@@ -70,7 +70,23 @@ export function markCompletedRun(db: PostludeDb, taskId: string, runId: string |
   //   与 run 账同一处、同一时机（承 B5「损」：两出口只写一处）；准入判据全在 positions.ts
   //   （指派岗位 ∧ 岗位在 ∧ 非外派 ∧ 验收通过 ∧ 有人话摘要），任一不满足如实不写。
   try {
-    generatePositionLessonCandidate(db as unknown as PositionDb, taskId);
+    const r = generatePositionLessonCandidateDetailed(db as unknown as PositionDb, taskId);
+    if (!r.written && r.reason) {
+      // zx_20261115_4 M3「账」：**只对带岗位的任务**说为什么没沉淀——不派岗的任务每单都刷一行就是噪音。
+      //   `already` 也不说：那不是"没沉淀"，是"早就沉淀过"（回执把既有说成缺失是另一种假话）。
+      //   去重按任务（`markCompletedRun` 两个出口可能各调一次）：已有同形行就不再写。
+      const row = db.prepare('SELECT position_id FROM wa_tasks WHERE id = ?').get(taskId) as { position_id?: string } | undefined;
+      const hasPosition = String(row?.position_id ?? '').trim() !== '';
+      if (hasPosition && r.reason !== 'already') {
+        const dup = db.prepare("SELECT 1 FROM wa_task_conversations WHERE task_id = ? AND role = 'system' AND content LIKE '[岗位经验]%' LIMIT 1").get(taskId);
+        if (!dup) {
+          db.prepare('INSERT INTO wa_task_conversations (id, task_id, role, content) VALUES (?, ?, ?, ?)').run(
+            crypto.randomUUID(), taskId, 'system',
+            `[岗位经验] 本单未沉淀岗位经验：${explainNoLesson(r.reason)}。`,
+          );
+        }
+      }
+    }
   } catch { /* 沉淀失败不阻断收口 */ }
   const id = String(runId ?? '').trim();
   if (!id) return;

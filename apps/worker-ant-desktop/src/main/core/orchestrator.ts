@@ -401,7 +401,10 @@ export async function driveOrchestration(
           ready,
           localOccupied: running,
           available,
-          mode,
+          // zx_20261115_1 M4：传**项目解析后的有效模式**，不是全局模式。
+          //   病根：全局 `off`/`capability` + 项目显式 `overflow` 时，外层已按 `resolution.mode`
+          //   判到 overflow，内层却拿全局模式归一成非 overflow ⇒ 恒返回空，项目级设置等于没设。
+          mode: resolution.mode,
           ...(deps.maxPerTick !== undefined ? { maxPerTick: deps.maxPerTick } : {}),
         });
         offered += taskIds.length;

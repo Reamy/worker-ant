@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, Fragment, type ReactElement } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { tasks, projects, admin, nodes, invoke, IpcError, newClientRequestId, type DispatchReasonView } from '../lib/ipc';
+import { tasks, projects, admin, nodes, invoke, IpcError, newClientRequestId, positions as positionsApi, type DispatchReasonView } from '../lib/ipc';
 import { useSettings } from '../lib/settingsStore';
 import { useDeliverableDrawer } from '../lib/deliverableDrawer';
 import { ArrowLeft, Play, Pause, RotateCcw, Plus, RefreshCw, GitBranch, MessageSquare, TrendingUp, AlertTriangle, History, Brain, Edit, Check, Trash2, FileText, Target, X, ChevronDown, ChevronRight, Paperclip, Archive, Terminal, CopyPlus, Users } from 'lucide-react';
@@ -50,6 +50,7 @@ import { formatTokens, formatTimeOrRaw, formatMoney } from '../lib/format';
 import TaskHeader from '../components/task/TaskHeader';
 import TaskProgress from '../components/task/TaskProgress';
 import TaskArtifacts from '../components/task/TaskArtifacts';
+import TaskContextLedger, { type ContextLedgerView, type InjectionSummaryRow } from '../components/task/TaskContextLedger';
 import TaskCost from '../components/task/TaskCost';
 import TaskLogs from '../components/task/TaskLogs';
 // zx_20260930 M4-2: 列表**批次大小**与"这一批之后还有没有下一页"的判据，与成果页/项目详情页**同一份**
@@ -254,6 +255,25 @@ export default function TaskDetailPage() {
   const [archivedAt, setArchivedAt] = useState<string | null>(null);
   const [convs, setConvs] = useState<ConvItem[]>([]);
   const [delivs, setDelivs] = useState<DelivItem[]>([]);
+  // zx_20261115_3 M2「归」：贡献账（本任务树写过、登记不在本树内的文件）与 0 产出的人话解释。
+  const [claimedArtifacts, setClaimedArtifacts] = useState<Array<{ path: string | null; name: string; ownerTaskId: string | null; claimedByTaskId: string | null; deliverableId: string | null; exists: boolean }>>([]);
+  const [artifactsNote, setArtifactsNote] = useState('');
+  const [backfillBusy, setBackfillBusy] = useState(false);
+  // zx_20261115_3 M6「简」：上下文成本账（七源 + 注入摘要）与读失败原因（三态分家）。
+  const [contextLedger, setContextLedger] = useState<ContextLedgerView | null>(null);
+  const [contextLedgerError, setContextLedgerError] = useState('');
+  const [injectionSummary, setInjectionSummary] = useState<InjectionSummaryRow[]>([]);
+  // zx_20261115_3 M2：两处 `task:get` 读点同一次写入（刷新与首次加载不各写各的）。
+  function applyClaimedArtifacts(d: { claimedArtifacts?: typeof claimedArtifacts; artifactsNote?: string }): void {
+    setClaimedArtifacts(d.claimedArtifacts || []);
+    setArtifactsNote(String(d.artifactsNote || ''));
+  }
+  // zx_20261115_3 M6：两处 `task:get` 读点同一次写入上下文账（缺键 = 未记录，错误单独带出）。
+  function applyContextLedger(d: { contextLedger?: ContextLedgerView | null; contextLedgerError?: string; injectionSummary?: InjectionSummaryRow[] }): void {
+    setContextLedger(d.contextLedger ?? null);
+    setContextLedgerError(String(d.contextLedgerError || ''));
+    setInjectionSummary(Array.isArray(d.injectionSummary) ? d.injectionSummary : []);
+  }
   // zx_20260930 M4-2: 对话与成果两列表各自**真分页**（`task:get` 的 `convLimit/convOffset` 与
   //   `delivLimit/delivOffset`，另回 `conversationsTotal`/`deliverablesTotal`）。
   //   `*Total` 是**服务端全量口径**：真库对话链已 2.6 万行，只印"已加载的条数"会把"还没取"
@@ -281,6 +301,10 @@ export default function TaskDetailPage() {
   const [pendingJobAgeMs, setPendingJobAgeMs] = useState<number | null>(null);
   // zx_20261112_1 B2「任」: 指派岗位（main 读时派生 id/name/enabled）；未指派即为 null，头部写「未指派岗位」。
   const [positionView, setPositionView] = useState<{ id: string; name: string; enabled: boolean; missing?: boolean } | null>(null);
+  // zx_20261115_4 M1「岗」：补派/改派——本项目可用岗位候选 + 正在保存。
+  //   此前只能建单时选一次，"当时没选"就永远补不上（真库 362 单只有 1 单带岗位）。
+  const [posOptions, setPosOptions] = useState<Array<{ id: string; name: string }>>([]);
+  const [posSaving, setPosSaving] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [showCreate, setShowCreate] = useState(false);
@@ -833,6 +857,8 @@ export default function TaskDetailPage() {
         setSuggestedCriteria(taskData.suggestedCriteria || []);
         setConvs(taskData.conversations || []);
         setDelivs(taskData.deliverables || []);
+        applyClaimedArtifacts(taskData as unknown as { claimedArtifacts?: typeof claimedArtifacts; artifactsNote?: string });
+        applyContextLedger(taskData as unknown as Parameters<typeof applyContextLedger>[0]);
         // 计数取**服务端全量**（分页后印当页长度会把"还没取"说成"就这么多"）
         setConvTotal(Number(taskData.conversationsTotal) || 0);
         setDelivTotal(Number(taskData.deliverablesTotal) || 0);
@@ -897,6 +923,8 @@ export default function TaskDetailPage() {
       // zx_20260930 M4-2: 与 `loadProject` 同尺——切任务也是取第 0 页 + 服务端总数
       const data = await tasks.get(taskId, { convLimit: LIST_PAGE_SIZE, convOffset: 0, delivLimit: LIST_PAGE_SIZE, delivOffset: 0 }) as unknown as { task: TaskItem; conversations: ConvItem[]; conversationsTotal?: number; deliverables: DelivItem[]; deliverablesTotal?: number; retiredCount?: number; archivedSnapshot?: ArchivedSnapshotView | null; archiveReason?: string | null; archivedAt?: string | null; runtimeEvidence?: RuntimeEvidenceView[]; suggestedCriteria?: string[]; modelSelection?: ModelSelection | null; execState?: { state: string; reason: string } | null; lastProgressAt?: string | null; stuckMs?: number | null; pendingJobAgeMs?: number | null; position?: { id: string; name: string; enabled: boolean } | null; dispatchDecision?: { attempted: boolean; ok: boolean; reason: string; label: string; nodeId?: string; at: string } | null };
       setTask(data.task); setModelSelection(data.modelSelection ?? null); setDispatchDecision(data.dispatchDecision ?? null); setPositionView(data.position ?? null); setConvs(data.conversations||[]); setDelivs(data.deliverables||[]); setRetiredCount(Number(data.retiredCount)||0);
+      applyClaimedArtifacts(data as unknown as { claimedArtifacts?: typeof claimedArtifacts; artifactsNote?: string });
+      applyContextLedger(data as unknown as Parameters<typeof applyContextLedger>[0]);
       applyExecState(data);
       setArchivedSnap(data.archivedSnapshot ?? null);
       setArchiveReason(data.archiveReason ?? null);
@@ -1038,6 +1066,24 @@ export default function TaskDetailPage() {
   }
   async function handleSaveGoal(taskId: string) { const text = goalEditText.trim(); if (!text) return; try { const existing = goalInfo; await tasks.context(taskId, { task_goal: { goal: text, success_criteria: existing?.success_criteria || '', investigate: existing?.investigate || [] } }); setShowGoalEdit(false); setGoalInfo(prev => prev ? { ...prev, goal: text } : { goal: text, success_criteria: '', investigate: [], principalContradiction: '' }); } catch (e) { reportAction(e); } }
   // zx_20261027_2 M1/M2: 归档态同样可删；删除清整棵子树（main 侧会拒绝含未结束成员的子树并点名）。
+  // zx_20261115_3 M2「归」：把写作账里"尚无登记行"的文件补登记为本任务产出物。
+  //   有界 20、幂等、归属不夺（已有登记行的文件跳过并如实回理由）；完成后重读详情。
+  async function handleBackfillArtifacts(): Promise<void> {
+    if (backfillBusy) return;
+    setBackfillBusy(true);
+    try {
+      const r = await invoke<{ created: number; skipped?: Array<{ path: string; reason: string }> }>('task:backfill-artifacts', { id: selectedId });
+      const skipped = r.skipped?.length ?? 0;
+      setActionMsg(r.created > 0
+        ? `已补登记 ${r.created} 件产出物${skipped ? `；跳过 ${skipped} 件（已有归属 / 探针 / 已删 / 超上限）` : ''}`
+        : (skipped ? `没有可补登记的文件；跳过 ${skipped} 件（已有归属 / 探针 / 已删 / 超上限）` : '没有可补登记的文件'));
+      if (actionTimerRef.current !== undefined) window.clearTimeout(actionTimerRef.current);
+      actionTimerRef.current = window.setTimeout(() => setActionMsg(''), 6000);
+      await loadProject();
+    } catch (e) { reportAction(e); }
+    setBackfillBusy(false);
+  }
+
   async function handleDelete(taskId: string) { if (!confirm('确定删除此任务？其全部子任务、对话记录和产出物将被一并清除。')) return; try { await tasks.delete(taskId); navigate('/tasks'); } catch (e) { reportAction(e); } }
   // zx_20261013_1 批二(K7): 「挂附件」——选本地文件挂到**本任务**（main 侧一条链：`im-media` 落盘 + `appendTaskAttachments` 写 `context_json.attachments`）。
   //   挂上后**下一次执行/回复**即被装配进上下文（无需立刻重跑）；逐件独立成败如实回报（成功件数 + 失败逐条带真因）。
@@ -1452,6 +1498,24 @@ export default function TaskDetailPage() {
       setDepPickId('');
       loadProject();
     } catch (e) { reportAction(e); } finally { setDepSaving(false); }
+  };
+  // zx_20261115_4 M1「岗」：补派 / 改派 / 解绑岗位。选项取本项目启用岗位（与建单表单同源 IPC）。
+  useEffect(() => {
+    const pid = task?.project_id;
+    if (!pid) { setPosOptions([]); return; }
+    let alive = true;
+    void positionsApi.forProject(pid)
+      .then((r) => { if (alive) setPosOptions(Array.isArray(r.positions) ? r.positions.map((p) => ({ id: p.id, name: p.name })) : []); })
+      .catch(() => { if (alive) setPosOptions([]); });
+    return () => { alive = false; };
+  }, [task?.project_id]);
+  const savePosition = async (nextId: string): Promise<void> => {
+    if (!task) return;
+    setPosSaving(true);
+    try {
+      await tasks.update(task.id, { positionId: nextId });
+      await selectTask(task.id);
+    } catch (e) { reportAction(e); } finally { setPosSaving(false); }
   };
 
   // 所有 hook 均已在上方执行完毕，此后可安全提前返回（防"加载后 hook 数量变化"白页）
@@ -2493,6 +2557,30 @@ export default function TaskDetailPage() {
                       )}
                       {!task.depends_on && !depPickerOpen && <span className="text-xs text-gray-400">当前无前置依赖</span>}
                     </div>
+                    {/* zx_20261115_4 M1「岗」：补派 / 改派 / 解绑。终态任务不给入口——
+                        改历史归属会让已沉淀的岗位经验来路失真（main 侧同一判据，界面只是不摆假路）。 */}
+                    <div className="flex items-center gap-2 pt-1 flex-wrap">
+                      <span className="text-xs text-gray-500">岗位</span>
+                      {task.status === 'completed' || task.status === 'archived' ? (
+                        <span className="text-xs text-gray-400">{positionView ? positionView.name : '未指派（任务已结束，不可改派）'}</span>
+                      ) : (
+                        <>
+                          <select
+                            value={positionView?.id ?? ''}
+                            disabled={posSaving}
+                            onChange={(e) => void savePosition(e.target.value)}
+                            className="text-xs border rounded px-1 py-0.5 max-w-[240px] disabled:opacity-50"
+                          >
+                            <option value="">不指派岗位</option>
+                            {posOptions.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                            {positionView?.missing && <option value={positionView.id}>{positionView.name}（已删除）</option>}
+                          </select>
+                          {posSaving && <span className="text-xs text-blue-500">保存中…</span>}
+                          {posOptions.length === 0 && <span className="text-xs text-gray-400">（本项目没有已启用的岗位——可到「岗位」页启用并绑定本项目）</span>}
+                          {!positionView && posOptions.length > 0 && !posSaving && <span className="text-xs text-gray-400">不指派也能干活，但这单不会沉淀岗位经验</span>}
+                        </>
+                      )}
+                    </div>
                   </div>
                 </details>
               )}
@@ -2534,11 +2622,18 @@ export default function TaskDetailPage() {
                 moreBusy={delivMoreBusy}
                 showAcceptance={showAccD}
                 drawerEnabled={drawerOn}
+                claimed={claimedArtifacts}
+                note={artifactsNote}
+                onBackfill={() => void handleBackfillArtifacts()}
+                backfillBusy={backfillBusy}
                 onLoadMore={loadMoreDelivs}
                 onPreview={handlePreviewDeliv}
                 onOpenDrawer={(did) => openDeliv(did)}
                 onNavigateTask={(tid) => navigate(`/tasks/${tid}`)}
               />
+
+              {/* zx_20261115_3 M6「简」：上下文与成本——七源分账 + 注入摘要（只读派生；三态分家） */}
+              <TaskContextLedger ledger={contextLedger} error={contextLedgerError} injections={injectionSummary} />
 
               {/* 事件时间线（zx_20260924 §2c UI-2: **默认折叠**——用户 2026-09-24 点名；由头同 M3/UI-1，
                   折叠头报**条数**（折叠态下连有几条都看不见就不叫"默认折叠"，叫"默认消失"）。列表体逐字未动。） */}

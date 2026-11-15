@@ -22,6 +22,10 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { initDatabase } from '../apps/worker-ant-desktop/src/main/database.js';
+// zx_20261115_2 M3：E2E 也必须像生产那样**落事件台账**——否则 `hasTaskEvent` 恒假，
+//   回执永远只能到 `self-reported`（真机首次跑通就是这么暴露的）。桌面启动块同一跳：`setEventStore`。
+import { eventBus } from '../apps/worker-ant-desktop/src/main/core/event-bus.js';
+import { EventStore } from '../apps/worker-ant-desktop/src/main/core/event-store.js';
 import { NODE_SETTING_KEYS, readNodeSetting, writeNodeSetting } from '../apps/worker-ant-desktop/src/main/core/node-identity.js';
 import { makeAnsDispatchIo } from '../apps/worker-ant-desktop/src/main/core/node-dispatch-io.js';
 import { driveRemoteSubtasks } from '../apps/worker-ant-desktop/src/main/core/node-remote-driver.js';
@@ -32,12 +36,35 @@ import {
   persistDispatchDecision,
 } from '../apps/worker-ant-desktop/src/main/core/collab-dispatch.js';
 import { routeCategoryForTask } from '../apps/worker-ant-desktop/src/main/core/task-routing.js';
+// zx_20261115_2 M3：收口判据抽到纯函数——只认 completed + 回执 verified + 产出清单；`failed` 不再算通过。
+import { judgeRelayE2E } from './lib/e2e-judge.js';
 
 const root = path.join(__dirname, '..');
-const dataDir = path.join(root, 'data');
-const remoteDbPath = path.join(dataDir, '_e2e_node', 'worker-ant-server.db');
-const TITLE = '调研 2026 年主流向量数据库的选型';
-const DESC = '对比 3 个方案，各一句优缺点，给出一页结论。';
+// zx_20261115_2 M3：**本地库可隔离**——若用户真开着桌面（其调度器会认领 data/ 里的 pending 任务），
+//   E2E 用 `E2E_DATA_DIR` 指向一份真库副本，自己跑、不跟桌面抢同一张表。
+const evidenceDir = path.join(root, 'data');
+const dbDir = process.env.E2E_DATA_DIR ? path.resolve(process.env.E2E_DATA_DIR) : evidenceDir;
+const remoteDbPath = path.join(
+  process.env.E2E_REMOTE_DIR ? path.resolve(process.env.E2E_REMOTE_DIR) : path.join(evidenceDir, '_e2e_node'),
+  'worker-ant-server.db',
+);
+// zx_20261115_2 M3：`E2E_SIMPLE=1` 走"一句话可完成、必落一个文件"的小题面（验证成功收口）；
+//   缺省保留原研究题面（验证有界终止：即便跑不完也会在树时窗前收口）。
+const SIMPLE = process.env.E2E_SIMPLE === '1';
+const TITLE = SIMPLE ? '调研一句话结论：向量数据库与关系数据库的核心差异' : '调研 2026 年主流向量数据库的选型';
+// ⚠ 题面**不得**出现"工作目录/文件/目录/写入/仓库"等 REPO_BOUND_TOKENS（会判"需本机工作目录"而拒派），
+//   但又要模型真落一个交付物（否则回执缺 outputs）。折中：点名一个具体文件名（不是通用"文件/目录"词）。
+const DESC = SIMPLE
+  // 真机已验证：这条调研题在远端跑出 quality=80、单根不拆解、约 2–3 分钟完成。
+  // 但模型是随机的——只在对话里答/只写文件不登记产出（真标本 outputs=0）。
+  // 故把**工具调用次序**写成显式清单（三个工具名都不在 REPO_BOUND_TOKENS 里）。
+  ? '对比缓存与会话存储两种场景下 Redis 与 PostgreSQL 的取舍，给出三点可执行的选型结论。\n'
+    + '完成前必须按顺序调用：① write_file 把结论写入 relay-ok.md；'
+    + '② register_deliverable 登记 relay-ok.md（type=doc）；③ finalize_task。'
+    + '缺少第②步不要 finalize。'
+  : '对比 3 个方案，各一句优缺点，给出一页结论。';
+const ACCEPTANCE = SIMPLE ? 'relay-ok.md 存在，且包含三点可执行的选型结论。' : '';
+const REMOTE_MARKER = '%向量数据库%';
 
 function readSetting(db: DatabaseSync, key: string): string | null {
   try {
@@ -53,7 +80,9 @@ async function main(): Promise<void> {
     console.error(`[e2e] 找不到第二节点库：${remoteDbPath}\n先按文件头启动 headless-node.ts`);
     process.exit(1);
   }
-  const db = initDatabase(dataDir);
+  const db = initDatabase(dbDir);
+  // 与 `main/index.ts` 启动块同跳：事件总线挂上 EventStore，派发/收口事件才真落 `wa_event_log`。
+  eventBus.setEventStore(new EventStore(db as never));
   const oldAuto = readSetting(db as never, NODE_SETTING_KEYS.autoDispatchOnCreate);
   const oldPart = readSetting(db as never, NODE_SETTING_KEYS.participate);
   const oldReason = readSetting(db as never, NODE_SETTING_KEYS.participateOffReason);
@@ -76,8 +105,8 @@ async function main(): Promise<void> {
     // 3) 建一条临时任务（与真实建单同一形状）。
     taskId = crypto.randomUUID();
     db.prepare(
-      "INSERT INTO wa_tasks (id, project_id, title, description, priority, status, context_json) VALUES (?, ?, ?, ?, 1, 'pending', ?)",
-    ).run(taskId, proj.id, TITLE, DESC, JSON.stringify({ source: 'e2e_zx_20261112_2' }));
+      "INSERT INTO wa_tasks (id, project_id, title, description, acceptance_criteria, priority, status, context_json) VALUES (?, ?, ?, ?, ?, 1, 'pending', ?)",
+    ).run(taskId, proj.id, TITLE, DESC, ACCEPTANCE, JSON.stringify({ source: 'e2e_zx_20261112_2' }));
     evidence.taskId = taskId;
 
     // 4) 生产同一处事实组装 → 派发。
@@ -89,7 +118,25 @@ async function main(): Promise<void> {
       teamUnlocked: facts.teamUnlocked, enrolled: facts.enrolled,
       needsLocalWorkspace: facts.needsLocalWorkspace, category: facts.category,
     };
-    const outcome = await dispatchCreatedTask(db, { id: taskId, title: TITLE, description: DESC }, facts);
+    // zx_20261115_2 M3：**指定第二节点**——ANS 自动选可能选中本机（本机也入网且参与），
+    //   而本机没有起中转消费者，活会等到超时。目标 id 从第二节点自己的库读（不是手写常量）。
+    let targetNodeId = '';
+    try {
+      const rdb = new DatabaseSync(remoteDbPath, { readOnly: true });
+      targetNodeId = String((rdb.prepare("SELECT value FROM wa_settings WHERE key = 'node.id'").get() as { value?: string } | undefined)?.value ?? '');
+      // zx_20261115_2 M3：清掉上一轮留在中转项目里的同名交付件——否则模型读到旧文件就不写/不登记，
+      //   回执缺 outputs（真标本：连续三次 outputs=0，模型直接 read_file 了上一轮的 relay-ok.md）。
+      const wd = String((rdb.prepare("SELECT working_dir FROM wa_projects WHERE name LIKE 'AI 终端中转%' LIMIT 1").get() as { working_dir?: string } | undefined)?.working_dir ?? '');
+      if (wd) { try { fs.rmSync(path.join(wd, 'relay-ok.md'), { force: true }); } catch { /* 清不掉不影响派发 */ } }
+      rdb.close();
+    } catch { targetNodeId = ''; }
+    evidence.targetNodeId = targetNodeId || null;
+    // 注入同一个 eventBus 出口（与 `main/index.ts` 同源）：确保派发事件真落 `wa_event_log`，
+    //   否则 `hasTaskEvent` 拿不到痕，回执永远只能到 `self-reported`。
+    const outcome = await dispatchCreatedTask(db, { id: taskId, title: TITLE, description: DESC }, facts, {
+      emit: (type, data) => eventBus.emit(type, data as Record<string, unknown>),
+      ...(targetNodeId ? { targetNodeId } : {}),
+    });
     persistDispatchDecision(db, taskId, outcome);
     evidence.dispatch = outcome;
     console.log(`[e2e] 派发结果：${JSON.stringify(outcome)}`);
@@ -104,12 +151,15 @@ async function main(): Promise<void> {
     const localId = readNodeSetting(db as never, NODE_SETTING_KEYS.id) ?? '';
     let remoteSeen = false;
     let localStatus = 'pending';
-    const deadline = Date.now() + 300_000;
+    // zx_20261115_1 M6：等待窗口可配。研究类任务在真机上要拆解 + 跑数分钟，300s 常不够；
+    //   缺省仍是 300s（不改变既有行为），端到端验证用 `E2E_WAIT_MS` 放宽。
+    const waitMs = Number(process.env.E2E_WAIT_MS ?? 300_000);
+    const deadline = Date.now() + (Number.isFinite(waitMs) && waitMs > 0 ? waitMs : 300_000);
     while (Date.now() < deadline) {
       if (!remoteSeen) {
         try {
           const rdb = new DatabaseSync(remoteDbPath, { readOnly: true });
-          const row = rdb.prepare('SELECT id, title, status FROM wa_tasks WHERE title LIKE ? ORDER BY created_at DESC LIMIT 1').get(`%向量数据库%`) as { id?: string; title?: string; status?: string } | undefined;
+          const row = rdb.prepare('SELECT id, title, status FROM wa_tasks WHERE title LIKE ? ORDER BY created_at DESC LIMIT 1').get(REMOTE_MARKER) as { id?: string; title?: string; status?: string } | undefined;
           rdb.close();
           if (row?.id) { remoteSeen = true; evidence.remoteTask = row; }
         } catch { /* 对端库正被写，下一拍再试 */ }
@@ -126,15 +176,31 @@ async function main(): Promise<void> {
     evidence.remoteTaskSeen = remoteSeen;
     evidence.localStatus = localStatus;
     const t2 = db.prepare('SELECT status, context_json FROM wa_tasks WHERE id = ?').get(taskId) as { status?: string; context_json?: string } | undefined;
-    try { evidence.dispatchDecision = JSON.parse(t2?.context_json ?? '{}').dispatch_decision ?? null; } catch { /* 坏 JSON 如实不填 */ }
-    console.log(`[e2e] 对端建任务=${remoteSeen} 本地终态=${localStatus}`);
+    let localCtx: Record<string, unknown> = {};
+    try { const parsed = JSON.parse(t2?.context_json ?? '{}'); if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) localCtx = parsed as Record<string, unknown>; } catch { /* 坏 JSON 如实不填 */ }
+    evidence.dispatchDecision = localCtx.dispatch_decision ?? null;
+    // zx_20261115_2 M3：回执与产出清单从本机落账的 `remote_result` 读（与 node-remote-driver 同源）。
+    const remoteResult = localCtx.remote_result && typeof localCtx.remote_result === 'object' && !Array.isArray(localCtx.remote_result)
+      ? localCtx.remote_result as Record<string, unknown> : null;
+    const receipt = remoteResult?.receipt && typeof remoteResult.receipt === 'object' && !Array.isArray(remoteResult.receipt)
+      ? remoteResult.receipt as Record<string, unknown> : null;
+    const outputs = Array.isArray(remoteResult?.outputs) ? remoteResult.outputs as unknown[] : null;
+    const receiptVerdict = typeof receipt?.verdict === 'string' ? String(receipt.verdict) : null;
+    const judgement = judgeRelayE2E({ remoteSeen, localStatus, receiptVerdict, outputs });
+    evidence.remoteReceipt = receipt;
+    evidence.outputsCount = outputs ? outputs.length : 0;
+    evidence.judgement = judgement;
+    console.log(`[e2e] 对端建任务=${remoteSeen} 本地终态=${localStatus} 回执=${receiptVerdict ?? '无'} 产出=${outputs ? outputs.length : 0} 判据=${judgement.ok ? '通过' : '未通过'}`);
 
-    fs.mkdirSync(path.join(dataDir), { recursive: true });
-    fs.writeFileSync(path.join(dataDir, 'baseline_zx_20261112_2.json'), JSON.stringify(evidence, null, 2));
-    console.log(`[e2e] 证据已落 data/baseline_zx_20261112_2.json`);
+    fs.mkdirSync(evidenceDir, { recursive: true });
+    fs.writeFileSync(path.join(evidenceDir, 'baseline_zx_20261112_2.json'), JSON.stringify(evidence, null, 2));
+    fs.writeFileSync(path.join(evidenceDir, 'baseline_zx_20261115_2_e2e.json'), JSON.stringify(evidence, null, 2));
+    console.log(`[e2e] 证据已落 data/baseline_zx_20261112_2.json 与 data/baseline_zx_20261115_2_e2e.json`);
 
-    const ok = remoteSeen && (localStatus === 'completed' || localStatus === 'failed');
-    if (!ok) { console.error('[e2e] 未达成端到端收口（对端没建任务，或本地未走到终态）'); process.exitCode = 1; }
+    if (!judgement.ok) {
+      console.error(`[e2e] 未达成成功收口：${judgement.reasons.join('；')}`);
+      process.exitCode = 1;
+    }
   } finally {
     // 6) 清理：删除本次临时任务与其对话/成果，复原设置。
     try {

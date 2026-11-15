@@ -1386,8 +1386,13 @@ async function main(): Promise<void> {
     eq(capacityDisplay('pro', 'maxCloudAccounts', '个'), `${TIER_LIMITS.pro.maxCloudAccounts} 个`,
       'M5 专业档写具体数（由 TIER_LIMITS 派生，不写死）');
     eq(capacityDisplay('team', 'maxCloudAccounts', '个'), '不限', 'M6 团队档 0=不限');
-    eq(capacityDisplay('community', 'maxDevices', '台'), `${TIER_LIMITS.community.maxDevices} 台`,
-      'M7 ★反证：同一社区档其它维度照常写数（特判只属于设备云账号）');
+    // zx_20261115_1 M8：特判从"只属于设备云账号"扩成"由 `CAPACITY_MIN_TIER` 一处派生"——
+    //   低档到不了的维度（设备登记/外部终端/知识卡/团队共享）同样写「需…」。
+    //   此处按**更强形状**重定向：①未列入表且无闸的维度照常写数（对照）；②已列入表的维度在低档必写「需…」。
+    eq(capacityDisplay('community', 'maxIMChannels', '个'), `${TIER_LIMITS.community.maxIMChannels} 个`,
+      'M7 ★反证：未列入最低可用档的维度照常写数（不收口过宽）');
+    ok(capacityDisplay('community', 'maxDevices', '台').startsWith('需'),
+      'M7b 低档到不了的维度由 CAPACITY_MIN_TIER 派生为「需…」（不再显示摸不到的数）');
 
     ok(LICENSE_TIERS.every((t) => capacityLine(t).includes('设备云账号')),
       'M8 价目表容量行八维齐备（逐档都含设备云账号）');

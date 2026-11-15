@@ -153,6 +153,9 @@ const SCHEMA_SAMPLE = SCHEMA
     'CREATE TABLE wa_memories (id TEXT PRIMARY KEY, project_id TEXT, task_id TEXT, content TEXT NOT NULL,',
     'CREATE TABLE wa_memories (id TEXT PRIMARY KEY, project_id TEXT REFERENCES wa_projects(id), task_id TEXT, content TEXT NOT NULL,',
   ) + `
+-- zx_20261115_1 M3：删项目级联新增清理岗位绑定（生产恒有该表，夹具须同形）。
+CREATE TABLE IF NOT EXISTS wa_project_positions (project_id TEXT NOT NULL, position_id TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT DEFAULT (datetime('now')), PRIMARY KEY (project_id, position_id));
 CREATE TABLE wa_deliverables (id TEXT PRIMARY KEY, project_id TEXT REFERENCES wa_projects(id), task_id TEXT, type TEXT NOT NULL, name TEXT DEFAULT '',
   description TEXT DEFAULT '', file_path TEXT, registry_id TEXT, status TEXT DEFAULT 'draft',
   created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));

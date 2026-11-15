@@ -37,6 +37,8 @@ function localCandidatesOf(payload: TeamItemsPayload, kind: TeamItemKind): Local
   if (kind === 'memory') return payload.local.memories;
   if (kind === 'domain_pack') return payload.local.domainPacks;
   if (kind === 'project_profile') return payload.local.profiles;
+  // zx_20261115_4 M7「墙」：岗位是团队资产——四段 + 已采纳经验可共享，导入落待审候选。
+  if (kind === 'position') return payload.local.positions;
   return payload.local.deliverables;
 }
 

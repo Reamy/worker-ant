@@ -141,7 +141,8 @@ async function main(): Promise<void> {
     // zx_20261011_3 再订正：删除离线节点的**写口** `nodes:delete` 同闸 ⇒ 闸数 5→6（面再扩，非放宽）。
     // zx_20261030_1 M3 再订正（**强化非放宽**）：派活方叫停的写口 `nodes:request-cancel` 同闸 ⇒ 闸数 6→7（面再扩）。
     //   逐 handler 取体核闸（新增写口若漏闸即红），原六处仍须在。
-    const NODE_GATED = ['nodes:update', 'nodes:enroll', 'nodes:request-token', 'nodes:dispatch', 'nodes:answer-question', 'nodes:delete', 'nodes:request-cancel'];
+    // zx_20261115_1 M4：新增 `nodes:participateOut` 写口（本机「允许派给他人」）。
+    const NODE_GATED = ['nodes:update', 'nodes:enroll', 'nodes:request-token', 'nodes:dispatch', 'nodes:answer-question', 'nodes:delete', 'nodes:request-cancel', 'nodes:participateOut'];
     const bodyOf = (h: string): string => {
       const i = NIPC.indexOf(`ipcMain.handle('${h}'`);
       if (i < 0) return '';

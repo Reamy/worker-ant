@@ -51,8 +51,10 @@ import { loadProjectBrief, renderProjectBrief } from './project-brief.js';
 import {
   DISPATCH_POSITION_KEY,
   POSITION_DISPATCH_SUMMARY_MAX,
+  narrowSandboxScope,
   positionBlockDetail,
   selectPositionLessonsForInjection,
+  type Position,
   type PositionBlockItem,
   resolveTaskPosition,
   sanitizeDispatchPosition,
@@ -127,6 +129,11 @@ export interface TaskContextAssembly {
   /** 岗位块真进文的全文（空串＝未注入）；调用方据此判断是否被预算整段裁掉。 */
   positionText: string;
   /**
+   * zx_20261115_1 M1：本任务岗位允许的工具名（空数组＝岗位未设白名单，沿用形态默认面）。
+   * 调用方（`agent-executor`）用它把工具面**再收一刀**——只做交集，绝不救回形态档外的工具。
+   */
+  positionTools: string[];
+  /**
    * zx_20261018_1 批七「账」：本段装配出的四源字符数（system/memory/knowledge/history），
    * 调用方补上 tools/user/output 即得七源分账。`memory + knowledge` 恰等于 `memoryContext.length`
    * （knowledge 是 memory 块里的一节，**不重复计**）。
@@ -188,6 +195,28 @@ export async function buildTaskContext(o: {
   // zx_20261113_1 B3「用」：岗位条目级注入明细（只在岗位块真进文时非空）。
   let positionInjections: PositionBlockItem[] = [];
   let positionText = '';
+  /**
+   * zx_20261115_1 M1「职」：岗位的**执行约束**（沙箱档 / MCP 白名单 / 工具面）在此一次取定。
+   *
+   * 次序要紧：MCP 装配（下方 20 余行）与沙箱装配都在岗位块注入之前。若仍等到岗位块那段才读，
+   * 前两处只能读到"项目默认"⇒ 岗位设置形同虚设（"做了没用上"的经典形态）。
+   *
+   * 读不到 / 未指派 ⇒ `null`：沙箱原样继承项目、MCP 不筛、工具面不收——与今日逐字节一致。
+   */
+  let positionRow: Position | null = null;
+  /** zx_20261115_1 M5：本机未指派岗位时，对端随单带来的工具白名单（远端同样收窄）。 */
+  let remotePositionTools: string[] = [];
+  try {
+    const prow = db.prepare('SELECT position_id, context_json FROM wa_tasks WHERE id = ?').get(taskId) as
+      | { position_id?: string | null; context_json?: string | null }
+      | undefined;
+    const pid0 = String(prow?.position_id ?? '').trim();
+    if (pid0) positionRow = resolveTaskPosition(db, projectId, pid0);
+    if (!positionRow) {
+      const cj = JSON.parse(String(prow?.context_json ?? '{}')) as Record<string, unknown>;
+      remotePositionTools = sanitizeDispatchPosition(cj[DISPATCH_POSITION_KEY])?.tools ?? [];
+    }
+  } catch { positionRow = null; }
   const add = (k: ContextBlock, content: string): void => {
     const arr = blocks.get(k);
     if (arr) arr.push(content); else blocks.set(k, [content]);
@@ -225,7 +254,11 @@ export async function buildTaskContext(o: {
     const mcpList = db.prepare(
       "SELECT d.name FROM wa_deliverables d WHERE d.project_id = ? AND d.type = 'mcp' AND d.status IN ('registered','running')"
     ).all(projectId) as Array<{ name: string }>;
-    if (mcpList.length > 0) projectCtx += `\n可用的MCP服务: ${mcpList.map(s => s.name).join(', ')}`;
+    // zx_20261115_1 M1：岗位设了 MCP 白名单就**只列白名单内的**；未设（空数组）⇒ 项目全部，
+    //   与今日逐字节一致。只做收窄，不新增项目里没有的 MCP。
+    const allowMcp = positionRow?.mcp ?? [];
+    const visible = allowMcp.length > 0 ? mcpList.filter((s) => allowMcp.includes(s.name)) : mcpList;
+    if (visible.length > 0) projectCtx += `\n可用的MCP服务: ${visible.map(s => s.name).join(', ')}`;
   } catch {}
   // 语言游戏（项目术语）
   if (projCtxJson.language_game) {
@@ -257,9 +290,11 @@ export async function buildTaskContext(o: {
 
   // 沙箱模式感知（sandbox.getSandboxPrompt）
   try {
-    const sandboxMode = (project?.sandbox_mode as string) || 'workspace';
+    // zx_20261115_1 M1：岗位沙箱档**只能调严**——`narrowSandboxScope` 取两者更严者，
+    //   岗位设 `workspace` 不能把项目的 `strict` 放宽（安全闸不交给可随意编辑的文本字段）。
+    const sandboxMode = narrowSandboxScope((project?.sandbox_mode as string) || 'workspace', positionRow?.sandboxScope ?? '');
     const { getSandboxPrompt } = await import('./sandbox.js');
-    const sandboxPrompt = getSandboxPrompt(sandboxMode as 'strict' | 'workspace' | 'off');
+    const sandboxPrompt = getSandboxPrompt(sandboxMode);
     if (sandboxPrompt) add('sandbox', sandboxPrompt);
   } catch {}
 
@@ -283,7 +318,11 @@ export async function buildTaskContext(o: {
       const position = resolveTaskPosition(db, projectId, pid);
       if (position) {
         // zx_20261113_1 B3：只注入「已采纳 ∧ 可迁移 ∧ 未晋升」的经验；摘要候选永远不进岗位块。
-        const detail = positionBlockDetail(position, selectPositionLessonsForInjection(db, pid));
+        // zx_20261115_1 M2「用」：按**本次任务文本**挑最相关的经验（无文本回退时间序，行为不变）。
+        const detail = positionBlockDetail(
+          position,
+          selectPositionLessonsForInjection(db, pid, undefined, `${title}\n${description}`),
+        );
         if (detail.text) {
           add('position', detail.text);
           positionText = detail.text;
@@ -510,6 +549,8 @@ export async function buildTaskContext(o: {
     lessonsIds,
     positionInjections,
     positionText,
+    // zx_20261115_1 M5：本机岗位优先；本机未指派 ⇒ 用对端随单带来的白名单（同样是"只收窄"）。
+    positionTools: positionRow?.tools?.length ? positionRow.tools : remotePositionTools,
     sections: {
       system: systemChars,
       memory: Math.max(0, memoryContext.length - knowledgeChars),

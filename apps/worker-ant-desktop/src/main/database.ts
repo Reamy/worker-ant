@@ -427,6 +427,13 @@ export function initDatabase(dataDir: string, dbName = 'worker-ant-server.db'): 
     "ALTER TABLE wa_position_lessons ADD COLUMN promoted_at TEXT",
     "ALTER TABLE wa_position_lessons ADD COLUMN origin TEXT NOT NULL DEFAULT 'local'",
     "UPDATE wa_position_lessons SET source = 'summary' WHERE source = 'task_close'",
+    // zx_20261115_1 M1「职」: 岗位从四段自由文本长出三项**能约束执行**的设置（工具面 / MCP / 沙箱）
+    //   与一项派单开关（参与跨机派单）。缺省值与"未设置"语义一一对应：空数组=沿用默认，空串=继承项目。
+    //   每个字段的**唯一读口**写在 `core/positions.ts` 顶部注记与方案 §M1；无读口不加列。
+    "ALTER TABLE wa_positions ADD COLUMN tools_json TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE wa_positions ADD COLUMN mcp_json TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE wa_positions ADD COLUMN sandbox_scope TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE wa_positions ADD COLUMN participate INTEGER NOT NULL DEFAULT 1",
   ];
   for (const sql of migrations) {
     try { db.exec(sql); } catch { /* 列已存在，跳过 */ }

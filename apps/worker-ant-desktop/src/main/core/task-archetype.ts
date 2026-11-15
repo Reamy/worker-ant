@@ -172,6 +172,38 @@ export function narrowToolFace(
   };
 }
 
+/** `narrowToolFace` 的结果形状（岗位收窄的入参）。 */
+export interface ToolFaceScope {
+  kept: string[];
+  removed: string[];
+  outside: string[];
+  restored: string[];
+}
+
+/**
+ * zx_20261115_1 M1「职」：**岗位工具白名单**——只做交集，绝不放宽。
+ *
+ * 与 `narrowToolFace` 的 `allowTools` 语义**相反**：那个是"救回"形态档外的工具（子代理需要 `execute_command`），
+ * 这个是"再收一刀"——岗位写 `['read_file']` 就只剩 `read_file`，**不会**因为白名单里写了
+ * 形态档外的名字就把它加回来（安全闸只向上，不向下）。
+ *
+ * 空白名单 ⇒ 原样返回（今日行为逐字节不变），`removedByPosition` 恒空。
+ */
+export function restrictToolFaceByPosition(
+  face: ToolFaceScope,
+  positionTools: readonly string[],
+): ToolFaceScope & { removedByPosition: string[] } {
+  if (positionTools.length === 0) return { ...face, removedByPosition: [] };
+  const allow = new Set(positionTools);
+  const removedByPosition = face.kept.filter((n) => !allow.has(n));
+  return {
+    ...face,
+    kept: face.kept.filter((n) => allow.has(n)),
+    removed: [...face.removed, ...removedByPosition],
+    removedByPosition,
+  };
+}
+
 /**
  * 子代理作用域收窄（zx_20261030_2 M2）：在形态收窄结果之上再落 allow/deny **两刀**。
  *
@@ -204,17 +236,33 @@ export function applySubagentToolScope(
  * 如实告知（正向·开工即知）：本档可用哪些工具。
  * 本档**零收窄**时不列名——此时没有"档外"可告知，列名纯属噪音（且白花 token）。
  */
+/** 简报里点名"不可用工具"的上限（超过只报数；名字是"为什么调不到"的线索，但不能无界）。 */
+export const TOOL_FACE_BRIEF_REMOVED_MAX = 40;
+
+/**
+ * zx_20261115_3 M7「简」（大野耐一·消除浪费 / 维特根斯坦·意义即用法）：
+ * **不再逐个点名已保留的工具**——schema 里本就有全名与参数，重复念一遍是纯浪费（每一步都付）。
+ * 只保留三件对模型**有用**的信息：本档件数、**被移除的**件数（及其名字，封顶 40）、
+ * "不要虚构工具名"的约束。
+ *
+ * `removedNames` 可选：旧的调用方（只有计数）仍可工作；执行体传入真名单。
+ */
 export function buildToolFaceBrief(
   archetype: TaskArchetype,
   label: string,
   available: string[],
   removedCount: number,
+  removedNames?: readonly string[],
 ): string {
   if (removedCount <= 0) {
-    return `[工具面·${label}] 本形态未收窄工具面，共 ${available.length} 个可用工具。`;
+    return `[工具面·${label}] 本形态未收窄工具面，共 ${available.length} 个可用工具（名称与参数见工具表）。`;
   }
-  return `[工具面·${label}] 本形态**只注入**本档 ${available.length} 个工具：${available.join(', ')}。`
-    + `其余 ${removedCount} 个工具在本形态下**不可用**（详见其 schema 不在本轮工具表内）；`
+  const names = (removedNames ?? []).filter((n) => !available.includes(n));
+  const shown = names.slice(0, TOOL_FACE_BRIEF_REMOVED_MAX);
+  const more = names.length > shown.length ? ` 等 ${names.length} 个` : '';
+  const named = shown.length > 0 ? `：${shown.join(', ')}${more}` : '';
+  return `[工具面·${label}] 本档 ${available.length} 个工具（名称与参数见工具表，不在此重复）；`
+    + `其余 ${removedCount} 个工具在本形态下不可用${named}。`
     + `若你认为确需其中某个能力，请说明用途并改用手头工具达成，不要虚构工具名。`;
 }
 

@@ -25,15 +25,17 @@ import { enqueueJob } from './job-enqueuer.js';
 import { NO_INTERACTION_KEY } from './no-interaction.js';
 // zx_20261011_2 M1（道德经·名可名非常名）: 「暂停」与「有人在等输入」是**两件事**——分因的读点与词表
 //   一律取 `pause-reason.ts` 的既有真源（`recordedPauseReason` / `pauseReasonLabel`），不在此手抄第二份。
-import { pauseReasonLabel, recordedPauseReason } from './pause-reason.js';
+import { PAUSE_REASON_CHILDREN_INCOMPLETE, PAUSE_REASON_RELAY_TREE_EXPIRED, pauseReasonLabel, recordedPauseReason } from './pause-reason.js';
+// zx_20261115_2 M1：中继任务树的**有界预算**与**真停**（树身份/时窗/深度/总数；超时/叫停整树归档）。
+import { RELAY_TREE_KEY, beginRelayTree } from './relay-tree.js';
+import { terminateRelayTree } from './relay-tree-terminate.js';
 // zx_20261011_1 M5（收口真源统一）：本任务产出的文件/completion_summary 由 task-outcome 一处判定，IM 通知同引。
 import { readDeliveredOutputs, resolveTaskOutcome } from './task-outcome.js';
 // zx_20261011_1 M4（双向澄清）：派单 id 写进任务上下文——`ask_user` 据此找到"上游是谁、问哪一单"。
 import { NODE_ANSWER_KEY, NODE_REQUEST_ID_KEY } from './node-clarify.js';
 import type { RequestRunner, RequestRunResult } from './node-request-worker.js';
-// zx_20261030_1 M3「止」：真停＝**归档**（`archiveTask` 会 `abortTaskRun` 通知在途执行体并落终态），
-//   而非只 `pauseTask`——后者会给叫停的活留一个"暂停幽灵"，等一个永远不会来的恢复。
-import { archiveTask } from './task-archive.js';
+// zx_20261030_1 M3「止」/ zx_20261115_2 M1：真停＝**归档整棵树**（`terminateRelayTree` 逐行调
+//   `archiveTask`，abort 在途执行体并落终态），而非只 `pauseTask`——后者会留"暂停幽灵"。
 import type { AnsNodeRequest } from '@worker-ant/shared-types';
 // zx_20261023_5 批一：上游摘要的写入口径与读口（`exec-prelude`）同源——键名/上限/裁剪只此一处。
 import { UPSTREAM_SUMMARIES_KEY, sanitizeUpstreamSummaries, type UpstreamSummaryItem } from './exec-prelude.js';
@@ -257,17 +259,17 @@ export function makeRelayRunner(deps: RelayRunnerDeps): RequestRunner {
       if (!cancelled) return false;
       try { return await cancelled(); } catch { return false; }
     };
-    /** 真停这件中转任务：归档（abort 在途执行体）→ 账记 `cancelled` → 如实回传。 */
-    const stopNow = (taskId: string): RequestRunResult => {
-      let archived = { changed: false, pageTurned: false };
-      try { archived = archiveTask(db, { taskId, reason: 'node_request_cancelled' }); } catch { /* 落到下面的如实报错 */ }
-      if (archived.changed) {
-        const result = { taskId, taskStatus: 'archived', cancelled: true, ...readOutcome(db, taskId) };
+    /** 真停这棵中转任务树：远端叫停 + 逐行归档（abort 在途执行体）→ 账记 `cancelled` → 如实回传。 */
+    const stopNow = async (taskId: string): Promise<RequestRunResult> => {
+      // zx_20261115_2 M1：叫停**整棵树**（旧写法只归档根，子任务会继续跑成孤儿）。
+      const term = await terminateRelayTree(db, taskId, 'node_request_cancelled');
+      if (term.archived > 0) {
+        const result = { taskId, taskStatus: 'archived', cancelled: true, treeSize: term.treeSize, cancelledRemote: term.cancelledRemote, ...readOutcome(db, taskId) };
         finishNodeRequestRun(ledgerDb, req.id, 'cancelled', result);
         return { status: 'cancelled', result };
       }
       // 归档没落笔（任务行已不在 / DB 错误）⇒ **不谎称已停**：如实报 error，说明叫停未能生效。
-      const result = { taskId, cancelled: true, error: 'cancel requested but relay task could not be archived' };
+      const result = { taskId, cancelled: true, error: 'cancel requested but relay task could not be archived', ...(term.errors.length > 0 ? { errors: term.errors } : {}) };
       finishNodeRequestRun(ledgerDb, req.id, 'error', result);
       return { status: 'error', result };
     };
@@ -304,10 +306,24 @@ export function makeRelayRunner(deps: RelayRunnerDeps): RequestRunner {
         // zx_20261018_1 批一 R-7：验收标准**随单落库**（远端判卷读的就是这个字段）——
         //   旧对端不发该键 ⇒ 空串（与建单默认一致），不编造。
         const fields = relayTaskFields(req);
+        // zx_20261115_1 M6「实」：**告诉远端"你的工作目录在哪"**。
+        //   真标本（跨机 E2E）：中继项目明明有 `working_dir`，模型却按训练直觉去写 `/workspace/…`（本机不存在）
+        //   ⇒ 触发越界审批 → 在不可交互任务里被抑制 → 最终 `output_missing`，一件本可完成的活白跑。
+        //   只在**确实有工作目录**时追加一句（无目录不编一个路径）。
+        let relayWorkingDir = '';
+        try {
+          const prow = db.prepare('SELECT working_dir FROM wa_projects WHERE id = ?').get(projectId) as
+            | { working_dir?: string | null }
+            | undefined;
+          relayWorkingDir = String(prow?.working_dir ?? '').trim();
+        } catch { relayWorkingDir = ''; }
+        const descWithWorkspace = relayWorkingDir
+          ? `${fields.description}\n\n工作目录：${relayWorkingDir}\n（本次任务的产出请写在这个目录内；不要使用 /workspace 等不存在的绝对路径。）`
+          : fields.description;
         const created = tasks.create({
           project_id: projectId,
           title: relayTaskTitle(req),
-          description: fields.description,
+          description: descWithWorkspace,
           acceptance_criteria: fields.acceptanceCriteria,
         }) as Record<string, unknown> | undefined;
         taskId = String(created?.id ?? '');
@@ -340,6 +356,9 @@ export function makeRelayRunner(deps: RelayRunnerDeps): RequestRunner {
         tasks.updateContext(taskId, {
           node_archetype: archetype,
           [NO_INTERACTION_KEY]: true,
+          // zx_20261115_2 M1：**中继任务树的有界预算**——根建单时一次许出（时窗 = 轮询上限 − 余量；
+          //   相对深度/总任务数取 relay-tree 常量）。子任务由 `inheritedConstraintContext` 原样继承。
+          [RELAY_TREE_KEY]: beginRelayTree(now(), timeoutMs, taskId),
           ...(peerDispatch ? { [NODE_REQUEST_ID_KEY]: req.id } : {}),
           ...(injectedAnswer ? { [NODE_ANSWER_KEY]: injectedAnswer } : {}),
           ...(upstream.length > 0 ? { [UPSTREAM_SUMMARIES_KEY]: upstream } : {}),
@@ -358,6 +377,13 @@ export function makeRelayRunner(deps: RelayRunnerDeps): RequestRunner {
     maybeReport(relayProgressOf(db, taskId) ?? { step: 0, total: null, note: '已接手，准备执行' }, true);
 
     const deadline = now() + timeoutMs;
+    // zx_20261115_2 M3：派活方的本地任务 id（随单带来）——对端建的是**新**任务，回执必须把它原样带回；
+    //   对端自己的 id 放 `remoteTaskId`，两者不混。旧载荷无此键 ⇒ 行为与从前逐字一致。
+    const originTaskId = (() => {
+      const p = req.payload as Record<string, unknown> | undefined;
+      const v = p?.origin_task_id;
+      return typeof v === 'string' ? v.trim() : '';
+    })();
     for (;;) {
       const row = db.prepare('SELECT status, context_json FROM wa_tasks WHERE id = ?').get(taskId) as { status?: string; context_json?: string | null } | undefined;
       const status = String(row?.status ?? '');
@@ -366,8 +392,8 @@ export function makeRelayRunner(deps: RelayRunnerDeps): RequestRunner {
         const result =
           status === 'completed'
             // M4：完成回传附**产出清单**（元数据）——派活方据此做回执核对（缺清单只能算"自报"）。
-            ? { taskId, taskStatus: status, outputs: readDeliveredOutputs(db, taskId), ...outcome }
-            : { taskId, taskStatus: status, error: `relay task ended as ${status}`, ...outcome };
+            ? { taskId: originTaskId || taskId, ...(originTaskId ? { remoteTaskId: taskId } : {}), taskStatus: status, outputs: readDeliveredOutputs(db, taskId), ...outcome }
+            : { taskId: originTaskId || taskId, ...(originTaskId ? { remoteTaskId: taskId } : {}), taskStatus: status, error: `relay task ended as ${status}`, ...outcome };
         const finalStatus = status === 'completed' ? 'done' : 'error';
         // 收口即入账：回传失败后重拉时原样重放这一份（同一 taskId，不重建任务）。
         finishNodeRequestRun(ledgerDb, req.id, finalStatus, result);
@@ -381,26 +407,62 @@ export function makeRelayRunner(deps: RelayRunnerDeps): RequestRunner {
       //   并把 `pauseReason` 原样带进结果（机器可读），供台账/面板如实上屏。
       if (status === 'paused') {
         const pauseReason = recordedPauseReason(row?.context_json);
-        const label = pauseReasonLabel(pauseReason);
-        const result = {
-          taskId,
-          taskStatus: status,
-          ...(pauseReason ? { pauseReason } : {}),
-          error: `relay task paused: ${label || status}`,
-          ...readOutcome(db, taskId),
-        };
-        // 非终态收口也入账：请求方已被告知失败，重拉不得再建第二件。
-        finishNodeRequestRun(ledgerDb, req.id, 'error', result);
-        return { status: 'error', result };
+        // zx_20261115_1 M6（真标本：跨机 E2E 首次跑到自动拆解）：
+        //   **`children_incomplete` 不是"失败"，是"正在等自己的子任务"**。远端任务被自动拆解后，
+        //   父任务必然短暂停在这个态；若在此报 error，一件本来会成功的活会被判死（真机上就是这么死的）。
+        //   处置：继续轮询，直到子任务把父任务推回终态或整体超时——超时那条路本来就有。
+        if (pauseReason === PAUSE_REASON_CHILDREN_INCOMPLETE) {
+          // 不 return，落到下面的超时判定继续等。
+        } else {
+          const label = pauseReasonLabel(pauseReason);
+          // zx_20261115_2 M1：树时窗用尽 = **整棵树不再继续**——先把远端/本机成员真停，再如实回传；
+          //   不能只回 error 把子任务留在 pending（那就是上一轮真机留下的孤儿树）。
+          if (pauseReason === PAUSE_REASON_RELAY_TREE_EXPIRED) {
+            const term = await terminateRelayTree(db, taskId, 'relay_tree_expired');
+            const expired = {
+              taskId,
+              taskStatus: 'archived',
+              pauseReason,
+              error: `relay task paused: ${label || status}`,
+              archived: term.archived > 0,
+              treeSize: term.treeSize,
+              cancelledRemote: term.cancelledRemote,
+              ...readOutcome(db, taskId),
+            };
+            finishNodeRequestRun(ledgerDb, req.id, 'error', expired);
+            return { status: 'error', result: expired };
+          }
+          const result = {
+            taskId,
+            taskStatus: status,
+            ...(pauseReason ? { pauseReason } : {}),
+            error: `relay task paused: ${label || status}`,
+            ...readOutcome(db, taskId),
+          };
+          // 非终态收口也入账：请求方已被告知失败，重拉不得再建第二件。
+          finishNodeRequestRun(ledgerDb, req.id, 'error', result);
+          return { status: 'error', result };
+        }
       }
       if (now() >= deadline) {
-        const result = { taskId, taskStatus: status, error: `relay task timed out after ${timeoutMs}ms` };
+        // zx_20261115_2 M1：超时**真停整棵树**（旧写法只回 error，远端根/子继续跑；回 error 后
+        //   ANS 落终态，事后再 cancel 也停不掉）。归档失败也如实进结果，不冒充已停。
+        const term = await terminateRelayTree(db, taskId, 'node_request_timeout');
+        const result = {
+          taskId,
+          taskStatus: 'archived',
+          error: `relay task timed out after ${timeoutMs}ms`,
+          archived: term.archived > 0,
+          treeSize: term.treeSize,
+          cancelledRemote: term.cancelledRemote,
+          ...(term.errors.length > 0 ? { errors: term.errors } : {}),
+        };
         finishNodeRequestRun(ledgerDb, req.id, 'error', result);
         return { status: 'error', result };
       }
-      // M3：检查点——派活方叫停 ⇒ **真停**（归档在途任务，abort 执行体）并如实回传 `cancelled`。
+      // M3：检查点——派活方叫停 ⇒ **真停整棵树**（远端叫停 + 归档，abort 执行体）并如实回传 `cancelled`。
       //   放在终态判定**之后**：若这件恰在这两跳之间已收口，如实回它的真实结局，不把"完成"改写成"停止"。
-      if (await isCancelled()) return stopNow(taskId);
+      if (await isCancelled()) return await stopNow(taskId);
       // M2：每一步后把"已完成几步"如实带给派活方（节流在 `maybeReport` 里；未知即不报）。
       const p = relayProgressOf(db, taskId);
       if (p) maybeReport(p);

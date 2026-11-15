@@ -33,7 +33,7 @@ import { boolSetting } from '../../../src/main/core/settings-bool.js';
 import { useSettings } from '../lib/settingsStore';
 import { FreshnessPill } from '../components/FreshnessPill';
 import { formatDbTime } from '../lib/deliverable-view';
-import { Router, RefreshCw, Radar, Power, PowerOff, ShieldCheck, ShieldOff, Lock, Radio, Pencil, Home, Cloud, Plus } from 'lucide-react';
+import { Router, RefreshCw, Radar, Power, PowerOff, ShieldCheck, ShieldOff, Lock, Radio, Pencil, Home, Cloud, Plus, Search } from 'lucide-react';
 // zx_20261023_5 批三: 统一接入向导（一步一屏；渠道目录由 main 的 `devices:channels` 给，界面不预判）。
 import { DeviceOnboardingWizard } from '../components/DeviceOnboardingWizard';
 // zx_20261017_1 批八: 区域词表从**零依赖**真源取（不引 `tuya-cloud.ts`——那里有 node:crypto，进不了渲染包）。
@@ -912,7 +912,8 @@ function CloudConfigBlock({ locked }: { locked: boolean }) {
               {account.provider === 'tuya'
                 ? `区域 ${String(account.config.region ?? '—')}${account.config.access_id ? ` · Access ID ${String(account.config.access_id)}` : ''}`
                 : `地址 ${String(account.config.base_url ?? '—')}`}
-              <span className="text-gray-400"> · 最近同步 {account.lastSyncAt ? `${formatDbTime(account.lastSyncAt)} UTC` : '从未'}</span>
+              {/* zx_20261115_2：`formatDbTime` 输出的已是**本地时间**，再缀「UTC」即两种口径混写——去掉。 */}
+              <span className="text-gray-400"> · 最近同步 {account.lastSyncAt ? (formatDbTime(account.lastSyncAt) || account.lastSyncAt) : '从未'}</span>
               {account.lastSyncError && <span className="text-amber-600"> · 上次失败：{account.lastSyncError}</span>}
             </div>
             <TestResultLine r={testResults[account.id] ?? null} />
@@ -1205,10 +1206,47 @@ export default function DevicesPage() {
   const [batchRoom, setBatchRoom] = useState('');
   const [batchBusy, setBatchBusy] = useState(false);
   const [batchMsg, setBatchMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  // zx_20261115_2: 失败要上屏——此前 `q.error` 从未被读、发现/直查的 catch 把原因吞掉。
+  //   两者**分名**：`q.error` = 台账**读**失败；`opError` = 用户动作（发现/直查）失败。不混作一句。
+  const [opError, setOpError] = useState<{ kind: 'discover' | 'refresh' | 'poll'; text: string; detail: string[] } | null>(null);
+  // zx_20261115_2: 台账搜索 + 状态筛选（与既有房间筛选**并存可组合**；只做展示筛选，不发请求）。
+  const [search, setSearch] = useState('');
+  const [statusView, setStatusView] = useState<'all' | 'online' | 'offline' | 'unauthorized'>('all');
 
   // zx_20261027_3 M1b: 云 Provider / miIO **没有实时订阅**——页面**可见时**每 30s 直查一次，
   //   隐藏即停（不留后台网络活动）。查到的状态由 main 以 `source='provider'` 写回 `live`
   //   并发 `device.status_changed` ⇒ 这里的 `useLiveQuery` 自动重读台账，无需另存一份数据。
+  //
+  // zx_20261115_2: 回包不再整包丢弃——逐台的 `ok/error`、`unsupported`、`skipped` 汇总成人话上屏；
+  //   轮询失败也走同一条通道（此前是空 catch，直查挂了页面上一个字都没有）。
+  const refreshStatesNow = useCallback(async (source: 'manual' | 'poll') => {
+    const kind: 'refresh' | 'poll' = source === 'manual' ? 'refresh' : 'poll';
+    try {
+      const r = await devicesApi.refreshStates();
+      // 只有 `ok:false` 才是「这轮没刷到」。⚠ 不把 `skipped` 计入告警：那是**按设计**跳过的设备
+      //   （mqtt/ha/http 有实时订阅，不在直查目标里）——拿它报警会让有 HA 设备的页每 30 秒常亮红条。
+      const notOk = r.refreshed.filter(x => !x.ok);
+      const unsupported = notOk.filter(x => x.unsupported === true);
+      const errored = notOk.filter(x => x.unsupported !== true);
+      if (errored.length > 0) {
+        setOpError({
+          kind,
+          text: `${errored.length} 台刷新失败${unsupported.length > 0 ? `（另有 ${unsupported.length} 台该协议不支持直查）` : ''}`,
+          detail: [
+            ...errored.map(f => `${f.name || f.deviceId}（${f.protocol}）：${f.error ?? '未说明原因'}`),
+            ...unsupported.map(u => `${u.name || u.deviceId}（${u.protocol}）：该协议不支持直查`),
+          ],
+        });
+      } else {
+        // 本轮没有失败：只清掉上一次的直查/轮询告警，不抹掉「发现失败」那条（那是另一件事）。
+        setOpError(prev => (prev != null && prev.kind !== 'discover' ? null : prev));
+      }
+    } catch (e) {
+      setOpError({ kind, text: `状态直查失败：${(e as Error)?.message || '未知原因'}`, detail: [] });
+    }
+    await q.reload();
+  }, [q.reload]);
+
   useEffect(() => {
     let timer: ReturnType<typeof setInterval> | null = null;
     let inFlight = false;
@@ -1216,9 +1254,7 @@ export default function DevicesPage() {
       if (inFlight) return;
       inFlight = true;
       try {
-        await devicesApi.refreshStates();
-      } catch {
-        // 失败原因已逐条回包（未写入 live 的保持旧快照）；页面不因一次直查失败而报错。
+        await refreshStatesNow('poll');
       } finally {
         inFlight = false;
       }
@@ -1237,13 +1273,15 @@ export default function DevicesPage() {
     if (document.visibilityState === 'visible') start();
     document.addEventListener('visibilitychange', onVisibility);
     return () => { stop(); document.removeEventListener('visibilitychange', onVisibility); };
-  }, []);
+  }, [refreshStatesNow]);
 
   async function toggleDiscovery() {
     if (!data) return;
+    const wasRunning = data.discoveryRunning;
     setDiscovering(true);
+    setOpError(null);
     try {
-      if (data.discoveryRunning) {
+      if (wasRunning) {
         await devicesApi.stop();
         setDiscoveryErrors([]);
       } else {
@@ -1251,7 +1289,23 @@ export default function DevicesPage() {
         setDiscoveryErrors(r.mqttErrors ?? []);
       }
       await q.reload();
+    } catch (e) {
+      // zx_20261115_2: 此前只有 try/finally——起/停失败静默无声（按钮弹回原样，用户以为没点着）。
+      setOpError({
+        kind: 'discover',
+        text: `${wasRunning ? '停止发现' : '开始发现'}失败：${(e as Error)?.message || '未知原因'}`,
+        detail: [],
+      });
     } finally { setDiscovering(false); }
+  }
+
+  /** zx_20261115_2: opError 的重试入口——按失败来源回到对应动作（发现 / 直查）。 */
+  function retryOpError() {
+    if (!opError) return;
+    const kind = opError.kind;
+    setOpError(null);
+    if (kind === 'discover') void toggleDiscovery();
+    else void refreshStatesNow('manual');
   }
 
   function toggleSelected(id: string) {
@@ -1294,11 +1348,61 @@ export default function DevicesPage() {
 
   if (q.loading && q.data == null) return <div className="flex justify-center py-12"><div className="animate-spin h-8 w-8 border-2 border-blue-500 border-t-transparent rounded-full" /></div>;
 
+  // zx_20261115_2（维特根斯坦·不要想而要看）: 首读失败 **不是**「台账为空」。
+  //   此前 `q.error` 从未被读 ⇒ `devices:list` 一失败，页面就印「台账暂空——点右上「开始发现」」，
+  //   把"读不到"说成"一台都没有"。读不到就如实说读不到，并给一条重试路。
+  if (data == null && q.error) {
+    return (
+      <div>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-xl font-bold">设备</h2>
+          <FreshnessPill q={q} />
+        </div>
+        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3">
+          <div className="text-sm font-medium text-red-800">设备台账没读到——这不是「一台设备都没有」</div>
+          <div className="mt-1 text-xs text-red-700 break-all font-mono">{q.error}</div>
+          <button onClick={() => void q.reload()}
+            className="mt-2 inline-flex items-center gap-1 text-xs px-2.5 py-1 bg-red-600 text-white rounded-lg hover:bg-red-700">
+            <RefreshCw className="w-3.5 h-3.5" />重试
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   const devices = data?.devices ?? [];
   const actions = data?.actions ?? [];
   // zx_20261029_2 M5: 「未分配房间」= `room` 为空（与 main 侧 `normalizeRoomName` 同义；发现提示只填空、不覆盖）。
   const unassignedDevices = devices.filter(d => !d.room.trim());
-  const visibleDevices = roomView === 'unassigned' ? unassignedDevices : devices;
+  // zx_20261115_2: 台账标题行的四个数**全部派生自本页已读到的行**（不另调接口、不猜）。
+  //   「在线」只认 `online === true`：`null`=未知，既不算在线也不算离线（知止不殆）。
+  const onlineDevices = devices.filter(d => d.online === true);
+  const offlineDevices = devices.filter(d => d.online === false);
+  const authorizedDevices = devices.filter(d => d.authorized);
+  const unauthorizedDevices = devices.filter(d => !d.authorized);
+  // 搜索：名称 / 别名 / 房间 / 地址，大小写不敏感的子串匹配（只做展示筛选，不发请求）。
+  const keyword = search.trim().toLowerCase();
+  const matchesKeyword = (d: AnsDevice): boolean => keyword === ''
+    || [d.name, d.alias, d.room, d.address].some(s => (s ?? '').toLowerCase().includes(keyword));
+  // 房间筛选（roomView）+ 状态筛选（statusView）+ 搜索**可组合**：三段各自收窄，互不覆盖。
+  const visibleDevices = devices.filter(d => {
+    if (roomView === 'unassigned' && d.room.trim() !== '') return false;
+    if (statusView === 'online' && d.online !== true) return false;
+    if (statusView === 'offline' && d.online !== false) return false;
+    if (statusView === 'unauthorized' && d.authorized) return false;
+    return matchesKeyword(d);
+  });
+
+  function resetFilters() {
+    setRoomView('all');
+    setStatusView('all');
+    setSearch('');
+  }
+
+  /** 筛选 chip 的统一外观（选中/未选两种，沿用本页既有的灰色系，不做视觉重设计）。 */
+  const chipClass = (active: boolean): string => `text-[11px] px-2 py-0.5 rounded-full border ${active
+    ? 'border-slate-400 bg-slate-100 text-slate-700'
+    : 'border-gray-200 text-gray-500 hover:bg-gray-50'}`;
   // 留痕按 `device_id` 现查台账取名（zx_20261014_1 批一）——名字来自**当前**台账，非冗余快照。
   const deviceById = new Map(devices.map(d => [d.id, d]));
   // 留痕按 `task_id` 现查任务引用（zx_20261014_3 批一）——标题/项目名由 main 读时查，同样非快照。
@@ -1329,9 +1433,9 @@ export default function DevicesPage() {
             {data?.discoveryRunning ? <><PowerOff className="w-3.5 h-3.5" />停止发现</> : <><Radar className="w-3.5 h-3.5" />开始发现</>}
           </button>
           {/* 「刷新状态」= 立刻直查云/miIO 一次（与 30s 轮询同一入口）；台账刷新仍走右侧按钮/实时事件。 */}
-          <button onClick={() => void devicesApi.refreshStates().then(() => q.reload()).catch(() => undefined)}
+          <button onClick={() => void refreshStatesNow('manual')}
             className="text-xs px-2.5 py-1 border border-gray-300 rounded-lg hover:bg-gray-50"
-            title="立即直查云 Provider / miIO 设备状态（MQTT/HA 有实时订阅，不在此列）">刷新状态</button>
+            title="立即直查云 Provider / miIO 设备状态（MQTT/HA 有实时订阅，不在此列）；逐台结果如实汇总，失败可展开">刷新状态</button>
           <button onClick={() => void q.reload()} className="p-2 hover:bg-gray-100 rounded-lg"><RefreshCw className="w-4 h-4" /></button>
         </div>
       </div>
@@ -1358,7 +1462,9 @@ export default function DevicesPage() {
         <div className="mb-2 text-[11px] text-gray-500">
           设备登记：已用 {data.capacity.used}/{data.capacity.limit === 0 ? '不限' : data.capacity.limit} 台
           {data.capacityRefusals && data.capacityRefusals.count > 0 && (
-            <> · 因上限未登记 {data.capacityRefusals.count} 台（最近 {data.capacityRefusals.lastAt ?? '—'} UTC）</>
+            /* zx_20261115_2：`lastAt` 是 main 侧的 UTC 串（不带 `Z`），此处并入 `formatDbTime` 统一转本地时间；
+               不再"本地 + UTC"混标（同页一种口径）。 */
+            <> · 因上限未登记 {data.capacityRefusals.count} 台（最近 {formatDbTime(data.capacityRefusals.lastAt) || '—'}）</>
           )}
         </div>
       )}
@@ -1383,65 +1489,133 @@ export default function DevicesPage() {
         </div>
       )}
 
-      <MqttConfigBlock locked={discoveryLocked} />
-
-      <HaConfigBlock locked={discoveryLocked} />
-
-      <CloudConfigBlock locked={discoveryLocked} />
-
-      <div className="mb-3 rounded-lg border bg-white px-3 py-2 text-[11px] text-gray-600">
-        <b>局域网直连</b>：发现会浏览 mDNS（http / hap / esphomelib / home-assistant）并解析 SSDP 描述；
-        设备自述可控且已授权后，控制经私网 HTTP JSON 或米家 miIO 下发。只向私网地址出站，不触公网。
-      </div>
-
-      <IntentSceneBlock devices={devices} locked={locked} />
+      {/* zx_20261115_2: 失败如实上屏——台账**读**失败（有旧数据时的增量刷新失败）与**动作**失败分两处说。 */}
+      {q.error && data != null && (
+        <div className="mb-3 text-[11px] text-amber-700">
+          最近一次刷新台账失败：<span className="font-mono break-all">{q.error}</span>（下方是上一次读到的内容，可能已过期）
+          <button onClick={() => void q.reload()} className="ml-1 underline hover:text-amber-900">重试</button>
+        </div>
+      )}
+      {opError && (
+        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="font-medium">{opError.text}</span>
+            <div className="ml-auto flex items-center gap-1.5">
+              <button onClick={retryOpError}
+                className="text-[11px] px-2 py-0.5 rounded border border-red-300 text-red-700 hover:bg-red-100">重试</button>
+              <button onClick={() => setOpError(null)}
+                className="text-[11px] px-2 py-0.5 rounded border border-gray-300 text-gray-600 hover:bg-white">关闭</button>
+            </div>
+          </div>
+          {opError.kind === 'poll' && (
+            <div className="mt-0.5 text-[10px] text-red-600">（每 30 秒自动重试一次；页面不可见时暂停）</div>
+          )}
+          {opError.detail.length > 0 && (
+            <details className="mt-1">
+              <summary className="cursor-pointer text-[11px] text-red-700">逐台明细（{opError.detail.length} 条）</summary>
+              <ul className="mt-1 space-y-0.5 pl-4 list-disc">
+                {opError.detail.map((d, i) => <li key={i} className="font-mono break-all">{d}</li>)}
+              </ul>
+            </details>
+          )}
+        </div>
+      )}
 
       {data?.discoveryRunning && (
         <div className="mb-3 text-[11px] text-emerald-600 inline-flex items-center gap-1"><Radar className="w-3.5 h-3.5 animate-pulse" />正在发现中…（新设备会实时出现在下方）</div>
       )}
 
-      {/* zx_20261029_2 M5: 未分配房间筛选 + 多选批量指派（写口仍只走 devices:set_room）。 */}
+      {/* zx_20261115_2: **台账是第一眼**——标题行直接给四个真数（全部派生自本页已读到的行，不另调接口）。 */}
+      <div className="mb-1.5 flex items-center gap-2 flex-wrap">
+        <span className="text-sm font-semibold text-gray-700">设备台账</span>
+        <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-600">设备 {devices.length}</span>
+        <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700"
+          title="只算设备明确上报「在」的；未上报可用性的算未知，不并入。">在线 {onlineDevices.length}</span>
+        <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-blue-50 text-blue-700"
+          title="已打开「允许控制」的设备数">已授权 {authorizedDevices.length}</span>
+        <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-indigo-50 text-indigo-700"
+          title="尚未指派房间——按房间的意图无法命中它们">未分房间 {unassignedDevices.length}</span>
+      </div>
+
+      {/* zx_20261029_2 M5 + zx_20261115_2: 房间筛选 / 状态筛选 / 搜索**三者并存可组合**；
+          多选批量指派写口仍只走 `devices:set_room`。 */}
       {devices.length > 0 && (
-        <div className="mb-2 flex items-center gap-2 flex-wrap">
-          <span className="text-[11px] text-gray-500">筛选</span>
-          <button onClick={() => setRoomView('all')}
-            className={`text-[11px] px-2 py-0.5 rounded-full border ${roomView === 'all' ? 'border-slate-400 bg-slate-100 text-slate-700' : 'border-gray-200 text-gray-500 hover:bg-gray-50'}`}>
-            全部（{devices.length}）
-          </button>
-          <button onClick={() => setRoomView('unassigned')}
-            className={`text-[11px] px-2 py-0.5 rounded-full border ${roomView === 'unassigned' ? 'border-indigo-400 bg-indigo-50 text-indigo-700' : 'border-gray-200 text-gray-500 hover:bg-gray-50'}`}
-            title="只看尚未指派房间的设备——按房间的意图无法命中它们">
-            未分配房间（{unassignedDevices.length}）
-          </button>
-          {roomView === 'unassigned' && unassignedDevices.length > 0 && (
-            <button onClick={() => setSelectedIds(new Set(unassignedDevices.map(d => d.id)))} disabled={batchBusy}
-              className="text-[11px] px-2 py-0.5 rounded border border-gray-300 text-gray-600 hover:bg-gray-50 disabled:opacity-50">
-              全选未分配
+        <div className="mb-2 space-y-1.5">
+          <div className="flex items-center gap-2 flex-wrap">
+            <Search className="w-3.5 h-3.5 text-gray-400" />
+            <input value={search} onChange={e => setSearch(e.target.value)}
+              placeholder="搜索名称 / 别名 / 房间 / 地址"
+              className="text-xs px-2 py-1 rounded border border-gray-300 w-64" />
+            {search !== '' && (
+              <button onClick={() => setSearch('')}
+                className="text-[11px] px-2 py-0.5 border border-gray-300 rounded hover:bg-gray-50">清除搜索</button>
+            )}
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-[11px] text-gray-500">筛选</span>
+            <button onClick={() => { setRoomView('all'); setStatusView('all'); }}
+              className={chipClass(roomView === 'all' && statusView === 'all')}>
+              全部（{devices.length}）
             </button>
-          )}
-          {selectedIds.size > 0 && (
-            <div className="ml-auto flex items-center gap-2 flex-wrap">
-              <span className="text-[11px] text-gray-500">已选 {selectedIds.size} 台</span>
-              <input value={batchRoom} onChange={e => setBatchRoom(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter') void batchAssignRoom(); }}
-                placeholder="批量指派到房间（如 客厅）"
-                className="text-xs px-2 py-1 rounded border border-gray-300 w-48" />
-              <button onClick={() => void batchAssignRoom()} disabled={batchBusy}
-                className="text-[11px] px-2.5 py-1 rounded bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50">
-                {batchBusy ? '指派中…' : '批量设房间'}
+            <button onClick={() => setStatusView(prev => prev === 'online' ? 'all' : 'online')}
+              className={chipClass(statusView === 'online')}
+              title="只算设备明确上报「在」的；在线态未知的不算。">
+              在线（{onlineDevices.length}）
+            </button>
+            <button onClick={() => setStatusView(prev => prev === 'offline' ? 'all' : 'offline')}
+              className={chipClass(statusView === 'offline')}
+              title="只算设备明确上报「不在」的；在线态未知的不算离线。">
+              离线（{offlineDevices.length}）
+            </button>
+            <button onClick={() => setStatusView(prev => prev === 'unauthorized' ? 'all' : 'unauthorized')}
+              className={chipClass(statusView === 'unauthorized')}
+              title="未打开「允许控制」的设备——只读，不能被下发命令。">
+              未授权（{unauthorizedDevices.length}）
+            </button>
+            <button onClick={() => setRoomView(prev => prev === 'unassigned' ? 'all' : 'unassigned')}
+              className={chipClass(roomView === 'unassigned')}
+              title="只看尚未指派房间的设备——按房间的意图无法命中它们">
+              未分房间（{unassignedDevices.length}）
+            </button>
+            {roomView === 'unassigned' && visibleDevices.length > 0 && (
+              <button onClick={() => setSelectedIds(new Set(visibleDevices.map(d => d.id)))} disabled={batchBusy}
+                className="text-[11px] px-2 py-0.5 rounded border border-gray-300 text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+                title="把当前筛选下看得见的设备全部选中（再按需批量指派房间）">
+                全选当前可见
               </button>
-              <button onClick={() => setSelectedIds(new Set())} disabled={batchBusy}
-                className="text-[11px] px-2 py-0.5 border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50">清除选择</button>
-            </div>
-          )}
+            )}
+            {selectedIds.size > 0 && (
+              <div className="ml-auto flex items-center gap-2 flex-wrap">
+                <span className="text-[11px] text-gray-500">已选 {selectedIds.size} 台</span>
+                <input value={batchRoom} onChange={e => setBatchRoom(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') void batchAssignRoom(); }}
+                  placeholder="批量指派到房间（如 客厅）"
+                  className="text-xs px-2 py-1 rounded border border-gray-300 w-48" />
+                <button onClick={() => void batchAssignRoom()} disabled={batchBusy}
+                  className="text-[11px] px-2.5 py-1 rounded bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50">
+                  {batchBusy ? '指派中…' : '批量设房间'}
+                </button>
+                <button onClick={() => setSelectedIds(new Set())} disabled={batchBusy}
+                  className="text-[11px] px-2 py-0.5 border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50">清除选择</button>
+              </div>
+            )}
+          </div>
         </div>
       )}
       {batchMsg && <div className={`mb-2 text-[11px] ${batchMsg.ok ? 'text-emerald-600' : 'text-amber-600'}`}>{batchMsg.text}</div>}
 
+      {/* zx_20261115_2: 空态分三种，不混为一谈——读失败已在上面单独成块；
+          这里只区分「真的一台都没有」与「筛选后没有匹配」。 */}
       {devices.length === 0
         ? <p className="text-gray-400 text-center py-8">台账暂空——点右上「开始发现」扫描局域网设备。</p>
         : visibleDevices.length === 0
-          ? <p className="text-gray-400 text-center py-8">当前筛选下没有设备。</p>
+          ? (
+            <div className="text-center py-8">
+              <p className="text-gray-400">当前筛选下没有匹配的设备（台账里共 {devices.length} 台）。</p>
+              <button onClick={resetFilters}
+                className="mt-2 text-[11px] px-2.5 py-1 border border-gray-300 rounded hover:bg-gray-50">清除筛选</button>
+            </div>
+          )
           : <div className="space-y-2 mb-6">{visibleDevices.map(d => (
             <DeviceRow key={d.id} dev={d} onChanged={() => void q.reload()} locked={locked}
               selected={selectedIds.has(d.id)} onToggleSelect={() => toggleSelected(d.id)} />
@@ -1453,6 +1627,29 @@ export default function DevicesPage() {
           ? <p className="text-gray-300 text-xs py-2">尚无控制记录。每次控制（**含被拒**）都会留一行。</p>
           : <div className="rounded-lg border bg-white px-3 py-1">{actions.map(a => <AuditRow key={a.id} a={a} dev={deviceById.get(a.device_id)} taskRef={taskRefs[a.task_id]} terminalName={a.actor_kind === 'external' ? terminalRefs[a.actor_ref] : undefined} />)}</div>}
       </div>
+
+      {/* zx_20261115_2: 接入与渠道**默认折叠**——台账是第一眼，配置只在"控不了 / 没接上"时才要找。
+          四块配置 + 局域网说明 + 意图演练整体收进来（顺序与内容原样保留）。 */}
+      <details className="mt-6 rounded-lg border bg-white px-3 py-2">
+        <summary className="cursor-pointer text-sm font-medium text-gray-700">
+          接入与渠道
+          <span className="ml-2 text-[11px] font-normal text-gray-400">控不了 / 没接上时在这里配（MQTT、Home Assistant、设备云账号、局域网直连、意图演练）</span>
+        </summary>
+        <div className="mt-3">
+          <MqttConfigBlock locked={discoveryLocked} />
+
+          <HaConfigBlock locked={discoveryLocked} />
+
+          <CloudConfigBlock locked={discoveryLocked} />
+
+          <div className="mb-3 rounded-lg border bg-white px-3 py-2 text-[11px] text-gray-600">
+            <b>局域网直连</b>：发现会浏览 mDNS（http / hap / esphomelib / home-assistant）并解析 SSDP 描述；
+            设备自述可控且已授权后，控制经私网 HTTP JSON 或米家 miIO 下发。只向私网地址出站，不触公网。
+          </div>
+
+          <IntentSceneBlock devices={devices} locked={locked} />
+        </div>
+      </details>
 
       {wizardOpen && (
         <DeviceOnboardingWizard

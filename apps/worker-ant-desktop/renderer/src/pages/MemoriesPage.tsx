@@ -45,6 +45,14 @@ export default function MemoriesPage() {
   const [total, setTotal] = useState(0);
   const [notice, setNotice] = useState<Notice>(null);
   const [capacity, setCapacity] = useState<MemoryCapacity | null>(null);
+  /** zx_20261115_1 M7：辅助块读失败的**逐块**原因（空对象 = 都读到了）。 */
+  const [auxFailures, setAuxFailures] = useState<Record<string, string>>({});
+  const markFail = (label: string, e: unknown): void => {
+    setAuxFailures((prev) => (label in prev ? prev : { ...prev, [label]: (e as Error)?.message || String(e) }));
+  };
+  const clearFail = (label: string): void => {
+    setAuxFailures((prev) => (label in prev ? Object.fromEntries(Object.entries(prev).filter(([k]) => k !== label)) : prev));
+  };
 
   // zx_20261108_1 B4: 搜索改**服务端**取数（此前只在当前页 50 条里过滤 ⇒ 全库第 51 条起永远搜不到）。
   //   防抖 300ms 避免逐键打库；换筛选条件即回第 1 页（否则旧页码可能落在新结果集之外）。
@@ -87,16 +95,16 @@ export default function MemoriesPage() {
     }
   }, [q.data]);
 
-  async function loadProjects() { try { const d = await projectsApi.list() as unknown as ProjectItem[]; setProjList(d); } catch {} }
-  async function loadHealth() { try { const h = await admin.memoryHealth(); setHealth(h); } catch {} }
+  async function loadProjects() { try { const d = await projectsApi.list() as unknown as ProjectItem[]; setProjList(d); clearFail('项目'); } catch (e) { markFail('项目', e); } }
+  async function loadHealth() { try { const h = await admin.memoryHealth(); setHealth(h); clearFail('索引健康'); } catch (e) { markFail('索引健康', e); } }
   // 只认最后一次请求：快速切换项目筛选时，旧响应不得覆盖新项目的结果。
   const injSeq = useRef(0);
   async function loadInjectionStats() {
     const seq = ++injSeq.current;
     try {
       const s = await admin.memoryInjectionStats(projFilter || undefined);
-      if (seq === injSeq.current) setInjStats(s);
-    } catch {}
+      if (seq === injSeq.current) { setInjStats(s); clearFail('注入统计'); }
+    } catch (e) { if (seq === injSeq.current) markFail('注入统计', e); }
   }
   // zx_20261107_1 B4: 注入 ROI——同一序号纪律（快速切项目时旧响应不得覆盖新项目）。
   const roiSeq = useRef(0);
@@ -104,10 +112,10 @@ export default function MemoriesPage() {
     const seq = ++roiSeq.current;
     try {
       const v = await admin.injectionRoi(projFilter || undefined);
-      if (seq === roiSeq.current) setRoi(v);
-    } catch {}
+      if (seq === roiSeq.current) { setRoi(v); clearFail('注入 ROI'); }
+    } catch (e) { if (seq === roiSeq.current) markFail('注入 ROI', e); }
   }
-  async function loadDrafts() { try { const d = await skills.listDrafts(); setDrafts((d as unknown as { drafts: SkillDraft[] }).drafts || []); } catch {} }
+  async function loadDrafts() { try { const d = await skills.listDrafts(); setDrafts((d as unknown as { drafts: SkillDraft[] }).drafts || []); clearFail('技能草案'); } catch (e) { markFail('技能草案', e); } }
   async function loadCapacity() { try { setCapacity(await admin.memoryCapacity()); } catch (e) { setNotice({ kind: 'err', text: `容量读取失败：${(e as Error).message}` }); } }
 
   /** 写后统一刷新：列表 + 健康 +（若容量已展开）容量。 */
@@ -431,7 +439,21 @@ export default function MemoriesPage() {
         ))}
       </div>
 
-      {items.length===0?<p className="text-gray-400 text-center py-12">{hasFilters ? '没有匹配的记忆' : '暂无记忆'}</p>:<div className="space-y-2">{items.map(m=>{const tomb=isTombstone(m);const s=signals(m);return (
+      {/* zx_20261115_1 M7「真」：**读失败不得伪装成"暂无记忆"**。
+          此前 `q.error` 全页从未使用、四个辅助加载是空 `catch {}` ⇒ 库读失败时用户看到的是"没有数据"，
+          进而以为自己的记忆丢了。现在：列表读失败如实说失败并可重试；辅助块各自点名哪一块没读到。 */}
+      {Object.keys(auxFailures).length > 0 && (
+        <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] text-amber-800">
+          部分数据没读到：{Object.entries(auxFailures).map(([k, v]) => `${k}（${v}）`).join('；')}。
+          <button onClick={() => { void loadProjects(); void loadHealth(); void loadDrafts(); void loadInjectionStats(); void loadInjectionRoi(); }} className="ml-2 underline">重试</button>
+        </div>
+      )}
+      {q.error ? (
+        <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-6 text-center text-[13px] text-red-700">
+          记忆列表读取失败：{String(q.error)}
+          <button onClick={() => void q.reload()} className="ml-2 underline">重试</button>
+        </div>
+      ) : items.length===0?<p className="text-gray-400 text-center py-12">{hasFilters ? '没有匹配的记忆' : '暂无记忆'}</p>:<div className="space-y-2">{items.map(m=>{const tomb=isTombstone(m);const s=signals(m);return (
         <div key={m.id} className={`rounded-lg border p-4 ${tomb?'bg-stone-50 border-stone-200':'bg-white'}`}>
           <div className="flex items-start justify-between mb-1">
             <div className="flex items-center gap-2 flex-wrap">

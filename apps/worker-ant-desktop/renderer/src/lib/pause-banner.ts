@@ -7,7 +7,7 @@
  * 口径：`acceptance_failed` 必须报**未达条数/总条数**并指向验收块；`awaiting_input` 说在等回复；
  *   其余因由走 `pauseReasonLabel` 的人话名（空串则如实说「因未记录」，不编原因）。
  */
-import { PAUSE_REASON_ACCEPTANCE_FAILED, PAUSE_REASON_AWAITING_INPUT, PAUSE_REASON_NO_OUTPUT, pauseReasonLabel } from '../../../src/main/core/pause-reason.js';
+import { PAUSE_REASON_ACCEPTANCE_FAILED, PAUSE_REASON_AWAITING_INPUT, PAUSE_REASON_NO_OUTPUT, PAUSE_REASON_RELAY_TREE_EXPIRED, pauseReasonLabel } from '../../../src/main/core/pause-reason.js';
 
 export function pausedBannerHeadline(input: { reason: string; reasonLabel?: string; failed?: number; total?: number }): string {
   if (input.reason === PAUSE_REASON_ACCEPTANCE_FAILED) {
@@ -28,6 +28,9 @@ export function pausedBannerHint(reason: string): string {
   if (reason === PAUSE_REASON_AWAITING_INPUT) return '在等你回复/执行；回复后点「恢复」。';
   if (reason === PAUSE_REASON_NO_OUTPUT) {
     return '收口时未发现任何真实产出证据（无落盘成果、无交付物登记、无写入类工具调用）——已暂停而非标完成。若确有产出，请核验后「恢复」；若确认无需产出，可点「完成」。';
+  }
+  if (reason === PAUSE_REASON_RELAY_TREE_EXPIRED) {
+    return '本次派单的任务树总时窗已用尽——已完成的部分产出保留；不会自动延长时间。如需继续，请由派活方重新发起，或在本机核实后手动恢复。';
   }
   return '执行已挂起，可恢复继续。';
 }

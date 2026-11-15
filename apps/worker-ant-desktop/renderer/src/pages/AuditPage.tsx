@@ -8,7 +8,7 @@
  * ⚠ 锁定档位：main 回 `TEAM_REQUIRED` ⇒ 整页只显示升级提示（与协同面板同形）；不显示一张空表
  *   冒充"没有审计记录"（那两件事不是一回事）。
  */
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ShieldCheck, RefreshCw, Download } from 'lucide-react';
 import { audit as auditApi, IpcError } from '../lib/ipc';
 import { useLiveQuery } from '../lib/useLiveQuery';
@@ -18,13 +18,16 @@ import {
   AUDIT_SOURCES, AUDIT_SOURCE_LABEL, auditActionLabel, type AuditEventRow, type AuditSource,
 } from '../../../src/main/core/audit-labels.js';
 
+/** zx_20261115_1 M7「真」：结果徽标走中文词表（机器码留在 title 里，可悬停核对）。 */
+const AUDIT_RESULT_LABEL: Record<string, string> = { ok: '成功', denied: '被拒', error: '失败' };
+
 /** 结果徽标：ok / denied / error 三态各一色；新账动作无此概念（空串）⇒ 不渲染。 */
 function ResultBadge({ result }: { result: string }) {
   if (!result) return <span className="text-gray-300">—</span>;
   const cls = result === 'ok' ? 'bg-emerald-50 text-emerald-600'
     : result === 'denied' ? 'bg-amber-50 text-amber-600'
     : 'bg-red-50 text-red-600';
-  return <span className={`text-[10px] px-1.5 py-0.5 rounded ${cls}`}>{result}</span>;
+  return <span className={`text-[10px] px-1.5 py-0.5 rounded ${cls}`} title={result}>{AUDIT_RESULT_LABEL[result] ?? result}</span>;
 }
 
 function SourceBadge({ source }: { source: AuditSource }) {
@@ -43,6 +46,8 @@ function detailText(row: AuditEventRow): string {
 
 function Row({ row }: { row: AuditEventRow }) {
   const detail = detailText(row);
+  // zx_20261115_1 M7：明细此前是一段 280px 截断的 JSON（看不见全貌也没法展开）⇒ 可展开/收起。
+  const [open, setOpen] = useState(false);
   const target = [row.targetType, row.targetId].filter(Boolean).join(' / ');
   return (
     <tr className="border-t border-gray-100 align-top">
@@ -60,8 +65,13 @@ function Row({ row }: { row: AuditEventRow }) {
         <ResultBadge result={row.result} />
         {row.note && <div className="text-[10px] text-amber-600 mt-0.5">{row.note}</div>}
       </td>
-      <td className="py-2 text-[11px] text-gray-500 font-mono max-w-[280px] truncate" title={detail}>
-        {detail || '—'}
+      <td className="py-2 text-[11px] text-gray-500 font-mono max-w-[280px]">
+        {detail ? (
+          <button onClick={() => setOpen((v) => !v)} className="text-left hover:underline" title={open ? '收起' : '展开完整明细'}>
+            <span className={open ? 'whitespace-pre-wrap break-all block max-w-[560px]' : 'block truncate'}>{detail}</span>
+            <span className="text-[10px] text-blue-600">{open ? '收起' : '展开'}</span>
+          </button>
+        ) : '—'}
       </td>
     </tr>
   );
@@ -73,6 +83,10 @@ type LoadState =
 
 export default function AuditPage() {
   const [source, setSource] = useState<AuditSource | ''>('');
+  /** 页大小（200 起，每次 +200，上限 500 = core 的 MAX_LIMIT）。 */
+  const [limit, setLimit] = useState(200);
+  // 换来源筛选 ⇒ 回到 200（否则新筛选下"看着有一千条"的假象）。
+  useEffect(() => { setLimit(200); }, [source]);
   const [exporting, setExporting] = useState(false);
   const [exportMsg, setExportMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
@@ -91,7 +105,9 @@ export default function AuditPage() {
   };
   const q = useLiveQuery<LoadState>(async () => {
     try {
-      const payload = await auditApi.list({ limit: 200, ...(source ? { source } : {}) });
+      // zx_20261115_1 M7：页大小可增（此前写死 200、无翻页 ⇒ 第 201 条起在界面上永远看不到）。
+      //   上限 500 是 core 的 `MAX_LIMIT`；到顶时界面如实提示"请用筛选或导出"，不假装已看全。
+      const payload = await auditApi.list({ limit, ...(source ? { source } : {}) });
       return { locked: false, events: payload.events };
     } catch (e) {
       if (e instanceof IpcError && e.code === 'TEAM_REQUIRED') {
@@ -99,7 +115,7 @@ export default function AuditPage() {
       }
       throw e;
     }
-  }, [source], {
+  }, [source, limit], {
     // 审计是可写动作的旁账：这几类事件到达时复取（不是数据源，只是刷新触发）。
     liveTypes: ['node.request_dispatched', 'node.request_result', 'device.discovered', 'device.status_changed'],
     debounceMs: 700,
@@ -192,6 +208,16 @@ export default function AuditPage() {
                   {events.map((row) => <Row key={`${row.source}:${row.id}`} row={row} />)}
                 </tbody>
               </table>
+              {/* zx_20261115_1 M7：页脚说明"看到了多少、还能不能多看"——不把一页当全量。 */}
+              <div className="mt-3 flex items-center gap-3 text-[12px] text-gray-500">
+                <span>已显示 {events.length} 条</span>
+                {events.length >= limit && limit < 500 && (
+                  <button onClick={() => setLimit(Math.min(500, limit + 200))} className="underline text-blue-600">加载更多</button>
+                )}
+                {events.length >= 500 && (
+                  <span className="text-amber-600">已达单页上限 500 条；更早的记录请用来源筛选或「导出 CSV」查看。</span>
+                )}
+              </div>
             </div>
           )}
         </>

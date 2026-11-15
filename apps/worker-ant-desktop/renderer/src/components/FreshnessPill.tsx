@@ -22,6 +22,21 @@ export function FreshnessPill<T>({ q, className = '', onReload }: {
     );
   }
 
+  // zx_20261115_2 M5/M6（维特根斯坦·不要想而要看）: **从未成功加载过**时不得显示绿色「实时」——
+  //   `updatedAt=null` 的 isLive 分支会把"读失败"画成"实时"，两页都踩过。读失败 ⇒ 红按钮可重试。
+  if (q.error && q.data == null) {
+    return (
+      <button
+        type="button"
+        onClick={() => { void q.reload(); onReload?.(); }}
+        className={`inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-red-50 text-red-600 hover:bg-red-100 cursor-pointer ${className}`}
+        title={q.error}
+      >
+        <RotateCw className="w-3 h-3" />未读到 · 重试
+      </button>
+    );
+  }
+
   const fmt = (ms: number | null): string => {
     if (ms == null) return '';
     const d = new Date(ms);

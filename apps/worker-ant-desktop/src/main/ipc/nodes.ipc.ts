@@ -34,7 +34,7 @@ import { resolveLicenseTier } from '../core/license.js';
 import { nodeQuotaCheck } from '../core/node-quota.js';
 // zx_20261010_1 M2（维特根斯坦·意义即使用）: 「加入协同网络」的三出口——令牌写口 / 申请 / 注册，
 //   复用 core 单源（`node-heartbeat.ts`），并调 M3 的 `startNodeRuntime` 完成**免重启即时生效**。
-import { enrollWithToken, isNodeEnrolled, nodeEnrollmentReason, readEnrollmentToken, requestEnrollmentToken, writeEnrollmentToken } from '../core/node-heartbeat.js';
+import { effectiveNodeParticipateOut, enrollWithToken, isNodeEnrolled, nodeEnrollmentReason, readEnrollmentToken, requestEnrollmentToken, writeEnrollmentToken } from '../core/node-heartbeat.js';
 import { startNodeRuntime } from '../core/node-runtime.js';
 // zx_20261011_4 M3: 台账取数移 core（编排器读同一份）——此处转调，形状 `NodeLedger` 一处。
 import { fetchNodes, type NodeLedger } from '../core/node-list.js';
@@ -44,7 +44,7 @@ import { ORCHESTRATE_MODES, isOrchestrateMode, readOrchestrateMode } from '../co
 // zx_20261017_1 批三: 建单即派的读/写口——开关真源与审计投影同出 `core/collab-dispatch.ts`（一处真源）。
 import { applyAutoDispatchOnboarding, autoDispatchPolicy, dispatchBoard, isAutoDispatchPrompted, lastAutoDispatch } from '../core/collab-dispatch.js';
 // zx_20261017_1 批四: 改档留痕——写点收 `core/audit-log.ts`（一处），此处只转调。
-import { recordNodeUpdate, type AuditDb } from '../core/audit-log.js';
+import { recordAudit, recordNodeUpdate, type AuditDb } from '../core/audit-log.js';
 
 /**
  * 本机台账行的投影——`nodes:list` / `nodes:card` 共用。
@@ -128,6 +128,34 @@ export function initNodesIpc(db: Database.Database): void {
         ...(ledger.error ? { error: ledger.error } : {}),
       });
       return { data: { ...view, gate } };
+    } catch (e) {
+      return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } };
+    }
+  });
+
+  /**
+   * zx_20261115_1 M4：本机「允许把活派给别人」的读写（**纯本地设置，不入 ANS**）。
+   *
+   * 为什么不进 `nodes:update`：交给 ANS 的那个 PATCH 的契约是"节点台账三键"（名称/角色/权重/接活），
+   * 而"派出去"是**本机的行为选择**，对端不需要知道。塞进同一个 PATCH 会污染跨仓契约。
+   */
+  ipcMain.handle('nodes:participateOut', async (_event, input?: { value?: unknown }) => {
+    try {
+      if (input?.value === undefined) return { data: { enabled: effectiveNodeParticipateOut(settingDb) } };
+      if (typeof input.value !== 'boolean') {
+        return { error: { code: 'INVALID_REQUEST', message: '参与派发必须是布尔值' } };
+      }
+      const refusal = teamFeatureRefusal(licDb, 'multi_node');
+      if (refusal) return { error: { code: 'TEAM_REQUIRED', message: refusalWithContext(db, refusal, { requiredTier: 'team' }) } };
+      const v = input.value ? '1' : '0';
+      writeNodeSetting(settingDb, NODE_SETTING_KEYS.participateOut, v);
+      broadcastSetting(NODE_SETTING_KEYS.participateOut, v);
+      const localId = ensureNodeIdentity(settingDb).id;
+      recordAudit(db as unknown as AuditDb, {
+        actorKind: 'local', actorRef: localId, action: 'node.update',
+        targetType: 'node', targetId: localId, detail: { fields: ['participateOut'], value: v, self: true },
+      });
+      return { data: { enabled: input.value } };
     } catch (e) {
       return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } };
     }

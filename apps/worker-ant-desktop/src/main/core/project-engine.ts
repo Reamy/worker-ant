@@ -162,6 +162,12 @@ export function deleteProjectCascade(db: Database.Database, id: string): string[
     db.prepare('DELETE FROM wa_project_profile_history WHERE project_id = ?').run(id);
     // zx_20261029_1「知」: 项目须知是本机对工作目录的一次只读快照，随项目一起消失。
     db.prepare('DELETE FROM wa_project_briefs WHERE project_id = ?').run(id);
+    // zx_20261115_1 M3「分」: 岗位绑定关系随项目消失（绑定是"本项目启用了哪个岗位"，不是资产）。
+    //   ⚠ **岗位经验（wa_position_lessons）刻意不删**：它属于岗位，是跨项目资产——这正是
+    //   「项目以项目为中心、岗位以岗位为中心」的分界。删项目后，经验行的 project_id 成为历史引用，
+    //   页面依 LEFT JOIN 的空值如实显示"项目已删除"，不伪造、不静默置空。
+    //   此前这张绑定表不在级联清单里 ⇒ 删项目后岗位页的项目数大于可见项目数（本次一并补上）。
+    db.prepare('DELETE FROM wa_project_positions WHERE project_id = ?').run(id);
     // zx_20261021_3 批一: 只删**本项目的启用关系**；`wa_domain_packs` 资产**不删**——
     //   源项目消失不该毁掉已经带走的东西（它可能已被别的项目启用、或经共享库流到别处）。
     db.prepare('DELETE FROM wa_project_domain_packs WHERE project_id = ?').run(id);

@@ -20,6 +20,8 @@ import { useLiveQuery } from '../lib/useLiveQuery';
 // zx_20261018_2 批六「见新」：门态/留痕以事件驱动为主，轮询只作兜底——节拍一处真源。
 import { ACTIVE_POLL_MS, FALLBACK_POLL_MS } from '../lib/refresh';
 import { FreshnessPill } from '../components/FreshnessPill';
+// zx_20261115_2 M5：读失败 ≠ 没有——五路查询各自带因由与重试，不再退化成「暂无」。
+import LoadFailure from '../components/LoadFailure';
 import { readNodeEnv, isNodeOnline, seenAgo, snapshotAgo, isSnapshotStale, dispatchFillView, slotFillView, fillColor, capacityView, capacityColor, diskUsageView, bottleneckView, adviceReliabilityOf, CALL_STATUS_LABEL, DISPATCH_STATUS_LABEL, nodeCategories, nodePositions, classLoadView, canRemovePeer, canEditNode, selectionReasonOf, type NodeEnvView } from '../lib/node-view';
 import { formatBytes, formatDbTime, parseDbTime } from '../lib/deliverable-view';
 import { resultBrief } from '../lib/result-brief';
@@ -49,6 +51,15 @@ function useTick(ms = 10_000): number {
     return () => window.clearInterval(t);
   }, [ms]);
   return now;
+}
+
+/**
+ * zx_20261115_2 M5（名实·一个意思）: **「可派单」只有这一个判据**——参与 ∧ 非观察者（共享真源 `isDispatchable`）
+ *   ∧ 此刻在线（阈值见 `node-view.ts`）。旧版徽标只看前者、派活下拉又各自要求在线 ⇒ 同一台离线机
+ *   行上写「可派单」却选不到。徽标与候选都走这里，不再各写一份判据。
+ */
+function canDispatchNow(node: AnsNode, nowMs: number): boolean {
+  return isDispatchable(node) && isNodeOnline(node.last_seen_at, nowMs);
 }
 
 function OnlineDot({ online }: { online: boolean }) {
@@ -511,11 +522,18 @@ function DispatchLedger({ nameOf }: { nameOf: (id: string) => string }) {
 
   return (
     <div className="mt-6 pt-5 border-t border-gray-200">
+      {/* zx_20261115_2 M5：main 缺省只取最近 50 条——标题如实写窗口，不把 limit 说成全部；
+          从未读成功时也不把「0 条」当成事实。 */}
       <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5">
-        我派出去的活（{records.length}）
+        我派出去的活（{q.error && q.data == null ? '读取失败' : `最近 ${records.length} 条，上限 50`}）
       </p>
+      {q.error && (
+        <div className="mb-2">
+          <LoadFailure what="「我派出去的活」" reason={q.error} onRetry={() => void q.reload()} busy={q.loading} />
+        </div>
+      )}
       {records.length === 0
-        ? <p className="text-xs text-gray-400 py-3">尚无派出记录——用上方「派活」发出第一单后在此留痕（派出/读回收口各一条）。</p>
+        ? (q.error ? null : <p className="text-xs text-gray-400 py-3">尚无派出记录——用上方「派活」发出第一单后在此留痕（派出/读回收口各一条）。</p>)
         : <div className="space-y-2">{records.map(r => <DispatchRow key={r.requestId} rec={r} nameOf={nameOf} onDone={() => void q.reload()} />)}</div>}
     </div>
   );
@@ -558,7 +576,8 @@ function RoleAdviceCard({ advice, currentRole, editable, busy, onAdopt }: {
 function NodeRow({ node, local, localRole, localNodeId, nowMs, reliability, onSaved, onRemove }: { node: AnsNode; local: boolean; localRole: NodeRole | null; localNodeId: string | null; nowMs: number; reliability: { successRate: number; avgLatencyMs: number | null; samples: number } | null; onSaved: () => void; onRemove?: () => void }) {
   const env = readNodeEnv(node);
   const online = isNodeOnline(node.last_seen_at, nowMs);
-  const dispatchable = isDispatchable(node);
+  // zx_20261115_2 M5：徽标与派活下拉同一个判据（此前徽标不含在线 ⇒ 同一词两套意思）。
+  const canDispatch = canDispatchNow(node, nowMs);
   // zx_20261017_1 批四: 可否改档的唯一判据（本机行恒可编；他机须本机 primary/observer）——不在此内联。
   const editable = canEditNode(localRole, node, localNodeId);
   const [role, setRole] = useState<NodeRole>(node.role);
@@ -566,6 +585,13 @@ function NodeRow({ node, local, localRole, localNodeId, nowMs, reliability, onSa
   const [participate, setParticipate] = useState(node.participate);
   // zx_20261011 M8（追加批）: 节点名——此前无写口（派活目标下拉只显 name，两台同名即无法分辨）。
   const [name, setName] = useState(node.name);
+  // zx_20261115_1 M4：「接活」与「派活」是两个方向，分开控制。仅本机行可改（对端无从知晓）。
+  // zx_20261115_2 M5：初值**只是占位**（失败安全=关）——是否可信由 `participateOutKnown` 说；
+  //   没读到当前值时既不显示"允许"，保存时也不写（旧版按"允许"显示，保存把"开"真写回去了）。
+  const [participateOut, setParticipateOut] = useState(false);
+  const [participateOutKnown, setParticipateOutKnown] = useState(false);
+  // 本机行的首读从"读取中"起算——不让默认值先被当成"未读到"闪一下；他机行不读它。
+  const [participateOutBusy, setParticipateOutBusy] = useState(local);
   const [saving, setSaving] = useState(false);
   const [saveErr, setSaveErr] = useState<string | null>(null);
 
@@ -582,6 +608,33 @@ function NodeRow({ node, local, localRole, localNodeId, nowMs, reliability, onSa
 
   // 台账刷新后回填（保存成功 → 复取 → 值一致；他处改动 → 这里跟手）。
   useEffect(() => { setRole(node.role); setWeight(String(node.weight)); setParticipate(node.participate); setName(node.name); }, [node.role, node.weight, node.participate, node.name]);
+  // 本机行才读"是否允许派给别人"（他机行不显示这个开关）。
+  // zx_20261115_2 M5：读不到 ⇒ 保持**未知**（不显示"允许"，保存时也不写）——旧注释那句
+  //   "读不到按允许显示，保存时会以真值覆盖"是错的：保存写的就是那个假的"开"。
+  useEffect(() => {
+    if (!local) return;
+    let alive = true;
+    setParticipateOutBusy(true);
+    nodesApi.getParticipateOut()
+      .then((r) => { if (alive) { setParticipateOut(r.enabled); setParticipateOutKnown(true); } })
+      .catch(() => { if (alive) setParticipateOutKnown(false); })
+      .finally(() => { if (alive) setParticipateOutBusy(false); });
+    return () => { alive = false; };
+  }, [local]);
+
+  /** 重读"允许派给他人"：返回真值；读不到返回 `null`（未知——调用方不得写回）。 */
+  async function readParticipateOut(): Promise<boolean | null> {
+    setParticipateOutBusy(true);
+    try {
+      const r = await nodesApi.getParticipateOut();
+      setParticipateOut(r.enabled);
+      setParticipateOutKnown(true);
+      return r.enabled;
+    } catch {
+      setParticipateOutKnown(false);
+      return null;
+    } finally { setParticipateOutBusy(false); }
+  }
 
   async function save() {
     setSaving(true); setSaveErr(null);
@@ -589,6 +642,12 @@ function NodeRow({ node, local, localRole, localNodeId, nowMs, reliability, onSa
       // 名字留空即**不改名**（不把空串 PATCH 上去把台账名清掉）——其余三键恒发。
       const patch = { role, weight: Number(weight), participate, ...(name.trim() ? { name: name.trim() } : {}) };
       await nodesApi.update(node.node_id, patch);
+      // 本机行另存"派出去"开关（本地设置，不入 ANS）。
+      // 未读到当前值 ⇒ 保存前先重取；仍读不到就**不写**（绝不把未知当"开"写回）。
+      if (local) {
+        const value = participateOutKnown ? participateOut : await readParticipateOut();
+        if (value != null) await nodesApi.setParticipateOut(value);
+      }
       onSaved();
     } catch (e) {
       setSaveErr((e as Error)?.message || '保存失败');
@@ -617,7 +676,8 @@ function NodeRow({ node, local, localRole, localNodeId, nowMs, reliability, onSa
         {local && <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-600 text-white">本机</span>}
         <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">{NODE_ROLE_LABEL[node.role]}</span>
         <span className="text-[10px] text-gray-400">权重 {node.weight}</span>
-        <span className={`text-[10px] px-1.5 py-0.5 rounded ${dispatchable ? 'bg-emerald-50 text-emerald-600' : 'bg-gray-100 text-gray-500'}`}>{dispatchable ? '可派单' : '不派单'}</span>
+        {/* zx_20261115_2 M5：与派活下拉同一个判据——离线机不再被写成「可派单」。 */}
+        <span className={`text-[10px] px-1.5 py-0.5 rounded ${canDispatch ? 'bg-emerald-50 text-emerald-600' : 'bg-gray-100 text-gray-500'}`}>{canDispatch ? '可派单' : online ? '不派单' : '离线（不可派）'}</span>
         <OnlineDot online={online} />
         <span className="text-[11px] text-gray-400 ml-auto">心跳 {seenAgo(node.last_seen_at, nowMs)}</span>
       </div>
@@ -657,9 +717,27 @@ function NodeRow({ node, local, localRole, localNodeId, nowMs, reliability, onSa
           <label className="text-[11px] text-gray-500 inline-flex items-center gap-1">权重
             <input type="number" step="0.1" min="0" value={weight} onChange={e => setWeight(e.target.value)} className="w-16 px-1.5 py-0.5 border rounded text-xs" />
           </label>
-          <label className="text-[11px] text-gray-500 inline-flex items-center gap-1">
-            <input type="checkbox" checked={participate} onChange={e => setParticipate(e.target.checked)} />参与派单
+          <label className="text-[11px] text-gray-500 inline-flex items-center gap-1" title="关掉后这台机器不再接收别人派来的活（存 ANS 台账）">
+            <input type="checkbox" checked={participate} onChange={e => setParticipate(e.target.checked)} />接收派单
           </label>
+          {local && (
+            participateOutKnown ? (
+              <label className="text-[11px] text-gray-500 inline-flex items-center gap-1" title="关掉后这台机器把自己的活也只在本机跑，不派给其他工蚁（本地设置）">
+                <input type="checkbox" checked={participateOut} onChange={e => setParticipateOut(e.target.checked)} />允许派给他人
+              </label>
+            ) : (
+              // 读不到当前值 ⇒ 如实说"未读到"，不摆一个看似"已允许"的勾；保存前会先重取，仍读不到就不写。
+              <span className="text-[11px] text-amber-700 inline-flex items-center gap-1" title="本地设置读不到 ⇒ 本次保存不会改动这一项">
+                允许派给他人：{participateOutBusy ? '读取中…' : '未读到当前值'}
+                {!participateOutBusy && (
+                  <button type="button" onClick={() => void readParticipateOut()} disabled={participateOutBusy}
+                    className="px-1.5 py-0.5 border border-amber-300 rounded hover:bg-amber-50 disabled:opacity-50">
+                    重试读取
+                  </button>
+                )}
+              </span>
+            )
+          )}
           <button onClick={save} disabled={saving} className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50">
             <Check className="w-3 h-3" />{saving ? '保存中…' : '保存'}
           </button>
@@ -849,6 +927,8 @@ function DoorCard() {
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   // 勾选态按 `pairingId` 记——一批待批里逐条各勾各的（新来一条不会串味；已处理的条目的勾选自然失效）。
   const [picked, setPicked] = useState<Record<string, string[]>>({});
+  // zx_20261115_2 M5：门是**次级**——默认折叠，先让工蚁节点占首屏；有待批时标题旁带一个数，折叠也不漏看。
+  const [open, setOpen] = useState(false);
 
   const status = st.data;
   const pending = list.data?.pending ?? [];
@@ -950,7 +1030,13 @@ function DoorCard() {
     <div className="mb-5 rounded-lg border border-slate-300 bg-slate-50/60 px-4 py-3">
       <div className="flex items-center gap-2 flex-wrap">
         <div className="text-sm font-medium text-gray-800 inline-flex items-center gap-1.5"><DoorOpen className="w-4 h-4" />门 · 外部 AI 终端接入</div>
-        <label className="ml-auto inline-flex items-center gap-1.5 text-xs text-gray-700">
+        {!open && pending.length > 0 && (
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">待审批 {pending.length}</span>
+        )}
+        <button type="button" onClick={() => setOpen(v => !v)} className="ml-auto text-[11px] text-blue-600 hover:underline">
+          {open ? '收起' : `展开（待批 ${pending.length} · 已授权 ${approved.length}）`}
+        </button>
+        <label className="inline-flex items-center gap-1.5 text-xs text-gray-700">
           <input type="checkbox" checked={status?.enabled ?? false} disabled={toggling || !status}
             onChange={e => void toggle(e.target.checked)} />
           {toggling ? '切换中…' : (status?.enabled ? '已开' : '关闭')}
@@ -958,6 +1044,7 @@ function DoorCard() {
       </div>
       {/* `enabled`（用户意图）与 `running`（真在监听）**分开如实说**——锁定时不被误说成"已开"。 */}
       <p className="mt-1 text-[11px] text-gray-600">{status ? status.detail : '读不到门的实况（IPC 未就绪）…'}</p>
+      {open && (<>
       {/* zx_20261029_2 M4：常驻发现的实况——未运行时把原因如实说出（门未开 / Team 未解锁 / 起不来）。 */}
       <p className="mt-0.5 text-[10px] text-gray-400">
         {browse.data ? `常驻发现：${browse.data.running ? '运行中' : '未运行'} — ${browse.data.detail}` : '常驻发现：读取中…'}
@@ -1176,6 +1263,7 @@ function DoorCard() {
             </div>
           ))}</div>}
       </div>
+      </>)}
     </div>
   );
 }
@@ -1262,7 +1350,8 @@ function ClusterNodeRow({ n }: { n: ClusterNode }) {
       <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-gray-500">
         <span>{n.online ? '在线' : '离线'} · 槽位 {n.freeSlots ?? '—'} · 运行 {n.running ?? '—'} · 排队 {n.queued}</span>
         <span>CPU {n.cpu != null ? `${n.cpu}%` : '—'} · 内存 {pct(n.mem)} · 磁盘 {pct(n.disk)}</span>
-        <span>成功率 {pct(n.successRate)} · 延迟 {latencyText(n.latency)}</span>
+        {/* zx_20261115_2 M5：样本窗口写明——集群成功率取最近 200 条，与出站台账的 50 条上限不是同一本账。 */}
+        <span title="按最近 200 条派单样本计算">成功率 {pct(n.successRate)}（最近 200 条）· 延迟 {latencyText(n.latency)}</span>
         <span className="text-gray-400">能力：{caps}</span>
       </div>
     </div>
@@ -1368,11 +1457,12 @@ export default function PeersPage() {
   const localId = data?.localNodeId ?? null;
   const localNode = data?.nodes.find(n => n.node_id === localId) ?? null;
   const others = (data?.nodes ?? []).filter(n => n.node_id !== localId);
-  // zx_20261011_2 M4（名实·知行合一）: 派活候选**按能被派的判据**先收窄——`isDispatchable`（参与 ∧ 非观察者）
-  //   ∧ 在线。此前把 `others` 原样喂进下拉：观察者/未参与/离线的他机**照样列得出来**，选中提交才被 ANS 拒
+  // zx_20261011_2 M4（名实·知行合一）: 派活候选**按能被派的判据**先收窄——参与 ∧ 非观察者 ∧ 在线。
+  //   此前把 `others` 原样喂进下拉：观察者/未参与/离线的他机**照样列得出来**，选中提交才被 ANS 拒
   //   （E2E ③ 实测：B 已转观察者，A 的窗口里它仍在）。**分组仍用 `others`**（面板要如实展示所有邻居，包括
   //   在线的观察者）——只收窄"可派给谁"。离线的以"自动"兜底留路：ANS 侧可挂起待其上线。
-  const dispatchCandidates = others.filter(n => isDispatchable(n) && isNodeOnline(n.last_seen_at, nowMs));
+  // zx_20261115_2 M5：判据与节点行徽标**同一处**（`canDispatchNow`），不再各写一份。
+  const dispatchCandidates = others.filter(n => canDispatchNow(n, nowMs));
   // 分组顺序**由枚举派生**（不手写角色列表）——加一档（本轮明令不加）时这里自动多一组。
   const groups = NODE_ROLES.map(role => ({ role, peers: others.filter(n => n.role === role) })).filter(g => g.peers.length > 0);
   // zx_20261011 M4: 出站台账里目标节点 id → 名字（用同一份台账解，不另取）。
@@ -1455,9 +1545,21 @@ export default function PeersPage() {
           {removeErr}
         </div>
       )}
+      {/* zx_20261115_2 M5：传输层读失败（IPC 抛错）此前从未上屏，页面只剩「暂无其他工蚁节点」——
+          那是在替读不到打掩护。失败给因由与重试；空态只在**真读到且无因由**时才说。 */}
+      {q.error && (
+        <div className="mb-4">
+          <LoadFailure what="「ANS 节点台账」" reason={q.error} onRetry={() => void q.reload()} busy={q.loading} />
+        </div>
+      )}
 
       {/* zx_20261030_1 M4「认」: 集群一屏——先给"现在卡在哪"（在线/运行中/排队/满载 + 瓶颈），逐节点可展开。 */}
       {cluster.data && <ClusterCard view={cluster.data} />}
+      {cluster.error && (
+        <div className="mb-4">
+          <LoadFailure what="「集群一屏」" reason={cluster.error} onRetry={() => void cluster.reload()} busy={cluster.loading} />
+        </div>
+      )}
 
       {/* zx_20261017_1 批三: 建单即派状态——开关在「设置 · 多机协同编排」；此处**如实**显示开/关、
           来由（缺省替用户开 / 用户自己设的）与最近一次自动外派。
@@ -1520,6 +1622,12 @@ export default function PeersPage() {
           </div>
         );
       })()}
+      {/* zx_20261115_2 M5：读不到 ≠ 未开启——`auto.data == null` 不渲染卡片，但失败要有因由与重试。 */}
+      {auto.error && (
+        <div className="mb-4">
+          <LoadFailure what="「建单即派」" reason={auto.error} onRetry={() => void auto.reload()} busy={auto.loading} />
+        </div>
+      )}
 
       {/* zx_20261018_1 批一: 首次满足条件的**一次性告知**（zx_20261029_2 M7：询问→告知）——说过即不再出现。 */}
       {showOnboard && (
@@ -1544,16 +1652,8 @@ export default function PeersPage() {
         </div>
       )}
 
-      {/* zx_20261014_4 批三: 「门」区块（外部 AI 终端接入的人侧）——先开门，才谈得上接入。
-          与 ANS 入网无关（门是**本机**的入站服务），故**不**要求 `localNode` 在场。 */}
-      <DoorCard />
-
-      {/* zx_20261011 M4: 「派活」卡——只在**本机已入网**（台账有本机行）时给；派发方须有身份。 */}
-      {localNode && <DispatchCard candidates={dispatchCandidates} onDone={() => void q.reload()} />}
-
-      {/* zx_20261023_5 批一: 待派任务三分组（可派 / 等待依赖 / 上游已死）——不再只有一个在线列表。 */}
-      {localNode && board.data && <DispatchBoardCard board={board.data} />}
-
+      {/* zx_20261115_2 M5：节点区（本机 + 他机）**先于门卡**——打开协同面板第一眼该看到工蚁节点；
+          门是次级能力（外部 AI 终端接入），默认折叠。 */}
       {localNode
         ? <div className="mb-5">
             <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5">自知者明 · 本机</p>
@@ -1566,22 +1666,28 @@ export default function PeersPage() {
           ? <div className="mb-5 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
               本机凭据被 ANS 拒绝（HTTP {data?.errorStatus}）——若本机已被移出协同网络，需由网络内其他节点签发新令牌、粘贴新令牌后重新入网。
             </div>
-          // 其余：**必须**真读到台账（`data` 存在且无 `error`）才谈得上"等收录"——否则 `data===undefined`
-          //   时 `!data.error` 为真会落进分支、显示"心跳上报后即出现"这条**假承诺**（那行永远不会来）。
-          : data && !data.error && (
-            es.data?.enrolled === false
-              // zx_20261010_1 M4: 未入网 ⇒ 入职卡（粘贴令牌 / 一键申请两条路；此前只有一句无路可走的空提示）。
-              ? <EnrollCard hasToken={es.data.hasToken} initialName={es.data?.name ?? ''} reason={es.data?.reason} onDone={() => { void q.reload(); void es.reload(); }} />
-              : es.data?.enrolled === true
-                // 已入网但台账暂无本机行 ⇒ 首次心跳尚未落库（正常瞬时态）——如实说"已入网、等收录"。
-                ? <div className="mb-5 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-500">
-                    本机已入网，等待 ANS 台账收录本机行（心跳上报后即出现）。
-                  </div>
-                // 入网态尚未读到 ⇒ 不显示，避免闪一下本不该出现的卡片。
-                : null
-          )}
+          // zx_20261115_2 M5：入网态读不到 ⇒ 如实说（此前整块不渲染，用户只看到"什么都没有"）。
+          : es.error
+            ? <div className="mb-5">
+                <LoadFailure what="「本机入网态」" reason={es.error} onRetry={() => void es.reload()} busy={es.loading} />
+              </div>
+            // 其余：**必须**真读到台账（`data` 存在且无 `error`）才谈得上"等收录"——否则 `data===undefined`
+            //   时 `!data.error` 为真会落进分支、显示"心跳上报后即出现"这条**假承诺**（那行永远不会来）。
+            : data && !data.error && (
+              es.data?.enrolled === false
+                // zx_20261010_1 M4: 未入网 ⇒ 入职卡（粘贴令牌 / 一键申请两条路；此前只有一句无路可走的空提示）。
+                ? <EnrollCard hasToken={es.data.hasToken} initialName={es.data?.name ?? ''} reason={es.data?.reason} onDone={() => { void q.reload(); void es.reload(); }} />
+                : es.data?.enrolled === true
+                  // 已入网但台账暂无本机行 ⇒ 首次心跳尚未落库（正常瞬时态）——如实说"已入网、等收录"。
+                  ? <div className="mb-5 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-500">
+                      本机已入网，等待 ANS 台账收录本机行（心跳上报后即出现）。
+                    </div>
+                  // 入网态尚未读到 ⇒ 不显示，避免闪一下本不该出现的卡片。
+                  : null
+            )}
 
-      {groups.length === 0
+      {/* zx_20261115_2 M5：读不到台账（`data==null` / IPC 抛错）或 ANS 明确回错时，不把空 `others` 说成「暂无其他工蚁节点」。 */}
+      {data && !data.error && !q.error && (groups.length === 0
         ? <p className="text-gray-400 text-center py-8">暂无其他工蚁节点</p>
         : groups.map(g => (
           <div key={g.role} className="mb-5">
@@ -1590,18 +1696,40 @@ export default function PeersPage() {
               {g.peers.map(n => <NodeRow key={n.node_id} node={n} local={false} localRole={localNode?.role ?? null} localNodeId={localId} nowMs={nowMs} reliability={reliabilityFor(n.node_id)} onSaved={() => void q.reload()} onRemove={() => void removePeer(n)} />)}
             </div>
           </div>
-        ))}
+        )))}
+
+      {/* zx_20261014_4 批三: 「门」区块（外部 AI 终端接入的人侧）——先开门，才谈得上接入。
+          与 ANS 入网无关（门是**本机**的入站服务），故**不**要求 `localNode` 在场。
+          zx_20261115_2 M5：默认折叠（节点优先，门是次级）；有待批时标题旁带数，折叠也不漏看。 */}
+      <DoorCard />
+
+      {/* zx_20261011 M4: 「派活」卡——只在**本机已入网**（台账有本机行）时给；派发方须有身份。 */}
+      {localNode && <DispatchCard candidates={dispatchCandidates} onDone={() => void q.reload()} />}
+
+      {/* zx_20261023_5 批一: 待派任务三分组（可派 / 等待依赖 / 上游已死）——不再只有一个在线列表。 */}
+      {localNode && board.data && <DispatchBoardCard board={board.data} />}
+      {localNode && board.error && (
+        <div className="mb-5">
+          <LoadFailure what="「待派任务」" reason={board.error} onRetry={() => void board.reload()} busy={board.loading} />
+        </div>
+      )}
 
       {/* zx_20261011 M4: 本机**派出去**的活（出站台账，与下方入站记录对照）。 */}
       <DispatchLedger nameOf={nameOf} />
 
       {/* M13：外客（AI 终端）经 ANS 派来的请求在此留痕——被谁派、办成没办成、耗时多久，一面可看。 */}
       <div className="mt-6 pt-5 border-t border-gray-200">
+        {/* zx_20261115_2 M5：main 缺省只取最近 50 条——标题如实写窗口；从未读成功时不说「0 条」。 */}
         <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5">
-          AI 终端调用记录（{records.length}）
+          AI 终端调用记录（{reqs.error && reqs.data == null ? '读取失败' : `最近 ${records.length} 条，上限 50`}）
         </p>
+        {reqs.error && (
+          <div className="mb-2">
+            <LoadFailure what="「AI 终端调用记录」" reason={reqs.error} onRetry={() => void reqs.reload()} busy={reqs.loading} />
+          </div>
+        )}
         {records.length === 0
-          ? <p className="text-xs text-gray-400 py-3">尚无调用记录——外部终端经 ANS 派来的请求会在此留痕（到场/收口各一条）。</p>
+          ? (reqs.error ? null : <p className="text-xs text-gray-400 py-3">尚无调用记录——外部终端经 ANS 派来的请求会在此留痕（到场/收口各一条）。</p>)
           : <div className="space-y-2">{records.map(r => <CallRecordRow key={r.requestId} rec={r} />)}</div>}
       </div>
       </>)}

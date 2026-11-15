@@ -476,7 +476,9 @@ async function sectionC(): Promise<void> {
   {
     const src = readCode(`${MAIN}/node-request-runner.ts`);
     const stop = src.slice(src.indexOf('const stopNow'), src.indexOf('ensureNodeRequestRunsTable(ledgerDb)'));
-    ok(stop.includes("archiveTask(db, { taskId, reason: 'node_request_cancelled' })"), 'C-23 ★真停调用 archiveTask（通知在途执行体）');
+    // zx_20261115_2 M1：真停从"只归档根"升级为"整树归档 + 远端叫停"——判据按更强的新载体重定向
+    //   （terminateRelayTree 内部逐行调 archiveTask；旧断言钉的正是那一步，不是放宽）。
+    ok(stop.includes("terminateRelayTree(db, taskId, 'node_request_cancelled')"), 'C-23 ★真停走 terminateRelayTree（整树归档 + 远端叫停）');
     ok(!stop.includes('pauseTask('), 'C-24 真停不落回 pauseTask（不留恢复幽灵）');
   }
 }

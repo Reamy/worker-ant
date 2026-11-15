@@ -48,7 +48,7 @@ import { refusalWithContext, PROJECT_QUOTA_UNLOCK_TIER } from '../core/tier-usag
 import { resolveProjectOwnerId } from '../core/project-engine.js';
 import { resumeWithQuota } from '../core/pause-settlement.js';
 import { createLogger } from '../core/logger.js';
-import { boolSetting } from '../core/settings-bool.js';
+import { boolSetting, readBoolSetting } from '../core/settings-bool.js';
 // 状态词的**唯一一份**在 `task-notice.ts`（M6 起 IM 的「查看系统状态」也从它取）——
 //   不在此另抄一份 `{ pending: '待执行', … }`：同一件事两处各写一遍正是本轮在治的形状。
 import { taskStatusWord } from '../core/task-notice.js';
@@ -78,6 +78,10 @@ import {
 import { classifyImText, parseIntentToken } from '../core/im-intent-rules.js';
 // zx_20261112_2 B2「识」: `@岗位` 解析与三种失败话术只在一处（纯读）。
 import { positionMentionRefusalText, resolvePositionMention } from '../core/position-mention.js';
+// zx_20261115_4 M2「岗」：缺岗位时"问一次、之后记住"的唯一判据（纯读、零 LLM）。
+import { positionPromptDecision, positionPromptText, positionReuseNote } from '../core/im/position-prompt.js';
+// zx_20261115_3 M4「传」：未 @岗位 时的项目默认岗位（恰好一个启用岗位才成立）。
+import { defaultPositionForProject } from '../core/positions.js';
 // zx_20261110_1 B2: 中置信建单/启动先请用户确认——确认词表/摘要/文案的纯判定在 core，路由只持有状态。
 import {
   buildPendingIntent, confirmationKey, intentConfirmationPrompt,
@@ -114,7 +118,7 @@ import { attachPendingMediaToTask } from './pending-media.js';
 //   截断不是错，**不说**才是错（用户拿到的是一份"看起来完整"的内容，末尾少了多少全无线索）。
 import { clipWithNotice, IM_ROUTER_OUTPUT_LIMIT } from '../core/im/im-text.js';
 // zx_20261031_1 M1: 标题/描述的切分**只这一处**（中文里的空格是排版，不是句界）。
-import { splitTaskInput } from '../core/im/task-input.js';
+import { parseImTargets, splitTaskInput } from '../core/im/task-input.js';
 // zx_20260930 M5: 用户答复＝对 agent 正在做的事的**纠正**——内容装配在 `memory-write.ts` 一处，
 //   名字（`user_correction`）在 `memory-constants.ts` 一处。本文件不另拼一份、也不写字符串字面量。
 import { buildImUserCorrection } from '../core/memory-write.js';
@@ -413,8 +417,27 @@ interface PendingProjectSelection {
   projects: Array<{ id: string; name: string }>;
   taskText: string;
   expiresAt: number;
+  /** zx_20261115_2 M2：追问项目编号前已解析到的 `@岗位`——回编号时不得丢（旧行为落成空串）。 */
+  positionId?: string;
 }
 const pendingProjectSelections = new Map<string, PendingProjectSelection>();
+
+/**
+ * zx_20261115_4 M2「岗」：待选岗位（项目里绑了 ≥2 个启用岗位、消息又没 @岗位 时追问一次）。
+ * key 与项目选择同形（"channelType:fromUser"）——**同一用户同一时刻只会有一个待答问题**，
+ * 所以设项目选择时清岗位选择（同理反之），不做两套并存的歧义裁决。
+ */
+interface PendingPositionSelection {
+  projectId: string;
+  projectName: string;
+  taskText: string;
+  /** 编号 1..N 对应 `options[i-1]`；`0` = 直接派（不指派岗位）。 */
+  options: Array<{ id: string; name: string }>;
+  expiresAt: number;
+  /** 追问前已解析到的 `@岗位`（为空——本支只在没有岗位时才问）。 */
+  positionId?: string;
+}
+const pendingPositionSelections = new Map<string, PendingPositionSelection>();
 
 export function registerPendingApproval(channel: string, fromUser: string, approval: PendingApproval): void {
   const key = `${channel}:${fromUser}`;
@@ -667,10 +690,44 @@ function listResumableTasks(db: Database.Database, channelType: string, fromUser
 /** 编号选择：纯数字消息 → 优先项目选择(A7)，否则选择暂停任务列表中的第N个 */
 function handleNumberSelection(ctx: ImContext, fromUser: string, msgText: string, inboundId?: string): boolean {
   const num = parseInt(msgText, 10);
+  const { db } = ctx;
+
+  // zx_20261115_4 M2「岗」：先处理**岗位追问**的编号（`0` = 直接派，故这一步在 1..20 的闸之前）。
+  {
+    const posKey = `${ctx.channelType}:${fromUser}`;
+    const pendingPos = pendingPositionSelections.get(posKey);
+    if (pendingPos) {
+      if (pendingPos.expiresAt <= Date.now()) {
+        pendingPositionSelections.delete(posKey);
+      } else if (/^\d{1,2}$/.test(msgText.trim())) {
+        const inRange = num === 0 || (num >= 1 && num <= pendingPos.options.length);
+        if (!inRange) {
+          void ctx.sendReply(fromUser, `编号超出范围：请回 1–${pendingPos.options.length}，或回 0 直接派（不指派岗位）。`);
+          return true;
+        }
+        pendingPositionSelections.delete(posKey);
+        const picked = num === 0 ? null : pendingPos.options[num - 1]!;
+        // 标题切分与建单主路**同一把尺**（`splitTaskInput`），不在这里手写第二份。
+        const title = splitTaskInput(pendingPos.taskText.replace(/@\S+/g, '')).title.slice(0, 50) || '来自IM渠道的任务';
+        const taskId = crypto.randomUUID();
+        db.prepare('INSERT INTO wa_tasks (id, project_id, title, description, priority, status, position_id, context_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+          .run(taskId, pendingPos.projectId, title, pendingPos.taskText, 1, 'pending', picked?.id ?? '', JSON.stringify({ source: 'im', channel: ctx.channelType, externalUser: fromUser }));
+        enqueueJob(db, 'ai-task', { taskId, projectId: pendingPos.projectId, source: 'im', channel: ctx.channelType, externalUser: fromUser });
+        linkInboundTask(db, inboundId, taskId);
+        void ctx.sendReply(fromUser, picked
+          ? `已选择岗位「${picked.name}」，任务「${title.slice(0, 20)}」已创建并自动执行。`
+          : `已按「直接派（不指派岗位）」创建任务「${title.slice(0, 20)}」，已自动执行。不指派也能干活，只是这单不会沉淀岗位经验。`);
+        return true;
+      } else {
+        // 用户没说编号而是在讲别的事 ⇒ 清掉这次追问（不挂 5 分钟挡路），让后面的路由照常处理。
+        pendingPositionSelections.delete(posKey);
+      }
+    }
+  }
+
   if (isNaN(num) || num < 1 || num > 20) return false;
   if (!/^\d{1,2}$/.test(msgText.trim())) return false; // 纯1-2位数字
 
-  const { db } = ctx;
 
   // A7: 优先处理项目编号选择（bot询问"请回复编号选择目标项目"后的回复）
   const selKey = `${ctx.channelType}:${fromUser}`;
@@ -683,12 +740,19 @@ function handleNumberSelection(ctx: ImContext, fromUser: string, msgText: string
       //   与建单主路共用 `splitTaskInput`。
       const title = splitTaskInput(pendingSel.taskText.replace(/@\S+/g, '')).title.slice(0, 50) || '来自IM渠道的任务';
       const taskId = crypto.randomUUID();
+      // zx_20261115_3 M4「传」：原文没 @岗位 时按项目默认（恰好一个启用岗位）指派——与主路同一派生。
+      let selPositionId = pendingSel.positionId || '';
+      let selPositionName = '';
+      if (!selPositionId && readBoolSetting(db as never, 'position.default_from_project')) {
+        const def = defaultPositionForProject(db as never, proj.id);
+        if (def) { selPositionId = def.id; selPositionName = def.name; }
+      }
       db.prepare('INSERT INTO wa_tasks (id, project_id, title, description, priority, status, position_id, context_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-        .run(taskId, proj.id, title, pendingSel.taskText, 1, 'pending', '', JSON.stringify({ source: 'im', channel: ctx.channelType, externalUser: fromUser }));
+        .run(taskId, proj.id, title, pendingSel.taskText, 1, 'pending', selPositionId, JSON.stringify({ source: 'im', channel: ctx.channelType, externalUser: fromUser }));
       enqueueJob(db, 'ai-task', { taskId, projectId: proj.id, source: 'im', channel: ctx.channelType, externalUser: fromUser });
       // zx_20261108_1 B3: 编号→建单也属于"这句话落到了哪张任务上"，回写入站行。
       linkInboundTask(db, inboundId, taskId);
-      void ctx.sendReply(fromUser, `已选择「${proj.name}」，任务「${title.slice(0, 20)}」已创建并自动执行。`);
+      void ctx.sendReply(fromUser, `已选择「${proj.name}」，任务「${title.slice(0, 20)}」已创建并自动执行。${selPositionName ? `（按项目默认岗位 ${selPositionName}）` : ''}`);
       console.log(`[IMRouter] 编号选择→项目已定位: ${proj.name}`);
       return true;
     }
@@ -1396,7 +1460,7 @@ export async function routeImMessage(
   if (decision.route === 'help') { await handleHelp(ctx, fromUser); return; }
   if (decision.route === 'query') { await handleSystemQuery(ctx, fromUser); return; }
   if (decision.route === 'start') { await handleStartTask(ctx, fromUser, routeText, inboundId); return; }
-  if (decision.route === 'create') { await handleCreateTask(ctx, fromUser, routeText, inboundId, intentEcho(decision)); return; }
+  if (decision.route === 'create') { await handleCreateTask(ctx, fromUser, routeText, inboundId, intentEcho(decision, routeText)); return; }
   if (decision.route === 'greeting') {
     // zx_20261112_1 B3「答」: 首条已发过欢迎就不再重复问候（同一句话两遍＝刷屏）。
     if (!welcomeSent) {
@@ -1427,7 +1491,7 @@ export async function routeImMessage(
     }
     if (decision.intent === 'start_task') { await handleStartTask(ctx, fromUser, routeText, inboundId); return; }
     if (decision.intent === 'query_status') { await handleSystemQuery(ctx, fromUser); return; }
-    if (decision.intent === 'create_task') { await handleCreateTask(ctx, fromUser, routeText, inboundId, intentEcho(decision)); return; }
+    if (decision.intent === 'create_task') { await handleCreateTask(ctx, fromUser, routeText, inboundId, intentEcho(decision, routeText)); return; }
     await ctx.sendReply(fromUser, GENERAL_CHAT_TEXT);
     return;
   }
@@ -1958,17 +2022,9 @@ export function projectBasisNote(basis: ProjectClaimBasis | null | undefined): s
   return '';
 }
 
-/** 提取 @项目名 和 引号内任务名 */
-function extractMentions(msgText: string): { mentions: string[]; quoted: string[] } {
-  const mentions: string[] = [];
-  for (const m of msgText.matchAll(/@([^\s@，。,\.！!？?：:；;、]+)/g)) {
-    const name = m[1]!.trim();
-    if (name.length >= 1 && name.length <= 30) mentions.push(name);
-  }
-  const quoted = (msgText.match(/[""“”「『]([^""“”「『」』]+)[""“”」』]/g) || [])
-    .map(q => q.replace(/[""“”「『」』]/g, '').trim())
-    .filter(n => n.length > 1);
-  return { mentions, quoted };
+/** 提取落点标记——**唯一实现在 `core/im/task-input.ts`**（`parseImTargets`），路由只转调。 */
+function extractMentions(msgText: string): { mentions: string[]; hashProjects: string[]; quoted: string[] } {
+  return parseImTargets(msgText);
 }
 
 /**
@@ -1996,12 +2052,22 @@ async function handleCreateTask(ctx: ImContext, toUser: string, msgText: string,
 
     // A8/A10: @项目名解析 + isCreateProject（@不存在的项目名则创建新项目）
     // zx_20261112_2 B2「识」：提及先分三类——项目（优先）/ 岗位 / 未归位；不再只看 mentions[0]。
-    const { mentions } = extractMentions(msgText);
+    const { mentions, hashProjects } = extractMentions(msgText);
     let projectId: string | undefined;
     let projectName = '';
     let positionId = '';
     let positionName = '';
     const unresolvedMentions: string[] = [];
+    // zx_20261115_4 M4「识」：`项目#名称` 是**显式声明项目**，优先级最高——
+    //   先解析它；解析不到时进同一条"列候选 + 追问"的路（用户以为存在，不能静默新建）。
+    for (const hp of hashProjects) {
+      const matched = resolveProject(ctx.db, hp);
+      if (matched) {
+        if (!projectId) { projectId = matched.id; projectName = matched.name; }
+        continue;
+      }
+      if (!unresolvedMentions.includes(hp)) unresolvedMentions.push(hp);
+    }
     /** zx_20261005 M7: 「为什么没按你的 @ 建新项目」的如实说明（并入最终回话，不静默改落点）。 */
     let quotaNote = '';
     for (const m of mentions) {
@@ -2013,7 +2079,9 @@ async function handleCreateTask(ctx: ImContext, toUser: string, msgText: string,
       if (matched === null) {
         // 模糊匹配有多个结果 → 让用户选择（A7: 暂存候选列表供编号回复）
         const fuzzy = ctx.db.prepare("SELECT id, name FROM wa_projects WHERE status = 'active' AND name LIKE ? ORDER BY created_at DESC").all(`%${m}%`) as Array<{ id: string; name: string }>;
-        pendingProjectSelections.set(`${ctx.channelType}:${toUser}`, { projects: fuzzy, taskText: msgText, expiresAt: Date.now() + 5 * 60_000 });
+        // 同一用户同一时刻只留一个待答问题：追问项目时清掉岗位追问（zx_20261115_4 M2）。
+        pendingPositionSelections.delete(`${ctx.channelType}:${toUser}`);
+        pendingProjectSelections.set(`${ctx.channelType}:${toUser}`, { projects: fuzzy, taskText: msgText, expiresAt: Date.now() + 5 * 60_000, ...(positionId ? { positionId } : {}) });
         const list = fuzzy.map((p, i) => `${i + 1}. ${p.name}`).join('\n');
         await ctx.sendReply(toUser, `"@${m}" 匹配到多个项目：\n${list}\n\n请回复编号选择目标项目。`);
         return;
@@ -2032,13 +2100,16 @@ async function handleCreateTask(ctx: ImContext, toUser: string, msgText: string,
     //   ② 否则列最近 3 个 active 项目让用户选；要新建就再发一句带强建单动词的（不新增命令词）。
     if (!projectId && unresolvedMentions.length > 0) {
       const missName = unresolvedMentions[0]!;
-      const strongCreate = classifyImText(msgText).kind === 'create';
+      // `项目#名称` 是**断言"它存在"**的写法 ⇒ 即使句子里有强建单动词也**不**静默新建，
+      //   一律走"列最近项目 + 追问"（要新建请改用 `@` 或显式建项目）。
+      const strongCreate = classifyImText(msgText).kind === 'create' && !hashProjects.includes(missName);
       if (!strongCreate) {
         const recent = ctx.db.prepare(
           "SELECT id, name FROM wa_projects WHERE status = 'active' ORDER BY COALESCE(datetime(updated_at), datetime(created_at)) DESC LIMIT 3",
         ).all() as Array<{ id: string; name: string }>;
         if (recent.length > 0) {
-          pendingProjectSelections.set(`${ctx.channelType}:${toUser}`, { projects: recent, taskText: msgText, expiresAt: Date.now() + 5 * 60_000 });
+          pendingPositionSelections.delete(`${ctx.channelType}:${toUser}`);
+          pendingProjectSelections.set(`${ctx.channelType}:${toUser}`, { projects: recent, taskText: msgText, expiresAt: Date.now() + 5 * 60_000, ...(positionId ? { positionId } : {}) });
           const list = recent.map((p, i) => `${i + 1}. ${p.name}`).join('\n');
           await ctx.sendReply(toUser,
             `没找到项目「${missName}」。最近的项目：\n${list}\n\n请回复编号选择；若要新建，请用「创建任务 … @${missName}」再发一次。`);
@@ -2094,9 +2165,49 @@ async function handleCreateTask(ctx: ImContext, toUser: string, msgText: string,
       }
       positionId = check.id;
     }
+    // zx_20261115_3 M4「传」：未 @岗位 且项目恰好一个启用岗位 ⇒ 默认指派（回执明示"按项目默认"）。
+    let positionDefaulted = false;
+    if (!positionId && projectId && readBoolSetting(ctx.db as never, 'position.default_from_project')) {
+      const def = defaultPositionForProject(ctx.db as never, projectId);
+      if (def) { positionId = def.id; positionName = def.name; positionDefaulted = true; }
+    }
+    // zx_20261115_4 M2「岗」：项目绑了 ≥2 个启用岗位、消息又没 @岗位 ⇒ **问一次**（有历史则沿用）。
+    //   判据全在 `core/im/position-prompt.ts`；这里只做三件事：沿用 / 追问 / 什么都不做。
+    //   0 个岗位与恰好 1 个岗位**不走本支**——不替没打算用岗位的人制造审讯。
+    let positionReused = false;
+    if (!positionId && projectId) {
+      const decision = positionPromptDecision(ctx.db as never, {
+        projectId,
+        externalUser: toUser,
+        channelType: ctx.channelType,
+        mentionedPosition: false,
+        enabled: readBoolSetting(ctx.db as never, 'position.ask_when_multiple'),
+        nowMs: Date.now(),
+      });
+      if (decision.kind === 'reuse') {
+        positionId = decision.positionId;
+        positionName = decision.positionName;
+        positionReused = true;
+      } else if (decision.kind === 'ask') {
+        pendingPositionSelections.set(`${ctx.channelType}:${toUser}`, {
+          projectId,
+          projectName,
+          taskText: msgText,
+          options: decision.options,
+          expiresAt: Date.now() + 5 * 60_000,
+        });
+        // 同一个 key 上只能有一个待答问题——项目选择先清掉（本支项目已定，留着只会抢编号）。
+        pendingProjectSelections.delete(`${ctx.channelType}:${toUser}`);
+        await ctx.sendReply(toUser, positionPromptText(decision));
+        return;
+      }
+    }
     const basisNote = projectBasisNote(basis);
     // zx_20261112_2 B2：指了岗位就在回执里点名（用户能核对「派给谁」）。
-    const positionNote = positionId ? ` · 岗位: ${positionName}` : '';
+    // zx_20261115_4 M2：沿用上次时另给一句，让人知道这是"记住的"而不是"猜的"。
+    const positionNote = positionId
+      ? ` · 岗位: ${positionName}${positionDefaulted ? '（按项目默认）' : ''}${positionReused ? positionReuseNote({ kind: 'reuse', positionId, positionName, lastUsedAtMs: null }) : ''}`
+      : '';
     // zx_20261111_3「证」：回执自证那一行（「我理解成…」+ 撤销指引）。空则不占行。
     const echoLine = echo ? `\n${echo}` : '';
 

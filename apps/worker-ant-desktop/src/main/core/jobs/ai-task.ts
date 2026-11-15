@@ -13,7 +13,9 @@ import { assessComplexity, isComplexOrPlanish } from '../task-archetype.js';
 import { describeExecutionError } from '../exec-error.js';
 // zx_20260915 P0-3(c): 「有失败子」这一问只在 children-gate.ts 一处回答（含回退开关），五处闸同取
 import { failedChildren, childNames } from '../children-gate.js';
-import { PAUSE_REASON_CHILDREN_INCOMPLETE, PAUSE_REASON_CHILDREN_FAILED, PAUSE_REASON_GOAL_DEVIATION, PAUSE_REASON_ABNORMAL_END, PAUSE_REASON_GHOST_LOOP, PAUSE_REASON_LABEL } from '../pause-reason.js';
+import { PAUSE_REASON_CHILDREN_INCOMPLETE, PAUSE_REASON_CHILDREN_FAILED, PAUSE_REASON_GOAL_DEVIATION, PAUSE_REASON_ABNORMAL_END, PAUSE_REASON_GHOST_LOOP, PAUSE_REASON_RELAY_TREE_EXPIRED, PAUSE_REASON_LABEL } from '../pause-reason.js';
+// zx_20261115_2 M1：中继任务树的时窗——起跑前读一次预算，过期即停（不把 LLM 的拆解预算白花掉）。
+import { readRelayTree } from '../relay-tree.js';
 // zx_20261110_2 B3「恒」: 恢复入口的裁决不再看**状态词**，改看**派生执行态**——
 //   "executing" 曾既表示"正在跑"也表示"曾经置过"，故用户点恢复会被告知"已在执行"而什么都不发生。
 import { readExecState } from '../exec-state-read.js';
@@ -55,6 +57,27 @@ import { createLogger } from '../logger.js';
 
 /** zx_20261110_2 B5：本模块首个结构化日志点（后置账去重键写不进去时要能被 grep 到，与 console 口径分开）。 */
 const logger = createLogger('ai-task');
+
+/**
+ * zx_20261115_2 M1：中继任务树的**总时窗**到点即停。
+ *
+ * 位置在两处 handler 的**起跑前**（`ai-task` 与 `resume-ai-task`）：过期就不再花一次拆解 LLM /
+ * 一次执行预算；落 `paused(relay_tree_expired)`，由唯一暂停写入口通知并放行父任务复核。
+ * 无 `relay_tree` 的本地任务 ⇒ 一次库读后即返回 false（与从前逐字同形）。
+ */
+function pauseIfRelayTreeExpired(db: Database.Database, taskId: string): boolean {
+  try {
+    const row = db.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get(taskId) as { context_json?: string | null } | undefined;
+    const tree = readRelayTree(row?.context_json);
+    if (!tree || Date.now() < tree.deadline_at) return false;
+    pauseTask(db, {
+      taskId,
+      reason: PAUSE_REASON_RELAY_TREE_EXPIRED,
+      note: `本次派单的任务树总时窗已用尽（截止 ${new Date(tree.deadline_at).toISOString()}）——已停止继续，已完成的部分产出保留。`,
+    });
+    return true;
+  } catch { return false; }
+}
 // zx_20261023_5 批一：本地任务到终态 ⇒ 依赖它的后继重新走一次派发决策（与远端回写处同一触发口）。
 import { scheduleDependentDispatch } from '../collab-dispatch.js';
 // zx_20261027_3 M6b: 任务完成 ⇒ 画像随项目知识自动跟随（仅已启用且已有本机画像；永不抛）。
@@ -795,6 +818,8 @@ export function registerAiTaskHandlers(ctx: JobContext, scheduler: {
     const channel = payload.channel as string | undefined;
     const externalUser = payload.externalUser as string | undefined;
     if (!taskId) return;
+    // zx_20261115_2 M1：中继树时窗已用尽 ⇒ 起跑前就停（不花拆解/执行预算）。
+    if (pauseIfRelayTreeExpired(db, taskId)) return;
 
     const task = db.prepare('SELECT title FROM wa_tasks WHERE id = ?').get(taskId) as { title: string } | undefined;
     try {
@@ -1021,6 +1046,8 @@ export function registerAiTaskHandlers(ctx: JobContext, scheduler: {
         const t0 = db.prepare('SELECT project_id FROM wa_tasks WHERE id = ?').get(taskId) as { project_id: string } | undefined;
         projectId = t0?.project_id || '';
       }
+      // zx_20261115_2 M1：恢复路同样先看中继树时窗——过期就不再续跑（否则父被唤醒后又白跑一轮）。
+      if (pauseIfRelayTreeExpired(db, taskId)) return;
 
       // 防重入：**只有真在跑才跳过**（zx_20261110_2 B3「恒」）。
       //   病根（事故 339ef167）：此前只看状态词 `curStatus` 属 running 族就 return——而状态词可能是

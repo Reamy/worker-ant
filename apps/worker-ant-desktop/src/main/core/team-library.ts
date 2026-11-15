@@ -26,6 +26,14 @@ import { insertImportedProfile, parseProjectProfileJson, readProjectProfile } fr
 // zx_20261030_1 M5「限」：用户驱动的记忆导入受档位容量闸（机器写入不在此列——见 §1.4）。
 import { resolveLicenseTier } from './license.js';
 import { capacityRefusal, countTaskTemplates, countTeamLibraryMemories } from './tier-capacity.js';
+// zx_20261115_4 M7「墙」：岗位的分享体与导入体**复用岗位知识包**的同一份构造/解析/落库——
+//   团队共享与 Pro 的文件导出走同一把尺，不另写"团队版更宽松/更严格"的第二套规则。
+import {
+  buildPositionPackage,
+  importPositionPackage,
+  parsePositionPackage,
+} from './position-package.js';
+import type { PositionDb as PositionDbLike } from './positions.js';
 
 /** 最小库接口（可脱 better-sqlite3 被 rr 直跑）。 */
 export interface TeamLibraryDb {
@@ -55,6 +63,8 @@ export interface LocalCandidates {
   domainPacks: LocalTeamItem[];
   /** 项目画像（zx_20261022_3 批八）：本机各项目已生成的画像（与"当前是否启用"无关）。 */
   profiles: LocalTeamItem[];
+  /** 岗位（zx_20261115_4 M7）：本机岗位（四段 + 已采纳经验）——Team 的组织资产。 */
+  positions: LocalTeamItem[];
   /** 任一列被 `CANDIDATE_LIMIT` 截断 ⇒ true（界面如实说"还有更多"）。 */
   truncated: boolean;
 }
@@ -109,9 +119,18 @@ export function listLocalItems(db: TeamLibraryDb): LocalCandidates {
        FROM wa_project_profiles p LEFT JOIN wa_projects j ON j.id = p.project_id
       ORDER BY p.generated_at DESC, p.project_id LIMIT 201`,
   );
+  // 岗位：只列本机的行（启用与否如实进副标题）——"能不能被团队用"由分享动作决定，不在这里替用户筛。
+  // ⚠ 旧库/裸夹具可能还没有 `wa_positions` 表（该表随岗位功能引入）⇒ **读不到就是空**，不抛。
+  //   这也是"没有岗位表 ⇒ 没有岗位可分享"的如实表达，不是吞错。
+  let positions: Array<{ id: string; name: string; category: string; enabled: number }> = [];
+  try {
+    positions = rows<{ id: string; name: string; category: string; enabled: number }>(
+      'SELECT id, name, category, enabled FROM wa_positions ORDER BY updated_at DESC, id LIMIT 201',
+    );
+  } catch { /* 表不存在 ⇒ 空候选 */ }
   const truncated = templates.length > CANDIDATE_LIMIT || memories.length > CANDIDATE_LIMIT
     || deliverables.length > CANDIDATE_LIMIT || domainPacks.length > CANDIDATE_LIMIT
-    || profiles.length > CANDIDATE_LIMIT;
+    || profiles.length > CANDIDATE_LIMIT || positions.length > CANDIDATE_LIMIT;
   return {
     templates: templates.slice(0, CANDIDATE_LIMIT).map((r) => ({
       kind: 'template',
@@ -145,6 +164,12 @@ export function listLocalItems(db: TeamLibraryDb): LocalCandidates {
         r.origin === 'imported' ? (r.source_project_name ? `导入自 ${r.source_project_name}` : '导入画像') : '本机生成',
         r.generated_at,
       ].filter(Boolean).join(' · '),
+    })),
+    positions: positions.slice(0, CANDIDATE_LIMIT).map((r) => ({
+      kind: 'position',
+      localId: r.id,
+      title: r.name || '(未命名岗位)',
+      subtitle: [r.category, Number(r.enabled) === 1 ? '' : '已停用'].filter(Boolean).join(' · '),
     })),
     truncated,
   };
@@ -233,6 +258,27 @@ export function shareItem(db: TeamLibraryDb, kind: TeamItemKind, localId: string
       },
     };
   }
+  if (kind === 'position') {
+    // zx_20261115_4 M7「墙」：体 = 岗位知识包本身（四段 + **仅已采纳**经验）。
+    //   复用 `buildPositionPackage`——与 Pro 的文件导出**同一份构造**，不另写一套读法
+    //   （两套读法迟早分家，届时"文件带得走、团队带不走"会变成说不清的 bug）。
+    const built = buildPositionPackage(db as unknown as PositionDbLike, localId);
+    if (!built.ok) throw new TeamLibraryError(`岗位不可分享：${built.message}`);
+    const pkg = built.value.package;
+    return {
+      kind,
+      title: firstChars(pkg.position.name || '(未命名岗位)', 200),
+      body: {
+        kind: pkg.kind,
+        version: pkg.version,
+        exportedAt: pkg.exportedAt,
+        position: pkg.position,
+        // 只带**可被采纳**的经验；待审/已拒的属于某台机器的私账，不该随团队流出去。
+        lessons: pkg.lessons,
+      },
+    };
+  }
+
   if (kind === 'project_profile') {
     // `localId` = 项目 id（画像一项目一份）。
     const stored = readProjectProfile(db as never, localId);
@@ -390,6 +436,26 @@ export function previewTeamBody(kind: TeamItemKind, title: string, body: Record<
     if (omitted.length) out.note = `超体量上限，未携带的节：${omitted.join(' / ')}`;
     return out;
   }
+  if (kind === 'position') {
+    // 岗位：四段各占一节，经验单独一节（**只列已采纳**——分享体里本来就只有这些）。
+    const pos = asRecord(body.position);
+    out.rows = rowsOf([
+      ['分类', str(pos.category)],
+      ['描述', str(pos.description)],
+    ]);
+    const rules = listText(pos.rules);
+    if (rules) out.sections.push({ label: '规范', content: rules });
+    const skills = listText(pos.skills);
+    if (skills) out.sections.push({ label: '技能', content: skills });
+    const knowledge = listText(pos.knowledge);
+    if (knowledge) out.sections.push({ label: '知识', content: knowledge });
+    const lessons = Array.isArray(body.lessons)
+      ? body.lessons.map((l) => str(asRecord(l).content)).filter((c) => c !== '')
+      : [];
+    if (lessons.length > 0) out.sections.push({ label: `已采纳经验（${lessons.length} 条）`, content: lessons.join('\n') });
+    out.note = '导入后四段只补不覆盖；经验一律落为待审候选，采纳后才注入。';
+    return out;
+  }
   if (kind === 'project_profile') {
     const profile = asRecord(body.profile);
     const runtime = asRecord(profile.runtime);
@@ -527,6 +593,16 @@ export function importItem(
       str(body.reasoning),
     );
     return { id, kind, target: 'wa_memories' };
+  }
+
+  if (kind === 'position') {
+    // zx_20261115_4 M7「墙」：体即岗位知识包，走**同一份解析与落库**（merge 语义 + 经验一律待审）。
+    //   `parsePositionPackage` 会校验 kind/version/条数/长度——坏包如实拒，不把损坏转嫁给下一个节点。
+    const parsed = parsePositionPackage(JSON.stringify(body));
+    if (!parsed.ok) throw new TeamLibraryError(`共享条目不是合法的岗位知识包：${parsed.message}`);
+    const r = importPositionPackage(db as unknown as PositionDbLike, parsed.value, 'merge', '', new Date().toISOString());
+    if (!r.ok) throw new TeamLibraryError(`岗位导入失败：${r.message}`);
+    return { id: r.value.position.id, kind, target: 'wa_positions' };
   }
 
   if (kind === 'project_profile') {

@@ -9,7 +9,8 @@ import { enqueueJob } from '../job-enqueuer.js';
 import { jsonSchema } from 'ai';
 import { createLogger } from '../logger.js';
 import { parseDepIds } from '../dep-graph.js';
-import { resolveTaskMilestoneLink, writeMilestoneDone, backfillBoardRemainderToSelf, selfCompleteBan, buildChildContext, resolveAncestorSchemeRef, classifyChildCompletion, childCompletionCheckLabel, milestoneBoardOwner, goalDeviationCapReached, isPlanOrImplTask, milestoneSubjectVerdict, MAX_CHILD_BREADTH, MAX_TASK_DEPTH, countActiveChildren, childBreadthRefusal, collectAncestorIds, collectSubtreeIds } from '../task-accounting.js';
+import { resolveTaskMilestoneLink, writeMilestoneDone, backfillBoardRemainderToSelf, selfCompleteBan, buildChildContext, resolveAncestorSchemeRef, classifyChildCompletion, childCompletionCheckLabel, milestoneBoardOwner, goalDeviationCapReached, isPlanOrImplTask, milestoneSubjectVerdict, MAX_CHILD_BREADTH, MAX_TASK_DEPTH, countActiveChildren, childBreadthRefusal, collectAncestorIds, collectSubtreeIds, inheritedConstraintContext } from '../task-accounting.js';
+import { relayTreeRefusal } from '../relay-tree.js';
 // zx_20260930 M9: ANS 服务器地址取**一处真源** `resolveAnsCreds`（与签名请求同一条出路）。
 // zx_20260930 M10: `find_mcp_service` 要读 ANS 注册表 ⇒ 到 ANS 的请求走**唯一出路** `ansSignedRequest`。
 import { resolveAnsCreds, ansSignedRequest, ansFailureNote } from '../ans-signed-request.js';
@@ -106,7 +107,9 @@ export function resourceTools(deps: ToolDeps) {
         required: ['prompt', 'taskTitle'],
       }),
       execute: async (args: { prompt: string; taskTitle: string; agentType?: string; dependsOn?: string; acceptance_criteria?: string; allow_duplicate?: boolean }) => {
-        const parentCtx = JSON.parse((db.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get(taskId) as { context_json: string })?.context_json || '{}');
+        const parentRow = db.prepare('SELECT context_json, position_id FROM wa_tasks WHERE id = ?').get(taskId) as { context_json?: string | null; position_id?: string | null } | undefined;
+        const parentCtx = JSON.parse(parentRow?.context_json || '{}') as Record<string, unknown>;
+        const parentPositionId = typeof parentRow?.position_id === 'string' ? parentRow.position_id : '';
         const childDepth = (parentCtx.depth as number || 0) + 1;
         // zx_20260916_3 M1（D2 裁定：统一为 5）：原为 2 —— 与 create_task 的 5 是**同名同义两值**
         //（"嵌套深度"在两个出口被两样地用）。且 `childDepth > 2` 使任何 depth≥2 的任务调本工具必被拒
@@ -116,6 +119,9 @@ export function resourceTools(deps: ToolDeps) {
         // 真库 3 个父任务达 6 个子、第 6 个一律是 `[Sub]` 前缀，即由此路绕过上限（E-①）。
         const breadthRefusal = childBreadthRefusal(db, taskId);
         if (breadthRefusal) return JSON.stringify({ error: breadthRefusal });
+        // zx_20261115_2 M1：中继派单的任务树另有相对深度/总任务数/总时窗三道界（与全局 MAX_TASK_DEPTH 两把尺）。
+        const treeRefusal = relayTreeRefusal(db, parentCtx, childDepth);
+        if (treeRefusal) return JSON.stringify({ error: treeRefusal });
         // 从子Agent注册表读取类型配置（maxSteps/systemPrompt/工具白名单）
         let subagentTypeCfg: { maxSteps?: number; systemPrompt?: string; allowTools?: string[]; denyTools?: string[] } = {};
         if (args.agentType) {
@@ -127,7 +133,12 @@ export function resourceTools(deps: ToolDeps) {
         // zx_20260911_3 M2a(知行合一): 子 agent 与 create_task 同一事实源——关联须上溯祖先链，否则同样丢 scheme_ref
         const subagentSr = resolveAncestorSchemeRef(db, taskId);
         const subagentCtx: Record<string, unknown> = withAcceptanceSource(
-          { type: 'subagent', depth: childDepth, subagentType: args.agentType || null, maxSteps: subagentTypeCfg.maxSteps || null, systemPrompt: subagentTypeCfg.systemPrompt || null, allowTools: subagentTypeCfg.allowTools || null, denyTools: subagentTypeCfg.denyTools || null },
+          {
+            type: 'subagent', depth: childDepth, subagentType: args.agentType || null, maxSteps: subagentTypeCfg.maxSteps || null, systemPrompt: subagentTypeCfg.systemPrompt || null, allowTools: subagentTypeCfg.allowTools || null, denyTools: subagentTypeCfg.denyTools || null,
+            // zx_20261115_1 M6 + zx_20261115_2 M2：不可交互/类目原型/跨机岗位白名单/树预算随树继承
+            //   （父读不到 ⇒ 不多键；子代理不会因"没人能答"而停在审批上，工具面也不因拆解而放宽）。
+            ...inheritedConstraintContext(parentCtx),
+          },
           // zx_20261106_1 M3：判据来源 —— 模型给了标 model，留空标 missing（候选判据只是候选，不算已设）。
           (args.acceptance_criteria || '').trim() ? 'model' : 'missing',
         );
@@ -161,8 +172,8 @@ export function resourceTools(deps: ToolDeps) {
           const title = repeatIndex > 1 ? `[Sub] ${args.taskTitle}（第 ${repeatIndex} 次）` : `[Sub] ${args.taskTitle}`;
           const ctx = repeatIndex > 1 ? { ...subagentCtx, subagent_repeat_index: repeatIndex } : subagentCtx;
           db.prepare(
-            "INSERT INTO wa_tasks (id, project_id, title, description, status, priority, context_json, parent_task_id, source, depends_on, acceptance_criteria) VALUES (?, ?, ?, ?, 'pending', 1, ?, ?, 'agent', ?, ?)"
-          ).run(id, projectId, title, args.prompt, JSON.stringify(ctx), taskId, depIds.join(','), (args.acceptance_criteria || '').trim());
+            "INSERT INTO wa_tasks (id, project_id, title, description, status, priority, context_json, parent_task_id, source, depends_on, acceptance_criteria, position_id) VALUES (?, ?, ?, ?, 'pending', 1, ?, ?, 'agent', ?, ?, ?)"
+          ).run(id, projectId, title, args.prompt, JSON.stringify(ctx), taskId, depIds.join(','), (args.acceptance_criteria || '').trim(), parentPositionId);
           return { repeatIndex, created: true };
         })();
         if (decision.reusedId) {

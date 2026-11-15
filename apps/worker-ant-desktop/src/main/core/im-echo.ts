@@ -32,15 +32,25 @@ export interface EchoDecision {
  * 回执里那一行「我理解成…」。返回 `null` = 这条路由不该加（查询/闲聊/帮助/群聊拒绝/确认分支）。
  *
  * 建单一律带撤销指引；启动不带——"已经开始跑"没有撤回语义，写了等于许诺做不到的事。
+ *
+ * zx_20261115_4 M5「话」（维特根斯坦·意义即使用）：**不再把内部 `reason` 说给用户听**。
+ *   旧实现直接拼 `d.reason`，实测产出「依据：含建单动词——按建单处理（强建单词）」「规则未命中，模型判为建单」——
+ *   那是给开发者看的账，不是给用户看的话。
+ *   今改为**回显用户自己的原话**（`rawText` 前 40 字）：用户核对的是"你听懂我说的了吗"，
+ *   不是"你走的哪条规则"。`reason` 仍留在审计里（一份内部账、一份用户话，各得其所）。
  */
-export function intentEcho(d: EchoDecision | null | undefined): string | null {
+export const ECHO_EXCERPT_MAX = 40;
+
+export function intentEcho(d: EchoDecision | null | undefined, rawText?: string | null): string | null {
   if (!d) return null;
   if (d.route !== 'create' && d.route !== 'start') return null;
+  const excerpt = String(rawText ?? '').replace(/\s+/g, ' ').trim().slice(0, ECHO_EXCERPT_MAX);
+  const said = excerpt ? `——「${excerpt}」` : '';
   if (d.intent === 'create_task') {
-    return `我理解成：建任务（依据：${d.reason}）。不对就回「撤销」，10 分钟内有效。`;
+    return `我理解成：建任务${said}。不对就回「撤销」，10 分钟内有效。`;
   }
   if (d.intent === 'start_task') {
-    return `我理解成：启动任务（依据：${d.reason}）。`;
+    return `我理解成：启动任务${said}。`;
   }
   return null;
 }

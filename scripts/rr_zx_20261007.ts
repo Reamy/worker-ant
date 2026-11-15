@@ -278,8 +278,13 @@ async function main(): Promise<void> {
     const mainSrc = strip(NODE_HEARTBEAT_SRC);
     crit('M4', NEW_FIELDS.every((f) => mainSrc.includes(f)),
       `M4-B① \`node-heartbeat.ts\`（类型+采集+上报一处）三名俱全——新字段**有生产者**。`);
-    crit('M4', /body:\s*\{\s*node_id:\s*nodeId,\s*status,\s*card\s*\}/.test(mainSrc),
+    // zx_20261115_1 M4：心跳另带 `participate`（接/派两向的"接"每跳同步）⇒ 按**两种体形**各钉一次：
+    //   ① 主体仍是 `{node_id, status, card}`（status 整份原样送，不是挑字段）；
+    //   ② 带参与态时是在同一体上**追加一个键**，不改 status 的形状。
+    crit('M4', /\{\s*node_id:\s*nodeId,\s*status,\s*card\s*\}/.test(mainSrc),
       `M4-B② 上报**整份 status 原样送**（不是挑几个字段抄）——ANS 侧因此天然收全。`);
+    crit('M4', /node_id:\s*nodeId,\s*status,\s*card,\s*participate/.test(mainSrc),
+      `M4-B②' 参与态是**追加键**（status 形状不变，旧 ANS 忽略未知键）。`);
     crit('M4', NEW_FIELDS.every((f) => strip(NODE_VIEW_TS).includes(f)),
       `M4-B③ \`node-view.ts\` 展示投影三名俱全——新字段**有消费者**（renderer 是词表第二落点）。`);
     const ansSrc = strip(ANS_NODES_TS);

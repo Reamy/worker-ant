@@ -262,8 +262,9 @@ console.log('\n[S2b M3-1 四处创建路径落 pending（父亦 pending）]');
   // ② 工具 spawn_subagent
   // zx_20260915 P0-2: 该 INSERT 末列增 `acceptance_criteria`（子 agent 任务也能带验收标准）——
   //   列名表由「…source, depends_on」变为「…source, depends_on, acceptance_criteria」，判据（落 pending 是字面量）不变。
-  ok(/INSERT INTO wa_tasks \(id, project_id, title, description, status, priority, context_json, parent_task_id, source, depends_on, acceptance_criteria\) VALUES \(\?, \?, \?, \?, 'pending'/.test(ae),
-    'spawn_subagent：子任务落 pending（字面量在 INSERT 内）');
+  // zx_20261115_2 M2：末列再增 `position_id`（岗位随树继承）——按更强的新形状钉，落 pending 判据不变。
+  ok(/INSERT INTO wa_tasks \(id, project_id, title, description, status, priority, context_json, parent_task_id, source, depends_on, acceptance_criteria, position_id\) VALUES \(\?, \?, \?, \?, 'pending'/.test(ae),
+    'spawn_subagent：子任务落 pending（字面量在 INSERT 内；含 position_id 列）');
   ok(ae.includes('if (depIds.length === 0) {') && ae.includes("created_pending_deps"),
     'spawn_subagent：有前置则不立即派发（派发同样只经调度器一条路）');
   ok(/dependsOn: \{ type: 'string'/.test(ae), 'spawn_subagent 新增 dependsOn 入参（与 create_task 同一表达）');
@@ -430,8 +431,10 @@ console.log('\n[S4 M3-4 introducesCycle（自环 / 间接环 / 合法）]');
   ok(ipc.includes('[依赖] 前置任务不存在：') && ipc.includes('不阻塞调度（请核对是否写错 id）'),
     'task:update 对查不到的 id **允许写入但如实标注**（承 M3-2 裁定）');
   ok(ipc.includes("sets.push('depends_on = ?');"), 'task:update 真正落库 depends_on（不只校验）');
-  ok(/async \(_event, \{ id, title, description, priority, acceptance_criteria, depends_on \}/.test(ipc),
-    'task:update 入参解构含 depends_on（参数不会被丢）');
+  // zx_20261115_4 M1「岗」：解构里多了 `positionId`（同一处补派/改派）——判据随之收紧，
+  //   仍钉"这两个参数都不会被丢"，不是放宽。
+  ok(/async \(_event, \{ id, title, description, priority, acceptance_criteria, depends_on, positionId \}/.test(ipc),
+    'task:update 入参解构含 depends_on 与 positionId（参数不会被丢）');
   ok(ipc.includes("if (depends_on !== undefined) {") && ipc.includes("if (!self) return { error: { code: 'NOT_FOUND', message: '任务不存在' } };"),
     'task:update 依赖分支：任务不存在先拒（否则会给不存在的任务写依赖）');
   ok(!/sets\.push\('depends_on = \?'\);\s*params\.push\(depends_on\)/.test(ipc),

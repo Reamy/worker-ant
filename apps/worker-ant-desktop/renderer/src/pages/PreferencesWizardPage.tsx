@@ -2,6 +2,8 @@ import { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { Check, ChevronLeft, ChevronRight, Sparkles } from 'lucide-react';
 import { invoke } from '../lib/ipc';
+// zx_20261115_4 M6「启」：跳过要与首启向导同一处置（会话级豁免），否则会被路由弹回。
+import { skipOnboarding } from '../lib/onboardingSkip';
 import { MEM_IMPORTANCE_DEFAULT } from '../../../src/main/core/memory-constants.js';
 
 // 5维度17题 — 与原工蚁前端保持一致
@@ -194,7 +196,9 @@ export default function PreferencesWizardPage() {
   };
 
   // zx_20261005 M14: 偏好向导**可跳过**——跳过与提交都不再写首启布尔标志（首启由状态判，不看标志）。
-  const skip = () => { navigate('/'); };
+  // zx_20261115_4 M6「启」：首启态下直接 `navigate('/')` 会被 `ProtectedRoute` 弹回 `/onboarding`
+  //   ⇒ "可跳过"名不副实。跳过与 `SetupPage` 的「先进去看看」**同一处置**：先置本次会话豁免。
+  const skip = () => { skipOnboarding(); navigate('/'); };
 
   return (
     <div className="min-h-screen bg-gray-50">

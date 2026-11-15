@@ -12,6 +12,8 @@ import { persistTurnMessage } from './pause-settlement.js';
 import { writeMilestoneDone, backfillBoardRemainderToSelf, selfCompleteBan, buildChildContext, resolveAncestorSchemeRef, classifyChildCompletion, childCompletionCheckLabel, milestoneBoardOwner, goalDeviationCapReached, milestoneSubjectVerdict, MAX_TASK_DEPTH, childBreadthRefusal, collectSubtreeIds, taskTreeIds } from './task-accounting.js';
 import { validateReadonlyBashCommand, sanitizeLoneSurrogates, searchPathForPattern, paginateReadFile, shellRejectPayload, shellRejectPayloadForChar, buildToolConstraintBrief } from './tool-guards.js';
 import { setDeliverableStatus, promoteTaskFileDeliverables, autoAssignPrimary, selectProbeDeliverables, disposeProbeDeliverables, readAcceptanceCheck, docNotProbe, findDeliverableByPath } from './deliverable-lifecycle.js';
+// zx_20261115_3 M1「归」：finalize_task 出口同样按写作账补登记（与 run_close 出口同一实现）。
+import { registerClaimedArtifacts } from './task-artifacts.js';
 import { parseDepIds } from './dep-graph.js';
 // zx_20260917 M5-1: 「链上至多一个在跑」的唯一真源（`create_task` 与 `task-scheduler` 共用，不抄第二份）
 import { childDispatchHint } from './task-chain.js';
@@ -105,7 +107,7 @@ import { shellTools } from './tools/shell.js';
 import { memoryTools } from './tools/memory.js';
 import { resourceTools } from './tools/resource.js';
 import { deviceTools } from './tools/device.js';
-import { classifyArchetypeDetailed, classifyArchetypeKeyword, classifyByFamilyResemblance, FAMILY_REPRESENTATIVES, getAdaptiveStrategy, ARCHETYPE_BUDGETS, ARCHETYPE_TOOL_CATEGORIES, capabilityNeedsOf, applyPriorityTilt, determineExecutionMode, applyExecutionMode, assessComplexity, narrowToolFace, applySubagentToolScope, buildToolFaceBrief, buildUnavailableNotice, applyArchetypeFloor, type TaskArchetype, type ArchetypeDecision } from './task-archetype.js';
+import { classifyArchetypeDetailed, classifyArchetypeKeyword, classifyByFamilyResemblance, FAMILY_REPRESENTATIVES, getAdaptiveStrategy, ARCHETYPE_BUDGETS, ARCHETYPE_TOOL_CATEGORIES, capabilityNeedsOf, applyPriorityTilt, determineExecutionMode, applyExecutionMode, assessComplexity, narrowToolFace, applySubagentToolScope, restrictToolFaceByPosition, buildToolFaceBrief, buildUnavailableNotice, applyArchetypeFloor, type TaskArchetype, type ArchetypeDecision } from './task-archetype.js';
 import { getSubagentType } from './subagent-registry.js';
 import { getLearnedStrategy, naturalStrategySelection, adjustProjectStrategy, recordStrategyOutcome, getToolUsageHint, getProjectThresholds, type ExecutionMetrics } from './feedback-engine.js';
 import { auditWorldConsistency, generateFactSnapshot, scanWorkingDirOnce, type WorkingDirScan } from './world-snapshot.js';
@@ -1597,7 +1599,7 @@ export async function executeTask(
     //   ⚠ `summaryOnly` 也随结果回来——下游 `context_watermark` 要把它落库（水位分项之一）；
     //     计划表原写回传 `{ messages, projectCtx }`，实测**少一个就不够**，如实订正为三项。
     //     zx_20260930 M7-c 再添一项 `lessonsIds`（`<lessons-learned>` 真入文者，回执见下）——**如实订正为四项**。
-    const { messages, projectCtx, summaryOnly, lessonsIds, positionInjections, positionText, sections, historyRange, stablePrefixEnd } = await buildTaskContext({
+    const { messages, projectCtx, summaryOnly, lessonsIds, positionInjections, positionText, positionTools, sections, historyRange, stablePrefixEnd } = await buildTaskContext({
       ctx, db, taskId, projectId, project, workingDir, title, description, archetype, adaptiveStrategy,
       complexityLevel, userPrefs, memoryContext, memoryKnowledgeText, memoryBudgetChars,
       successContext, subagentSystemPrompt, projCtxJson,
@@ -1763,7 +1765,12 @@ export async function executeTask(
       subagentAllowTools ? { allowTools: subagentAllowTools } : undefined);
     // zx_20261030_2 M2（「器」）：allow/deny 在这里一次算定（纯函数），删 key 与说明书共用同一结果。
     const scope = applySubagentToolScope(baseFace, { allowTools: subagentAllowTools, denyTools: subagentDenyTools });
-    const toolFace = { ...baseFace, kept: scope.kept, removed: scope.removed };
+    // zx_20261115_1 M1「职」：岗位工具白名单最后一道**交集**（岗位没设 ⇒ 空数组 ⇒ 与今日逐字节一致）。
+    //   次序在子代理 allow/deny 之后：deny 已先赢，岗位再收一刀只会更窄，不会把 deny 掉的救回来。
+    const toolFace = restrictToolFaceByPosition(
+      { ...baseFace, kept: scope.kept, removed: scope.removed },
+      positionTools,
+    );
     const toolsCharsAfter = JSON.stringify(Object.fromEntries(toolFace.kept.map((k) => [k, (tools as unknown as Record<string, unknown>)[k]]))).length;
 
     // ═══ zx_20261018_1 批七「账」（道德经·知止 / 管子·度量衡）：七源分账 + 最小 token 的裁法 ═══
@@ -2121,7 +2128,7 @@ export async function executeTask(
       // zx_20261112_1 「任·答·诊·衡」——岗位在册可派活 / 跨机认岗 / IM 有问必答 / 任务可诊断 / 档位一把尺。
       // zx_20261112_3 「名」——入站 mDNS 广播改用节点自持主机名，不再借用系统 LocalHostName。**只改这一处**。
       const prefixFp = fingerprintMessages(messages, stablePrefixEnd);
-      const feats ={ requirementCard: true, contextWatermark: true, historySummaryOnly: true, readListOnResume: true, goalRestartCap: true, build: 'zx_20261113_4',
+      const feats ={ requirementCard: true, contextWatermark: true, historySummaryOnly: true, readListOnResume: true, goalRestartCap: true, build: 'zx_20261115_4',
         archetype_source: decision.source,
         ctx_prefix_hash: prefixFp.hash, ctx_prefix_chars: prefixFp.chars, ctx_prefix_end: prefixFp.end };
       // zx_20260916_1 M5 (#6): 读**恢复账总数**（用户介入 + 系统自动），不再单读 `resume_count`——
@@ -2153,7 +2160,7 @@ export async function executeTask(
       removedByAllow: scope.removedByAllow.length, removedByDeny: scope.removedByDeny.length, restored: toolFace.restored, toolsCharsAfter }, '工具面按形态收窄已应用');
     // 如实告知（正向·开工即知）: 本档可用哪些工具。本档零收窄时只说一句"未收窄"（无"档外"可告知）。
     //   ⚠ zx_20261030_2 M2：这句话**必须**在 allow/deny 两刀之后生成——它描述的是模型**手上真正拿到的那把**。
-    messages.push({ role: 'system', content: buildToolFaceBrief(archetype, adaptiveStrategy.label, toolFace.kept, toolFace.removed.length) });
+    messages.push({ role: 'system', content: buildToolFaceBrief(archetype, adaptiveStrategy.label, toolFace.kept, toolFace.removed.length, toolFace.removed) });
 
     // zx_20261023_3 批二（令下即止 / 越界即拒）：给变更类工具的 `execute` 包一层**调用时**状态闸。
     //   装配时只包壳、不读库；壳里每次调用当场读库 ⇒ 同一 run 内前一步被暂停，后一步即进不来。
@@ -2629,6 +2636,15 @@ export async function executeTask(
           if (claimCompletedEmit(ctx)) {
             eventBus.emit('task.completed', { taskId, task_id: taskId, projectId, run_id: ctx.runId, ...buildTaskOutcome(db, taskId, fileMutationCount), acceptance: toAcceptanceSummary(readAcceptanceCheck(db, taskId)) }).catch(() => {});
           }
+          // zx_20261115_3 M1「归」：先按写作账补登记（有界、非探针、归属不夺），再提升成果——
+          //   顺序与 run_close 出口同一条约束（新建行是 draft，须紧接提升；否则永久草稿）。
+          try {
+            const bf = registerClaimedArtifacts(db, { taskId, projectId, via: 'finalize_task' });
+            if (bf.created > 0) {
+              db.prepare("INSERT INTO wa_task_conversations (id, task_id, role, content, token_count, created_at) VALUES (?, ?, 'system', ?, 0, datetime('now'))")
+                .run(crypto.randomUUID(), taskId, `[产出对账] 按本任务文件账补登记 ${bf.created} 件产出物（文件已落盘、工程内无登记行）。`);
+            }
+          } catch { /* 补登记 best-effort，不阻断收口 */ }
           promoteTaskFileDeliverables(db, taskId, 'finalize_task');
           // zx_20261016_3 M32（「完成出口同一把尺」· 实测照出的**第二处两出口不同尺**）:
           //   finalize_task **工具路**此前**不进策略闭环**——全仓 `adjustProjectStrategy` 只有 run_close

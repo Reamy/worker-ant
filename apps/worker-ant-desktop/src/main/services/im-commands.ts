@@ -179,7 +179,7 @@ export interface BuiltinImCommand {
 export const BUILTIN_IM_COMMANDS: readonly BuiltinImCommand[] = [
   {
     name: '创建任务',
-    example: '「创建任务+标题」',
+    example: '「创建任务+标题」；可在标题后加「@项目」「@岗位」',
     probe: '创建任务+标题',
     match: (s) => classifyImText(s).kind === 'create',
   },

@@ -321,6 +321,8 @@ const offenders = (hits: RawHit[]): RawHit[] => hits.filter((h) => !RAW_WHITELIS
     `enqueueJob(ctx.db, 'ai-task', { taskId: task.id, source: 'im'`,                  // 启动·指定任务
     `enqueueJob(ctx.db, 'ai-task', { taskId: t.id, source: 'im'`,                     // 启动·唯一任务
     `enqueueJob(ctx.db, 'ai-task', { taskId, projectId, source: 'im'`,                // Intent 路建单即派
+    // zx_20261115_4 M2「岗」：岗位追问的编号回复后建单即派（与上面两路同一形状、同一作业类型）。
+    `enqueueJob(db, 'ai-task', { taskId, projectId: pendingPos.projectId, source: 'im'`,
   ];
   const imRouterSrc = stripComments(RD(`${A}/src/main/services/im-router.ts`));
   eq(imEnqueueSites.filter((s) => imRouterSrc.includes(s)).length, imEnqueueSites.length,
@@ -328,8 +330,8 @@ const offenders = (hits: RawHit[]): RawHit[] => hits.filter((h) => !RAW_WHITELIS
   eq(countIn(`${A}/src/main/services/im-router.ts`), imEnqueueSites.length, `im-router.ts enqueueJob 恰 ${imEnqueueSites.length} 次`);
   eq(countIn(`${A}/src/main/index.ts`), 1, 'index.ts enqueueJob 恰 1 次（cron 注入点）');
   eq(perEngineFile.reduce((n, h) => n + h.n, 0)
-    + countIn(`${A}/src/main/services/im-router.ts`) + countIn(`${A}/src/main/index.ts`), 18,
-    '三处调用点合计 enqueueJob 恰 18 次（8+9+1）');
+    + countIn(`${A}/src/main/services/im-router.ts`) + countIn(`${A}/src/main/index.ts`), 19,
+    '三处调用点合计 enqueueJob 恰 19 次（8+10+1）');
   // D4 专项：核实收口建修复任务的那一段不得再入队（否则又与父任务并发改文件）
   eq(countIn(`${A}/src/main/core/tools/control-finalize.ts`), 0,
     'control-finalize.ts enqueueJob 0 处（D4：改为 depends_on 由调度器接续）');

@@ -389,6 +389,9 @@ export const packs = {
     ipcCall<{ packs: DomainPackListRow[] }>('packs:suggested', { projectId }),
   dismiss: (packId: string) =>
     ipcCall<{ dismissed: boolean }>('packs:dismiss', { packId }),
+  // zx_20261115_3 M5：按任务题面命中的候选包建议（只读；≤2 条；0 命中为空数组）。
+  suggestForTask: (projectId: string, taskText: string, limit?: number) =>
+    ipcCall<{ packs: Array<{ id: string; name: string; hits: string[] }> }>('packs:suggestForTask', { projectId, taskText, limit }),
 };
 
 // ===== 岗位（zx_20261112_1 B1）=====
@@ -412,6 +415,13 @@ export interface PositionWriteBody {
   skills?: string[];
   rules?: string[];
   knowledge?: string[];
+  /** zx_20261115_1 M1：岗位执行的硬件约束（空数组＝沿用默认面）。 */
+  tools?: string[];
+  mcp?: string[];
+  /** 空串＝继承项目沙箱档；只能调严（strict > workspace > off）。 */
+  sandboxScope?: '' | 'strict' | 'workspace' | 'off';
+  /** false ⇒ 该岗位的任务不出本机。 */
+  participate?: boolean;
   enabled?: boolean;
 }
 
@@ -428,7 +438,7 @@ export const positions = {
   projectToggle: (positionId: string, projectId: string, enabled: boolean) =>
     ipcCall<{ projects: PositionProjectBinding[] }>('positions:projectToggle', { positionId, projectId, enabled }),
   // zx_20261112_1 B2「任」: 本项目可指派岗位（岗位启用 ∧ 项目绑定启用）——建单下拉 / 派活共用。
-  forProject: (projectId: string) => ipcCall<{ positions: Position[] }>('positions:forProject', { projectId }),
+  forProject: (projectId: string) => ipcCall<{ positions: Position[]; defaultId?: string | null }>('positions:forProject', { projectId }),
   // zx_20261113_1 B1「联」: 项目详情岗位卡——含未启用项 × 绑定态 × 本项目任务数 × 待审候选，计数由 main 一次取齐。
   projectBoard: (projectId: string) =>
     ipcCall<{ positions: ProjectPositionBoardRow[] }>('positions:projectBoard', { projectId }),
@@ -481,6 +491,17 @@ export const tasks = {
       conversationsTotal?: number;
       deliverables: Array<Record<string, unknown>>;
       deliverablesTotal?: number;
+      /** zx_20261115_3 M2「归」：本任务树写过、但登记不在本树内的文件（归属/贡献两栏的另一栏）。 */
+      claimedArtifacts?: Array<{
+        path: string | null;
+        name: string;
+        ownerTaskId: string | null;
+        claimedByTaskId: string | null;
+        deliverableId: string | null;
+        exists: boolean;
+      }>;
+      /** zx_20261115_3 M2：0 产出时的人话解释（不是"没有产出" / 不是"读不到"）。 */
+      artifactsNote?: string;
       /** zx_20261107_1 B6：本次执行的选型记录（旧任务无此键 ⇒ `null`）。 */
       modelSelection?: ModelSelection | null;
       /**
@@ -514,8 +535,8 @@ export const tasks = {
   // zx_20260914 M0.6: clientRequestId 可选——**一次表单提交 = 一个键**，main 侧据此幂等去重（双击不再建两份）。
   // zx_20261013_1 批二(K7): attachmentPaths 可选——建任务时就把本地件挂上（main 侧落盘并写 `context_json.attachments`）。
   // zx_20261112_1 B2「任」: positionId 可选——建单即指派岗位（main 侧先验「岗位启用 ∧ 项目绑定启用」）。
-  create: (projectId: string, title: string, description?: string, priority?: number, acceptance_criteria?: string, parentTaskId?: string, planTaskId?: string, clientRequestId?: string, attachmentPaths?: string[], positionId?: string) =>
-    ipcCall<Record<string, unknown>>('task:create', { projectId, title, description, priority, acceptance_criteria, parent_task_id: parentTaskId, plan_task_id: planTaskId, client_request_id: clientRequestId, attachment_paths: attachmentPaths, positionId }),
+  create: (projectId: string, title: string, description?: string, priority?: number, acceptance_criteria?: string, parentTaskId?: string, planTaskId?: string, clientRequestId?: string, attachmentPaths?: string[], positionId?: string, positionExplicit?: boolean) =>
+    ipcCall<Record<string, unknown>>('task:create', { projectId, title, description, priority, acceptance_criteria, parent_task_id: parentTaskId, plan_task_id: planTaskId, client_request_id: clientRequestId, attachment_paths: attachmentPaths, positionId, position_explicit: positionExplicit }),
 
   // zx_20261105_1 M7: 判据候选（只读）——建单弹窗实时预览，人点「采用」后才经 `update` 入列。
   suggestCriteria: (title: string, description?: string) =>
@@ -550,7 +571,7 @@ export const tasks = {
   // zx_20261027_2: 删除返回的是整棵子树（含根），`deletedIds` 为实际删净的任务 id。
   delete: (id: string) => ipcCall<{ id: string; deleted: boolean; deletedIds?: string[] }>('task:delete', { id }),
 
-  update: (id: string, body: { title?: string; description?: string; priority?: number; acceptance_criteria?: string; depends_on?: string }) =>
+  update: (id: string, body: { title?: string; description?: string; priority?: number; acceptance_criteria?: string; depends_on?: string; positionId?: string }) =>
     ipcCall<Record<string, unknown>>('task:update', { id, ...body }),
 
   context: (id: string, context?: Record<string, unknown>) =>
@@ -926,6 +947,9 @@ export const nodes = {
   /** 协同面板三分组：可派 / 等待依赖 / 上游已死（与真派同一把尺）。 */
   dispatchBoard: () => ipcCall<DispatchBoardPayload>('nodes:dispatch-board'),
   update: (nodeId: string, patch: NodePatch) => ipcCall<AnsNode>('nodes:update', { nodeId, patch }),
+  /** zx_20261115_1 M4：本机「允许把活派给别人」——纯本地设置，不入 ANS 台账。 */
+  getParticipateOut: () => ipcCall<{ enabled: boolean }>('nodes:participateOut'),
+  setParticipateOut: (value: boolean) => ipcCall<{ enabled: boolean }>('nodes:participateOut', { value }),
   // zx_20261011_3: 删除离线节点（写口，过 Team 软闸；ANS 侧硬删 + 吊销该节点 key）。
   remove: (nodeId: string) => ipcCall<{ node_id: string; removed: boolean }>('nodes:delete', { nodeId }),
   card: () => ipcCall<NodeCardPayload>('nodes:card'),

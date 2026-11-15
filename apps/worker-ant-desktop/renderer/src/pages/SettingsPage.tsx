@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { invoke } from '../lib/ipc';
 // zx_20261005 M8: 许可读写走专用通道（激活须验签落库，不经通用 settings:set）；`LicenseState` 取 main 侧真源。
 import { license as licenseApi, IpcError, nodes as nodesApi, sample as sampleApi } from '../lib/ipc';
@@ -18,7 +19,7 @@ import type { PricingPayload } from '../../../src/main/core/pricing.js';
 import type { TierCatalogPayload } from '../../../src/main/core/tier-catalog.js';
 // zx_20261022_3 批九: 用量形状同引 main 侧真源（`core/tier-usage.ts`）；本页只上屏，不自行数库/猜上限。
 import type { TierUsagePayload } from '../../../src/main/core/tier-usage.js';
-import { Monitor, Cpu, HardDrive, RefreshCw, Lock, Check, Globe, Save, Bell, Package, GitBranch, Shield, ShieldCheck, ListTree, Terminal, BookOpen } from 'lucide-react';
+import { Monitor, Cpu, HardDrive, RefreshCw, Lock, Check, Globe, Save, Bell, Package, GitBranch, Shield, ShieldCheck, ListTree, Terminal, BookOpen, Compass } from 'lucide-react';
 // zx_20261111_3「显」：第一行的唯一真源在 main 纯模块（设置页只说"还差什么"，不自己排优先级）。
 import NextActionBar from '../components/NextActionBar';
 import { nextActionForSettings, type NextActionId } from '../../../src/main/core/next-action.js';
@@ -106,6 +107,10 @@ const EXPOSED_BOOL_KEYS: readonly string[] = [
   'engine.kill_background_on_exit',
   // zx_20261113_4 B1「成」：项目画像首次自动成型（缺省即开；关 ⇒ 回「首次由用户点」旧行为）
   'profile_auto_bootstrap',
+  // zx_20261115_4 M2「岗」：`position.default_from_project` 曾只列在本表里 ⇒ 被排除出高级区、
+  //   却没有任何专属控件 ⇒ **用户点不到**（承「承诺开关须有 GUI 读写口」）。
+  //   今同族两枚一并落到高级区「岗位」组（有名字、有写口），本表不再收录。
+
 ];
 
 const ELSEWHERE_BOOL_KEYS: readonly string[] = [
@@ -122,6 +127,7 @@ const ADVANCED_GROUPS: Array<{ label: string; prefix: string }> = [
   { label: '引擎行为', prefix: 'engine.' },
   { label: '记忆', prefix: 'memory.' },
   { label: 'IM 通知', prefix: 'im.' },
+  { label: '岗位', prefix: 'position.' },
   { label: '界面与常驻', prefix: 'ui.' },
   { label: '其它', prefix: '' },
 ];
@@ -130,6 +136,8 @@ const advancedGroupOf = (key: string): string =>
 
 // 高级区 26 个键的中文名——用户可见文案落在 renderer（词表第二落点）；缺名即由断言弄红。
 const ADVANCED_BOOL_LABELS: Record<string, string> = {
+  'position.default_from_project': '项目只有唯一岗位时建单默认指派它',
+  'position.ask_when_multiple': '项目有多个岗位时，IM 建单先问一次派给谁',
   'deliverable.acceptance_on_close': '收口时自动验收',
   'deliverable.probe_disposition': '探针文件处置',
   'deliverable.primary_prefer_created': '优先「已创建」置主',
@@ -161,6 +169,7 @@ const ADVANCED_BOOL_LABELS: Record<string, string> = {
 // 搜索：分区关键词（卡片级过滤）——中文分词做不到，就按"用户会打的词"列在这里。
 const SECTION_KEYWORDS: Record<string, string> = {
   'local-owner': '本机密码 所有者 账号',
+  tour: '新手引导 导览 重看 第一次',
   password: '修改密码 账号 登录',
   ans: 'ANS 服务 地址 API Key 密钥 资源',
   notify: '桌面通知 免打扰 安静时段 系统通知 横幅 toast',
@@ -185,6 +194,17 @@ const SECTION_KEYWORDS: Record<string, string> = {
 const ADVANCED_KEYWORDS = '高级设置 开关 布尔 白名单';
 
 export default function SettingsPage() {
+  const navigate = useNavigate();
+  // zx_20261115_4 M6「启」：重看新手导览——只清一次性标记，不碰任何配置（真源仍是 `onboarding.tour_done`）。
+  const [tourMsg, setTourMsg] = useState('');
+  const resetTour = async (): Promise<void> => {
+    try {
+      await invoke('settings:set', 'onboarding.tour_done', '0');
+      navigate('/');
+    } catch (e) {
+      setTourMsg(`重置失败：${(e as Error).message || '写入未成功'}`);
+    }
+  };
   // zx_20261108_1 B5：动作路径**可见结果**的总闸——写失败回滚本地值并红条说明原因。
   const fb = useActionFeedback();
   /** 设置写口。此前每个开关都是 `try { … } catch {}`：没写进去，界面却仍显示"已打开/已保存"。 */
@@ -760,6 +780,17 @@ export default function SettingsPage() {
         {noMatch && <p className="text-sm text-gray-400">没有匹配的设置项。</p>}
         <div className={wrapCls('local-owner')}>
           <LocalOwnerPasswordCard />
+        </div>
+        {/* zx_20261115_4 M6「启」：导览只有一次性标记（`onboarding.tour_done`），此前**没有任何重看入口**——
+            用户关掉就再也看不到。这里给一条真的路：清标记 + 回首页（由既有的 `shouldShowTour` 自然重弹，
+            不新造状态、不重跑配置向导）。 */}
+        <div className={cardCls('tour')}>
+          <h3 className="font-semibold mb-2 flex items-center gap-2"><Compass className="w-4 h-4"/>新手引导</h3>
+          <p className="text-xs text-gray-500 mb-3">导览只自动弹一次。想再看一遍就重置它——不影响任何配置、许可与项目数据。</p>
+          <div className="flex items-center gap-2">
+            <button onClick={resetTour} className="px-3 py-1.5 rounded-lg text-sm border border-gray-300 hover:bg-gray-50">重置并回到首页</button>
+            {tourMsg && <span className="text-xs text-gray-500">{tourMsg}</span>}
+          </div>
         </div>
         <div className={cardCls('password')}>
           <h3 className="font-semibold mb-4 flex items-center gap-2"><Lock className="w-4 h-4"/>修改密码</h3>

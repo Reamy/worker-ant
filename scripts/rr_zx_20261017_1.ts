@@ -587,7 +587,9 @@ async function main(): Promise<void> {
     const reasons = ['eligible', 'project-mode-off', 'setting-off', 'team-locked', 'not-enrolled',
       'parent-missing', 'parent-failed', 'parent-archived', 'parent-completed',
       'has-dependencies', 'dependencies-waiting', 'dependencies-dead',
-      'has-attachments', 'has-working-dir', 'decomposed', 'local-capacity', 'no-category'];
+      'has-attachments', 'has-working-dir', 'decomposed', 'local-capacity',
+      // zx_20261115_1 M1/M4：岗位级"不参与跨机派单" + 本机"不派出去"（新枚举成员，逐成员枚举须同步）。
+      'position-local-only', 'participate-out-off', 'no-category'];
     eq(Object.keys(CREATE_DISPATCH_REASON_LABEL).sort(), [...reasons].sort(),
       'R-14d 理由词表逐成员枚举（机器码与上屏文案成对，漏一项是编译期错）');
     for (const r of reasons) {
@@ -911,6 +913,12 @@ async function main(): Promise<void> {
           is_exemplar INTEGER DEFAULT 0, exemplar_type TEXT, exemplar_context TEXT, updated_at TEXT,
           created_at TEXT DEFAULT (datetime('now'))
         );
+        -- zx_20261115_4 M7「墙」：团队共享第六类 position 的资产表（只建候选读面需要的列）。
+        CREATE TABLE wa_positions (
+          id TEXT PRIMARY KEY, name TEXT NOT NULL, category TEXT DEFAULT 'custom',
+          description TEXT DEFAULT '', enabled INTEGER DEFAULT 1,
+          updated_at TEXT DEFAULT (datetime('now'))
+        );
         CREATE TABLE wa_deliverables (
           id TEXT PRIMARY KEY, project_id TEXT, task_id TEXT,
           type TEXT NOT NULL, name TEXT DEFAULT '', description TEXT DEFAULT '',
@@ -950,7 +958,8 @@ async function main(): Promise<void> {
 
     // 词表与上限：唯一真源在 shared-types（ANS 与桌面同引）
     // zx_20261022_3 批八：`project_profile` 入册（4→5；逐成员枚举仍不放宽）。
-    eq([...TEAM_ITEM_KINDS], ['template', 'memory', 'deliverable', 'domain_pack', 'project_profile'],
+    // zx_20261115_4 M7：`position` 入册（5→6；逐成员枚举仍不放宽——加类目必须是一次有意的动作）。
+    eq([...TEAM_ITEM_KINDS], ['template', 'memory', 'deliverable', 'domain_pack', 'project_profile', 'position'],
       'R-34a 共享类型词表**逐成员枚举**（唯一定处 `packages/shared-types/src/team.ts`）');
     for (const k of TEAM_ITEM_KINDS) {
       ok(isTeamItemKind(k) && TEAM_ITEM_KIND_LABEL[k].length > 0,
@@ -984,11 +993,13 @@ async function main(): Promise<void> {
     // zx_20261022_3 批八：第五类候选（画像一项目一份；`localId` = project_id）。
     d.prepare(`INSERT INTO wa_project_profiles (project_id, version, source_hash, profile_json, origin, source_project_name, enabled)
                VALUES ('prof-1', 1, 'h-1', '{}', 'imported', '远端项目', 0)`).run();
+    // zx_20261115_4 M7：第六类候选——岗位（四段 + 已采纳经验可共享）。
+    d.prepare("INSERT INTO wa_positions (id, name, category, enabled) VALUES ('pos-1', '财务', 'business', 1)").run();
 
     // 本地候选：五类各一列（纯本地读）
     const local = listLocalItems(d as unknown as Parameters<typeof listLocalItems>[0]);
-    const candidateLists = [local.templates, local.memories, local.deliverables, local.domainPacks, local.profiles];
-    eq(candidateLists.map((l) => l.length), [1, 1, 1, 1, 1], 'R-34e 候选五列各 1 条');
+    const candidateLists = [local.templates, local.memories, local.deliverables, local.domainPacks, local.profiles, local.positions];
+    eq(candidateLists.map((l) => l.length), [1, 1, 1, 1, 1, 1], 'R-34e 候选六列各 1 条');
     ok(!local.truncated, 'R-34e2 未截断');
     // 类目集合**由词表派生**（不写死 3/4）：下次再加一维时，此判据只问"实现是否覆盖词表"。
     eq([...new Set(candidateLists.flat().map((x) => x.kind))].sort(), [...TEAM_ITEM_KINDS].sort(),

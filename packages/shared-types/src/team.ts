@@ -6,11 +6,19 @@
  */
 
 /**
- * 共享件五类：任务模板 / 记忆 / 成果元数据 / 领域包 / 项目画像（zx_20261022_3 批八）。
+ * 共享件六类：任务模板 / 记忆 / 成果元数据 / 领域包 / 项目画像（zx_20261022_3 批八）/
+ * 岗位（zx_20261115_4 M7：四段 + 已采纳经验——岗位是组织资产，不是个人收藏）。
  * ⚠ 新增一类须穷举全部读取谓词：ANS 路由（kind 校验与拒因文案）、`core/team-library.ts`
  *   （候选/分享/导入三分支）、`ipc/team.ipc.ts`、`renderer/.../TeamLibraryPage.tsx`（列由本表派生）。
  */
-export const TEAM_ITEM_KINDS = ['template', 'memory', 'deliverable', 'domain_pack', 'project_profile'] as const;
+export const TEAM_ITEM_KINDS = [
+  'template',
+  'memory',
+  'deliverable',
+  'domain_pack',
+  'project_profile',
+  'position',
+] as const;
 export type TeamItemKind = (typeof TEAM_ITEM_KINDS)[number];
 
 export function isTeamItemKind(v: unknown): v is TeamItemKind {
@@ -31,6 +39,7 @@ export const TEAM_ITEM_KIND_LABEL: Record<TeamItemKind, string> = {
   deliverable: '成果',
   domain_pack: '领域包',
   project_profile: '项目画像',
+  position: '岗位',
 };
 
 /** `POST /api/v1/team/items` 的请求体：**没有 `source_node_id`**——来源只由凭据派生。 */

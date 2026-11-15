@@ -244,7 +244,7 @@ const schema = `
 CREATE TABLE wa_settings (key TEXT PRIMARY KEY, value TEXT DEFAULT '');
 CREATE TABLE wa_tasks (id TEXT PRIMARY KEY, project_id TEXT DEFAULT '', title TEXT DEFAULT '',
   status TEXT DEFAULT 'pending', parent_task_id TEXT DEFAULT '', depends_on TEXT DEFAULT '',
-  context_json TEXT DEFAULT '{}', updated_at TEXT DEFAULT (datetime('now')));
+  context_json TEXT DEFAULT '{}', position_id TEXT DEFAULT '', updated_at TEXT DEFAULT (datetime('now')));
 `;
 
 /**
@@ -1192,7 +1192,7 @@ async function main(): Promise<void> {
       d.exec(`
         CREATE TABLE wa_settings (key TEXT PRIMARY KEY, value TEXT DEFAULT '');
         CREATE TABLE wa_tasks (id TEXT PRIMARY KEY, project_id TEXT DEFAULT '', title TEXT DEFAULT '',
-          status TEXT DEFAULT 'pending', parent_task_id TEXT DEFAULT '', context_json TEXT DEFAULT '{}');
+          status TEXT DEFAULT 'pending', parent_task_id TEXT DEFAULT '', context_json TEXT DEFAULT '{}', position_id TEXT DEFAULT '');
         CREATE TABLE wa_deliverables (id TEXT PRIMARY KEY, project_id TEXT DEFAULT '', task_id TEXT DEFAULT '',
           type TEXT DEFAULT '', name TEXT DEFAULT '', description TEXT DEFAULT '', file_path TEXT,
           status TEXT DEFAULT 'draft', updated_at TEXT DEFAULT (datetime('now')));
@@ -1300,7 +1300,7 @@ async function main(): Promise<void> {
       d.exec(`
         CREATE TABLE wa_settings (key TEXT PRIMARY KEY, value TEXT DEFAULT '');
         CREATE TABLE wa_tasks (id TEXT PRIMARY KEY, project_id TEXT DEFAULT '', title TEXT DEFAULT '',
-          status TEXT DEFAULT 'pending', parent_task_id TEXT DEFAULT '', context_json TEXT DEFAULT '{}');
+          status TEXT DEFAULT 'pending', parent_task_id TEXT DEFAULT '', context_json TEXT DEFAULT '{}', position_id TEXT DEFAULT '');
         CREATE TABLE wa_deliverables (id TEXT PRIMARY KEY, project_id TEXT DEFAULT '', task_id TEXT DEFAULT '',
           type TEXT DEFAULT '', name TEXT DEFAULT '', description TEXT DEFAULT '', file_path TEXT,
           status TEXT DEFAULT 'draft', updated_at TEXT DEFAULT (datetime('now')));
@@ -1461,7 +1461,7 @@ async function main(): Promise<void> {
       const d = new DatabaseSync(':memory:') as unknown as AnyDb;
       d.exec(`
         CREATE TABLE wa_tasks (id TEXT PRIMARY KEY, project_id TEXT DEFAULT '', status TEXT DEFAULT 'pending',
-          parent_task_id TEXT DEFAULT '', context_json TEXT DEFAULT '{}');
+          parent_task_id TEXT DEFAULT '', context_json TEXT DEFAULT '{}', position_id TEXT DEFAULT '');
         CREATE TABLE wa_jobs (id TEXT PRIMARY KEY, type TEXT, payload TEXT DEFAULT '', status TEXT DEFAULT 'pending');
       `);
       return d;
@@ -1581,7 +1581,7 @@ async function main(): Promise<void> {
         CREATE TABLE wa_tasks (id TEXT PRIMARY KEY, project_id TEXT DEFAULT '', title TEXT DEFAULT '',
           description TEXT DEFAULT '', status TEXT DEFAULT 'pending', priority INTEGER DEFAULT 0,
           parent_task_id TEXT DEFAULT '', depends_on TEXT DEFAULT '', source TEXT DEFAULT '',
-          acceptance_criteria TEXT DEFAULT '', context_json TEXT DEFAULT '{}');
+          acceptance_criteria TEXT DEFAULT '', context_json TEXT DEFAULT '{}', position_id TEXT DEFAULT '');
         CREATE TABLE wa_jobs (id TEXT PRIMARY KEY, type TEXT, payload TEXT DEFAULT '', status TEXT DEFAULT 'pending',
           created_at TEXT DEFAULT (datetime('now')), completed_at TEXT, error TEXT);
       `);

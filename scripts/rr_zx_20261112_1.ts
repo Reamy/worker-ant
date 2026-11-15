@@ -318,9 +318,11 @@ function sectionB(): void {
   ok(ctxCode.includes('if (pid)') && ctxCode.indexOf("add('position'") > ctxCode.indexOf('if (pid)'),
     'B4 岗位块只在 pid 非空分支内 add（未指派上下文不变）');
   // zx_20261113_1 B3「用」：执行期改用**条目级**选择器——按更强形状重定向（不是放宽）。
+  // zx_20261115_1 M2：选择器新增第 4 参（任务文本，相关性排序）⇒ 按更强形状重定向：
+  //   仍钉「条目级选择器 + 岗位解析」同一真源，只是不再要求调用恰好一句话。
   ok(ctxCode.includes('resolveTaskPosition(db, projectId, pid)')
-    && ctxCode.includes('positionBlockDetail(position')
-    && ctxCode.includes('selectPositionLessonsForInjection(db, pid)'),
+    && ctxCode.includes('positionBlockDetail(')
+    && /selectPositionLessonsForInjection\(\s*db,\s*pid,/.test(ctxCode),
     'B5 注入读「岗位 + 可迁移经验」同一真源（条目级选择器）');
 
   // B6–B13 可指派判据：岗位启用 ∧ 项目绑定启用，缺一不可。
@@ -984,8 +986,10 @@ function sectionE(): void {
   // ── ⑥ 跨机载荷：无岗位时形状不变；有岗位时带摘要且不含知识与经验 ──
   const dispatchTask = { id: 't1', title: '甲', description: '乙', acceptanceCriteria: '丙' };
   const barePayload = buildDispatchPayload(dispatchTask);
-  eq(Object.keys(barePayload).sort(), ['acceptance_criteria', 'description', 'prompt', 'title'],
-    'E-35 无岗位/无上游 ⇒ 载荷仍是旧四键');
+  // zx_20261115_2 M3：载荷新增 `origin_task_id`（派活方本地任务 id，回执核对要原样带回）；
+  //   无岗位/无上游时仍是"旧四键 + 这一个真字段"，不再另带 position/upstream（更强的形状钉）。
+  eq(Object.keys(barePayload).sort(), ['acceptance_criteria', 'description', 'origin_task_id', 'prompt', 'title'],
+    'E-35 无岗位/无上游 ⇒ 旧四键 + origin_task_id（不凭空带 position/upstream）');
   eq(JSON.stringify(buildDispatchPayload(dispatchTask)), JSON.stringify(buildDispatchPayload(dispatchTask, [], null)),
     'E-36 空上游/空岗位与缺省参数逐字节相同');
   const posPayload = { id: 'p1', name: '财务', version: 2, summary: '说明' };

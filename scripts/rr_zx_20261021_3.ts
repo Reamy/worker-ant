@@ -478,8 +478,9 @@ async function main(): Promise<void> {
 
     // 类目词表：人话名覆盖全部五种，且 ANS 报错文案**由词表派生**（不手抄）。
     // zx_20261022_3 批八：`project_profile` 入册（4→5；逐成员枚举仍不放宽）。
-    eq([...TEAM_ITEM_KINDS], ['template', 'memory', 'deliverable', 'domain_pack', 'project_profile'],
-      'F-7 ★共享类型词表五类（唯一定处 shared-types）');
+    // zx_20261115_4 M7：`position` 入册（5→6；逐成员枚举仍不放宽）。
+    eq([...TEAM_ITEM_KINDS], ['template', 'memory', 'deliverable', 'domain_pack', 'project_profile', 'position'],
+      'F-7 ★共享类型词表六类（唯一定处 shared-types）');
     for (const k of TEAM_ITEM_KINDS) ok(TEAM_ITEM_KIND_LABEL[k].length > 0, `F-8 人话名非空：${k}`);
     const ansTeam = CODE('apps/ans-server/src/routes/team.ts');
     ok(/TEAM_ITEM_KINDS\.join\(/.test(ansTeam), 'F-9 ★ANS 报错文案由 `TEAM_ITEM_KINDS` 派生（不手抄类目串）');

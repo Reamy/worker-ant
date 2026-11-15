@@ -1,6 +1,6 @@
 {
   "name": "@worker-ant/desktop",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "工蚁 Worker Ant — 跑在你机器上、用手机就能指挥的私有 AI 打工队",
   "homepage": "https://github.com/Reamy/worker-ant",
   "author": {

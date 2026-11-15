@@ -58,6 +58,8 @@ export function parseTriState(value: string | undefined | null): TriState {
  * memory.archive_retention_days —— '0' 对其是合法值）、缺省关键族（判据不同）。误改即制造新的名实不符。
  */
 export const BOOL_SETTING_KEYS: readonly string[] = [
+  // zx_20261115_4 M2「岗」：项目绑了 ≥2 个启用岗位时，IM 建单缺岗位先问一次（缺省开）。
+  'position.ask_when_multiple',
   'deliverable.show_acceptance',
   'deliverable.acceptance_on_close',
   'deliverable.probe_disposition',
@@ -96,6 +98,10 @@ export const BOOL_SETTING_KEYS: readonly string[] = [
   'ui.tray_presence_menu',
   'ui.stale_running_hint',
   'plan.link_at_create',
+  // zx_20261115_3 M4「传」：**项目默认岗位**（缺省即开）。项目绑定里恰好 1 个启用岗位时，
+  //   建单未点名岗位 ⇒ 默认指派它（回执明示，可改；用户显式选"不指派"不被覆盖）。
+  //   关 ⇒ 逐字回"不选就不指派"的旧行为（一键回退，非删代码）。
+  'position.default_from_project',
   // zx_20261023_5 批一（孙子·先为不可胜）：就绪排序的**关键路径优先**（**缺省即开**）。
   //   开 ⇒ 同优先级下依赖链更长的任务先启动；关 ⇒ 逐字回"priority DESC, created_at ASC"旧序。
   'sched.critical_path',

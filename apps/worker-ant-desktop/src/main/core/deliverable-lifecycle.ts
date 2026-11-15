@@ -340,6 +340,26 @@ export function docNotProbe(alias = ''): string {
 }
 
 /**
+ * zx_20261115_3 M1「归」：`docNotProbe` 的 **JS 侧同一把尺**（写作账里的文件没有 SQL 行可判，
+ *   但"临时探针不得被算成产出"这条规则必须同义）。
+ *
+ * 逐条镜像上方 SQL 判据，语义**刻意保持偏宽/偏窄的方向一致**：
+ *   · `esc`：SQL 是 `LIKE '%/\_%kw%' ESCAPE '\'` ⇒ 路径里出现 `/` 紧跟字面 `_`、其后任意处出现
+ *     `verify|probe|tmp`（`%` 可跨 `/`）。LIKE 对 ASCII **大小写不敏感**，故 JS 用 `i`。
+ *   · `numeric`：SQL 是两条 GLOB（`/` + 1 位数字 + `_kw` 起头，以及 2 位数字同形）⇒ 本处用等价正则；
+ *     GLOB **大小写敏感**，故 JS 此处**不加** `i`（与 SQL 逐字一致，宁不一致也不擅自放宽）。
+ *
+ * ⚠ 两把尺由 rr **同一批标本对拍**（`rr_zx_20261115_3` A 组）：改一边不改另一边即红。
+ */
+export function isProbePath(p: string): boolean {
+  const s = String(p ?? '');
+  if (!s) return false;
+  const esc = /\/_[^\n]*?(verify|probe|tmp)/i.test(s);
+  const numeric = /\/[0-9]_(verify|probe|tmp)/.test(s) || /\/[0-9][0-9]_(verify|probe|tmp)/.test(s);
+  return esc || numeric;
+}
+
+/**
  * zx_20260930 M4-1(管子·度量衡 / 维特根斯坦·同一把尺): 成果**取数范围**的唯一起草处。
  *
  * 病根：`status != 'retired' AND (type != 'doc' OR docNotProbe(…))` 这一串谓词此前在

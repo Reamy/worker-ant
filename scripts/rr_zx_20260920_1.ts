@@ -660,12 +660,17 @@ async function main(): Promise<void> {
         miss === '' ? '空串 ✓' : `实测非空：${miss.slice(0, 60)}`);
       // ③′ 正向告知（开工即知）也须如实：**零收窄**的档不该列一长串工具名（那是噪音）；
       //    有收窄的档必须点出"只注入本档 N 个 + 其余 M 个不可用"。
-      const briefNarrow = buildToolFaceBrief('conversation', label, conv.kept, conv.removed.length);
+      const briefNarrow = buildToolFaceBrief('conversation', label, conv.kept, conv.removed.length, conv.removed);
       const wide = narrowToolFace('code', ALL_TOOLS);
-      const briefWide = buildToolFaceBrief('code', ADAPTIVE_STRATEGIES.code.label, wide.kept, wide.removed.length);
-      ok(briefNarrow.includes(String(conv.kept.length)) && /不可用/.test(briefNarrow) && briefNarrow.includes('read_file')
+      const briefWide = buildToolFaceBrief('code', ADAPTIVE_STRATEGIES.code.label, wide.kept, wide.removed.length, wide.removed);
+      // zx_20261115_3 M7：有收窄的档**只报件数 + 被移除的名单**，不再逐个重复 schema 已有的保留名；
+      //   零收窄仍是一句带过。判据钉更强形状（保留名不得出现 / 移除名必须出现）。
+      const narrowTokens = new Set(briefNarrow.split(/[\s,，、：:；;]+/));
+      ok(briefNarrow.includes(String(conv.kept.length)) && /不可用/.test(briefNarrow)
+        && !conv.kept.some((n) => narrowTokens.has(n))
+        && conv.removed.length > 0 && conv.removed.every((n) => briefNarrow.includes(n))
         && !/不可用/.test(briefWide) && briefWide.length < briefNarrow.length,
-        'C4″ 开工简报**分两态**：有收窄 ⇒ 列本档工具并说明档外不可用；零收窄 ⇒ 一句带过（不白花 token）',
+        'C4″ 开工简报**分两态**：有收窄 ⇒ 报件数 + 档外不可用名单（不重复保留名）；零收窄 ⇒ 一句带过',
         `收窄档 ${briefNarrow.length} 字 / 零收窄档 ${briefWide.length} 字`);
     }
 

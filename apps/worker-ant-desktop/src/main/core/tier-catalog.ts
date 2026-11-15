@@ -189,6 +189,15 @@ export const BENEFIT_COVERAGE: Record<LicenseTier, BenefitCoverageEntry[]> = {
     { benefit: '多机协同（自动外派）', target: { kind: 'capability', keys: ['multi_node'] } },
     // zx_20261104_3 M6「联」：子任务外派/恢复父任务同属 `multi_node`——卖点两句指回同一真闸。
     { benefit: '跨机子任务（完成后自动恢复父任务）', target: { kind: 'capability', keys: ['multi_node'] } },
+    // zx_20261115_2 M7「收」：中继任务树有界执行（相对深度/总任务数/总时窗 + 超时真停整树）同属
+    //   `multi_node`——卖点指回既有 Team 闸，**不新增闸、不改价格/上限**。
+    { benefit: '跨机任务树有界执行（派得出去，收得回来）', target: { kind: 'capability', keys: ['multi_node'] } },
+    // zx_20261115_3 M8「归」：回执核对从"远端说完成"变成"产出清单对得上"（归属 ∪ 贡献两本账），
+    //   同属 `multi_node`——**不新增闸、不改价格/上限**。
+    { benefit: '跨机成果回执核对（产出清单对得上）', target: { kind: 'capability', keys: ['multi_node'] } },
+    // zx_20261115_4 M7「墙」：岗位知识成为**团队资产**（四段 + 已采纳经验；导入一律落待审候选）。
+    //   与 Pro 的 `position_transfer`（文件带走）形成阶梯：Pro = 你能带走自己的；Team = 全队自动汇齐。
+    { benefit: '岗位知识团队共享（四段 + 已采纳经验；导入落待审）', target: { kind: 'capability', keys: ['team_library'] } },
     // zx_20261029_2 M6：发现已归 Pro；本档只兑现「控制（含意图执行）」。
     { benefit: '设备控制（含意图执行）', target: { kind: 'capability', keys: ['device_control'] } },
     // zx_20261104_3 M4「联」：离家场景执行同样过 `device_control`（K-6 逐设备闸仍在动作出口）。

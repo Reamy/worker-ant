@@ -347,8 +347,11 @@ async function main(): Promise<void> {
 
     // —— 静态接线：候选由 `isDispatchable ∧ isNodeOnline` 派生；`others` 仍供分组 ——
     const PEERS = CODE(`${A}/renderer/src/pages/PeersPage.tsx`);
-    ok(/const dispatchCandidates = others\.filter\(n => isDispatchable\(n\) && isNodeOnline\(n\.last_seen_at, nowMs\)\)/.test(PEERS),
-      'E-3 ★接线：`dispatchCandidates` 由 `isDispatchable ∧ isNodeOnline` 派生（与 ANS 侧 `nodeQualifies` 同窄）');
+    // zx_20261115_2 M5：判据收成一个具名函数 `canDispatchNow`（徽标与下拉同源）——
+    //   仍钉「参与 ∧ 非观察者 ∧ 在线」两半，且钉调用点真的用它（更强：定义+调用两处）。
+    ok(/function canDispatchNow[\s\S]{0,240}isDispatchable\(node\)[\s\S]{0,120}isNodeOnline\(node\.last_seen_at, nowMs\)/.test(PEERS)
+      && /const dispatchCandidates = others\.filter\(n => canDispatchNow\(n, nowMs\)\)/.test(PEERS),
+      'E-3 ★接线：`dispatchCandidates` 由 `canDispatchNow`（isDispatchable ∧ isNodeOnline）派生（与 ANS 侧同窄）');
     ok(/<DispatchCard candidates=\{dispatchCandidates\}/.test(PEERS),
       'E-4 ★派活卡**真喂**收窄后的候选（不是算了一份却仍传 `others`）');
     ok(!/<DispatchCard candidates=\{others\}/.test(PEERS),

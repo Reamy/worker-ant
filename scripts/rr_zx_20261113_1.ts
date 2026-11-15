@@ -384,7 +384,11 @@ function sectionU(): void {
 
   // 静态接线：装配用条目级、执行体记账、详情上屏。
   const ctxCode = codeOf(`${A}/src/main/core/exec-context.ts`);
-  ok(ctxCode.includes('positionBlockDetail(position, selectPositionLessonsForInjection(db, pid))'),
+  // zx_20261115_1 M2：选择器新增第 4 参（任务文本）⇒ 换成**形状更宽但仍点真源**的三段钉：
+  //   ① 仍走 positionBlockDetail；② 选择器仍以 (db, pid) 取同一岗位；③ 本轮回的"相关性排序"输入在场。
+  ok(ctxCode.includes('positionBlockDetail(')
+    && /selectPositionLessonsForInjection\(\s*db,\s*pid,/.test(ctxCode)
+    && /selectPositionLessonsForInjection\([\s\S]{0,200}title[\s\S]{0,40}description/.test(ctxCode),
     'U20 ★执行期用条目级选择器（不是旧的 accepted 全量）');
   const execCode = codeOf(`${A}/src/main/core/agent-executor.ts`);
   ok(execCode.includes('positions: positionRows.map') && execCode.includes('injected_position'),

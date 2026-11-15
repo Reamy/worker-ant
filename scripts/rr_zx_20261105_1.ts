@@ -767,7 +767,7 @@ function makeSpawnTool() {
   db.exec(`CREATE TABLE wa_tasks (
     id TEXT PRIMARY KEY, project_id TEXT, title TEXT, description TEXT, status TEXT,
     priority INTEGER, context_json TEXT, parent_task_id TEXT, source TEXT,
-    depends_on TEXT, acceptance_criteria TEXT, created_at TEXT DEFAULT (datetime('now'))
+    depends_on TEXT, acceptance_criteria TEXT, position_id TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now'))
   )`);
   db.exec('CREATE TABLE wa_jobs (id TEXT PRIMARY KEY, type TEXT, payload TEXT, status TEXT)');
   (db as unknown as { transaction: unknown }).transaction = (fn: () => unknown) => () => fn();

@@ -27,6 +27,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { initDatabase } from '../apps/worker-ant-desktop/src/main/database.js';
+// zx_20261115_2 M3：与桌面启动块同跳——事件总线挂 EventStore，任务步/收口/质量账才真落 `wa_event_log`。
+//   无头节点此前未挂 ⇒ 进度派生（relayProgressOf）恒 0、回执的"本机台账有痕"也读不到（真机 E2E 照出）。
+import { eventBus } from '../apps/worker-ant-desktop/src/main/core/event-bus.js';
+import { EventStore } from '../apps/worker-ant-desktop/src/main/core/event-store.js';
 import { NODE_SETTING_KEYS, ensureNodeIdentity, writeNodeSetting } from '../apps/worker-ant-desktop/src/main/core/node-identity.js';
 import {
   collectNodeEnv,
@@ -60,6 +64,7 @@ if (!Number.isFinite(durationSec) || durationSec < 0 || !Number.isFinite(heartbe
 async function main(): Promise<void> {
   fs.mkdirSync(dataDir, { recursive: true });
   const db = initDatabase(dataDir);
+  eventBus.setEventStore(new EventStore(db as never));
   // 生产模块只认"能 prepare 的最小库接口"；better-sqlite3 的 Database 形状兼容。
   const settingDb = db as unknown as Parameters<typeof isNodeEnrolled>[0];
 
@@ -107,6 +112,12 @@ async function main(): Promise<void> {
       { db: db as never, dataDir, getAnsClient: async () => ansClient as never },
       scheduler as never,
     );
+    // zx_20261115_2 M3：无头入口只起 ai-task 执行链；生产桌面注册的其余作业（记忆向量/夜间复盘等）
+    //   在此**登记空处理器**，否则调度器按序取到无处理器的作业会一直占着队列，ai-task 永远轮不到
+    //   （真标本：远端任务 10 分钟停在 pending，jobs 表里排着一串 embed-memory/background-review）。
+    for (const t of ['embed-memory', 'background-review', 'task-postlude', 'deliverable-runtime', 'memory-consolidate']) {
+      scheduler.register(t, async () => { /* 验收入口：不执行非 ai-task 作业，只释放队列 */ });
+    }
     scheduler.start();
     stopWork = () => scheduler.stop();
     console.log('[headless] 作业消费已启动（scheduler + ai-task）');
@@ -118,7 +129,8 @@ async function main(): Promise<void> {
   const worker = startNodeRequestWorker({
     nodeId: ensureNodeIdentity(settingDb).id,
     io: makeAnsRequestIo(db),
-    runner: makeRelayRunner({ db }),
+    // zx_20261115_2 M3：验收入口可放宽中继等待（默认仍 10 分钟，产线不变）；树时窗随之推导。
+    runner: makeRelayRunner({ db, ...(Number(process.env.WA_RELAY_TIMEOUT_MS) > 0 ? { timeoutMs: Number(process.env.WA_RELAY_TIMEOUT_MS) } : {}) }),
     onEvent: (e) => {
       const line = `${e.type} request=${e.requestId ?? '-'} category=${e.category ?? '-'} status=${e.status ?? '-'}`;
       events.push(line);

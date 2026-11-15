@@ -73,7 +73,7 @@ CREATE TABLE wa_projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, description T
 CREATE TABLE wa_tasks (id TEXT PRIMARY KEY, project_id TEXT, title TEXT NOT NULL, description TEXT DEFAULT '',
   status TEXT DEFAULT 'pending', context_json TEXT DEFAULT '{}', priority INTEGER DEFAULT 0,
   depends_on TEXT DEFAULT '', parent_task_id TEXT DEFAULT '', source TEXT DEFAULT 'user',
-  acceptance_criteria TEXT DEFAULT '',
+  acceptance_criteria TEXT DEFAULT '', position_id TEXT DEFAULT '',
   created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));
 CREATE TABLE wa_task_conversations (id TEXT PRIMARY KEY, task_id TEXT, role TEXT NOT NULL,
   content TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')));

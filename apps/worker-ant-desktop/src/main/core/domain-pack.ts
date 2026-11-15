@@ -174,6 +174,8 @@ export interface DomainPackListRow extends DomainPackRow {
   similarity?: DomainPackSimilarity;
   /** 仅 `listSuggestedDomainPacks` 填：最多 3 节的内容预览。 */
   preview?: DomainPackPreviewSection[];
+  /** zx_20261115_3 M5：仅 `withPackJson` 时回传——供"按任务文本命中的建议"取词，不额外查一遍候选。 */
+  pack_json?: string;
 }
 
 export interface DomainPackStats {
@@ -737,6 +739,7 @@ export function listSuggestedDomainPacks(
   db: PackDb,
   projectId: string,
   limit: number = 5,
+  opts?: { withPackJson?: boolean },
 ): DomainPackListRow[] {
   const pid = projectId || '';
   if (!pid) return [];
@@ -784,6 +787,8 @@ export function listSuggestedDomainPacks(
       chars: pack ? pack.sections.reduce((n, s) => n + s.content.length, 0) : 0,
       ...(similarity ? { similarity } : {}),
       ...(pack ? { preview: previewDomainPackSections(pack) } : {}),
+      // zx_20261115_3 M5：只有显式要原文时才带（默认不把整份 pack_json 塞给 IPC 调用方）。
+      ...(opts?.withPackJson ? { pack_json: r.pack_json } : {}),
     };
   });
   return rankSuggestedPacks(mapped);

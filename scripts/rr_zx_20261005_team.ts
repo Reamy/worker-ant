@@ -173,7 +173,8 @@ function main(): void {
     //   ——**重定向到新真源**（与设备出口同一范式），
     //   非放宽：逐 handler 取体核闸、逐成员枚举回码，新增写口漏闸即红（承 feedback_retarget_assertions_to_stronger_source）。
     //   zx_20261030_1 M3 再 +1（request-cancel，叫停是协同动作，同属 multi_node——此前漏登，本套件首跑即红）。
-    const NODE_GATED = ['nodes:update', 'nodes:enroll', 'nodes:request-token', 'nodes:dispatch', 'nodes:answer-question', 'nodes:delete', 'nodes:confirm-auto-dispatch', 'nodes:request-cancel'];
+    // zx_20261115_1 M4：新增 `nodes:participateOut` 写口（本机「允许派给他人」）。
+    const NODE_GATED = ['nodes:update', 'nodes:enroll', 'nodes:request-token', 'nodes:dispatch', 'nodes:answer-question', 'nodes:delete', 'nodes:confirm-auto-dispatch', 'nodes:request-cancel', 'nodes:participateOut'];
     const nodeBodyOf = (h: string): string => {
       const i = NIPC.indexOf(`ipcMain.handle('${h}'`);
       if (i < 0) return '';

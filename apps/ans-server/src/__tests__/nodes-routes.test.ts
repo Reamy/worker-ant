@@ -1364,6 +1364,10 @@ describe('M11/M12 能力卡曝光 + 中转队列', () => {
   };
   const weightOf = (nodeId: string) =>
     (db.prepare('SELECT weight FROM ans_nodes WHERE node_id = ?').get(nodeId) as { weight: number }).weight;
+  /** zx_20261115_1 M4：台账里"接不接活"的落库值（真源列，不读缓存）。 */
+  const nodeParticipateOf = (nodeId: string) =>
+    (db.prepare('SELECT participate FROM ans_nodes WHERE node_id = ?').get(nodeId) as { participate: number })
+      .participate;
 
   it('★★ R-20 改档权限矩阵四格：self ✓ / primary 改他机 ✓ / observer 改他机 ✓ / worker 改他机 ✗', async () => {
     const { primary, observer, worker } = await enrollPermNodes();
@@ -1406,5 +1410,50 @@ describe('M11/M12 能力卡曝光 + 中转队列', () => {
     const forged = await patchAs(worker, 'perm-target', { weight: 9, requester_node_id: 'perm-primary' });
     expect(forged.status).toBe(403);
     expect(weightOf('perm-target')).toBe(before);
+  });
+
+  // ==================== zx_20261115_1 M4：心跳带参与态 + 拉取复核 ====================
+
+  it('zx_20261115_1 M4-① 心跳带 participate 当拍生效（许可过期不必等重启）；不传则保持原值', async () => {
+    const { apiKey, secret } = await enrollNode('n-participate', card('n-participate', ['code']));
+    expect(nodeParticipateOf('n-participate')).toBe(1);
+
+    const offText = JSON.stringify({ node_id: 'n-participate', status: { os: 'x' }, participate: false });
+    const off = await call(guardedApp, 'POST', '/api/v1/nodes/heartbeat', keyHeaders(apiKey, secret, offText), offText);
+    expect(off.status).toBe(200);
+    expect(nodeParticipateOf('n-participate')).toBe(0);
+
+    // 反证一：不带该键的心跳**不改**参与态（旧客户端零影响）。
+    const legacyText = JSON.stringify({ node_id: 'n-participate', status: { os: 'x' } });
+    await call(guardedApp, 'POST', '/api/v1/nodes/heartbeat', keyHeaders(apiKey, secret, legacyText), legacyText);
+    expect(nodeParticipateOf('n-participate')).toBe(0);
+
+    // 反证二：带 true 能改回来。
+    const onText = JSON.stringify({ node_id: 'n-participate', status: { os: 'x' }, participate: true });
+    await call(guardedApp, 'POST', '/api/v1/nodes/heartbeat', keyHeaders(apiKey, secret, onText), onText);
+    expect(nodeParticipateOf('n-participate')).toBe(1);
+  });
+
+  it('zx_20261115_1 M4-② 关接活后不再被拉走（已 assigned 的单也不拉）；打开恢复', async () => {
+    const { apiKey, secret } = await enrollNode('n-puller2', card('n-puller2', ['code']));
+    // 先派一件给它（指定目标 ⇒ 直接 assigned）。
+    const submitted = await submitTo('code', 'n-puller2');
+    expect(submitted.status).toBe(201);
+    expect((await submitted.json()).data.status).toBe('assigned');
+
+    const pull = () => call(guardedApp, 'GET', '/api/v1/nodes/requests?node_id=n-puller2', keyHeaders(apiKey, secret));
+    const before = (await (await pull()).json()).data as Array<{ id: string }>;
+    expect(before.length).toBe(1);
+
+    const offText = JSON.stringify({ node_id: 'n-puller2', status: { os: 'x' }, participate: false });
+    await call(guardedApp, 'POST', '/api/v1/nodes/heartbeat', keyHeaders(apiKey, secret, offText), offText);
+    const after = (await (await pull()).json()).data as Array<{ id: string }>;
+    expect(after.length).toBe(0);
+
+    // 打开后原来的 assigned 单仍能被拉走（不丢单）。
+    const onText = JSON.stringify({ node_id: 'n-puller2', status: { os: 'x' }, participate: true });
+    await call(guardedApp, 'POST', '/api/v1/nodes/heartbeat', keyHeaders(apiKey, secret, onText), onText);
+    const back = (await (await pull()).json()).data as Array<{ id: string }>;
+    expect(back.length).toBe(1);
   });
 });

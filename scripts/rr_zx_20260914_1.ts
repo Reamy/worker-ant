@@ -33,7 +33,8 @@ import { childBreadthRefusal } from '../apps/worker-ant-desktop/src/main/core/ta
 // zx_20261105_1 M7：重放回执体抽成具名纯函数——切片只留调用，纯 JS 窗口可直接执行。
 import { buildCreateReplay } from '../apps/worker-ant-desktop/src/main/core/acceptance-check.js';
 // zx_20261112_1 B2：切片窗口内新增「指派岗位先验再插」——判据以**真实现**注入，不在脚本里复刻。
-import { resolveTaskPosition, POSITIONS_DDL } from '../apps/worker-ant-desktop/src/main/core/positions.js';
+import { defaultPositionForProject, resolveTaskPosition, POSITIONS_DDL } from '../apps/worker-ant-desktop/src/main/core/positions.js';
+import { readBoolSetting } from '../apps/worker-ant-desktop/src/main/core/settings-bool.js';
 
 let pass = 0; let fail = 0;
 function ok(cond: boolean, label: string, detail?: string): void {
@@ -135,9 +136,12 @@ ok(branch.includes('resolveTaskPosition(db, projectId, wantedPositionId)')
 //   （本脚本一律传 undefined：夹具不建父子链，该分支自然不进入）与 `childBreadthRefusal`（真实现）。
 // ⚠ zx_20261112_1 B2：同一窗口又加了「指派岗位先验再插」——补 `positionId`（既有用例传 undefined，
 //   该分支不进入）与 `resolveTaskPosition`（真实现）。§S1-6 对其做行为断言，不只静态钉。
+// zx_20261115_3 M4：窗口里新增"未选岗位 ⇒ 项目默认岗位"一跳，故补三个自由变量
+//   （`position_explicit` 与生产解构名逐字一致；两个函数传真实现）。判据形状不变：仍是**生产切片**。
 const mkCreate = (db: AnyDb) => new Function(
   'db', 'crypto', 'projectId', 'title', 'description', 'priority', 'acceptance_criteria', 'client_request_id',
   'parent_task_id', 'childBreadthRefusal', 'buildCreateReplay', 'positionId', 'resolveTaskPosition',
+  'position_explicit', 'readBoolSetting', 'defaultPositionForProject',
   `${branch}\nreturn { data: db.prepare('SELECT * FROM wa_tasks WHERE id = ?').get(id) };`,
 ) as (db: AnyDb, crypto: { randomUUID: () => string }, projectId: string, title: string,
   description: string | undefined, priority: number | undefined, acceptance_criteria: string | undefined,
@@ -145,12 +149,15 @@ const mkCreate = (db: AnyDb) => new Function(
   childBreadthRefusal: (db: AnyDb, taskId: string) => string | null,
   buildCreateReplay: (hit: unknown) => Record<string, unknown>,
   positionId: string | undefined,
-  resolveTaskPosition: (db: AnyDb, projectId: string, positionId: string) => unknown) =>
+  resolveTaskPosition: (db: AnyDb, projectId: string, positionId: string) => unknown,
+  position_explicit: boolean | undefined,
+  readBoolSetting: (db: AnyDb, key: string) => boolean,
+  defaultPositionForProject: (db: AnyDb, projectId: string) => { id: string; name: string } | null) =>
   { data?: { id: string; position_id?: string }; error?: { code: string; message: string } };
 
 const cryptoShim = { randomUUID };
 const create = (db: AnyDb, key: string | undefined, title = '同名任务', projectId = 'p1', positionId?: string) =>
-  mkCreate(db)(db, cryptoShim, projectId, title, '', 0, '', key, undefined, childBreadthRefusal, buildCreateReplay, positionId, resolveTaskPosition);
+  mkCreate(db)(db, cryptoShim, projectId, title, '', 0, '', key, undefined, childBreadthRefusal, buildCreateReplay, positionId, resolveTaskPosition, undefined, readBoolSetting, defaultPositionForProject);
 
 // §S1-0（zx_20261105_1 M7）：重放回执体是**具名纯函数**——原行键一个不少，候选只读附上。
 {
@@ -202,13 +209,17 @@ const snap = (db: AnyDb) => {
   ok(stripped !== branch, '反证③前提：能构造出"无去重"分支（切片确实变了）');
   const noDedupe = new Function('db', 'crypto', 'projectId', 'title', 'description', 'priority', 'acceptance_criteria', 'client_request_id',
     'parent_task_id', 'childBreadthRefusal', 'positionId', 'resolveTaskPosition',
+    'position_explicit', 'readBoolSetting', 'defaultPositionForProject',
     `${stripped}\nreturn { data: { id } };`) as (db: AnyDb, crypto: { randomUUID: () => string }, projectId: string,
       title: string, description: string | undefined, priority: number | undefined,
       acceptance_criteria: string | undefined, client_request_id: string | undefined,
       parent_task_id: string | undefined, childBreadthRefusal: (db: AnyDb, taskId: string) => string | null,
       positionId: string | undefined,
-      resolveTaskPosition: (db: AnyDb, projectId: string, positionId: string) => unknown) => { data: { id: string } };
-  const callCreate = (f: typeof noDedupe, k: string | undefined) => f(db, cryptoShim, 'p1', '同名任务', '', 0, '', k, undefined, childBreadthRefusal, undefined, resolveTaskPosition);
+      resolveTaskPosition: (db: AnyDb, projectId: string, positionId: string) => unknown,
+      position_explicit: boolean | undefined,
+      readBoolSetting: (db: AnyDb, key: string) => boolean,
+      defaultPositionForProject: (db: AnyDb, projectId: string) => { id: string; name: string } | null) => { data: { id: string } };
+  const callCreate = (f: typeof noDedupe, k: string | undefined) => f(db, cryptoShim, 'p1', '同名任务', '', 0, '', k, undefined, childBreadthRefusal, undefined, resolveTaskPosition, undefined, readBoolSetting, defaultPositionForProject);
   callCreate(noDedupe, 'key-A');
   callCreate(noDedupe, 'key-A');
   eq(rowCount(db), 2, '反证③：摘掉去重分支 ⇒ 同键两次 2 行（正是 M0.6 修前的实机现象）⇒ ①的判据真的抓得住缺陷');

@@ -20,6 +20,7 @@ import {
 import {
   createPosition,
   decidePositionLesson,
+  defaultPositionForProject,
   deletePosition,
   getPositionDetail,
   isPositionLessonDecision,
@@ -159,7 +160,12 @@ export function initPositionsIpc(db: Database.Database): void {
     try {
       const projectId = typeof input?.projectId === 'string' ? input.projectId.trim() : '';
       if (!projectId) return { error: { code: 'INVALID_REQUEST', message: '缺少项目 id' } } satisfies IpcFailure;
-      return { data: { positions: listProjectEnabledPositions(db, projectId) } };
+      // zx_20261115_3 M4：附带**项目默认岗位**（恰好一个启用岗位时才有值；否则 null）。
+      //   与建单默认同一派生 `defaultPositionForProject`——界面预选与服务端回退不会各说一套。
+      return { data: {
+        positions: listProjectEnabledPositions(db, projectId),
+        defaultId: defaultPositionForProject(db, projectId)?.id ?? null,
+      } };
     } catch (e) {
       return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } } satisfies IpcFailure;
     }

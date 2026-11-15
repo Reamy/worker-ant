@@ -23,6 +23,14 @@ interface FormState {
   rules: string;
   skills: string;
   knowledge: string;
+  /** zx_20261115_1 M1：工具白名单（每行一个工具名；空＝沿用任务形态默认面）。 */
+  tools: string;
+  /** MCP 白名单（每行一个名称；空＝项目全部可用）。 */
+  mcp: string;
+  /** 沙箱档：空＝继承项目；只能调严。 */
+  sandboxScope: '' | 'strict' | 'workspace' | 'off';
+  /** 参与跨机派单。 */
+  participate: boolean;
   enabled: boolean;
 }
 
@@ -33,6 +41,10 @@ const EMPTY_FORM: FormState = {
   rules: '',
   skills: '',
   knowledge: '',
+  tools: '',
+  mcp: '',
+  sandboxScope: '',
+  participate: true,
   enabled: true,
 };
 
@@ -48,6 +60,10 @@ function toBody(f: FormState): PositionWriteBody {
     rules: splitLines(f.rules),
     skills: splitLines(f.skills),
     knowledge: splitLines(f.knowledge),
+    tools: splitLines(f.tools),
+    mcp: splitLines(f.mcp),
+    sandboxScope: f.sandboxScope,
+    participate: f.participate,
     enabled: f.enabled,
   };
 }
@@ -61,6 +77,10 @@ function formOf(d: PositionDetail): FormState {
     rules: p.rules.join('\n'),
     skills: p.skills.join('\n'),
     knowledge: p.knowledge.join('\n'),
+    tools: p.tools.join('\n'),
+    mcp: p.mcp.join('\n'),
+    sandboxScope: p.sandboxScope,
+    participate: p.participate,
     enabled: p.enabled,
   };
 }
@@ -471,6 +491,40 @@ export default function PositionsPage() {
                     <label className="block text-xs font-medium mb-1">知识（每行一条；手工维护，不跨机）</label>
                     <textarea value={form.knowledge} onChange={(e) => setForm({ ...form, knowledge: e.target.value })} rows={3} className={inputCls} />
                   </div>
+                  {/* zx_20261115_1 M1「职」：岗位从"自由文本"长出**能约束执行**的三项 + 派单开关。
+                      每个勾选/输入都对应一个真读口；空值一律等于"沿用默认"，不会悄悄改变既有行为。 */}
+                  <div>
+                    <label className="block text-xs font-medium mb-1">允许的工具（每行一个；留空＝按任务形态默认）</label>
+                    <textarea value={form.tools} onChange={(e) => setForm({ ...form, tools: e.target.value })} rows={3} className={inputCls} placeholder="read_file" />
+                    <p className="text-[10px] text-gray-400 mt-1">只能收窄：只保留这里列出的工具，且不会把任务形态挡掉的工具加回来。</p>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium mb-1">允许的 MCP（每行一个；留空＝项目全部）</label>
+                    <textarea value={form.mcp} onChange={(e) => setForm({ ...form, mcp: e.target.value })} rows={3} className={inputCls} placeholder="github" />
+                    <p className="text-[10px] text-gray-400 mt-1">只能收窄：只列白名单内的 MCP，不会把项目里没有的加进来。</p>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium mb-1">沙箱档（只能调严，不能放宽）</label>
+                    <select
+                      value={form.sandboxScope}
+                      onChange={(e) => setForm({ ...form, sandboxScope: e.target.value as FormState['sandboxScope'] })}
+                      className={inputCls}
+                    >
+                      <option value="">跟随项目</option>
+                      <option value="strict">严格（最严）</option>
+                      <option value="workspace">仅工作目录</option>
+                      <option value="off">不限制</option>
+                    </select>
+                    <p className="text-[10px] text-gray-400 mt-1">取「岗位」与「项目」中更严者——选「不限制」也不会把项目的严格档放宽。</p>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium mb-1">跨机派单</label>
+                    <label className="flex items-center gap-2 text-sm mt-2">
+                      <input type="checkbox" checked={form.participate} onChange={(e) => setForm({ ...form, participate: e.target.checked })} />
+                      <span>该岗位的任务可派给其他工蚁</span>
+                    </label>
+                    <p className="text-[10px] text-gray-400 mt-1">取消后，指派到该岗位的任务只在本机执行（拒因：该岗位已设为不参与跨机派单）。</p>
+                  </div>
                 </div>
                 <div className="flex items-center justify-between mt-3">
                   <span className="text-[11px] text-gray-400">注入上限 1200 字；执行时只取说明 / 前 3 条规范 / 前 3 条技能 / 前 3 条知识 / 最近 3 条已采纳经验。</span>
@@ -519,6 +573,17 @@ export default function PositionsPage() {
                             {!editingLesson && l.content.trim().length > 200 && !l.promotedTo && (
                               <p className="text-[11px] text-amber-600 mt-1">当前 {l.content.trim().length} 字，超过晋升单条上限 200 字——先「编辑」缩短。</p>
                             )}
+                            {/* zx_20261115_1 M2「用」：经验**真被任务用上**的次数与晋升建议。
+                                次数取自注入账（不是"选进候选"）；建议只是建议，采纳与晋升仍须人点。 */}
+                            {l.injectedCount > 0 && (
+                              <p className="text-[11px] text-gray-500 mt-1">
+                                已被 {l.injectedCount} 个任务用上
+                                {l.crossProjectCount > 1 && `，跨 ${l.crossProjectCount} 个项目（可迁移的直接证据）`}
+                              </p>
+                            )}
+                            {l.promoteSuggested && (
+                              <p className="text-[11px] text-blue-600 mt-0.5">已反复用上，建议晋升到「规范/技能/知识」——仍由你决定。</p>
+                            )}
                             <div className="flex items-center gap-1.5 flex-wrap mt-1">
                               <span className={`text-[10px] px-1.5 py-0.5 rounded ${l.source === 'retrospective' ? 'bg-indigo-50 text-indigo-700' : 'bg-gray-100 text-gray-500'}`}>
                                 {(POSITION_LESSON_SOURCE_LABEL as Record<string, string>)[l.source] ?? l.source}
@@ -526,7 +591,8 @@ export default function PositionsPage() {
                               {!l.reusable && <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700" title="项目摘要或复盘判定不可复用——只留档，不注入、不可晋升">不可迁移</span>}
                               {l.origin === 'imported' && <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-50 text-sky-700">导入候选</span>}
                               <span className="text-[11px] text-gray-500">
-                                来源：{l.taskTitle || l.taskId} · {l.projectName || l.projectId} · {l.createdAt}
+                                {/* zx_20261115_1 M3：删任务/删项目后如实说"已删除"，不显示裸 id 假装还在。 */}
+                                来源：{l.taskTitle || (l.taskId ? '任务已删除' : '任务')} · {l.projectName || (l.projectId ? '项目已删除' : '项目')} · {l.createdAt}
                               </span>
                             </div>
                           </div>

@@ -82,17 +82,54 @@ export function selfCompleteBan(currentTaskId: string, targetTaskId: string, sta
 }
 
 /**
- * G2a 子任务上下文继承：depth 递增 + 继承父任务的显式关联方案（scheme_ref）。
+ * zx_20261115_2 M2（道德经·大制不割 / 佛学·缘起）：**执行约束随任务树继承**的**唯一白名单**。
+ *
+ * 病根（recon 实测）：约束只作用于根任务——`create_task` 的 `buildChildContext` 只复制
+ * `depth/scheme_ref`，`spawn_subagent` 只补 `no_interaction`，自动拆解只补 `no_interaction`。
+ * 于是中继树一拆解，`node_archetype`（类目工具面）、`dispatch_position`（跨机岗位白名单）、
+ * `relay_tree`（树预算）逐层失效；岗位只覆盖人工建单的 1/360 任务，也直接源于此。
+ *
+ * 只复制**父确有**的键（不凭空造键）；`no_interaction` 只认显式 `true`（与 `no-interaction.ts` 同尺）。
+ * 四条建子路（`create_task` / `spawn_subagent` / 自动拆解 / 续拆）一律引本函数，不各写一份。
+ */
+export const INHERITED_CONSTRAINT_KEYS = ['no_interaction', 'node_archetype', 'dispatch_position', 'relay_tree'] as const;
+
+export function inheritedConstraintContext(parentCtx: Record<string, unknown> | null | undefined): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (!parentCtx || typeof parentCtx !== 'object' || Array.isArray(parentCtx)) return out;
+  if (parentCtx.no_interaction === true) out.no_interaction = true;
+  for (const k of INHERITED_CONSTRAINT_KEYS) {
+    if (k === 'no_interaction') continue;
+    const v = parentCtx[k];
+    if (v !== undefined && v !== null) out[k] = v;
+  }
+  return out;
+}
+
+/**
+ * G2a 子任务上下文继承：depth 递增 + 继承父任务的显式关联方案（scheme_ref）+ 执行约束。
  *
  * 此前 create_task 只写 {depth}，子任务失去 scheme_ref ⇒ 动工/finalize 的里程碑联动整条失效
  * （现象2/3：用户已在「关联方案（规划）」里选好方案，整棵子树却无一节点能连上里程碑板）。
- * 仅在父任务确有 scheme_ref 时注入——无关联任务不凭空多出字段。
+ * zx_20261115_2 M2 起再带上 `INHERITED_CONSTRAINT_KEYS`（约束不因拆解而放宽）。
+ * 仅在父任务确有对应键时注入——无这些键的任务不凭空多出字段。
  */
 export function buildChildContext(parentCtx: Record<string, unknown>, childDepth: number): Record<string, unknown> {
   const child: Record<string, unknown> = { depth: childDepth };
   const sr = parentCtx?.scheme_ref;
   if (sr && typeof sr === 'object') child.scheme_ref = sr;
-  return child;
+  return { ...child, ...inheritedConstraintContext(parentCtx) };
+}
+
+/**
+ * 父任务的 `position_id`（列，不在 context_json 里）——子任务继承岗位指派的**唯一读口**。
+ * 读不到 ⇒ 空串（不编一个岗位；旧库无该列也只是空）。
+ */
+export function parentPositionIdOf(db: AccountingDb, parentTaskId: string): string {
+  try {
+    const row = db.prepare('SELECT position_id FROM wa_tasks WHERE id = ?').get(parentTaskId) as { position_id?: unknown } | undefined;
+    return typeof row?.position_id === 'string' ? row.position_id : '';
+  } catch { return ''; }
 }
 
 /**
@@ -106,8 +143,11 @@ export function buildChildContext(parentCtx: Record<string, unknown>, childDepth
  *
  * 取舍：retry 语义确是「从零重跑」，**运行指标**（budget/tokens/每轮去向…）本就该清空、由新一轮重算
  * ⇒ 故**不**做全量保留，只点名保留**用户自述输入**这几键。键值原样搬（不深拷贝，与 ctx 其余键既有处理一致）。
+ *
+ * zx_20261115_2 M2：再带上 `INHERITED_CONSTRAINT_KEYS`——重跑不能把"不可交互/类目工具面/
+ *   跨机岗位白名单/树预算"放宽（约束是边界，不是运行指标）。
  */
-export const RETRY_CARRIED_CTX_KEYS = ['attachments', 'task_goal', 'scheme_ref'] as const;
+export const RETRY_CARRIED_CTX_KEYS = ['attachments', 'task_goal', 'scheme_ref', ...INHERITED_CONSTRAINT_KEYS] as const;
 
 /** 从重跑前的 ctx 里挑出**用户自述输入**键（无则不多添键）。纯函数 ⇒ 受控回归直跑真实现。 */
 export function carryRetryContext(prev: Record<string, unknown> | null | undefined): Record<string, unknown> {

@@ -97,7 +97,9 @@ function main(): void {
       'S-5 ModelRequirements 带 preferRemote?（旧 ANS 忽略未知字段，前向兼容）');
 
     const client = codeOf('packages/ans-client/src/client.ts');
-    ok(/getOptimalModel\(req: ModelRequirements\): Promise<ModelEndpoint & \{[^}]*usedLocalFallback\?: boolean/.test(client),
+    // zx_20261115_1 M0：原正则钉死单行签名，v0.6.0 的 prettier 把参数表拆成多行后恒假。
+    //   判据语义不变（"回包类型带 usedLocalFallback?"），只去掉对**排版换行**的耦合——空白一律 `\s*`。
+    ok(/getOptimalModel\s*\(\s*req:\s*ModelRequirements,?\s*\)\s*:\s*Promise<ModelEndpoint\s*&\s*\{[^}]*usedLocalFallback\?\s*:\s*boolean/.test(client),
       'S-5b ans-client 回包类型带 usedLocalFallback（调用方无需自造断言）');
   }
 

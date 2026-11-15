@@ -73,6 +73,8 @@ export default function ProjectDetailPage() {
   const [cronForm, setCronForm] = useState({ cron_task_title: '', cron_task_desc: '', cron_run_command: '' });
   // zx_20261107_1 B6: 项目级模型覆盖。生效项由 main 按「恢复路 > 项目 > 全局默认」裁定，本页只显示不重算。
   const [modelOv, setModelOv] = useState<ProjectModelOverridePayload | null>(null);
+  // 「没读到」≠「用户真的没指定」：读失败单独留痕，界面分别说「读不到」与「按任务自动选型」。
+  const [modelOvErr, setModelOvErr] = useState('');
   const [modelDraft, setModelDraft] = useState('');
   const [modelSaving, setModelSaving] = useState(false);
   // 记忆 Tab
@@ -81,6 +83,19 @@ export default function ProjectDetailPage() {
   //   类型/状态文案取**同一份词表**（DELIVERABLE_TYPE_LABEL/DELIVERABLE_STATUS_LABEL），
   //   行点开也进**同一个**就地抽屉 ⇒ 不产生第二套"什么叫已完成"的判据。
   const [activeTab, setActiveTab] = useState<'overview' | 'memories' | 'milestones' | 'tensions' | 'deliverables' | 'packs'>('overview');
+  // 首屏「阻塞 N」直达里程碑区：页签切过去才在 DOM 里，故先挂起意图、渲染完再滚（已在场上则直接滚）。
+  const milestonesScrollPending = useRef(false);
+  useEffect(() => {
+    if (activeTab !== 'milestones' || !milestonesScrollPending.current) return;
+    milestonesScrollPending.current = false;
+    document.getElementById('project-milestones')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [activeTab]);
+  function openMilestones(): void {
+    const el = document.getElementById('project-milestones');
+    if (activeTab === 'milestones') { el?.scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
+    milestonesScrollPending.current = true;
+    setActiveTab('milestones');
+  }
   // zx_20261021_3 批五: 领域包页签随项目事件重载（与既有页签同形：靠换 key 触发卡内 load）。
   const [packTick, setPackTick] = useState(0);
   const [memories, setMemories] = useState<Array<Record<string, unknown>>>([]);
@@ -90,6 +105,8 @@ export default function ProjectDetailPage() {
   // 里程碑
   const [blockers, setBlockers] = useState<Array<Record<string, unknown>>>([]);
   const [milestones, setMilestones] = useState<Array<Record<string, unknown>>>([]);
+  // 首屏「阻塞 N」只有在**真读到过**之后才印数字——未加载/读失败都不许冒充 0。
+  const [milestoneLoaded, setMilestoneLoaded] = useState(false);
   // zx_20260905 批4: 方案里程碑(M0-M6) 项目级聚合（含 doing/done/pending 自动流转展示）
   const [planMilestones, setPlanMilestones] = useState<Array<Record<string, unknown>>>([]);
   // zx_20261027_1 M6: 空转看板（done+doing=0）默认折叠——真库多块「九行全 pending」的板与真在推进的板混排。
@@ -120,6 +137,8 @@ export default function ProjectDetailPage() {
   const [pjDelivs, setPjDelivs] = useState<Array<Record<string, unknown>>>([]);
   // zx_20260930 M4-2: 真分页——`pjDelivTotal` 取服务端总数（"共 M 条"），`pjDelivExhausted` 决定是否出「加载更多」。
   const [pjDelivTotal, setPjDelivTotal] = useState(0);
+  // zx_20261115_2: 服务端同口径的「已退休 R 条」——与首屏「产出物 N 条」（不含退休）的差额由此可解释。
+  const [pjDelivRetired, setPjDelivRetired] = useState(0);
   const [pjDelivExhausted, setPjDelivExhausted] = useState(false);
   const [pjDelivMoreBusy, setPjDelivMoreBusy] = useState(false);
   const [pjDelivLoading, setPjDelivLoading] = useState(false);
@@ -166,7 +185,8 @@ export default function ProjectDetailPage() {
       setBizStatusError(messageOf(e));
     }
   }
-  useEffect(() => { if (id) { void load(); void loadQuality(); void loadBrief(); void loadProjectAction(); void loadBusinessStatus(); } }, [id]);
+  // 里程碑/阻塞与项目本体同一轮加载：首屏「阻塞 N」不再依赖用户先点开页签（未加载不得显示成 0）。
+  useEffect(() => { if (id) { void load(); void loadMilestones(); void loadQuality(); void loadBrief(); void loadProjectAction(); void loadBusinessStatus(); } }, [id]);
   // A1/A2 (2026-09-04_2): 项目详情保鲜度——事件驱动静默刷新头部统计（无常·保鲜；不打断编辑态）
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const projStale = useStaleness(lastUpdated);
@@ -224,24 +244,33 @@ export default function ProjectDetailPage() {
       if (!liveProjectEvent) return;
       if (projRefreshTimer.current !== undefined) return;
       projRefreshTimer.current = window.setTimeout(() => { projRefreshTimer.current = undefined; void refreshHeader(); void loadProjectAction(); }, 700);
+      // 首屏「阻塞 N」与页签同源：里程碑/阻塞不再看当前停在哪个页签，随项目事件一律刷新。
       const tab = activeTabRef.current;
-      if (tab === 'memories' || tab === 'milestones' || tab === 'tensions' || tab === 'deliverables' || tab === 'packs') {
-        if (panelTimer.current !== undefined) window.clearTimeout(panelTimer.current);
-        panelTimer.current = window.setTimeout(() => {
-          panelTimer.current = undefined;
-          if (tab === 'memories') void loadMemories();
-          else if (tab === 'milestones') void loadMilestones();
-          else if (tab === 'deliverables') void loadProjectDeliverables();
-          else if (tab === 'packs') setPackTick((n) => n + 1);
-          else void loadTensions();
-        }, 500);
-      }
+      if (panelTimer.current !== undefined) window.clearTimeout(panelTimer.current);
+      panelTimer.current = window.setTimeout(() => {
+        panelTimer.current = undefined;
+        void loadMilestones();
+        if (tab === 'memories') void loadMemories();
+        else if (tab === 'deliverables') void loadProjectDeliverables();
+        else if (tab === 'packs') setPackTick((n) => n + 1);
+        else if (tab === 'tensions') void loadTensions();
+      }, 500);
     });
   }, [id, subscribe]);
   useEffect(() => () => {
     if (projRefreshTimer.current !== undefined) window.clearTimeout(projRefreshTimer.current);
     for (const t of Object.values(tensionTimers.current)) window.clearTimeout(t);
   }, []);
+  // 页签级读取失败：与「暂无数据」分家——catch 时记人话原因，页签顶部出错误块 + 重试，
+  //   且错误态下不再渲染「暂无…」空态（首屏「阻塞 N」同理，不把未加载/读不到说成 0）。
+  const [tabErrors, setTabErrors] = useState<Record<string, string>>({});
+  function setTabError(key: 'memories' | 'milestones' | 'tensions' | 'deliverables', reason: string): void {
+    setTabErrors((prev) => {
+      const next = { ...prev };
+      if (reason) next[key] = reason; else delete next[key];
+      return next;
+    });
+  }
   // C1/D1: 加载项目自适应策略与当前主要矛盾（IPC 返回，非 UI 假数据）
   useEffect(() => {
     if (!id) return;
@@ -277,17 +306,31 @@ export default function ProjectDetailPage() {
       })() as CtxData;
       setCtx(c);
       if (c.budget) setBudgetForm({ max_tokens_per_task: String(c.budget.max_tokens_per_task || ''), max_cost_usd_per_task: String(c.budget.max_cost_usd_per_task || '') });
-      if (c.rhythm) setRhythmForm({ activeHourStart: String(c.rhythm.activeHourStart || 9), activeHourEnd: String(c.rhythm.activeHourEnd || 18), maxConcurrency: String(c.rhythm.maxConcurrency || 2) });
+      // 0 是合法值：用 `??` 判缺，不用 `||` 把 0 顶成本 9/18/2；读不到留空（保存时按用户输入原样提交）。
+      if (c.rhythm) setRhythmForm({
+        activeHourStart: c.rhythm.activeHourStart == null ? '' : String(c.rhythm.activeHourStart),
+        activeHourEnd: c.rhythm.activeHourEnd == null ? '' : String(c.rhythm.activeHourEnd),
+        maxConcurrency: c.rhythm.maxConcurrency == null ? '' : String(c.rhythm.maxConcurrency),
+      });
       if (c.cron_create_task) setCronForm({ cron_task_title: c.cron_create_task.title || '', cron_task_desc: c.cron_create_task.description || '', cron_run_command: c.cron_run_command || '' });
       else setCronForm({ cron_task_title: '', cron_task_desc: '', cron_run_command: c.cron_run_command || '' });
       // B6: 模型覆盖与项目同批读——取不到就按"没读到"显示（不伪造一个生效模型）。
       try {
         const mo = await projects.modelOverride.get(id!);
         setModelOv(mo);
+        setModelOvErr('');
         setModelDraft(mo.project_override || '');
-      } catch { setModelOv(null); setModelDraft(''); }
+      } catch (e) {
+        // 读不到 ≠ 用户没指定：留错误标记，界面单独说「读不到」，不混进「按任务自动选型」。
+        setModelOv(null);
+        setModelOvErr(messageOf(e));
+        setModelDraft('');
+      }
     } catch (e) {
       setLoadError(messageOf(e));
+      setLoading(false);
+      // 失败不刷新「最后更新」时刻：一屏旧的头部数据配一个此刻的时间戳＝假新鲜。
+      return;
     }
     setLoading(false);
     setLastUpdated(Date.now());
@@ -301,6 +344,7 @@ export default function ProjectDetailPage() {
       await projects.modelOverride.set(id, next === undefined ? (modelDraft.trim() || null) : next);
       const mo = await projects.modelOverride.get(id);
       setModelOv(mo);
+      setModelOvErr('');
       setModelDraft(mo.project_override || '');
       fb.ok(next === null ? '已清除项目指定模型' : '项目指定模型已保存');
     } catch (e) { fb.fail('「项目指定模型」未保存', e); }
@@ -319,9 +363,13 @@ export default function ProjectDetailPage() {
       const total = Number(d?.total) || 0;
       setPjDelivs(rows);
       setPjDelivTotal(total);
+      setPjDelivRetired(Number(d?.retiredCount) || 0);
       setPjDelivExhausted(pageExhausted(rows.length, total));
+      setTabError('deliverables', '');
     } catch (e) {
       setPjDelivs([]); setPjDelivTotal(0); setPjDelivExhausted(true);
+      // 读失败不再与「本项目暂无成果」同形：记下因由，页签顶部出错误块 + 重试。
+      setTabError('deliverables', messageOf(e));
       fb.fail('「本项目成果」加载失败', e);
     }
     setPjDelivLoading(false);
@@ -340,6 +388,7 @@ export default function ProjectDetailPage() {
       });
       const total = Number(d?.total) || 0;
       setPjDelivTotal(total);
+      setPjDelivRetired(Number(d?.retiredCount) || 0);
       setPjDelivExhausted(pageExhausted(pjDelivs.length + more.length, total));
     } catch (e) { fb.fail('「加载更多成果」失败', e); }
     setPjDelivMoreBusy(false);
@@ -351,7 +400,8 @@ export default function ProjectDetailPage() {
       const d = await projects.memories(id!, type || undefined) as unknown as { list: Array<Record<string, unknown>>; counts: Array<{ memory_type: string; cnt: number }> };
       setMemories(d.list || []);
       setMemCounts(d.counts || []);
-    } catch (e) { fb.fail('「记忆」加载失败', e); }
+      setTabError('memories', '');
+    } catch (e) { setTabError('memories', messageOf(e)); fb.fail('「记忆」加载失败', e); }
     setMemLoading(false);
   }
 
@@ -362,7 +412,9 @@ export default function ProjectDetailPage() {
       setBlockers(d.blockers || []);
       setMilestones(d.milestones || []);
       setPlanMilestones(d.planMilestones || []);
-    } catch (e) { fb.fail('「里程碑」加载失败', e); }
+      setMilestoneLoaded(true);
+      setTabError('milestones', '');
+    } catch (e) { setTabError('milestones', messageOf(e)); fb.fail('「里程碑」加载失败', e); }
     setMilestoneLoading(false);
   }
 
@@ -371,7 +423,8 @@ export default function ProjectDetailPage() {
       const d = await projects.tensions(id!) as unknown as { tensions: Record<string, Record<string, unknown>>; configs: Record<string, Record<string, unknown>> };
       setTensions(d.tensions || {});
       setTensionConfigs(d.configs || {});
-    } catch (e) { fb.fail('「矛盾张力」加载失败', e); }
+      setTabError('tensions', '');
+    } catch (e) { setTabError('tensions', messageOf(e)); fb.fail('「矛盾张力」加载失败', e); }
   }
 
   // zx_20261110_1 B5：拖动中只更新本地（此前每动一格写一次库），停手 400ms 才写一次；
@@ -494,7 +547,13 @@ export default function ProjectDetailPage() {
     try {
       const body: Record<string, unknown> = { name: form.name, description: form.description, cron_schedule: form.cron_schedule, cron_timezone: form.cron_timezone, working_dir: form.working_dir, autonomous_mode: form.autonomous_mode, sandbox_mode: form.sandbox_mode };
       body.budget = { max_tokens_per_task: Number(budgetForm.max_tokens_per_task) || undefined, max_cost_usd_per_task: Number(budgetForm.max_cost_usd_per_task) || undefined };
-      body.rhythm = { activeHourStart: Number(rhythmForm.activeHourStart), activeHourEnd: Number(rhythmForm.activeHourEnd), maxConcurrency: Number(rhythmForm.maxConcurrency) };
+      // 空输入不再落成 0（`Number('') === 0`）——缺键即不要这个键（显式 `undefined` 会在 main 的
+      //   浅合并里覆盖掉原值，故这里**不放进对象**），main 侧按浅合并保留未填项。
+      const rhythm: Record<string, number> = {};
+      if (String(rhythmForm.activeHourStart).trim() !== '') rhythm.activeHourStart = Number(rhythmForm.activeHourStart);
+      if (String(rhythmForm.activeHourEnd).trim() !== '') rhythm.activeHourEnd = Number(rhythmForm.activeHourEnd);
+      if (String(rhythmForm.maxConcurrency).trim() !== '') rhythm.maxConcurrency = Number(rhythmForm.maxConcurrency);
+      body.rhythm = rhythm;
       body.cron_create_task = cronForm.cron_task_title ? { title: cronForm.cron_task_title, description: cronForm.cron_task_desc } : undefined;
       body.cron_run_command = cronForm.cron_run_command || undefined;
       await projects.update(id!, body);
@@ -587,13 +646,24 @@ export default function ProjectDetailPage() {
             <span className="font-semibold text-gray-700">进度</span>
             <span title="本项目全部任务（含子任务）">任务 {total} · 完成 {done}（{pct}%）</span>
             <span className="text-gray-500">未完成 {Math.max(0, total - done)}</span>
-            <button type="button" onClick={() => setActiveTab('milestones')}
-              className={`px-1.5 py-0.5 rounded ${blockers.length > 0 ? 'bg-red-50 text-red-700 hover:bg-red-100' : 'text-gray-500 hover:bg-gray-50'}`}
-              title="点击打开「里程碑/阻塞」">
-              阻塞 {blockers.length}
-            </button>
-            <span title="本项目全部任务的成果合计——与任务页「本任务（含子任务）」不是同一把尺">产出物 {projectDeliverables?.total || 0} 条</span>
+            {tabErrors.milestones ? (
+              <span className="text-red-600" title={tabErrors.milestones}>
+                阻塞项读不到
+                <button type="button" onClick={() => void loadMilestones()} disabled={milestoneLoading}
+                  className="ml-1 text-xs underline hover:text-red-800 disabled:opacity-50">重试</button>
+              </span>
+            ) : !milestoneLoaded ? (
+              <span className="text-gray-400" title="正在读取阻塞项——读到之前不显示数字">阻塞 读取中…</span>
+            ) : (
+              <button type="button" onClick={openMilestones}
+                className={`px-1.5 py-0.5 rounded ${blockers.length > 0 ? 'bg-red-50 text-red-700 hover:bg-red-100' : 'text-gray-500 hover:bg-gray-50'}`}
+                title="点击打开「里程碑/阻塞」">
+                阻塞 {blockers.length}
+              </button>
+            )}
+            <span title="本项目全部任务的成果合计——与任务页「本任务（含子任务）」不是同一把尺；不含已退休">产出物 {projectDeliverables?.total || 0} 条（不含已退休）</span>
             <span className="text-gray-500">Token {formatTokens(project.tokenStats?.total_tokens)}</span>
+            <span className="text-gray-500" title="本项目最近一次活动的时间（项目/任务/成果事件）">最近活动于 {formatDbTime(project.lastActive) || '—'}</span>
             <span className="ml-auto text-xs text-gray-400">{project.staleness==='healthy'?'活跃':project.staleness==='stale'?'低活跃':'不活跃'}</span>
           </div>
         );
@@ -867,7 +937,8 @@ export default function ProjectDetailPage() {
                   <div className="flex justify-between"><span className="text-gray-500">费用上限(¥)/任务</span><span>{formatMoney(ctx.budget.max_cost_usd_per_task)}</span></div>
                   {!ctx.budget.max_cost_usd_per_task && <p className="text-[10px] text-gray-400">费用上限「—」= 本项目暂无金额闸（任务仅按 Token 预算收敛；费用照常累计与展示，可在项目设置中填写上限）</p>}
                 </> : <p className="text-gray-400 text-xs">未设置预算</p>}
-                {ctx.rhythm ? <div className="flex justify-between"><span className="text-gray-500">活跃时段</span><span>{ctx.rhythm.activeHourStart}:00-{ctx.rhythm.activeHourEnd}:00 · 并发{ctx.rhythm.maxConcurrency||2}</span></div> : <p className="text-gray-400 text-xs">未设置节奏</p>}
+                {/* 0 是合法值（如 0 点起始、并发 0）；读不到印 `—`，不拿 9/18/2 冒充事实。 */}
+                {ctx.rhythm ? <div className="flex justify-between"><span className="text-gray-500">活跃时段</span><span>{ctx.rhythm.activeHourStart ?? '—'}:00-{ctx.rhythm.activeHourEnd ?? '—'}:00 · 并发 {ctx.rhythm.maxConcurrency ?? '—'}</span></div> : <p className="text-gray-400 text-xs">未设置节奏</p>}
                 {project.cron_schedule && <div className="flex justify-between"><span className="text-gray-500">Cron</span><span className="font-mono text-xs">{project.cron_schedule}</span></div>}
                 {project.working_dir && <div className="flex justify-between"><span className="text-gray-500">工作目录</span><span className="font-mono text-xs truncate">{project.working_dir}</span></div>}
                 {/* zx_20261107_1 B6: 项目级模型覆盖——「生效项」由 main 裁定，用户只填「本项目指定」。
@@ -880,6 +951,9 @@ export default function ProjectDetailPage() {
                         <>{modelOv.effective.requested}
                           <span className="text-gray-400 ml-1">（{PIN_SOURCE_LABEL[modelOv.effective.source] ?? modelOv.effective.source}）</span>
                         </>
+                      ) : modelOvErr ? (
+                        // 读不到 ≠ 用户没指定：单独说「读不到」，不混进「按任务自动选型」。
+                        <span className="text-red-600" title={modelOvErr}>读不到（指定模型状态未知）</span>
                       ) : <span className="text-gray-400">按任务自动选型</span>}
                     </span>
                   </div>
@@ -1052,7 +1126,8 @@ export default function ProjectDetailPage() {
               <button key={c.memory_type} onClick={() => setMemTypeFilter(c.memory_type)} className={`px-2.5 py-1 rounded text-xs font-medium ${memTypeFilter===c.memory_type?'bg-blue-600 text-white':'bg-gray-100 text-gray-600'}`}>{MEMORY_TYPES[c.memory_type]||c.memory_type} ({c.cnt})</button>
             ))}
           </div>
-          {memLoading ? <p className="text-sm text-gray-400 py-4">加载中...</p> : memories.length===0 ? <p className="text-gray-400 text-sm py-4 text-center">暂无记忆</p> : (
+          {tabErrors.memories && <div className="mb-3"><LoadFailure what="「记忆」" reason={tabErrors.memories} onRetry={() => void loadMemories(memTypeFilter)} busy={memLoading} /></div>}
+          {memLoading ? <p className="text-sm text-gray-400 py-4">加载中...</p> : memories.length===0 ? (tabErrors.memories ? null : <p className="text-gray-400 text-sm py-4 text-center">暂无记忆</p>) : (
             <div className="space-y-2 max-h-80 overflow-y-auto">
               {memories.map((m: Record<string,unknown>) => {
                 const hasConflict = (() => { try { const j = JSON.parse(String(m.context_json||'{}')); return !!(j.conflict_flag || j.potential_conflict); } catch { return false; } })();
@@ -1075,7 +1150,9 @@ export default function ProjectDetailPage() {
       )}
 
       {activeTab === 'milestones' && (
-        <div className="space-y-4">
+        <div className="space-y-4" id="project-milestones">
+          {/* 读失败 ≠ 没有阻塞项：错误块置顶 + 重试，下方不再印「未检测到阻塞项」/「暂无建议」。 */}
+          {tabErrors.milestones && <LoadFailure what="「里程碑/阻塞」" reason={tabErrors.milestones} onRetry={() => void loadMilestones()} busy={milestoneLoading} />}
           {/* 方案里程碑(M0-M6)项目级进度（zx_20260905 批4：聚合 wa_plan_milestones，doing 随实施任务动工自动流转） */}
           {!milestoneLoading && planMilestones.length > 0 && (
             <div className="bg-white rounded-lg border p-4">
@@ -1114,7 +1191,7 @@ export default function ProjectDetailPage() {
           {/* 阻塞分析（修复：analyzeBlockers 实际返回 taskId/title/status/blockedCount/impactScore） */}
           <div className="bg-white rounded-lg border p-4">
             <h3 className="font-semibold mb-3 flex items-center gap-2"><AlertTriangle className="w-4 h-4 text-red-500"/>阻塞项 ({blockers.length})</h3>
-            {milestoneLoading ? <p className="text-sm text-gray-400 py-2">加载中...</p> : blockers.length===0 ? <p className="text-sm text-gray-400">未检测到阻塞项</p> : (
+            {milestoneLoading ? <p className="text-sm text-gray-400 py-2">加载中...</p> : blockers.length===0 ? (tabErrors.milestones ? null : <p className="text-sm text-gray-400">未检测到阻塞项</p>) : (
               <div className="space-y-2">{blockers.map((b: Record<string,unknown>,i:number)=>(
                 <div key={i} className="flex items-start gap-2 text-sm p-2 bg-red-50 rounded">
                   <AlertTriangle className="w-4 h-4 text-red-500 mt-0.5 flex-shrink-0"/>
@@ -1129,7 +1206,7 @@ export default function ProjectDetailPage() {
           {/* 里程碑建议（启发式 phase_transition/refactor/knowledge_mature，与方案 M0-M6 语义不同） */}
           <div className="bg-white rounded-lg border p-4">
             <h3 className="font-semibold mb-3 flex items-center gap-2"><Lightbulb className="w-4 h-4 text-blue-500"/>里程碑建议 ({milestones.length})</h3>
-            {milestoneLoading ? <p className="text-sm text-gray-400 py-2">加载中...</p> : milestones.length===0 ? <p className="text-sm text-gray-400">暂无建议</p> : (
+            {milestoneLoading ? <p className="text-sm text-gray-400 py-2">加载中...</p> : milestones.length===0 ? (tabErrors.milestones ? null : <p className="text-sm text-gray-400">暂无建议</p>) : (
               <div className="space-y-2">{milestones.map((ml: Record<string,unknown>,i:number)=>(
                 <div key={i} className="text-sm p-2 bg-blue-50 rounded">
                   <p className="font-medium text-blue-800">{String(ml.title ?? ml.milestone ?? '')}</p>
@@ -1144,27 +1221,34 @@ export default function ProjectDetailPage() {
       {activeTab === 'tensions' && (
         <div className="bg-white rounded-lg border p-4">
           <h3 className="font-semibold mb-4 flex items-center gap-2"><Activity className="w-4 h-4 text-blue-500"/>矛盾张力面板（矛盾论）</h3>
-          {Object.keys(tensionConfigs).length === 0 ? <p className="text-sm text-gray-400 py-4 text-center">暂无张力数据</p> : (
+          {tabErrors.tensions && <div className="mb-3"><LoadFailure what="「矛盾张力」" reason={tabErrors.tensions} onRetry={() => void loadTensions()} /></div>}
+          {Object.keys(tensionConfigs).length === 0 ? (tabErrors.tensions ? null : <p className="text-sm text-gray-400 py-4 text-center">暂无张力数据</p>) : (
             <div className="space-y-4">
               {Object.entries(tensionConfigs).map(([tid, cfg]) => {
-                const t = tensions[tid] || { position: 50 };
-                const pos = tensionDraft[tid] ?? (t.position as number) ?? 50;
+                const t = tensions[tid];
+                // 位置缺失不拿 50 冒充：没有记录就明说「未记录」，滑杆位置不渲染。
+                const stored = t?.position as number | undefined;
+                const pos = tensionDraft[tid] ?? (typeof stored === 'number' && Number.isFinite(stored) ? stored : undefined);
                 return (
                   <div key={tid} className="p-3 border rounded">
                     <div className="flex justify-between text-sm mb-2">
                       <span className="font-medium">{cfg.name as string}</span>
                       <span className="text-xs text-gray-400">{cfg.description as string}</span>
                     </div>
-                    <div className="flex items-center gap-3">
-                      <span className="text-xs text-gray-500 w-20 text-right">{cfg.leftLabel as string} ({100-pos}%)</span>
-                      <input type="range" min={0} max={100} value={pos} onChange={e => onTensionInput(tid, Number(e.target.value))} className="flex-1"/>
-                      <span className="text-xs text-gray-500 w-20">{cfg.rightLabel as string} ({pos}%)</span>
-                    </div>
+                    {pos == null ? (
+                      <p className="text-xs text-gray-400">位置未记录（滑杆位置未知，不默认居中）</p>
+                    ) : (
+                      <div className="flex items-center gap-3">
+                        <span className="text-xs text-gray-500 w-20 text-right">{cfg.leftLabel as string} ({100-pos}%)</span>
+                        <input type="range" min={0} max={100} value={pos} onChange={e => onTensionInput(tid, Number(e.target.value))} className="flex-1"/>
+                        <span className="text-xs text-gray-500 w-20">{cfg.rightLabel as string} ({pos}%)</span>
+                      </div>
+                    )}
                     {/* zx_20260905 批6: 自动调节开关——启用后主进程每5min按规则自动微调并实时回推本页(此前 autoAdjust 无 UI 入口=默认 false 永不触发) */}
                     <label className="mt-2 flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer select-none">
-                      <input type="checkbox" checked={!!(t.autoAdjust)} onChange={(e) => { void projects.updateTension(id!, tid, undefined, e.target.checked); window.setTimeout(loadTensions, 150); }} />
+                      <input type="checkbox" checked={!!(t?.autoAdjust)} onChange={(e) => { void projects.updateTension(id!, tid, undefined, e.target.checked); window.setTimeout(loadTensions, 150); }} />
                       自动调节 <span className="text-gray-400">（每5min按规则微调，变更实时回推）</span>
-                      {!!(t.autoAdjust) && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-600">已启用</span>}
+                      {!!(t?.autoAdjust) && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-600">已启用</span>}
                     </label>
                   </div>
                 );
@@ -1179,11 +1263,14 @@ export default function ProjectDetailPage() {
           行点开**同一个**就地抽屉（doc_drawer 门控，与全局页/最近产出物行同尺）。 */}
       {activeTab === 'deliverables' && (
         <div className="bg-white rounded-lg border p-4">
+          {/* 读失败 ≠ 本项目没有成果：错误块置顶 + 重试，下方不再印「本项目暂无成果」。 */}
+          {tabErrors.deliverables && <div className="mb-3"><LoadFailure what="「本项目成果」" reason={tabErrors.deliverables} onRetry={() => void loadProjectDeliverables()} busy={pjDelivLoading} /></div>}
           <div className="flex items-center justify-between mb-3">
             <h3 className="font-semibold flex items-center gap-2"><Package className="w-4 h-4 text-amber-500"/>本项目成果
               {/* zx_20260930 M4-2: 「已加载 K / 共 M」——两个数各是各的口径（K=已取到的行、M=服务端全量），
-                  分页后只印 K 会把"还没取"说成"只有这些"。 */}
-              <span className="text-xs font-normal text-gray-400">· 已加载 {pjDelivs.length} / 共 {pjDelivTotal} 条（含已退休）</span>
+                  分页后只印 K 会把"还没取"说成"只有这些"。
+                  zx_20261115_2: 再印服务端同口径的「已退休 R 条」——首屏「产出物 N 条（不含已退休）」的差额由此可解释。 */}
+              <span className="text-xs font-normal text-gray-400">· 已加载 {pjDelivs.length} / 共 {pjDelivTotal} 条（含已退休 {pjDelivRetired} 条）</span>
             </h3>
             <div className="flex items-center gap-2">
               <button onClick={() => void loadProjectDeliverables()} className="p-1.5 hover:bg-gray-100 rounded-lg" title="刷新"><RefreshCw className="w-3.5 h-3.5 text-gray-500" /></button>
@@ -1193,7 +1280,7 @@ export default function ProjectDetailPage() {
           {pjDelivLoading ? (
             <div className="flex justify-center py-8"><div className="animate-spin h-6 w-6 border-2 border-blue-500 border-t-transparent rounded-full" /></div>
           ) : pjDelivs.length === 0 ? (
-            <p className="text-sm text-gray-400 py-6 text-center">本项目暂无成果</p>
+            tabErrors.deliverables ? null : <p className="text-sm text-gray-400 py-6 text-center">本项目暂无成果</p>
           ) : (
             <table className="w-full text-sm">
               <thead className="bg-gray-50 border-b text-xs text-gray-500">

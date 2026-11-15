@@ -15,17 +15,19 @@
  */
 import type Database from 'better-sqlite3';
 import { NODE_SETTING_KEYS, ensureNodeIdentity, readNodeSetting, writeNodeSetting, type NodeSettingDb } from './node-identity.js';
-import { isNodeEnrolled } from './node-heartbeat.js';
+import { effectiveNodeParticipateOut, isNodeEnrolled } from './node-heartbeat.js';
 import { teamFeatureRefusal } from './team-gate.js';
 import type { LicenseSettingDb } from './license.js';
 import { dispatchNodeRequest, type DispatchEventSink, type DispatchIo } from './node-dispatcher.js';
-import { readProjectDispatchModeRaw } from './project-dispatch-mode.js';
+import { isProjectDispatchMode, readProjectDispatchModeRaw } from './project-dispatch-mode.js';
 import {
   markRemoteAssigned,
   remoteAssignOf,
   isRemoteOffered,
   markRemoteOffered,
   clearRemoteOffered,
+  normalizeOrchestrateMode,
+  readOrchestrateMode,
   type OrchestrateDb,
 } from './node-orchestrate.js';
 import { fetchNodes, listDispatchablePeers, type NodeLedger } from './node-list.js';
@@ -272,6 +274,22 @@ export interface CreateDispatchFacts extends ParentDispatchFacts {
    *   据此拦建单会把 Team 档缺省开一并打死（见方案 B3 实施注记）。
    */
   projectDispatchOff?: boolean;
+  /**
+   * zx_20261115_1 M1：任务所指岗位被设为"不参与跨机派单"（`wa_positions.participate = 0`）。
+   * 未指派岗位 / 读不到 / 键缺省 ⇒ **不拦**（不因一次读失败把用户的活永久钉在本机）。
+   */
+  positionLocalOnly?: boolean;
+  /**
+   * zx_20261115_1 M4：本机是否可以**把活派出去**（`effectiveNodeParticipateOut`）。
+   * 缺省（无此键）⇒ 不拦（旧调用方行为不变）。
+   */
+  localParticipateOut?: boolean;
+  /**
+   * zx_20261115_1 M4：项目此刻的有效派发模式是否为 `capability`（能力优先）。
+   * 为 `true` 时**不适用**「本机有空槽就留本机」——能力优先的语义是"谁更合适谁干"，
+   *   本机闲着恰恰说明该让更合适的对端干。缺省（无此键）⇒ 沿用旧行为（`local-capacity` 照拦）。
+   */
+  capabilityMode?: boolean;
 }
 
 export type CreateDispatchReason =
@@ -299,6 +317,10 @@ export type CreateDispatchReason =
   | 'decomposed'
   /** 本机尚有余力（缺省开时「满负荷才溢出」；显式开不受此限）。 */
   | 'local-capacity'
+  /** zx_20261115_1 M1：任务所指岗位被用户设为"不参与跨机派单"（岗位级意图，比节点级更具体）。 */
+  | 'position-local-only'
+  /** zx_20261115_1 M4：本机被用户设为**不把活派出去**（与"接不接"分开的开关）。 */
+  | 'participate-out-off'
   | 'no-category';
 
 export interface CreateDispatchDecision {
@@ -317,6 +339,11 @@ export function decideCreateDispatch(f: CreateDispatchFacts): CreateDispatchDeci
   if (!f.settingOn) return deny('setting-off');
   if (!f.teamUnlocked) return deny('team-locked');
   if (!f.enrolled) return deny('not-enrolled');
+  // zx_20261115_1 M1「职」：**岗位**级意图优先于后续技术性排除——用户把该岗位设成"不参与派单"，
+  //   就是"这类活不出本机"，与"本机忙不忙"无关。缺省（无此键）不改变旧行为。
+  if (f.positionLocalOnly === true) return deny('position-local-only');
+  // zx_20261115_1 M4：用户把本机设成"不派出去"——比"本机忙不忙"更靠前（那是用户的意志，不是容量问题）。
+  if (f.localParticipateOut === false) return deny('participate-out-off');
   // zx_20261104_3 M1：不再"有父任务即留本机"——只看父任务接不接得住结果（暂停/进行中照常可派）。
   const parentBlock = parentDispatchBlock(f);
   if (parentBlock) return deny(parentBlock);
@@ -337,7 +364,10 @@ export function decideCreateDispatch(f: CreateDispatchFacts): CreateDispatchDeci
   //   显式开启（用户在设置里自己打的开关）不受此限：那是用户的主动选择，不是我们替他做的默认。
   // zx_20261101_2 M3：**项目里登记了分工**同理——用户点名了「交给哪几台」，就不该再被
   //   「本机闲着」挡回去（否则"指定了也永远留在本机"）。只见于缺省开；显式开本就不受此闸。
-  if (f.autoDispatchSource === 'default' && f.localHasFreeSlot === true && f.projectTargeted !== true) {
+  // zx_20261115_1 M4：**能力优先模式下本闸不适用**——"本机有空"恰恰不是留在本机的理由：
+  //   能力优先问的是"谁更合适"，而不是"本机跑不跑得过来"。此前该闸对两种模式一视同仁，
+  //   导致 capability 模式下建单即派永远被挡（空闲机器恒拒），能力优先事实上不存在。
+  if (f.capabilityMode !== true && f.autoDispatchSource === 'default' && f.localHasFreeSlot === true && f.projectTargeted !== true) {
     return deny('local-capacity');
   }
   if (!f.category) return deny('no-category');
@@ -361,6 +391,8 @@ export const CREATE_DISPATCH_REASON_LABEL: Record<CreateDispatchReason, string> 
   'has-attachments': '任务带附件（附件在本机盘上）',
   'has-working-dir': '任务需要本机工作目录（代码类或题面涉及本机仓库/文件）',
   decomposed: '已按模板拆解（工作单元是子任务）',
+  'position-local-only': '该岗位已设为不参与跨机派单（只在本机跑）',
+  'participate-out-off': '本机已关闭「把活派出去」（只在本机跑）',
   'local-capacity': '本机尚有余力（满负荷才溢出到其他节点）',
   'no-category': '任务形态不明确（留在本机）',
 };
@@ -409,6 +441,11 @@ export interface DispatchCreatedTaskOpts {
   emit?: DispatchEventSink;
   /** 时钟注入（在线判据不依赖真实墙钟）。 */
   nowMs?: number;
+  /**
+   * zx_20261115_2 M3：**指定目标节点**（不传 = ANS 自动选）。E2E/运维验证用；
+   * 与 GUI「派活」卡的手动目标同一条 `dispatchNodeRequest` 出口，不另写派发路。
+   */
+  targetNodeId?: string;
   /** 团队许可库（缺省与主库同一份）。 */
   licenseDb?: LicenseSettingDb;
 }
@@ -477,6 +514,12 @@ export interface DispatchPayload {
   title: string;
   description: string;
   acceptance_criteria: string;
+  /**
+   * zx_20261115_2 M3：**派活方本地任务 id**。中继对端建的是**新**任务（有自己的 id），
+   * 回执核对要求 `result.taskId === 本地任务 id` ⇒ 必须把本地 id 随单带过去、回传时原样带回；
+   * 对端自己的任务 id 另放 `remoteTaskId`（可追溯、不冒充）。
+   */
+  origin_task_id: string;
   /** 前置任务摘要（无依赖/读不到 ⇒ 不出现该键）。 */
   upstream?: DispatchUpstream[];
   /**
@@ -501,6 +544,7 @@ export function buildDispatchPayload(
     title: String(task.title ?? '').trim(),
     description: String(task.description ?? '').trim(),
     acceptance_criteria: String(task.acceptanceCriteria ?? '').trim(),
+    origin_task_id: String(task.id ?? '').trim(),
   };
   const kept = (upstream ?? []).filter((u) => u && typeof u.id === 'string' && u.id !== '');
   // B5：无岗位 / 无上游时**不出现新键**——旧载荷形状与字节不变。
@@ -527,6 +571,8 @@ export function dispatchPositionOfTask(db: Database.Database, taskId: string): D
       name: position.name,
       version: position.version,
       summary: positionDispatchSummary(position),
+      // zx_20261115_1 M5：工具白名单随单过界（**约束**可以过界，知识与经验不行）。
+      ...(position.tools.length > 0 ? { tools: [...position.tools] } : {}),
     };
   } catch {
     return null;
@@ -651,6 +697,7 @@ export async function dispatchCreatedTask(
         category,
         payload: { ...buildDispatchPayload(task, upstream, position) },
         requireTarget: true,
+        ...(opts.targetNodeId ? { targetNodeId: opts.targetNodeId } : {}),
         ...(policy ? { policy: toWireDispatchPolicy(policy) } : {}),
       },
       { ...(opts.io ? { io: opts.io } : {}), ...(opts.emit ? { emit: opts.emit } : {}) },
@@ -843,6 +890,9 @@ export function buildExistingTaskDispatchFacts(db: Database.Database, taskId: st
     projectTargeted: projectHasNodePolicy(db as unknown as ProjectNodePolicyDb, String(row?.project_id ?? '')),
     // zx_20261110_1 B3：任务详情的「派单理由」与真派同一把尺——项目关了外派也照实说。
     projectDispatchOff: projectDispatchOff(db, String(row?.project_id ?? '')),
+    positionLocalOnly: taskPositionLocalOnly(db, taskId),
+    localParticipateOut: effectiveNodeParticipateOut(db as unknown as NodeSettingDb),
+    capabilityMode: effectiveCapabilityMode(db, String(row?.project_id ?? '')),
   };
 }
 
@@ -1229,7 +1279,53 @@ export function buildCreatedTaskDispatchFacts(
     category,
     projectTargeted: projectHasNodePolicy(db as unknown as ProjectNodePolicyDb, input.projectId),
     projectDispatchOff: projectDispatchOff(db, input.projectId),
+    positionLocalOnly: taskPositionLocalOnly(db, input.taskId),
+    localParticipateOut: effectiveNodeParticipateOut(db as unknown as NodeSettingDb),
+    capabilityMode: effectiveCapabilityMode(db, input.projectId),
   };
+}
+
+/**
+ * zx_20261115_1 M1「职」：任务所指岗位是否被设为**不参与跨机派单**（唯一读口）。
+ *
+ * 语义边界：只看**任务显式指派的岗位**（`wa_tasks.position_id`）。未指派 ⇒ `false`（照常可派）；
+ * 岗位行不存在 / 读库失败 ⇒ 也 `false`——**不因读不到而拦**：把用户的活永久钉在本机
+ * 比多派一次更难挽回（承本模块"不确定就留在本机"的旧纪律在此**反向**：此处的"不确定"是指
+ * 读失败，不是语义不确定）。
+ */
+export function taskPositionLocalOnly(db: Database.Database, taskId: string): boolean {
+  try {
+    const row = db
+      .prepare(
+        `SELECT p.participate AS participate
+           FROM wa_tasks t LEFT JOIN wa_positions p ON p.id = t.position_id
+          WHERE t.id = ?`,
+      )
+      .get(taskId) as { participate?: unknown } | undefined;
+    return Number(row?.participate ?? 1) === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * zx_20261115_1 M4：项目此刻的有效派发模式是否 `capability`（**纯读，不触网**）。
+ *
+ * 口径与 `resolveProjectDispatchMode` 一致但**刻意极简**：项目显式给了就用显式的，
+ * 没给就看全局。**不在这里判能力前提**（在线对端数等）——那是编排器每拍算的事；
+ * 建单这一刻只需要知道"这个项目是不是能力优先"，不该因为一次节点列表抖动而改变口径。
+ */
+export function effectiveCapabilityMode(db: Database.Database, projectId: string): boolean {
+  try {
+    const row = db.prepare('SELECT context_json FROM wa_projects WHERE id = ?').get(projectId) as
+      | { context_json?: string | null }
+      | undefined;
+    const raw = readProjectDispatchModeRaw(row?.context_json ?? null);
+    if (isProjectDispatchMode(raw)) return normalizeOrchestrateMode(raw) === 'capability';
+    return normalizeOrchestrateMode(readOrchestrateMode(db as unknown as NodeSettingDb)) === 'capability';
+  } catch {
+    return false;
+  }
 }
 
 /** 供 IPC 组准入事实时共用：项目是否指定了本机工作目录。 */

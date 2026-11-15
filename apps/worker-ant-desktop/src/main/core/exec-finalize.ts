@@ -24,6 +24,8 @@ import { PAUSE_REASON_ACCEPTANCE_FAILED, PAUSE_REASON_ACCEPTANCE_UNJUDGED, PAUSE
 import { isTerminalStatus } from './task-jobs.js';
 import { readBoolSetting } from './settings-bool.js';
 import { promoteTaskFileDeliverables, selectProbeDeliverables, disposeProbeDeliverables } from './deliverable-lifecycle.js';
+// zx_20261115_3 M1「归」：按写作账有界补登记（归属不夺、非探针、盘上仍在），先于成果提升。
+import { registerClaimedArtifacts } from './task-artifacts.js';
 import { unfinishedChildren } from './children-gate.js';
 import { buildTaskOutcome } from './task-outcome.js';
 import { adjustProjectStrategy, recordStrategyOutcome, type ExecutionMetrics } from './feedback-engine.js';
@@ -261,6 +263,18 @@ export function finalizeRunClose(o: {
   if (claimCompletedEmit(ctx)) {
     eventBus.emit('task.completed', { taskId, task_id: taskId, projectId, run_id: ctx.runId, ...buildTaskOutcome(db, taskId, fileMutationCount), acceptance: closeAcceptance ?? undefined }).catch(() => {});
   }
+  // zx_20261115_3 M1「归」：产出对账——写作账里有、工程内尚无登记行的文件，先补登记再提升。
+  //   （有界 20、非探针、盘上仍在；**不夺归属**：已有登记行的文件一律跳过。）
+  //   ⚠ 必须排在 `promoteTaskFileDeliverables` 之前：新建行此刻是 draft，紧接着被提升为 completed，
+  //     否则"补登记的成果"会永久停在草稿（与 zx_20261110_2 B8 的归位纪律同形）。
+  try {
+    const bf = registerClaimedArtifacts(db, { taskId, projectId, via: 'run_close' });
+    if (bf.created > 0) {
+      db.prepare("INSERT INTO wa_task_conversations (id, task_id, role, content, token_count, created_at) VALUES (?, ?, 'system', ?, 0, datetime('now'))")
+        .run(crypto.randomUUID(), taskId, `[产出对账] 按本任务文件账补登记 ${bf.created} 件产出物（文件已落盘、工程内无登记行）。`);
+    }
+    if (bf.skipped.length > 0) logger.info({ taskId: taskId.slice(0, 8), skipped: bf.skipped.length }, '产出对账：部分写作账文件未补登记（探针/已删/已有归属/超上限）');
+  } catch { /* 补登记 best-effort，不阻断收口 */ }
   // zx_20260906 批1: 成果随任务交付——达标收尾把本任务 doc 草稿产出物推进 completed（未达标 forced 场景内部跳过）
   promoteTaskFileDeliverables(db, taskId, 'run_close');
   console.log(`[Agent] 任务完成: ${title.slice(0, 50)} steps=${stepCount} quality=${qualityScore.score}分`);

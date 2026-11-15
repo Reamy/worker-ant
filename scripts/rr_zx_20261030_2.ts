@@ -31,6 +31,7 @@ import {
   classifyArchetype,
   classifyArchetypeDetailed,
   narrowToolFace,
+  TOOL_FACE_BRIEF_REMOVED_MAX,
   type TaskArchetype,
 } from '../apps/worker-ant-desktop/src/main/core/task-archetype.js';
 import { closeTextDelta, resolvePinnedArchetype } from '../apps/worker-ant-desktop/src/main/core/agent-executor.js';
@@ -138,12 +139,18 @@ function sectionE(): void {
     const finalKept = scope.kept;
     ok(finalKept.length + scope.removed.length === allNames.length,
       `E-7[${arch}] 保留+移除恰为全集（划分不丢件 ${finalKept.length}+${scope.removed.length}=${allNames.length}）`);
-    const brief = buildToolFaceBrief(arch, '编码实现', finalKept, scope.removed.length);
-    ok(brief.includes(`只注入**本档 ${finalKept.length} 个工具`),
+    // zx_20261115_3 M7（大野耐一·消除浪费）：说明书**不再逐个点名已保留工具**（schema 已有全名与参数），
+    //   只报本档件数与被移除的名单。判据随之钉更强形状：件数对 + 保留名不重复 + 移除名仍在。
+    const brief = buildToolFaceBrief(arch, '编码实现', finalKept, scope.removed.length, scope.removed);
+    ok(brief.includes(`本档 ${finalKept.length} 个工具`),
       `E-8[${arch}] 说明书声明数 = 最终工具面键数（${finalKept.length}）`, brief.slice(0, 80));
-    ok(!brief.includes(`只注入**本档 ${base.kept.length} 个工具`),
+    ok(!brief.includes(`本档 ${base.kept.length} 个工具`),
       `E-9[${arch}] 不再复现「说 allow/deny 之前的数」（旧病 ${base.kept.length} vs 实际 ${finalKept.length}）`);
-    ok(finalKept.every((n) => brief.includes(n)), `E-10[${arch}] 说明书逐个点名最终留下的工具`);
+    const tokensOfBrief = new Set(brief.split(/[\s,，、：:；;]+/));
+    ok(!finalKept.some((n) => tokensOfBrief.has(n)),
+      `E-10[${arch}] 不再逐个重复 schema 已有的保留工具名（省的是每一步的固定 token）`);
+    ok(scope.removed.length === 0 || scope.removed.slice(0, TOOL_FACE_BRIEF_REMOVED_MAX).every((n) => brief.includes(n)),
+      `E-10b[${arch}] 被移除的名字仍如实列出（"为什么调不到"的线索不丢；封顶 ${TOOL_FACE_BRIEF_REMOVED_MAX}）`);
     ok(finalKept.length < base.kept.length,
       `E-11[${arch}] allow/deny 真收窄（0→1 对照：${base.kept.length} → ${finalKept.length}）`);
   }
@@ -152,7 +159,8 @@ function sectionE(): void {
   const iBase = ae.indexOf('const baseFace = narrowToolFace(');
   const iScope = ae.indexOf('const scope = applySubagentToolScope(');
   const iDelete = ae.indexOf('for (const k of toolFace.removed) delete toolMap[k];');
-  const iBrief = ae.indexOf('buildToolFaceBrief(archetype, adaptiveStrategy.label, toolFace.kept, toolFace.removed.length)');
+  // zx_20261115_3 M7：说明书调用点**必须把被移除的名单**传进去（只传计数 ⇒ 名单线索丢失）。
+  const iBrief = ae.indexOf('buildToolFaceBrief(archetype, adaptiveStrategy.label, toolFace.kept, toolFace.removed.length, toolFace.removed)');
   ok(iBase >= 0 && iBase < iScope && iScope < iDelete && iDelete < iBrief,
     'E-12 接线顺序：形态收窄 → allow/deny 两刀 → 删 key → 生成说明书（顺序改回去即红）',
     `${iBase}/${iScope}/${iDelete}/${iBrief}`);

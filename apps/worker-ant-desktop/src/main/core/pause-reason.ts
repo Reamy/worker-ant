@@ -128,6 +128,15 @@ export const PAUSE_REASON_GHOST_LOOP = 'ghost_loop_cap';
 export const PAUSE_REASON_OUTPUT_INSUFFICIENT_BUT_CHANGED = 'output_insufficient_but_changed';
 
 /**
+ * zx_20261115_2 M1（老子·知止）：本次**中继派单的任务树总时窗已用尽**。
+ *
+ * 与 `exec_timeout` 的区别在"停的是谁"：后者是单个任务无心跳被自愈回收；
+ * 本因是**整棵中继树**到了派单方给的预算上限——根、子、孙一起不再继续，已完成部分产出保留。
+ * 处置：不自动延长、不自动恢复（预算已许出去）；由派活方重新发起或本机人工判断。
+ */
+export const PAUSE_REASON_RELAY_TREE_EXPIRED = 'relay_tree_expired';
+
+/**
  * 暂停之因的**取值域**——`pauseTask` 的 `reason` 取此类型，故"无因暂停"在类型层**不可表达**。
  *
  * 用 `typeof` 逐个引用上面的常量（而非另抄一份字面量）：改常量名漏改这里即**编译不过**，
@@ -158,7 +167,8 @@ export type PauseReason =
   | typeof PAUSE_REASON_ABNORMAL_END
   | typeof PAUSE_REASON_AGENT_PAUSED
   | typeof PAUSE_REASON_GHOST_LOOP
-  | typeof PAUSE_REASON_OUTPUT_INSUFFICIENT_BUT_CHANGED;
+  | typeof PAUSE_REASON_OUTPUT_INSUFFICIENT_BUT_CHANGED
+  | typeof PAUSE_REASON_RELAY_TREE_EXPIRED;
 
 /** 暂停原因 → 人话（GUI 横幅 / IM 通知 / 系统会话行共用；**词表只此一份**） */
 export const PAUSE_REASON_LABEL: Record<string, string> = {
@@ -187,6 +197,7 @@ export const PAUSE_REASON_LABEL: Record<string, string> = {
   [PAUSE_REASON_AGENT_PAUSED]: '执行体主动暂停',
   [PAUSE_REASON_GHOST_LOOP]: '状态显示在运行、实则无执行体（连续多次自动恢复未成功，已停止自动重试）',
   [PAUSE_REASON_OUTPUT_INSUFFICIENT_BUT_CHANGED]: '有文件改动但未登记产出物（待补登记或确认无关）',
+  [PAUSE_REASON_RELAY_TREE_EXPIRED]: '本次派单的任务树总时窗已用尽',
 };
 
 /** 取暂停原因的人话说法；未知原因**原文回显**（不吞、不编） */

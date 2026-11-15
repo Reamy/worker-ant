@@ -27,6 +27,16 @@ export interface TaskArtifactItem {
   other_writers?: Array<{ id: string; title: string }>;
 }
 
+/** zx_20261115_3 M2「归」：贡献账条目——本任务树写过、登记不在本树内的文件。 */
+export interface ClaimedArtifactItem {
+  path: string | null;
+  name: string;
+  ownerTaskId: string | null;
+  claimedByTaskId: string | null;
+  deliverableId: string | null;
+  exists: boolean;
+}
+
 export default function TaskArtifacts({
   currentTaskId,
   items,
@@ -35,6 +45,10 @@ export default function TaskArtifacts({
   moreBusy,
   showAcceptance,
   drawerEnabled,
+  claimed,
+  note,
+  onBackfill,
+  backfillBusy,
   onLoadMore,
   onPreview,
   onOpenDrawer,
@@ -47,13 +61,23 @@ export default function TaskArtifacts({
   moreBusy: boolean;
   showAcceptance: boolean;
   drawerEnabled: boolean;
+  /** zx_20261115_3 M2：贡献账（归属不在本树内的写作账文件）。 */
+  claimed?: ClaimedArtifactItem[];
+  /** zx_20261115_3 M2：0 产出时的人话解释（不是"没有产出"/不是"读不到"）。 */
+  note?: string;
+  /** 一键把写作账里"尚无登记行"的文件补登记为本任务产出物。 */
+  onBackfill?: () => void;
+  backfillBusy?: boolean;
   onLoadMore: () => void;
   onPreview: (d: TaskArtifactItem) => void;
   onOpenDrawer: (id: string) => void;
   onNavigateTask: (id: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  if (items.length === 0) return null;
+  const claims = claimed ?? [];
+  const claimable = claims.some((c) => !c.deliverableId);
+  // 0 条归属 + 0 条贡献 + 无解释 ⇒ 整块不出现；有任何一项都出（"写了文件却 0 产出"正是本轮要治的沉默）。
+  if (items.length === 0 && claims.length === 0 && !note) return null;
 
   const tree = buildDeliverableTree(items);
 
@@ -111,8 +135,13 @@ export default function TaskArtifacts({
         <PackageIcon className="w-4 h-4 text-purple-500 shrink-0" />产出物
         {/* 计数取服务端全量口径（`total`）——印 `items.length` 会把"这一批"说成"一共就这些"，与「加载更多」自相矛盾。 */}
         <span className="text-[10px] font-normal text-gray-400">本任务（含子任务）{total} 条</span>
+        {claims.length > 0 && (
+          <span title="本任务树写过、但登记不在本任务树内的文件（归属不被后写者夺，见「参与产出」）"
+            className="text-[10px] font-normal px-1.5 py-0.5 rounded-full bg-sky-50 text-sky-700 border border-sky-200">参与产出 {claims.length}</span>
+        )}
       </button>
       {open && <div className="mt-2">
+        {note && <p className="text-[11px] text-amber-700 bg-amber-50/60 border border-amber-200 rounded px-2 py-1 mb-2">{note}</p>}
         {tree.commonPrefix.length > 0 && <p className="text-[10px] text-gray-400 px-2 mb-1">相对根：{tree.commonPrefix.join('/')}/</p>}
         {renderTree(tree.root, 0)}
         {/* 没有盘上路径的件如实单列，不塞进任何假目录（塞了就是编造"它在哪"） */}
@@ -120,6 +149,39 @@ export default function TaskArtifacts({
           <div className="mt-2 pt-2 border-t border-gray-100">
             <p className="text-[10px] text-gray-400 px-2">（无盘上路径 · {tree.noPath.length} 条）</p>
             {tree.noPath.map((d) => row(d, 0))}
+          </div>
+        )}
+        {claims.length > 0 && (
+          <div className="mt-2 pt-2 border-t border-gray-100">
+            <div className="flex items-center justify-between gap-2 px-2">
+              <p className="text-[10px] text-gray-500">
+                参与产出 · {claims.length} 条（本任务树写过；<span className="text-gray-400">归属不夺</span>，登记在其他任务名下的会注明）
+              </p>
+              {claimable && onBackfill && (
+                <button type="button" onClick={onBackfill} disabled={backfillBusy}
+                  title="把本任务写过、但工程内尚无登记行的文件登记为本任务产出物（上限 20，幂等）"
+                  className="shrink-0 text-[10px] px-2 py-0.5 rounded border border-sky-300 text-sky-700 hover:bg-sky-50 disabled:opacity-50">
+                  {backfillBusy ? '补齐中…' : '补齐本任务文件账'}
+                </button>
+              )}
+            </div>
+            {claims.map((c, i) => (
+              <div key={`${c.path ?? c.name}:${i}`} className="flex items-center justify-between text-sm py-1 px-2 hover:bg-gray-50 rounded">
+                <span className="flex items-center gap-2 min-w-0">
+                  <span className="text-xs font-mono text-gray-400 shrink-0">文件</span>
+                  <span className={`truncate ${c.exists ? '' : 'text-gray-400 line-through'}`} title={c.path || undefined}>{c.name}</span>
+                  {!c.exists && <span className="shrink-0 text-[10px] text-gray-400">已不在盘上</span>}
+                  {c.ownerTaskId && (
+                    <button type="button" onClick={() => onNavigateTask(c.ownerTaskId!)}
+                      title="该文件已有登记行，归属在另一个任务（本任务只是写过它）"
+                      className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full bg-teal-50 text-teal-700 hover:bg-teal-100">
+                      登记在任务 {c.ownerTaskId.slice(0, 8)}
+                    </button>
+                  )}
+                  {!c.deliverableId && <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500">未登记</span>}
+                </span>
+              </div>
+            ))}
           </div>
         )}
       </div>}

@@ -25,6 +25,13 @@ export const POSITIONS_DDL = `
     skills_json TEXT NOT NULL DEFAULT '[]',
     rules_json TEXT NOT NULL DEFAULT '[]',
     knowledge_json TEXT NOT NULL DEFAULT '[]',
+    -- zx_20261115_1 M1「职」：岗位从"四段自由文本"长出**能约束执行**的三项。
+    --   每个字段都有唯一读口（见 §M1 表）；无读口的字段不加（维特根斯坦·意义即用法）。
+    tools_json TEXT NOT NULL DEFAULT '[]',
+    mcp_json TEXT NOT NULL DEFAULT '[]',
+    sandbox_scope TEXT NOT NULL DEFAULT '',
+    -- 岗位是否参与跨机派单：0 ⇒ 该岗位的任务不出本机（拒因 position-local-only）。
+    participate INTEGER NOT NULL DEFAULT 1,
     enabled INTEGER NOT NULL DEFAULT 1,
     builtin INTEGER NOT NULL DEFAULT 0,
     version INTEGER NOT NULL DEFAULT 1,
@@ -71,6 +78,42 @@ export const POSITION_LESSON_MAX = 300;
 export const POSITION_DISPATCH_SUMMARY_MAX = 600;
 
 /**
+ * zx_20261115_1 M1：岗位沙箱档（空串 = 继承项目设置）。
+ *
+ * **单调不放宽**：岗位只能把沙箱**调严**，不能调松——`strict` 可覆盖项目的 `workspace`，
+ * 而 `workspace` 不得把项目的 `strict` 放宽回 `workspace`。判据见 `narrowSandboxScope`。
+ */
+export const POSITION_SANDBOX_SCOPES = ['', 'strict', 'workspace', 'off'] as const;
+export type PositionSandboxScope = (typeof POSITION_SANDBOX_SCOPES)[number];
+export function isPositionSandboxScope(raw: unknown): raw is PositionSandboxScope {
+  return typeof raw === 'string' && (POSITION_SANDBOX_SCOPES as readonly string[]).includes(raw);
+}
+
+/** 沙箱档的"严"序（数越大越严）。`off` 最松，`strict` 最严。 */
+const SANDBOX_STRICTNESS: Record<Exclude<PositionSandboxScope, ''>, number> = {
+  off: 0,
+  workspace: 1,
+  strict: 2,
+};
+
+/**
+ * 岗位沙箱档与项目沙箱档的**合成**（唯一判据）：取**更严**者，岗位空串 = 原样继承。
+ *
+ * 病根预防：若直接拿岗位值覆盖项目值，"岗位设 workspace" 就能把项目的 `strict` 放宽——
+ * 那是把安全闸交给一个可被随意编辑的文本字段。故此处只允许**向上**。
+ */
+export function narrowSandboxScope(
+  projectScope: string,
+  positionScope: PositionSandboxScope,
+): 'strict' | 'workspace' | 'off' {
+  const base = (['strict', 'workspace', 'off'] as const).includes(projectScope as 'strict')
+    ? (projectScope as 'strict' | 'workspace' | 'off')
+    : 'workspace';
+  if (!positionScope) return base;
+  return SANDBOX_STRICTNESS[positionScope] >= SANDBOX_STRICTNESS[base] ? positionScope : base;
+}
+
+/**
  * zx_20261112_1 B5：跨机派来的岗位上下文落 `context_json` 的这个键（**只写这个键，绝不写 `wa_tasks.position_id`**
  * ——那只属本机台账；对端岗位不在本机岗位表里，写成 position_id 会伪造一条本地指派）。
  */
@@ -82,8 +125,26 @@ export interface DispatchPosition {
   name: string;
   version: number;
   summary: string;
+  /**
+   * zx_20261115_1 M5：派活方岗位的**工具白名单**随单过界。
+   *
+   * 为什么这条可以过界而知识与经验不行：它是**约束**（只能更窄），不是资产；
+   * 远端据此把工具面再收一刀，与派活方的岗位边界一致——否则"岗位限定只读"一到别的机器就失效。
+   * 空数组/缺键 ⇒ 远端不收窄（旧载荷字节不变）。
+   */
+  tools?: string[];
 }
 export const POSITION_BLOCK_ITEMS = 3;
+
+/**
+ * zx_20261115_1 M2「用」：**建议晋升**门槛——同一条可迁移经验被真注入 `N` 次而仍未被采纳晋升时，
+ * 页面给一个"建议晋升"标记。**只是建议**：采纳与晋升仍须人点（道德经·功成而不处）。
+ * 判据读的是注入账（真发生过的注入），不是"被选进候选"的次数。
+ */
+export const POSITION_PROMOTE_SUGGEST_MIN = 3;
+
+/** 相关性排序时的扫描上界（经验再多也不全量读进内存；按最近 50 条取候选再排）。 */
+export const POSITION_LESSON_SCAN_MAX = 50;
 
 export const POSITION_LESSON_STATUSES = ['pending', 'accepted', 'rejected'] as const;
 export type PositionLessonStatus = (typeof POSITION_LESSON_STATUSES)[number];
@@ -123,6 +184,14 @@ export interface Position {
   skills: string[];
   rules: string[];
   knowledge: string[];
+  /** 岗位允许的工具名（空 = 沿用任务形态的默认工具面；非空则**与形态面取交集**）。 */
+  tools: string[];
+  /** 岗位允许使用的 MCP 名称（空 = 项目全部可用 MCP）。 */
+  mcp: string[];
+  /** 沙箱档（空串 = 继承项目；只能调严，见 `narrowSandboxScope`）。 */
+  sandboxScope: PositionSandboxScope;
+  /** 是否参与跨机派单（false ⇒ 该岗位任务不出本机）。 */
+  participate: boolean;
   enabled: boolean;
   builtin: boolean;
   version: number;
@@ -142,6 +211,10 @@ export interface PositionInput {
   skills?: unknown;
   rules?: unknown;
   knowledge?: unknown;
+  tools?: unknown;
+  mcp?: unknown;
+  sandboxScope?: unknown;
+  participate?: unknown;
   enabled?: unknown;
 }
 
@@ -152,7 +225,19 @@ export interface SanitizedPosition {
   skills: string[];
   rules: string[];
   knowledge: string[];
+  tools: string[];
+  mcp: string[];
+  sandboxScope: PositionSandboxScope;
+  participate: boolean;
   enabled: boolean;
+}
+
+/** 更新时才有的"原值继承"来源——知识包导入只带三段，不能把其余字段抹成空。 */
+export interface PositionSanitizeFallback {
+  tools: string[];
+  mcp: string[];
+  sandboxScope: PositionSandboxScope;
+  participate: boolean;
 }
 
 export type SanitizeResult =
@@ -179,6 +264,15 @@ export interface PositionLesson {
   decidedBy: string;
   taskTitle: string;
   projectName: string;
+  /** zx_20261115_1 M2：这条经验被**真注入**过多少次（真源=注入账 `source='position'` 的 `lesson:<id>` 行数）。 */
+  injectedCount: number;
+  /** zx_20261115_1 M2：已达「建议晋升」门槛且仍未晋升（只是建议，仍须人点）。 */
+  promoteSuggested: boolean;
+  /**
+   * zx_20261115_1 M3：这条经验在**多少个不同项目**的任务里被真注入过。
+   * 这是"岗位以岗位为中心、跨项目复用"的直接证据（项目侧知识不外流，岗位经验可跨项目）。
+   */
+  crossProjectCount: number;
 }
 
 export interface PositionProjectBinding {
@@ -373,7 +467,7 @@ function normalizeList(raw: unknown, label: string): { ok: true; value: string[]
  * 四段校验：非法**整块拒绝**（不悄悄截断、不丢坏项），调用方据 `code` 给用户看原因。
  * 名称非空且唯一由写入侧 SQL 再判；此处只校验形状与长度。
  */
-export function sanitizePosition(input: PositionInput): SanitizeResult {
+export function sanitizePosition(input: PositionInput, fallback?: PositionSanitizeFallback): SanitizeResult {
   const name = typeof input.name === 'string' ? input.name.trim() : '';
   if (!name) return fail('NAME_REQUIRED', '岗位名称不能为空');
   if (name.length > POSITION_NAME_MAX) return fail('NAME_TOO_LONG', `岗位名称最多 ${POSITION_NAME_MAX} 字（当前 ${name.length} 字）`);
@@ -395,6 +489,30 @@ export function sanitizePosition(input: PositionInput): SanitizeResult {
   const knowledge = normalizeList(input.knowledge, '知识');
   if (!knowledge.ok) return knowledge;
 
+  // ── zx_20261115_1 M1：新增四项**缺省继承**（`undefined` ⇒ 沿用 fallback）。
+  //   为什么必须继承：`updatePosition` 是全列覆写，而岗位知识包导入只带 规范/技能/知识 三段
+  //   （`position-package.ts`）——若这里把缺失项当空，导入一次知识包就会把工具面/沙箱/参与设置静默抹掉。
+  //   与 auto-memory `feedback_json_column_overwrite_wipes_siblings` 同族病根。
+  const tools = inheritList(input.tools, '工具', fallback?.tools ?? []);
+  if (!tools.ok) return tools;
+  const mcp = inheritList(input.mcp, 'MCP', fallback?.mcp ?? []);
+  if (!mcp.ok) return mcp;
+
+  let sandboxScope: PositionSandboxScope = fallback?.sandboxScope ?? '';
+  if (input.sandboxScope !== undefined) {
+    const raw = typeof input.sandboxScope === 'string' ? input.sandboxScope.trim() : input.sandboxScope;
+    if (!isPositionSandboxScope(raw)) {
+      return fail('SANDBOX_SCOPE_INVALID', `沙箱档只能是 strict / workspace / off 或留空（当前 ${String(input.sandboxScope)}）`);
+    }
+    sandboxScope = raw;
+  }
+
+  let participate = fallback?.participate ?? true;
+  if (input.participate !== undefined) {
+    if (typeof input.participate !== 'boolean') return fail('PARTICIPATE_NOT_BOOLEAN', '参与派单必须是布尔值');
+    participate = input.participate;
+  }
+
   let enabled = true;
   if (input.enabled !== undefined) {
     if (typeof input.enabled !== 'boolean') return fail('ENABLED_NOT_BOOLEAN', '启用状态必须是布尔值');
@@ -410,9 +528,23 @@ export function sanitizePosition(input: PositionInput): SanitizeResult {
       skills: skills.value,
       rules: rules.value,
       knowledge: knowledge.value,
+      tools: tools.value,
+      mcp: mcp.value,
+      sandboxScope,
+      participate,
       enabled,
     },
   };
+}
+
+/** `undefined` ⇒ 沿用继承值；否则与既有列表同规则校验（整块拒绝，不悄悄截断）。 */
+function inheritList(
+  raw: unknown,
+  label: string,
+  fallback: readonly string[],
+): { ok: true; value: string[] } | { ok: false; code: string; message: string } {
+  if (raw === undefined) return { ok: true, value: [...fallback] };
+  return normalizeList(raw, label);
 }
 
 function parseStringArray(raw: unknown): string[] {
@@ -435,6 +567,10 @@ function rowToPosition(raw: Record<string, unknown>): Position {
     skills: parseStringArray(raw.skills_json),
     rules: parseStringArray(raw.rules_json),
     knowledge: parseStringArray(raw.knowledge_json),
+    tools: parseStringArray(raw.tools_json),
+    mcp: parseStringArray(raw.mcp_json),
+    sandboxScope: isPositionSandboxScope(raw.sandbox_scope) ? raw.sandbox_scope : '',
+    participate: Number(raw.participate ?? 1) !== 0,
     enabled: Number(raw.enabled ?? 1) !== 0,
     builtin: Number(raw.builtin ?? 0) !== 0,
     version: Number(raw.version ?? 1) || 1,
@@ -445,6 +581,9 @@ function rowToPosition(raw: Record<string, unknown>): Position {
 
 function rowToLesson(raw: Record<string, unknown>): PositionLesson {
   const status = isPositionLessonStatus(raw.status) ? raw.status : 'pending';
+  const injectedCount = Number(raw.injected_count ?? 0) || 0;
+  const reusable = Number(raw.reusable ?? 0) === 1;
+  const promotedTo = String(raw.promoted_to ?? '');
   return {
     id: String(raw.id ?? ''),
     positionId: String(raw.position_id ?? ''),
@@ -453,8 +592,8 @@ function rowToLesson(raw: Record<string, unknown>): PositionLesson {
     content: String(raw.content ?? ''),
     status,
     source: String(raw.source ?? ''),
-    reusable: Number(raw.reusable ?? 0) === 1,
-    promotedTo: String(raw.promoted_to ?? ''),
+    reusable,
+    promotedTo,
     promotedAt: String(raw.promoted_at ?? ''),
     origin: String(raw.origin ?? 'local'),
     createdAt: String(raw.created_at ?? ''),
@@ -462,7 +601,63 @@ function rowToLesson(raw: Record<string, unknown>): PositionLesson {
     decidedBy: String(raw.decided_by ?? ''),
     taskTitle: String(raw.task_title ?? ''),
     projectName: String(raw.project_name ?? ''),
+    injectedCount,
+    promoteSuggested: status === 'accepted' && reusable && !promotedTo && injectedCount >= POSITION_PROMOTE_SUGGEST_MIN,
+    crossProjectCount: Number(raw.cross_project_count ?? 0) || 0,
   };
+}
+
+/**
+ * zx_20261115_1 M2：按岗位统计每条经验的**真注入次数**（真源=注入账，不另立计数器）。
+ *
+ * 读不到注入表（老库/夹具未建）⇒ 空表：**不伪造 0，也不因此报错**——页面只是不显示建议标记。
+ */
+function lessonInjectionCounts(db: PositionDb, positionId: string): Map<string, number> {
+  const out = new Map<string, number>();
+  try {
+    const rows = db
+      .prepare(
+        `SELECT substr(i.ref_id, 8) AS lesson_id, COUNT(*) AS n
+           FROM wa_context_injections i
+           JOIN wa_position_lessons l ON i.ref_id = 'lesson:' || l.id
+          WHERE i.source = 'position' AND l.position_id = ?
+          GROUP BY lesson_id`,
+      )
+      .all(positionId) as Array<{ lesson_id?: unknown; n?: unknown }>;
+    for (const r of rows) {
+      const id = String(r.lesson_id ?? '');
+      if (id) out.set(id, Number(r.n ?? 0) || 0);
+    }
+  } catch { /* 注入账不可读 ⇒ 空表 */ }
+  return out;
+}
+
+/**
+ * zx_20261115_1 M3「分」：每条经验被**多少个不同项目**的任务真注入过（唯一读口）。
+ *
+ * 与 `lessonInjectionCounts` 的分界：那个数"多少次"，这个数"跨几个项目"。
+ * 后者才是「岗位以岗位为中心」的可核对证据——同一岗位经验在两个项目的任务里都用上了，
+ * 说明它可迁移；只在一个项目里出现，说明它仍属于那个项目的具体情境。**只读注入账，不另立表。**
+ */
+function lessonCrossProjectCounts(db: PositionDb, positionId: string): Map<string, number> {
+  const out = new Map<string, number>();
+  try {
+    const rows = db
+      .prepare(
+        `SELECT substr(i.ref_id, 8) AS lesson_id, COUNT(DISTINCT t.project_id) AS n
+           FROM wa_context_injections i
+           JOIN wa_position_lessons l ON i.ref_id = 'lesson:' || l.id
+           JOIN wa_tasks t ON t.id = i.task_id
+          WHERE i.source = 'position' AND l.position_id = ?
+          GROUP BY lesson_id`,
+      )
+      .all(positionId) as Array<{ lesson_id?: unknown; n?: unknown }>;
+    for (const r of rows) {
+      const id = String(r.lesson_id ?? '');
+      if (id) out.set(id, Number(r.n ?? 0) || 0);
+    }
+  } catch { /* 注入账/任务表不可读 ⇒ 空表 */ }
+  return out;
 }
 
 /** 列表：内置在前，名称升序；带「绑定项目数」与「待确认经验数」。 */
@@ -528,7 +723,14 @@ export function listPositionLessons(db: PositionDb, positionId: string): Positio
         ORDER BY CASE l.status WHEN 'pending' THEN 0 ELSE 1 END, l.created_at DESC`,
     )
     .all(positionId) as Array<Record<string, unknown>>;
-  return rows.map(rowToLesson);
+  // zx_20261115_1 M2/M3：注入次数与跨项目数都从注入账派生后并入（不写冗余列）。
+  const counts = lessonInjectionCounts(db, positionId);
+  const cross = lessonCrossProjectCounts(db, positionId);
+  return rows.map((r) => rowToLesson({
+    ...r,
+    injected_count: counts.get(String(r.id ?? '')) ?? 0,
+    cross_project_count: cross.get(String(r.id ?? '')) ?? 0,
+  }));
 }
 
 export function getPositionDetail(db: PositionDb, id: string): PositionDetail | null {
@@ -555,11 +757,13 @@ export function createPosition(db: PositionDb, input: PositionInput, nowIso = ne
   try {
     db.prepare(
       `INSERT INTO wa_positions
-         (id, name, category, description, skills_json, rules_json, knowledge_json, enabled, builtin, version, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?)`,
+         (id, name, category, description, skills_json, rules_json, knowledge_json,
+          tools_json, mcp_json, sandbox_scope, participate, enabled, builtin, version, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?)`,
     ).run(
       id, v.name, v.category, v.description,
       JSON.stringify(v.skills), JSON.stringify(v.rules), JSON.stringify(v.knowledge),
+      JSON.stringify(v.tools), JSON.stringify(v.mcp), v.sandboxScope, v.participate ? 1 : 0,
       v.enabled ? 1 : 0, nowIso, nowIso,
     );
   } catch (e) {
@@ -574,18 +778,26 @@ export function createPosition(db: PositionDb, input: PositionInput, nowIso = ne
 export function updatePosition(db: PositionDb, id: string, input: PositionInput, nowIso = new Date().toISOString()): PositionWriteResult {
   const existing = getPosition(db, id);
   if (!existing) return { ok: false, code: 'NOT_FOUND', message: '岗位不存在' };
-  const clean = sanitizePosition(input);
+  // zx_20261115_1 M1：**原值继承**——入参缺哪一项就沿用现有行，绝不因为"这次没带"而抹成空。
+  const clean = sanitizePosition(input, {
+    tools: existing.tools,
+    mcp: existing.mcp,
+    sandboxScope: existing.sandboxScope,
+    participate: existing.participate,
+  });
   if (!clean.ok) return clean;
   const v = clean.value;
   try {
     db.prepare(
       `UPDATE wa_positions
           SET name = ?, category = ?, description = ?, skills_json = ?, rules_json = ?, knowledge_json = ?,
+              tools_json = ?, mcp_json = ?, sandbox_scope = ?, participate = ?,
               enabled = ?, version = version + 1, updated_at = ?
         WHERE id = ?`,
     ).run(
       v.name, v.category, v.description,
       JSON.stringify(v.skills), JSON.stringify(v.rules), JSON.stringify(v.knowledge),
+      JSON.stringify(v.tools), JSON.stringify(v.mcp), v.sandboxScope, v.participate ? 1 : 0,
       v.enabled ? 1 : 0, nowIso, id,
     );
   } catch (e) {
@@ -643,6 +855,30 @@ export function setProjectPositionEnabled(db: PositionDb, projectId: string, pos
  * 本项目**可指派**的岗位：岗位自身启用 ∧ 项目绑定启用。
  * 禁用任一即撤下（历史任务不改，下一轮注入自然为空）。
  */
+/**
+ * zx_20261115_3 M4「传」（道德经「名亦既有，夫亦将知止」）：**项目默认岗位**——只在"恰好一个"时成立。
+ *
+ * 病根（真库）：362 个任务只有 1 个带岗位；岗位能力卡/经验/注入机器都在，但**建单时人不选** ⇒
+ *   缘不起，经验永不现前。默认不是猜：项目绑定里**恰好 1 个启用岗位**是强信号；0 个或 ≥2 个
+ *   一律返回 `null`（宁可没有，也不替用户选一个"看起来最像"的）。
+ *
+ * 复用 `listProjectEnabledPositions`（"能派给谁"的唯一读法）——不另写一份过滤 SQL。
+ * 开关 `position.default_from_project` 由**调用方**判（缺省开）；本函数只回答"默认是谁"。
+ */
+export function defaultPositionForProject(db: PositionDb, projectId: string): { id: string; name: string } | null {
+  // zx_20261115_3 M4 收口修（真标本：8 个 IM/建单回归套件因夹具无岗位表而"创建任务失败"）：
+  //   默认岗位是**加料**，不是建单的必要条件——表缺失/读失败一律当作"没有默认"（null），
+  //   绝不把读不到的岗位表变成"这条任务建不出来"。判据仍只有"恰好一个"那一条。
+  try {
+    const list = listProjectEnabledPositions(db, String(projectId ?? '').trim());
+    if (list.length !== 1) return null;
+    const only = list[0]!;
+    return only.id ? { id: only.id, name: only.name } : null;
+  } catch {
+    return null;
+  }
+}
+
 export function listProjectEnabledPositions(db: PositionDb, projectId: string): Position[] {
   if (!projectId) return [];
   const rows = db
@@ -1112,9 +1348,13 @@ export function selectPositionLessonsForInjection(
   db: PositionDb,
   positionId: string,
   limit = POSITION_BLOCK_ITEMS,
+  query = '',
 ): PositionLesson[] {
   const pid = String(positionId ?? '').trim();
   if (!pid) return [];
+  const text = String(query ?? '').trim();
+  // 无任务文本 ⇒ **逐字节沿用**今日的时间序（旧调用方行为不变；旧断言不动）。
+  const scan = text ? Math.max(limit, POSITION_LESSON_SCAN_MAX) : limit;
   const rows = db
     .prepare(
       `SELECT * FROM wa_position_lessons
@@ -1123,8 +1363,43 @@ export function selectPositionLessonsForInjection(
         ORDER BY COALESCE(decided_at, created_at) DESC
         LIMIT ?`,
     )
-    .all(pid, limit) as Array<Record<string, unknown>>;
-  return rows.map(rowToLesson);
+    .all(pid, scan) as Array<Record<string, unknown>>;
+  const lessons = rows.map(rowToLesson);
+  if (!text) return lessons;
+  // 有文本 ⇒ 按词面相关性稳定排序（同分保持"最近在前"），再截取 `limit`。
+  const scored = lessons
+    .map((l, i) => ({ l, i, s: lessonRelevance(l.content, text) }))
+    .sort((a, b) => b.s - a.s || a.i - b.i)
+    .slice(0, limit)
+    .map((x) => x.l);
+  return scored;
+}
+
+/** 相关性词元：拉丁词（≥2 字符）+ 中日韩**二元组**（单字不成词，避免"的/了"这类噪声满命中）。 */
+function relevanceTokens(raw: string): Set<string> {
+  const s = String(raw ?? '').toLowerCase();
+  const out = new Set<string>();
+  for (const m of s.matchAll(/[a-z0-9_]{2,}/g)) out.add(m[0]);
+  for (const run of s.match(/[㐀-鿿぀-ヿ가-힯]+/g) ?? []) {
+    if (run.length === 1) { out.add(run); continue; }
+    for (let i = 0; i + 1 < run.length; i++) out.add(run.slice(i, i + 2));
+  }
+  return out;
+}
+
+/**
+ * zx_20261115_1 M2「用」：**经验与任务文本的相关性**（纯函数，零 IO、零时钟）。
+ *
+ * 口径：`query` 的词元中有多少出现在 `content` 里（覆盖率 0..1）。任务文本为空 ⇒ 恒 0，
+ * 调用方据此回退时间序——**不把"没算出来"当成"不相关"**。
+ */
+export function lessonRelevance(content: string, query: string): number {
+  const q = relevanceTokens(query);
+  if (q.size === 0) return 0;
+  const c = relevanceTokens(content);
+  let hit = 0;
+  for (const t of q) if (c.has(t)) hit++;
+  return hit / q.size;
 }
 
 /* ── 有界注入与建议打分（纯函数） ────────────────────────────────────────── */
@@ -1301,11 +1576,20 @@ export function sanitizeDispatchPosition(raw: unknown): DispatchPosition | null 
   if (typeof o.name !== 'string' || o.name.trim() === '') return null;
   if (typeof o.version !== 'number' || !Number.isFinite(o.version)) return null;
   if (typeof o.summary !== 'string') return null;
+  // zx_20261115_1 M5：工具白名单过界（形状非法/超限 ⇒ 整键丢弃并**照常收窄**：
+  //   远端宁可只给默认面，也不接受一份读不懂的白名单——"读不懂"不等于"不限制"）。
+  const toolsRaw = Array.isArray(o.tools) ? o.tools : [];
+  const tools = toolsRaw
+    .filter((t): t is string => typeof t === 'string' && t.trim() !== '')
+    .map((t) => t.trim())
+    .filter((t, i, arr) => arr.indexOf(t) === i)
+    .slice(0, POSITION_LIST_MAX);
   return {
     id: o.id,
     name: o.name,
     version: o.version,
     summary: o.summary.slice(0, POSITION_DISPATCH_SUMMARY_MAX),
+    ...(tools.length > 0 ? { tools } : {}),
   };
 }
 
@@ -1367,6 +1651,53 @@ export function resolveTaskPosition(db: PositionDb, projectId: string, positionI
     .prepare('SELECT enabled FROM wa_project_positions WHERE project_id = ? AND position_id = ?')
     .get(proj, pid) as { enabled?: number } | undefined;
   return row && Number(row.enabled) === 1 ? position : null;
+}
+
+export type TaskPositionChange =
+  | { ok: true; changed: boolean; from: string; to: string; projectId: string }
+  | { ok: false; code: 'NOT_FOUND' | 'TASK_TERMINAL' | 'POSITION_NOT_IN_PROJECT'; message: string };
+
+/**
+ * zx_20261115_4 M1「岗」：**补派 / 改派 / 解绑岗位**的唯一判据与写口。
+ *
+ * 病根：岗位此前只能在建单时选一次，选了空就永远补不上（真库 362 单只有 1 单带岗位）。
+ *
+ * 三条约束：
+ *   ① **终态任务拒改**（`completed` / `archived`）——回写历史岗位会让已沉淀经验的来路失真，
+ *      那是账本问题，不是界面问题；
+ *   ② 非空值须过 `resolveTaskPosition`（与 `tasks:create` **同一把尺**，不另写一份）；
+ *   ③ 值未变 ⇒ 不写（`changed:false`）——"点保存"不该刷出一串空改动。
+ *
+ * 写口只改 `position_id`（`updated_at` 由调用方按自己的收口形状补），审计由调用方落。
+ */
+export function applyTaskPositionChange(db: PositionDb, taskId: string, positionId: string): TaskPositionChange {
+  const id = String(taskId ?? '').trim();
+  if (!id) return { ok: false, code: 'NOT_FOUND', message: '任务不存在' };
+  const row = db
+    .prepare('SELECT project_id, status, position_id FROM wa_tasks WHERE id = ?')
+    .get(id) as { project_id?: string | null; status?: string | null; position_id?: string | null } | undefined;
+  if (!row) return { ok: false, code: 'NOT_FOUND', message: '任务不存在' };
+  const status = String(row.status ?? '');
+  if (status === 'completed' || status === 'archived') {
+    return {
+      ok: false,
+      code: 'TASK_TERMINAL',
+      message: '任务已结束（完成/归档）——不能改派岗位：那会改写已沉淀经验的来路',
+    };
+  }
+  const projectId = String(row.project_id ?? '');
+  const current = String(row.position_id ?? '').trim();
+  const wanted = String(positionId ?? '').trim();
+  if (wanted && !resolveTaskPosition(db, projectId, wanted)) {
+    return { ok: false, code: 'POSITION_NOT_IN_PROJECT', message: '该岗位未在本项目启用（或已停用/删除），不能指派' };
+  }
+  if (wanted === current) return { ok: true, changed: false, from: current, to: wanted, projectId };
+  try {
+    db.prepare('UPDATE wa_tasks SET position_id = ? WHERE id = ?').run(wanted, id);
+  } catch (e) {
+    return { ok: false, code: 'NOT_FOUND', message: `岗位写入失败：${(e as Error)?.message || String(e)}` };
+  }
+  return { ok: true, changed: true, from: current, to: wanted, projectId };
 }
 
 /** 任务收口时读任务行：只取沉淀判据需要的列（本模块不拥有 `wa_tasks` 的其他语义）。 */
@@ -1491,9 +1822,25 @@ export function buildPositionLessonCandidate(db: PositionDb, taskId: string): Po
 
 /** 收口写候选：派生后 `INSERT OR IGNORE`（同一任务只一条，人工结论不被覆盖）。 */
 export function generatePositionLessonCandidate(db: PositionDb, taskId: string): boolean {
+  return generatePositionLessonCandidateDetailed(db, taskId).written;
+}
+
+/**
+ * zx_20261115_4 M3「账」：同上，但把**为什么没写**带回来。
+ *
+ * 病根：四条准入任一不开就静默 `false`——用户只看到岗位页"暂无经验候选"，
+ *   永远不知道是**没派岗**、**没验收**还是**验收没过**。说不出的失败等于没发生。
+ *
+ * `written=false` 时 `reason` 是既有拒因词（`not_assigned` / `not_completed` / …），
+ * 由调用方决定要不要告诉人（**带岗位的任务才说**，否则每单都刷一行噪音）。
+ */
+export function generatePositionLessonCandidateDetailed(
+  db: PositionDb,
+  taskId: string,
+): { written: boolean; reason?: string } {
   const built = buildPositionLessonCandidate(db, taskId);
-  if (!built.ok) return false;
-  return insertPositionLessonCandidate(db, {
+  if (!built.ok) return { written: false, reason: built.reason };
+  const inserted = insertPositionLessonCandidate(db, {
     positionId: built.positionId,
     taskId: String(taskId).trim(),
     projectId: built.projectId,
@@ -1501,6 +1848,38 @@ export function generatePositionLessonCandidate(db: PositionDb, taskId: string):
     source: built.source,
     reusable: built.reusable,
   });
+  // `false` = 已有候选（`INSERT OR IGNORE` 命中 UNIQUE）或写入失败——两种都不算"新沉淀"，
+  //   但也不是"没资格沉淀"。用 `already` 区分，免得回执把"早就有了"说成"这单没沉淀"。
+  return inserted ? { written: true } : { written: false, reason: 'already' };
+}
+
+/**
+ * 拒因 → 人话（含下一步）。未知词给保底句——**不硬编一个像理由的理由**。
+ * 文案在 core 一处，GUI/对话/脚本共用同一份，不各自手抄。
+ */
+export function explainNoLesson(reason: string): string {
+  switch (String(reason ?? '')) {
+    case 'not_assigned':
+      return '这单没有指派岗位（在任务详情「岗位」里补派后可重跑收口）';
+    case 'not_completed':
+      return '任务还没完成（未完成没有"做完的经验"）';
+    case 'position_missing':
+      return '原指派的岗位已被删除（经验仍留在岗位库，但不再新增）';
+    case 'remote_assigned':
+      return '这单由他机执行——经验归他机的岗位，不在本机沉淀';
+    case 'remote_position':
+      return '这单是对端岗位交来的——经验归对端岗位，不在本机沉淀';
+    case 'acceptance_not_passed':
+      return '验收没有通过（"跑完了"不等于"做对了"，先补齐验收结论再收口）';
+    case 'no_summary':
+      return '没有可用的完成摘要（收口时留下摘要才能沉淀）';
+    case 'bad_context_json':
+      return '任务上下文损坏（读不出验收与摘要）';
+    case 'already':
+      return '这单早已沉淀过一条候选（同任务只留一条，人工结论不被覆盖）';
+    default:
+      return '未满足岗位经验沉淀的条件';
+  }
 }
 
 /**

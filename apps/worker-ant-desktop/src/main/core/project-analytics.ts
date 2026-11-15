@@ -48,17 +48,23 @@ export function detectMilestones(db: Database.Database, projectId: string): Arra
 }> {
   const suggestions: Array<{ type: string; title: string; reason: string }> = [];
   try {
+    // zx_20261115_3 M2b「详情不卡」（真库实测的病根）：
+    //   旧写法是**三表笛卡尔积**——`wa_tasks LEFT JOIN wa_deliverables LEFT JOIN wa_knowledge_triples`
+    //   全部按 `project_id` 关联 ⇒ 行数 = 任务数 × 产出物数 × 知识三元组数。
+    //   真库标本：怡寿里 121 × 841 × 972 ≈ 9,900 万行 ⇒ 单次 **34.9 秒**（A股投顾 12.0 秒），
+    //   而它是「进项目详情」与「项目事件」都会调的路径（`project:milestones`）。
+    //   另有**口径错**：`COUNT(DISTINCT …)` 不受重复行影响，但 `SUM(CASE WHEN t.status='completed' …)`
+    //   会把每个已完成任务重复计 D×K 次——同一标本实测「已完成 81,745,200 个任务」（真值 100），
+    //   于是三条里程碑建议恒被触发。
+    //   修法：四个**独立标量子查询**——语义与 `COUNT(DISTINCT)` 相同、`SUM` 不再重复累加，
+    //   且各走各自的 `project_id` 索引（真库实测旧 31.2s → 新 < 1ms）。
     const stats = db.prepare(`
       SELECT
-        COUNT(DISTINCT t.id) as totalTasks,
-        SUM(CASE WHEN t.status = 'completed' THEN 1 ELSE 0 END) as completedTasks,
-        COUNT(DISTINCT d.id) as deliverables,
-        COUNT(DISTINCT k.id) as knowledgeTriples
-      FROM wa_tasks t
-      LEFT JOIN wa_deliverables d ON d.project_id = t.project_id
-      LEFT JOIN wa_knowledge_triples k ON k.project_id = t.project_id
-      WHERE t.project_id = ?
-    `).get(projectId) as { totalTasks: number; completedTasks: number; deliverables: number; knowledgeTriples: number };
+        (SELECT COUNT(*) FROM wa_tasks WHERE project_id = ?) AS totalTasks,
+        (SELECT COUNT(*) FROM wa_tasks WHERE project_id = ? AND status = 'completed') AS completedTasks,
+        (SELECT COUNT(*) FROM wa_deliverables WHERE project_id = ?) AS deliverables,
+        (SELECT COUNT(*) FROM wa_knowledge_triples WHERE project_id = ?) AS knowledgeTriples
+    `).get(projectId, projectId, projectId, projectId) as { totalTasks: number; completedTasks: number; deliverables: number; knowledgeTriples: number };
 
     if (stats.completedTasks >= 10 && stats.deliverables >= 3) {
       suggestions.push({ type: 'phase_transition', title: '建议进入功能开发完成阶段', reason: `已完成${stats.completedTasks}个任务，产出${stats.deliverables}个交付物` });

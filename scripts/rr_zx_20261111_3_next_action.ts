@@ -225,13 +225,19 @@ function sectionC(): void {
   const createDecision = { intent: 'create_task', route: 'create', confidence: 'high', reason: '含建单动词——按建单处理（创建）' };
   const startDecision = { intent: 'start_task', route: 'start', confidence: 'high', reason: '以启动词开头——按启动/恢复处理' };
 
-  // ── C1 回执自证：只说"理解成什么 + 凭什么"，且承诺的撤销确实存在 ──
-  const echo = intentEcho(createDecision);
+  // ── C1 回执自证：只说"理解成什么"，且承诺的撤销确实存在 ──
+  // zx_20261115_4 M5「话」：依据从"路由内部的 reason"改为"用户自己的原话"——
+  //   旧断言 C1b 钉的是"含 reason"，而 reason 恰恰是内部术语（「含建单动词——按建单处理（强建单词）」）。
+  //   现**按符号重定向到更强的真源**：必须含原话摘录、且**不得**含内部 reason。
+  const RAW = '帮我把报销单核一下，生成凭证草稿';
+  const echo = intentEcho(createDecision, RAW);
   ok(!!echo && echo.includes('我理解成：建任务'), 'C1a 建单回执带「我理解成：建任务」', echo ?? '(null)');
-  ok(!!echo && echo.includes(createDecision.reason), 'C1b 依据取路由自己的 reason（不另写一份"为什么"）');
+  ok(!!echo && echo.includes(RAW), 'C1b ★回显用户原话（用户核对的是"你听懂我说的了吗"）');
+  ok(!!echo && !echo.includes(createDecision.reason), 'C1b2 ★反证：内部 reason 不上屏（术语还给审计）');
   ok(!!echo && echo.includes('撤销') && echo.includes('10 分钟'), 'C1c 承诺撤销并写明窗口');
-  const startEcho = intentEcho(startDecision);
+  const startEcho = intentEcho(startDecision, '启动周报任务');
   ok(!!startEcho && startEcho.includes('我理解成：启动任务'), 'C1d 启动回执也自证');
+  ok(!!startEcho && !startEcho.includes(startDecision.reason), 'C1d2 启动同样不带内部 reason');
   ok(!!startEcho && !startEcho.includes('撤销'),
     'C1e ★反证：启动不承诺撤销（已经开始跑的事撤回不了，写了就是许诺做不到的事）');
 
@@ -272,8 +278,8 @@ function sectionC(): void {
 
   // ── C6 接线：两处建单调用都带自证；撤销排在别路之前；建单成功即记账 ──
   const router = readSrc(`${A}/src/main/services/im-router.ts`);
-  eq((router.match(/handleCreateTask\(ctx, fromUser, routeText, inboundId, intentEcho\(decision\)\)/g) ?? []).length, 2,
-    'C6a 两条建单调用（规则路 + 模型路）都带自证');
+  eq((router.match(/handleCreateTask\(ctx, fromUser, routeText, inboundId, intentEcho\(decision, routeText\)\)/g) ?? []).length, 2,
+    'C6a 两条建单调用（规则路 + 模型路）都带自证，且都传原话（摘录才有内容）');
   ok(/await handleUndo\(ctx, fromUser, routeText\)/.test(router), 'C6b 撤销已接入主分发');
   ok(router.indexOf('handleUndo(ctx, fromUser, routeText)') < router.indexOf("handleApprovalInbox(ctx, fromUser, routeText"),
     'C6c 撤销排在审批/授权台之前（"刚才那条错了"要能被听见）');

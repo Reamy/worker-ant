@@ -469,6 +469,12 @@ export function nodesRoutes(db: Database.Database) {
             sets.push('card_json = ?');
             args.push(JSON.stringify(body.card));
           }
+          // zx_20261115_1 M4：心跳每跳同步「接不接活」——许可过期/用户关参与后**当拍**生效，
+          //   不再等到重启。不传该键 ⇒ 保持原值（旧客户端零影响）。
+          if (body.participate !== undefined) {
+            sets.push('participate = ?');
+            args.push(body.participate === true ? 1 : 0);
+          }
           args.push(body.node_id);
           const r = db.prepare(`UPDATE ans_nodes SET ${sets.join(', ')} WHERE node_id = ?`).run(...args);
           if (r.changes === 0) throw notFound('Node', body.node_id);
@@ -480,6 +486,7 @@ export function nodesRoutes(db: Database.Database) {
             node_id: t.String(),
             status: t.Optional(t.Any()),
             card: t.Optional(t.Any()),
+            participate: t.Optional(t.Boolean()),
           }),
         },
       )
@@ -740,6 +747,14 @@ export function nodesRoutes(db: Database.Database) {
         if (!groups.includes(`node:${nodeId}`)) {
           throw new AppError(ErrorCode.FORBIDDEN, `Key is not bound to node ${nodeId}`, 403);
         }
+        // zx_20261115_1 M4：关掉「接活」的节点**不再被拉走**。
+        //   此前本路由只认 key 资源组，不复核 participate ⇒ 关闭参与前已 assigned 的单仍会被拉去执行。
+        //   不在这里改写单据状态：派活方的超时/改派（`redispatch`）会把无人认领的件收回，比在拉取口
+        //   私自清账更可回溯（"为什么这单没人做"仍留在台账上）。
+        const partRow = db.prepare('SELECT participate FROM ans_nodes WHERE node_id = ?').get(nodeId) as
+          | { participate?: number }
+          | undefined;
+        if ((partRow?.participate ?? 1) === 0) return { data: [] };
         // 先认领积压的 pending 件（`pending → assigned`），再回本节点的 assigned 件。
         claimPendingForNode(db, nodeId);
         db.prepare(

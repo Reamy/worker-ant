@@ -21,6 +21,8 @@
  */
 import fs from 'node:fs';
 import { goalDeviationCapReached } from './task-accounting.js';
+// zx_20261115_3 M1：产出清单改读「归属 ∪ 贡献」两本账（与任务详情/补登记同一实现）。
+import { listTaskArtifacts } from './task-artifacts.js';
 import type { GoalEvidence } from './acceptance-check.js';
 
 /** 只需 prepare().get()/.all() 的最小库接口（同 settings-bool 范式：可脱 better-sqlite3 跑真实现） */
@@ -278,14 +280,17 @@ export function resolveTaskProducedFile(db: TaskOutcomeDb, taskId: string): Prod
  *   无库/无行 ⇒ `[]`（"没报"≠编一条）。
  */
 export function readDeliveredOutputs(db: TaskOutcomeDb, taskId: string): Array<{ name: string; type: string }> {
+  // zx_20261115_3 M1（维特根斯坦·意义即用法 / 韩非·循名责实）：产出清单 = **归属 ∪ 贡献**。
+  //   旧实现只读 `task_id = ?`——同一文件被第二单重写时，工程级查重按既有行返回且**不夺归属**，
+  //   于是第二单名下 0 行 ⇒ 跨机回执永远停在 `self-reported`（真标本：任务 05341469 的
+  //   `relay-ok.md` 登记在上一单 d9f83411 名下，本单写作账里确有它）。
+  //   现走 `listTaskArtifacts`（同一本账给任务详情/回执/补登记共用）；只计盘上仍在的文件，
+  //   探针与退休件不计（宁少不多）。本模块仍**只读**，不写库、不发事件。
   try {
-    const rows = db.prepare(
-      'SELECT name, type FROM wa_deliverables WHERE task_id = ? ORDER BY created_at ASC',
-    ).all(taskId) as Array<{ name?: unknown; type?: unknown }>;
-    return rows.map((r) => ({
-      name: typeof r.name === 'string' ? r.name : '',
-      type: typeof r.type === 'string' ? r.type : '',
-    }));
+    return listTaskArtifacts(db as unknown as import('better-sqlite3').Database, {
+      taskIds: [taskId],
+      includeMissing: false,
+    }).map((a) => ({ name: a.name, type: a.type }));
   } catch { return []; }
 }
 

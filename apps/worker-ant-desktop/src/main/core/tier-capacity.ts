@@ -72,9 +72,33 @@ export interface CapacityVerdict {
 export const CLOUD_ACCOUNT_MIN_TIER: LicenseTier =
   LICENSE_TIERS.find((t) => TIER_LIMITS[t].maxCloudAccounts > 0) ?? 'pro';
 
-/** 本档是否在该维度可用（仅设备云账号有「最低可用档之前＝不可接入」这一态）。 */
+/**
+ * zx_20261115_1 M8「名实」：某些容量维度**在低档根本到不了**——功能本身归上一档的闸。
+ *
+ * 病根：社区档写「设备登记 5 台 / 外部终端 1 台 / 每项目知识卡 8 张 / 团队共享 200 条」，
+ *   可设备接入归 Pro、外部终端归 Team、知识卡蒸馏归 Pro、团队共享归 Team ⇒ 这四个数字**不可达**，
+ *   于是"5 → 30""1 → 3""8 → 24""200 → 2000"的阶梯全是**装饰**，用户买的是空气。
+ *
+ * 处置：把这些维度的**最低可用档**写在这里（与各闸的真源同档），低档一律显示「需专业版/需团队版」，
+ *   不再显示一个摸不到的数字。上限本身不动（高档内它仍是真的第二层天花板）。
+ */
+export const CAPACITY_MIN_TIER: Partial<Record<TierCapacityField, LicenseTier>> = {
+  maxDevices: 'pro', // 设备发现/接入归 Pro（`devices.*` 回 `PRO_REQUIRED`）
+  maxKnowledgeCardsPerProject: 'pro', // 知识卡蒸馏/候选落卡两跳过 Pro 闸
+  maxExternalTerminals: 'team', // 外部终端批准先过 Team `external_terminal` 闸
+  maxTeamLibraryMemories: 'team', // 团队共享库本身是 Team 能力
+};
+
+/** 本维度在本档的最低可用档（无则 `undefined` = 各档都可达）。 */
+export function capacityMinTier(field: TierCapacityField): LicenseTier | undefined {
+  return CAPACITY_MIN_TIER[field] ?? (field === 'maxCloudAccounts' ? CLOUD_ACCOUNT_MIN_TIER : undefined);
+}
+
+/** 本档是否在该维度可用（最低可用档之前 ⇒ 不可接入/不可用）。 */
 export function capacityAvailable(tier: LicenseTier, field: TierCapacityField): boolean {
-  return !(field === 'maxCloudAccounts' && LICENSE_TIERS.indexOf(tier) < LICENSE_TIERS.indexOf(CLOUD_ACCOUNT_MIN_TIER));
+  const min = capacityMinTier(field);
+  if (!min) return true;
+  return LICENSE_TIERS.indexOf(tier) >= LICENSE_TIERS.indexOf(min);
 }
 
 /**
@@ -82,7 +106,7 @@ export function capacityAvailable(tier: LicenseTier, field: TierCapacityField): 
  * 那格的 `0` 意为「不可接入」（Pro 闸先拦），写成「不限」就是假话。
  */
 export function capacityDisplay(tier: LicenseTier, field: TierCapacityField, unit: string): string {
-  if (!capacityAvailable(tier, field)) return `需${TIER_LABEL[CLOUD_ACCOUNT_MIN_TIER]}`;
+  if (!capacityAvailable(tier, field)) return `需${TIER_LABEL[capacityMinTier(field) ?? CLOUD_ACCOUNT_MIN_TIER]}`;
   const v = capacityLimit(tier, field);
   return v === 0 ? '不限' : `${v} ${unit}`;
 }

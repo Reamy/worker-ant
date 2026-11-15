@@ -985,8 +985,10 @@ async function main(): Promise<void> {
   console.log('\n【R-6】结构化派单载荷 `buildDispatchPayload`');
   {
     const payload = buildDispatchPayload({ id: 't1', title: '实现登录模块', description: '写代码并跑通', acceptanceCriteria: '测试全绿' });
-    eq(Object.keys(payload).sort(), ['acceptance_criteria', 'description', 'prompt', 'title'],
-      'R-6a 载荷**恰四键**（prompt/title/description/acceptance_criteria）');
+    // zx_20261115_2 M3：新增 `origin_task_id`（派活方本地任务 id，回执核对要原样带回）；
+    //   无岗位/无上游时仍是"旧四键 + 这一个真字段"（更强形状）。
+    eq(Object.keys(payload).sort(), ['acceptance_criteria', 'description', 'origin_task_id', 'prompt', 'title'],
+      'R-6a 载荷**恰五键**（旧四键 + origin_task_id）');
     eq(payload.title, '实现登录模块', 'R-6b `title` 原样（不拼接）');
     eq(payload.description, '写代码并跑通', 'R-6c `description` 原样（不拼接）');
     eq(payload.acceptance_criteria, '测试全绿', 'R-6d ★`acceptance_criteria` 原样（判卷读的就是它）');

@@ -16,6 +16,17 @@ export const TASK_TITLE_MAX = 50;
 const MENTION_RE = /@[^\s@，。,\.！!？?：:；;、]+/g;
 
 /**
+ * zx_20261115_4 M4「识」：`项目#名称` ——需求文档 §4.1 原文的写法（`项目#2026年11月报销`）。
+ *
+ * 维特根斯坦·语言游戏：用户有自己的约定，系统的活是**学会听**，不是纠正他改说 `@名称`。
+ * 半角 `#` 与全角 `＃` 都认（中文输入法下全角极常见）。
+ *
+ * ⚠ 只剥 `项目` 前缀形，不把任意 `#话题` 当项目——`#` 在中文里也用于标语/编号，
+ *   一律当项目会把普通句子切坏。
+ */
+export const HASH_PROJECT_RE = /项目[#＃][^\s@，。,\.！!？?：:；;、]+/g;
+
+/**
  * 建任务命令脚手架：`创建任务:` / `新建任务 ` / `帮我做 ` 等。
  *
  * zx_20261112_2 B2：**长词优先 + 量词可选**。旧写法把 `创建一个任务：写周报` 只剥掉「创建」，
@@ -58,6 +69,37 @@ export function findTitleBoundary(text: string): number {
   return -1;
 }
 
+/**
+ * 一条 IM 消息里的"落点标记"：`@名字` / `项目#名字` / 引号内的任务名。
+ *
+ * zx_20261115_4 M4：抽到 core 的**唯一实现**——路由与受控回归跑同一份（不在 router 里内联再测一遍）。
+ * `mentions` 与 `hashProjects` **刻意分开**：`@` 可能指岗位（项目优先、同名不抢），
+ * `项目#` 只可能是项目（用户显式声明）。并成一个数组会让"显式"退化成"猜"。
+ */
+export interface ImTargets {
+  mentions: string[];
+  hashProjects: string[];
+  quoted: string[];
+}
+
+export function parseImTargets(msgText: string): ImTargets {
+  const text = String(msgText ?? '');
+  const mentions: string[] = [];
+  for (const m of text.matchAll(/@([^\s@，。,\.！!？?：:；;、]+)/g)) {
+    const name = m[1]!.trim();
+    if (name.length >= 1 && name.length <= 30) mentions.push(name);
+  }
+  const hashProjects: string[] = [];
+  for (const m of text.matchAll(/项目[#＃]([^\s@，。,\.！!？?：:；;、]+)/g)) {
+    const name = m[1]!.trim();
+    if (name.length >= 1 && name.length <= 30) hashProjects.push(name);
+  }
+  const quoted = (text.match(/[""“”「『]([^""“”「『」』]+)[""“”」』]/g) || [])
+    .map((q) => q.replace(/[""“”「『」』]/g, '').trim())
+    .filter((n) => n.length > 1);
+  return { mentions, hashProjects, quoted };
+}
+
 export interface SplitTaskInput {
   /** 首句，≤ `TASK_TITLE_MAX`。空标题表示用户没给正文。 */
   title: string;
@@ -72,7 +114,8 @@ export interface SplitTaskInput {
  * 未切分时（文本只有一句 / 首字符即句读）整段作标题——**与旧实现同**（旧代码只认 `> 0`）。
  */
 export function splitTaskInput(raw: string): SplitTaskInput {
-  const cleaned = raw.replace(MENTION_RE, '').replace(SCAFFOLD_RE, '').trim();
+  // `项目#名称` 与 `@提及` 一并剥离——两者都是"指定落点"的标记，不属于任务正文。
+  const cleaned = raw.replace(HASH_PROJECT_RE, '').replace(MENTION_RE, '').replace(SCAFFOLD_RE, '').trim();
   let title = cleaned;
   let description = '';
   const boundary = findTitleBoundary(cleaned);

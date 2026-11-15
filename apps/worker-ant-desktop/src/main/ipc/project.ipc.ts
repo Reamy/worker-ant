@@ -16,7 +16,11 @@ import { readExecState } from '../core/exec-state-read.js';
 import { readProgressAt } from '../core/task-progress.js';
 import { abortTaskRun, hasTaskRun } from '../core/task-run-registry.js';
 import { pauseTask } from '../core/pause-task.js';
-import { setDeliverableStatus, retireTaskDeliverables, countDeliverables, countDeliverablesByType, deliverableScopeSql, applyPrimary, emitDeliverableEvent, loadDeliverableRow, otherWriters, isAcceptanceType, annotateAcceptance, verifiedAcceptanceMap, markDeliverableAcceptanceVerified, findDeliverableByPath, createDeliverable, type AcceptanceMeta } from '../core/deliverable-lifecycle.js';
+import { setDeliverableStatus, retireTaskDeliverables, countDeliverables, countDeliverablesByType, deliverableScopeSql, applyPrimary, emitDeliverableEvent, loadDeliverableRow, otherWriters, isAcceptanceType, annotateAcceptance, verifiedAcceptanceMap, markDeliverableAcceptanceVerified, findDeliverableByPath, createDeliverable, promoteTaskFileDeliverables, type AcceptanceMeta } from '../core/deliverable-lifecycle.js';
+// zx_20261115_3 M2「归」：归属/贡献两本账的唯一读口与补登记写口（与引擎收口同源）。
+import { listTaskArtifacts, registerClaimedArtifacts } from '../core/task-artifacts.js';
+// zx_20261115_3 M6「简」：上下文成本账的读侧纯函数（缺键 = 未记录、坏 JSON = 如实报错）。
+import { buildContextLedgerView } from '../core/context-ledger-view.js';
 // zx_20260914 M2-2: 内联图片的白名单与上限取**真源**（零依赖模块，rr 断言读同一份）
 // zx_20260914 M2-2: 图片预览的判定/读取抽在 core（纯函数 + 注入 io），handler 只取行、转壳
 import { resolveImagePreview } from '../core/image-preview.js';
@@ -90,7 +94,9 @@ import { teamFeatureRefusal } from '../core/team-gate.js';
 import { resolveLicenseTier, type LicenseSettingDb } from '../core/license.js';
 import { routeCategoryForTask } from '../core/task-routing.js';
 // zx_20261112_1 B2「任」: 人工收口也沉淀候选经验（与引擎两出口同一判据）。
-import { generatePositionLessonCandidate, resolveTaskPosition } from '../core/positions.js';
+import { applyTaskPositionChange, defaultPositionForProject, generatePositionLessonCandidate, resolveTaskPosition } from '../core/positions.js';
+// zx_20261115_4 M1「岗」：补派/改派岗位要留痕（复用既有审计写口，不新造动词前缀）。
+import { recordAudit } from '../core/audit-log.js';
 // zx_20260921 M7（D4 断点①）: GUI 置子任务终态后**放行父**——复用引擎那四处**同一个**判定（不写第二把尺）。
 //   ⚠ 实现**不内联在本文件**：本文件顶层 import electron，node（受控回归）里 import 不进来 ⇒
 //     内联的薄函数 rr 够不着，只能靠"复刻一份等价物"来测（那正是自我印证）。故抽到 core，两边引同一份。
@@ -127,7 +133,7 @@ import { refusalWithContext, PROJECT_QUOTA_UNLOCK_TIER } from '../core/tier-usag
 // zx_20261101_1 M4「授」：用户自建任务模板受档位容量闸（`maxTaskTemplates`，0=不限）。
 import { capacityRefusal, countTaskTemplates, type CapacityDb } from '../core/tier-capacity.js';
 import { createLogger } from '../core/logger.js';
-import { boolSetting } from '../core/settings-bool.js';
+import { boolSetting, readBoolSetting } from '../core/settings-bool.js';
 // zx_20260930 M8: 随项目/任务删除的级联落墓碑（缘由词表与写入语句形状同出该模块）。
 import { MEM_LIVE_SQL } from '../core/memory-lifecycle.js';
 import { deleteTaskSubtree } from '../core/task-delete.js';
@@ -828,8 +834,57 @@ export function initProjectIpc(db: Database.Database, dataDir: string, memoryGet
             : { id: pid, name: '', enabled: false, missing: true };
         }
       } catch { positionInfo = null; }
+      // zx_20261115_3 M6「简」：上下文成本账——七源分账（`execution_metrics.token_breakdown`）+ 注入账。
+      //   只读派生：七源 token 取引擎落账值（同一把 `estimateTokensFromChars` 尺），
+      //   缺字段如实 `null`（旧任务"未记录" ≠ "0 token"）；解析失败给 `contextLedgerError`，不冒充没有。
+      const { ledger: contextLedger, error: contextLedgerError } = buildContextLedgerView(ctxJson);
+      let injectionSummary: Array<{ source: string; rows: number; tokens: number }> = [];
+      try {
+        injectionSummary = (db.prepare(
+          `SELECT source, COUNT(*) AS rows, COALESCE(SUM(est_tokens), 0) AS tokens
+             FROM wa_context_injections WHERE task_id IN (${ownerIds.map(() => '?').join(',')})
+            GROUP BY source ORDER BY tokens DESC`,
+        ).all(...ownerIds) as Array<{ source?: unknown; rows?: unknown; tokens?: unknown }>).map((r) => ({
+          source: String(r.source ?? ''),
+          rows: Number(r.rows) || 0,
+          tokens: Number(r.tokens) || 0,
+        }));
+      } catch { injectionSummary = []; }
+
+      // zx_20261115_3 M2「归」：归属 / 贡献两栏——本任务树**写过**、但登记不在本树内的文件。
+      //   `deliverables` 已按子树聚合；这里只补"写作账里有、归属在别处或尚无归属"的那部分，
+      //   同一路径不出现两行（归属优先，口径在 `task-artifacts.ts` 一处）。
+      let claimedArtifacts: Array<Record<string, unknown>> = [];
+      let artifactsNote = '';
+      try {
+        const ownerSet = new Set(ownerIds);
+        const allArtifacts = listTaskArtifacts(db, {
+          taskIds: ownerIds,
+          projectId: String((task as Record<string, unknown>).project_id ?? ''),
+          includeMissing: true,
+        });
+        claimedArtifacts = allArtifacts
+          .filter((a) => a.claimed && (!a.ownerTaskId || !ownerSet.has(a.ownerTaskId)))
+          .map((a) => ({
+            path: a.path,
+            name: a.name,
+            ownerTaskId: a.ownerTaskId,
+            claimedByTaskId: a.claimedByTaskId,
+            deliverableId: a.deliverableId,
+            exists: a.exists,
+          }));
+        if (deliverablesTotal === 0 && claimedArtifacts.length > 0) {
+          artifactsNote = `本任务名下没有登记产出；它写过的 ${claimedArtifacts.length} 个文件登记在别处（见「参与产出」）——不是"没有产出"。`;
+        } else if (deliverablesTotal === 0 && claimedArtifacts.length === 0) {
+          artifactsNote = '本任务没有写文件的记录（write_file / edit_file）——不是"读不到"。';
+        }
+      } catch {
+        artifactsNote = '产出对账读取失败——不是"没有产出"，可重试。';
+      }
       return { data: {
         task, conversations, conversationsTotal, deliverables, deliverablesTotal, retrospective, retiredCount,
+        claimedArtifacts, artifactsNote,
+        contextLedger, contextLedgerError, injectionSummary,
         position: positionInfo,
         dispatchDecision,
         execState,
@@ -846,6 +901,28 @@ export function initProjectIpc(db: Database.Database, dataDir: string, memoryGet
         // zx_20261105_1 M6: 被守卫拒绝/失败的命令与判卷引用的是**同一本账**；上限 50 条，
         //   只读回传，不在 IPC 层另做过滤或改写（脱敏已在写口完成）。
         runtimeEvidence: listRuntimeEvidence(db, id, 50),
+      } };
+    } catch (err) {
+      return { error: { code: 'INTERNAL', message: (err as Error).message } };
+    }
+  });
+
+  // zx_20261115_3 M2「归」：把本任务**写作账里的文件**补登记为产出物（人工一键；引擎收口会自动做）。
+  //   归属不夺：工程内已有登记行的文件跳过并如实回理由；上限 20；幂等（再点一次 created=0）。
+  ipcMain.handle('task:backfill-artifacts', async (_event, { id }: { id: string }) => {
+    try {
+      const row = db.prepare('SELECT id, project_id, status FROM wa_tasks WHERE id = ?').get(id) as
+        { id: string; project_id?: string | null; status?: string | null } | undefined;
+      if (!row) return { error: { code: 'NOT_FOUND', message: '任务不存在' } };
+      const r = registerClaimedArtifacts(db, { taskId: id, projectId: String(row.project_id ?? ''), via: 'manual_backfill' });
+      // 已完成任务补登记后立即归位：新行创建时是 draft，不提升就会永久草稿（与 zx_20261110_2 B8 同一条纪律）。
+      if (String(row.status ?? '') === 'completed' && r.created > 0) {
+        try { promoteTaskFileDeliverables(db, id, 'manual_backfill'); } catch { /* 归位 best-effort */ }
+      }
+      return { data: {
+        created: r.created,
+        skipped: r.skipped.map((s) => ({ path: s.path ? path.basename(s.path) : '', reason: s.reason })),
+        ids: r.ids,
       } };
     } catch (err) {
       return { error: { code: 'INTERNAL', message: (err as Error).message } };
@@ -932,8 +1009,10 @@ export function initProjectIpc(db: Database.Database, dataDir: string, memoryGet
     }
   });
 
-  ipcMain.handle('task:create', async (_event, { projectId, title, description, priority, acceptance_criteria, parent_task_id, plan_task_id, client_request_id, attachment_paths, positionId }: {
-    projectId: string; title: string; description?: string; priority?: number; acceptance_criteria?: string; parent_task_id?: string; plan_task_id?: string; client_request_id?: string; attachment_paths?: string[]; positionId?: string
+  ipcMain.handle('task:create', async (_event, { projectId, title, description, priority, acceptance_criteria, parent_task_id, plan_task_id, client_request_id, attachment_paths, positionId, position_explicit }: {
+    projectId: string; title: string; description?: string; priority?: number; acceptance_criteria?: string; parent_task_id?: string; plan_task_id?: string; client_request_id?: string; attachment_paths?: string[]; positionId?: string;
+    /** zx_20261115_3 M4：true = 用户**显式**做过岗位选择（含"不指派"）⇒ 不做默认；undefined = 未选过。 */
+    position_explicit?: boolean
   }) => {
     try {
       // zx_20260914 M0.6(老子·为之于未有 / 康德·范畴穷尽): **一次点击只该建一个任务**。
@@ -961,7 +1040,16 @@ export function initProjectIpc(db: Database.Database, dataDir: string, memoryGet
       }
       // zx_20261112_1 B2「任」: 指派岗位须**先验再插**（与父任务校验同一纪律）——
       //   岗位停用 / 项目未绑定 / 岗位已删一律拒绝，绝不"插了再说"落一条名不副实的指派。
-      const wantedPositionId = String(positionId ?? '').trim();
+      // zx_20261115_3 M4「传」：显式选择（含"不指派"）优先；**未显式**且项目恰好一个启用岗位 ⇒ 默认指派。
+      //   默认不是猜：`defaultPositionForProject` 只在"恰好一个"时返回，0/≥2 一律不默认；回执明示可改。
+      let wantedPositionId = String(positionId ?? '').trim();
+      //   注：这里刻意**不写类型标注**——`rr_zx_20260914_1` 会把本窗口（算键→查→插）就地取出执行，
+      //   窗口内出现 TS-only 语法（`: { id: string } | null`）会让 `new Function` 直接语法错。
+      const positionDefaulted = !wantedPositionId && position_explicit !== true
+        && readBoolSetting(db, 'position.default_from_project')
+        ? defaultPositionForProject(db, projectId)
+        : null;
+      if (positionDefaulted) wantedPositionId = positionDefaulted.id;
       if (wantedPositionId && !resolveTaskPosition(db, projectId, wantedPositionId)) {
         return { error: { code: 'BAD_REQUEST', message: '该岗位未在本项目启用（或已停用/删除），不能指派' } };
       }
@@ -1142,6 +1230,8 @@ export function initProjectIpc(db: Database.Database, dataDir: string, memoryGet
         // 批三：外派结局（机器可读理由在 `reason`；`attempted=false` 即压根没触网）。
         task.dispatch = dispatchOutcome;
         task.suggestedCriteria = suggestedCriteria;
+        // zx_20261115_3 M4：默认岗位如实回执（界面据此显示「已按项目默认岗位 X 指派（可改）」）。
+        if (positionDefaulted) task.position_defaulted = positionDefaulted;
       }
       return { data: task };
     } catch (err) {
@@ -2362,8 +2452,10 @@ export function initProjectIpc(db: Database.Database, dataDir: string, memoryGet
   });
 
   // 任务编辑
-  ipcMain.handle('task:update', async (_event, { id, title, description, priority, acceptance_criteria, depends_on }: {
-    id: string; title?: string; description?: string; priority?: number; acceptance_criteria?: string; depends_on?: string
+  ipcMain.handle('task:update', async (_event, { id, title, description, priority, acceptance_criteria, depends_on, positionId }: {
+    id: string; title?: string; description?: string; priority?: number; acceptance_criteria?: string; depends_on?: string;
+    /** zx_20261115_4 M1「岗」：补派 / 改派 / 解绑（`''` = 解绑）。`undefined` = 不动。 */
+    positionId?: string;
   }) => {
     try {
       const sets: string[] = [];
@@ -2399,10 +2491,35 @@ export function initProjectIpc(db: Database.Database, dataDir: string, memoryGet
           );
         }
       }
-      if (sets.length === 0) return { error: { code: 'BAD_REQUEST', message: '无有效字段' } };
+      // zx_20261115_4 M1「岗」：**补派 / 改派 / 解绑**岗位（`''` = 解绑）。
+      //   病根：此前只能建单时选一次，选了空就永远补不上——真库 362 单只有 1 单带岗位。
+      //   三条约束：① 终态（completed/archived）**拒改**——回写历史岗位会让已沉淀经验的来路失真；
+      //   ② 非空须过 `resolveTaskPosition`（与 `tasks:create` **同一把尺**，不另写一份判据）；
+      //   ③ 值未变 ⇒ 不写、不落审计（"点保存"不该刷出一串空改动）。
+      //   判据与写口**只在 core 一处**（`applyTaskPositionChange`）——rr 能直跑真实现，
+      //   不在 IPC 里再内联一份"界面宽松版"。
+      let positionChange: { from: string; to: string; projectId: string } | null = null;
+      if (positionId !== undefined) {
+        const r = applyTaskPositionChange(db, id, positionId);
+        if (!r.ok) {
+          return { error: { code: r.code === 'NOT_FOUND' ? 'NOT_FOUND' : 'BAD_REQUEST', message: r.message } };
+        }
+        if (r.changed) positionChange = { from: r.from, to: r.to, projectId: r.projectId };
+      }
+      if (sets.length === 0 && !positionChange) return { error: { code: 'BAD_REQUEST', message: '无有效字段' } };
       sets.push("updated_at = datetime('now')");
       params.push(id);
       db.prepare(`UPDATE wa_tasks SET ${sets.join(', ')} WHERE id = ?`).run(...params);
+      if (positionChange) {
+        // 审计写失败不改变主动作结局（`recordAudit` 永不抛）——与 `positions.ipc.ts` 同一纪律。
+        recordAudit(db, {
+          actorKind: 'local',
+          action: positionChange.to ? 'position.task_assign' : 'position.task_unassign',
+          targetType: 'task',
+          targetId: id,
+          detail: { from: positionChange.from, to: positionChange.to, projectId: positionChange.projectId },
+        });
+      }
       const data = db.prepare('SELECT * FROM wa_tasks WHERE id = ?').get(id);
       return { data };
     } catch (err) {

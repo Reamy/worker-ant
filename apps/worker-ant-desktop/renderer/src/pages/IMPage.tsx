@@ -24,7 +24,7 @@ interface Channel { id: string; channel_type: string; name: string; config: stri
 // zx_20260912 M2-4: seq = 会话行 rowid（main 侧 `SELECT rowid AS seq`）——分页游标与稳定次序同一把尺。
 // zx_20260913 M1-4: status/last_error/outbox_id —— 出站送达态写在事本身的行上（未送达也到场）。
 // zx_20261108_1 B3: 入站行多三列——「理解结果」（intent/route）与一句路由理由，供界面核对。
-interface Conversation { id: string; seq: number; external_user_id: string; message_json: string; direction: string; created_at: string; status?: string; last_error?: string; outbox_id?: string; task_id?: string; task_title?: string; intent?: string; route?: string; route_reason?: string; }
+interface Conversation { id: string; seq: number; external_user_id: string; message_json: string; direction: string; created_at: string; status?: string; last_error?: string; outbox_id?: string; task_id?: string; task_title?: string; intent?: string; route?: string; route_reason?: string; /** zx_20261115_1 M7：来自规则/模型的置信度（此前只写不读）。 */ intent_confidence?: string; }
 /** B3: 意图/路由的词只作**展示投影**——判定真源在 main `core/im-intent.ts`，此处不另写规则。 */
 const INTENT_LABEL: Record<string, string> = {
   start_task: '启动', create_task: '建任务', query_status: '查询', general_chat: '闲聊', ambiguous: '待澄清',
@@ -40,7 +40,11 @@ const ROUTE_LABEL: Record<string, string> = {
   help: '帮助', query: '查询', start: '启动', create: '建单', greeting: '问候', llm: '模型判定',
   ambiguous: '待澄清', group_gate: '群聊拒绝', group_silent: '群聊静默', preference: '偏好记忆',
   selection: '编号选择', terminal_pair: '终端配对', approval: '审批', agent_reply: '代理回复', command: '项目指令',
+  // zx_20261115_1 M7：确认分支此前缺词 → 屏上直接显示英文 raw key。
+  confirmation: '待确认',
 };
+/** zx_20261115_1 M7：置信度**上屏**（此前 `intent_confidence` 只写不读，用户看不到"这只是模型猜的"）。 */
+const CONFIDENCE_LABEL: Record<string, string> = { high: '置信高', medium: '置信中', low: '置信低' };
 /** zx_20260930 M2: `message_json` 里的正文（认不出就是空串）——用来判"刚按下发送的那一行，
  *  是不是**真的**已经在服务端返回的这一屏里"。手发的两条路写进库的都是这一串：手发文字＝用户原文，
  *  手发件＝`📎 件名`（失败行由 `im-outbox.entryPreview` 写同一串，故成/败两支同一把尺）。 */
@@ -934,6 +938,7 @@ export default function IMPage() {
    上次失败的原因移进 title，屏上不啰嗦。 */const busy=convBusyOf(c,{resending,retryingOutbox:outboxBusy});const dv=convDeliveryOf(c,busy);return (<div key={c.id} className={`p-2 rounded text-sm ${c.direction==='inbound'?'bg-blue-50':'bg-gray-50'}`}><div className="flex items-center justify-between mb-0.5"><p className="text-xs text-gray-400">{c.direction==='inbound'?'← 收到':'→ 发送'} · <span title={c.external_user_id?`用户：${c.external_user_id}`:''}>{userLabel(c.external_user_id)}</span> · {formatDbTime(c.created_at)}{/* zx_20261108_1 B3(维特根斯坦·意义即使用): 入站「理解结果」徽标 + 一句路由理由——
    用户能看到这条被当成什么、为什么；理由取库内 `route_reason`（main 一处判定），界面不重算规则。 */}
 {c.direction==='inbound'&&c.intent&&<span className={`ml-1 px-1 rounded ${INTENT_TONE[c.intent]||'bg-gray-200 text-gray-600'}`} title={c.route_reason||`路由：${ROUTE_LABEL[c.route||'']||c.route||'未记录'}`}>{INTENT_LABEL[c.intent]||c.intent}</span>}
+{c.direction==='inbound'&&c.intent_confidence&&c.intent_confidence!=='high'&&<span className={`ml-1 px-1 rounded ${c.intent_confidence==='medium'?'bg-amber-100 text-amber-700':'bg-red-100 text-red-700'}`} title="这是按规则/模型判出的置信度；中/低置信时工蚁会先追问确认再执行">{CONFIDENCE_LABEL[c.intent_confidence]||c.intent_confidence}</span>}
 {c.direction==='inbound'&&c.route_reason&&<span className="ml-1 text-gray-400" title={`路由：${ROUTE_LABEL[c.route||'']||c.route||'未记录'}`}>{c.route_reason}</span>}{dv&&<span className={DELIVERY_TONE_CLS[dv.tone]} title={dv.reason?`上次失败：${dv.reason}`:undefined}> · {dv.label}</span>}{/* zx_20260930 M2-c(维特根斯坦·意义即使用 / 一实一名): 「这句属于哪个任务」的小标牌。
    只在 main **真标了** `task_id` 的行上出现——空串=无归属，界面上就什么都不说（**不替它编一个**）；
    任务名取不到（已删/查无）时正文只说"属于任务"，完整 id 退进 title，不拿 id 冒充标题。

@@ -309,9 +309,14 @@ export interface StartHeartbeatOpts {
 export function makeAnsHeartbeatSend(db: NodeSettingDb): HeartbeatSend {
   const credsDb = db as unknown as AnsSettingDb;
   return async (nodeId, status, card) => {
+    // zx_20261115_1 M4：**每跳带上"接不接活"**。此前只有启动对账与用户手改才 PATCH 到 ANS，
+    //   许可过期/自动关参与后要等到重启才生效——期间仍会被派单（真空档）。
+    //   读不到（异常）⇒ 不传该键，让 ANS 保持原值，**不冒名替用户关**。
+    let participate: boolean | undefined;
+    try { participate = effectiveNodeParticipate(db); } catch { participate = undefined; }
     const r = await ansSignedRequest(resolveAnsCreds(credsDb), '/api/v1/nodes/heartbeat', {
       method: 'POST',
-      body: { node_id: nodeId, status, card },
+      body: participate === undefined ? { node_id: nodeId, status, card } : { node_id: nodeId, status, card, participate },
     });
     return r.ok ? { ok: true, note: '' } : { ok: false, note: ansFailureNote(r) };
   };
@@ -392,6 +397,18 @@ export interface EnrollOpts {
 export function effectiveNodeParticipate(db: NodeSettingDb, opts: ResolveLicenseOpts = {}): boolean {
   if (!resolveTeamGate(db, opts).unlocked) return false;
   return readNodeSetting(db, NODE_SETTING_KEYS.participate) !== '0';
+}
+
+/**
+ * zx_20261115_1 M4：**本机能不能把活派出去**（与"接不接"分开判的唯一真源）。
+ *
+ * 与 `effectiveNodeParticipate` 的分界：那个是"接"（还要过 Team 闸，因为收活要 ANS 中转）；
+ * 这个是"派"——用户关掉它就只在本机跑。**缺省 = 允许**（存量行为零变化）。
+ * 同样受 Team 闸约束：没有多机协同能力时本就派不出去。
+ */
+export function effectiveNodeParticipateOut(db: NodeSettingDb, opts: ResolveLicenseOpts = {}): boolean {
+  if (!resolveTeamGate(db, opts).unlocked) return false;
+  return readNodeSetting(db, NODE_SETTING_KEYS.participateOut) !== '0';
 }
 
 export interface EnrollResult {

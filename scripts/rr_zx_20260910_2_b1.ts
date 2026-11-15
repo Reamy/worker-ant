@@ -298,8 +298,10 @@ ok(
   // zx_20261106_1 M3 收窄再钉：ctx 现经 `withAcceptanceSource(...)` 包一层落判据来源，
   //   故 INSIDE 允许该包装，但 `buildChildContext(parentCtx, childDepth)` 仍是那个表达式的实参
   //   （不是被换掉的真源），且包装的第二个实参由判据有无派生——两半仍绑在同一句 INSERT 上。
-  /INSERT INTO wa_tasks \(id, project_id, title, description, status, priority, parent_task_id, depends_on, source, acceptance_criteria, context_json\) VALUES \(\?, \?, \?, \?, \?, \?, \?, \?, 'agent', \?, \?\)"\s*\)\s*\.run\([\s\S]{0,900}?JSON\.stringify\(withAcceptanceSource\(buildChildContext\(parentCtx, childDepth\), acceptanceText \? 'model' : 'missing'\)\)\)/.test(exe),
-  'create_task 用 buildChildContext 落子任务 ctx(子任务继承 scheme_ref)，并经 withAcceptanceSource 落判据来源',
+  // zx_20261115_2 M2：INSERT 增 `position_id` 列、`.run` 尾增 `parentPositionId`——按更强的新形状钉
+  //   （既仍钉 buildChildContext/withAcceptanceSource，也钉岗位随树继承；不是放宽）。
+  /INSERT INTO wa_tasks \(id, project_id, title, description, status, priority, parent_task_id, depends_on, source, acceptance_criteria, context_json, position_id\) VALUES \(\?, \?, \?, \?, \?, \?, \?, \?, 'agent', \?, \?, \?\)"\s*\)\s*\.run\([\s\S]{0,900}?JSON\.stringify\(withAcceptanceSource\(buildChildContext\(parentCtx, childDepth\), acceptanceText \? 'model' : 'missing'\)\), parentPositionId\)/.test(exe),
+  'create_task 用 buildChildContext 落子任务 ctx(子任务继承 scheme_ref 与岗位)，并经 withAcceptanceSource 落判据来源',
 );
 ok(
   /const ownerTaskId = milestoneBoardOwner\(bctx\) \?\? taskId;/.test(exe),

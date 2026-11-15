@@ -36,6 +36,7 @@ import { noInteractionAskRefusal } from '../no-interaction.js';
 // zx_20261011_1 M4（双向澄清）: 中继任务（派来的活）的提问器——先问上游（有界等待），答不到才退回 M11 自决。
 import { answerOf, getRequestAsker, requestIdOf } from '../node-clarify.js';
 import { resolveTaskMilestoneLink, writeMilestoneDone, revertMilestoneDoneForTask, selfCompleteBan, buildChildContext, resolveAncestorSchemeRef, goalDeviationCapReached, MAX_CHILD_BREADTH, MAX_TASK_DEPTH, childBreadthRefusal, collectAncestorIds, collectSubtreeIds } from '../task-accounting.js';
+import { relayTreeRefusal } from '../relay-tree.js';
 import { truncationNote } from '../shell-exec.js';
 import { makeAnsDecomposeDeps, autoDecomposeForTask, loadDecompositionPatterns, recordInferredDeps, withAcceptanceSource, acceptanceSourcesNotice } from '../task-decompose.js';
 // zx_20260921 M7（D4 断点③）: 判"前置是否指向自己的祖先"要解析 id 串——用**既有真源**，不在此手抄 split/trim
@@ -201,9 +202,14 @@ export function controlTools(deps: ToolDeps) {
       }),
       execute: async (args: { title: string; description: string; priority?: number; depends_on?: string; acceptance_criteria?: string }) => {
         // 深度限制：子任务深度=父任务深度+1
-        const parentCtx = JSON.parse((db.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get(taskId) as { context_json: string })?.context_json || '{}');
+        const parentRow = db.prepare('SELECT context_json, position_id FROM wa_tasks WHERE id = ?').get(taskId) as { context_json?: string | null; position_id?: string | null } | undefined;
+        const parentCtx = JSON.parse(parentRow?.context_json || '{}') as Record<string, unknown>;
+        const parentPositionId = typeof parentRow?.position_id === 'string' ? parentRow.position_id : '';
         const childDepth = (parentCtx.depth as number || 0) + 1;
         if (childDepth > MAX_TASK_DEPTH) return JSON.stringify({ error: `已达最大嵌套深度(${MAX_TASK_DEPTH}层)，请直接完成而非创建子任务。当前深度=${childDepth - 1}` });
+        // zx_20261115_2 M1：中继派单的任务树另有相对深度/总任务数/总时窗三道界（与全局 MAX_TASK_DEPTH 两把尺）。
+        const treeRefusal = relayTreeRefusal(db, parentCtx, childDepth);
+        if (treeRefusal) return JSON.stringify({ error: treeRefusal });
         // 广度限制：只数**在途**（zx_20260916_3 M1，真源在 task-accounting.countActiveChildren）——
         // 旧写法 `COUNT(*)` 不筛 status，已终态的子任务永久占位（真库 9/9 父任务如此）。
         const breadthRefusal = childBreadthRefusal(db, taskId);
@@ -241,8 +247,8 @@ export function controlTools(deps: ToolDeps) {
         //   不自动派生（派生是自动拆解路的兜底，不该替显式调用方做主）。
         const acceptanceText = (args.acceptance_criteria || '').trim();
         db.prepare(
-          "INSERT INTO wa_tasks (id, project_id, title, description, status, priority, parent_task_id, depends_on, source, acceptance_criteria, context_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'agent', ?, ?)"
-        ).run(id, projectId, args.title, args.description, status, args.priority ?? 0, taskId, args.depends_on || '', acceptanceText, JSON.stringify(withAcceptanceSource(buildChildContext(parentCtx, childDepth), acceptanceText ? 'model' : 'missing')));
+          "INSERT INTO wa_tasks (id, project_id, title, description, status, priority, parent_task_id, depends_on, source, acceptance_criteria, context_json, position_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'agent', ?, ?, ?)"
+        ).run(id, projectId, args.title, args.description, status, args.priority ?? 0, taskId, args.depends_on || '', acceptanceText, JSON.stringify(withAcceptanceSource(buildChildContext(parentCtx, childDepth), acceptanceText ? 'model' : 'missing')), parentPositionId);
         // zx_20261105_1 M7（王阳明·知行合一 / 道德经·知不知）: 无用户判据时登记**文本有据**的候选，
         //   供人在任务详情「采用」。候选不是许诺——不写 `acceptance_criteria`、不改判卷语义。
         const suggestedCriteria = (args.acceptance_criteria || '').trim()

@@ -36,6 +36,14 @@ export const NODE_SETTING_KEYS = {
   weight: 'node.weight',
   participate: 'node.participate',
   /**
+   * zx_20261115_1 M4：**派出去**的独立开关（`'0'` = 不把活派给别的工蚁；缺省 = 允许）。
+   *
+   * 为什么不复用 `node.participate`：那个的语义是"**接**不接活"，一个开关管两个方向会让
+   * "我不想接别人的活"被迫等于"我不能用自己的活求人"——两件事用户会分别决定。
+   * 缺省允许 ⇒ 存量用户行为零变化（此前本来就只管接）。
+   */
+  participateOut: 'node.participate_out',
+  /**
    * zx_20261112_2 B1：`participate='0'` 是**谁**关的——`'license'`（许可锁替用户关）或 `'user'`（用户手关）。
    * 许可恢复时只自动恢复 `'license'` 的那种；用户手关的永不覆盖。空/未知按"用户意志"处理（不自动改）。
    */
