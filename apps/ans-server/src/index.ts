@@ -203,7 +203,11 @@ const app = new Elysia({ adapter: node() })
     const apiKey = request.headers.get('x-api-key');
     const ip = request.headers.get('x-forwarded-for') ?? '127.0.0.1';
     let pathname = '/';
-    try { pathname = new URL(request.url).pathname; } catch { pathname = String(request.url || '/'); }
+    try {
+      pathname = new URL(request.url).pathname;
+    } catch {
+      pathname = String(request.url || '/');
+    }
     const cls = rateLimitClassOf(pathname);
     rateLimiters[cls].check(apiKey ?? ip);
     return {};

@@ -22,8 +22,15 @@ export type RateLimitClass = 'billing' | 'model' | 'mgmt' | 'a2a' | 'default';
 export function rateLimitClassOf(pathname: string): RateLimitClass {
   const p = String(pathname || '/');
   if (p.startsWith('/api/v1/billing')) return 'billing';
-  if (p.startsWith('/api/v1/models') || p.startsWith('/api/v1/gateway') || p.startsWith('/api/v1/optimal')) return 'model';
-  if (p.startsWith('/api/v1/a2a') || p.startsWith('/api/v1/mcp') || p.startsWith('/mcp') || p.startsWith('/.well-known/agent.json')) return 'a2a';
+  if (p.startsWith('/api/v1/models') || p.startsWith('/api/v1/gateway') || p.startsWith('/api/v1/optimal'))
+    return 'model';
+  if (
+    p.startsWith('/api/v1/a2a') ||
+    p.startsWith('/api/v1/mcp') ||
+    p.startsWith('/mcp') ||
+    p.startsWith('/.well-known/agent.json')
+  )
+    return 'a2a';
   if (p.startsWith('/api/v1/')) return 'mgmt';
   return 'default';
 }

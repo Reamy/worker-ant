@@ -101,7 +101,9 @@ async function runHealthChecks(db: Database.Database): Promise<void> {
   // A2A服务器检查
   // zx_20261116_3 M6「轻」：disabled 服务不再每轮探测（真标本：三条 19999/19990/19952 已 disabled，
   //   仍每 5 分钟打 3 条 WARN fetch failed）。A2A 段单独过滤，MCP 段不动。
-  const a2aServers = db.prepare("SELECT id, name, agent_card_url, status FROM ans_a2a_servers WHERE status <> 'disabled'").all() as Array<{
+  const a2aServers = db
+    .prepare("SELECT id, name, agent_card_url, status FROM ans_a2a_servers WHERE status <> 'disabled'")
+    .all() as Array<{
     id: string;
     name: string;
     agent_card_url: string;
