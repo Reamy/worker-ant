@@ -26,12 +26,23 @@ import type { AppliedDomainPack } from './domain-pack.js';
 // zx_20261022_3 批八: 项目画像的**消费侧读口**（薄委托）；解析/校验只在 `project-profile.ts` 一处。
 import { readProjectProfile } from './project-profile.js';
 import type { StoredProjectProfile } from './project-profile.js';
+// zx_20261121_1 M1/M2：项目技能的唯一真源（独立表 + 项目作用域注册）。
+//   本类只做薄委托，不再把带 project_id 的行注册进全局表。
+import {
+  approveProjectSkillCompat,
+  listProjectSkillDraftsCompat,
+  loadSkillsFromDbCompat,
+  rejectProjectSkillCompat,
+  storeProjectSkillDraftCompat,
+} from './project-skills.js';
+// zx_20261121_1 M6：项目经验段的轻量派生与开关（注入侧只读，不据此改预算）。
+import { deriveExperienceBrief, type ProjectExperienceBrief } from './project-experience.js';
+import { boolSetting } from './settings-bool.js';
 // zx_20261023_5 批二: 知识蒸馏卡的**消费侧读口**（薄委托）；Pro 闸与选卡算法只在 `knowledge-cards.ts` 一处。
 import { cardOutcomeStats, listActiveKnowledgeCards, KNOWLEDGE_CARD_FEATURE } from './knowledge-cards.js';
 import type { CardOutcomeStat, KnowledgeCard } from './knowledge-cards.js';
 import { proFeatureRefusal } from './pro-gate.js';
 // zx_20261029_1「知」: 预读带一句项目须知概述（读不到就照旧，不因缺须知而少预读）。
-import { loadProjectBrief } from './project-brief.js';
 // zx_20260930 M5: 复盘的**提示词**由 `memory-write.ts` 的纯函数定（按终态分叉 + 无事实则不编），
 //   本文件不再就地拼一段"只认成功"的提示词。类型 `FailureRecord` 亦取自那里。
 import { buildTaskReviewPrompt, failureAnchors, isAttributable } from './memory-write.js';
@@ -40,10 +51,10 @@ import { auxModelRequest } from './model-request.js';
 // zx_20261021_4 批二：理解预读的提示词构造搬进 `core/memory-prelude.ts`（纯函数、零依赖——
 //   本文件的读表与调用保留，拼装只此一份）。
 import { buildPreludePrompt } from './memory-prelude.js';
-import type { PreludeProjectContext } from './memory-prelude.js';
 // zx_20261012_3 批二（「算得真」）：字÷4 的分度走**一处真源**（core/token-estimate.ts），不各写一份。
 import { estimateTokensFromChars } from './token-estimate.js';
 import { INJECTION_SOURCE } from './injection-sources.js';
+import { preludeProjectContext } from './exec-task-dir.js';
 // zx_20260930 M6: **时间基准的四个常数与两把派生尺**收进 `core/memory-decay.ts` 一处真源
 //   （本轮之前它们散在本文件里当裸字面量：14 / 21 / 30 / 0.1）。
 import { dbTimeMs } from './memory-decay.js';
@@ -857,7 +868,7 @@ export class MemoryManager {
    * **唯一键 `(task_id, source, ref_id)` + `INSERT OR IGNORE`**：resume/多次装配重复注入只留一行（R-62）。
    * 返回**新写入**行数（0→1 的正面计数即由此可断言）。
    */
-  recordContextInjections(taskId: string, input: { knowledge?: Array<{ ref_id: string; chars: number }>; memoryIds?: string[]; domainPacks?: Array<{ ref_id: string; chars: number }>; profiles?: Array<{ ref_id: string; chars: number }>; cards?: Array<{ ref_id: string; chars: number }>; positions?: Array<{ ref_id: string; chars: number }> }): number {
+  recordContextInjections(taskId: string, input: { knowledge?: Array<{ ref_id: string; chars: number }>; memoryIds?: string[]; domainPacks?: Array<{ ref_id: string; chars: number }>; profiles?: Array<{ ref_id: string; chars: number }>; cards?: Array<{ ref_id: string; chars: number }>; positions?: Array<{ ref_id: string; chars: number }>; experiences?: Array<{ ref_id: string; chars: number }> }): number {
     const ins = this.db.prepare(
       `INSERT OR IGNORE INTO wa_context_injections (id, task_id, source, ref_id, chars, est_tokens, outcome)
        VALUES (?, ?, ?, ?, ?, ?, 'pending')`,
@@ -887,6 +898,11 @@ export class MemoryManager {
     for (const k of input.positions ?? []) {
       const chars = Math.max(0, Math.floor(k.chars));
       written += ins.run(randomUUID(), taskId, INJECTION_SOURCE.position, k.ref_id, chars, estimateTokensFromChars(chars)).changes;
+    }
+    // zx_20261121_1 M6：项目经验段一段一行（`ref_id` = `experience:<hash12>`）。
+    for (const k of input.experiences ?? []) {
+      const chars = Math.max(0, Math.floor(k.chars));
+      written += ins.run(randomUUID(), taskId, INJECTION_SOURCE.projectExperience, k.ref_id, chars, estimateTokensFromChars(chars)).changes;
     }
     for (const id of input.memoryIds ?? []) {
       let chars = 0;
@@ -1784,77 +1800,44 @@ export class MemoryManager {
     } catch { return null; }
   }
 
-  /** 存储技能草案到 wa_skills(status='draft')。同名（任意状态）已存在则返回已有 id，避免 wa_skills.name 唯一约束冲突。 */
+  /** 存储项目技能草案（实现与迁移在 `project-skills.ts`；本类只留一跳）。 */
   storeSkillDraft(projectId: string, skill: { name: string; description: string; steps: string[] }): string {
-    // name 为全局 UNIQUE，去重须按 name 全查（不限 status），否则同名已 approved/rejected 时 INSERT 抛 UNIQUE 异常
-    const existing = this.db.prepare(
-      "SELECT id FROM wa_skills WHERE name = ?",
-    ).get(skill.name) as { id: string } | undefined;
-    if (existing) return existing.id;
-    const id = randomUUID();
-    this.db.prepare(
-      "INSERT INTO wa_skills (id, name, description, category, config, status, project_id, updated_at) VALUES (?, ?, ?, 'custom', ?, 'draft', ?, datetime('now'))",
-    ).run(id, skill.name, skill.description, JSON.stringify({ instructions: skill.steps }), projectId);
-    return id;
+    return storeProjectSkillDraftCompat(this.db, projectId, skill);
   }
 
-  /** 列出待审批的技能草案（projectId 为空时跨全部项目，供全局审批 UI 使用）。 */
-  listSkillDrafts(projectId?: string, limit = 20): Array<{ id: string; name: string; description: string; steps: string[] }> {
-    try {
-      const rows = projectId
-        ? this.db.prepare(
-            "SELECT id, name, description, config FROM wa_skills WHERE project_id = ? AND status = 'draft' ORDER BY created_at DESC LIMIT ?",
-          ).all(projectId, limit) as Array<{ id: string; name: string; description: string; config: string }>
-        : this.db.prepare(
-            "SELECT id, name, description, config FROM wa_skills WHERE status = 'draft' ORDER BY created_at DESC LIMIT ?",
-          ).all(limit) as Array<{ id: string; name: string; description: string; config: string }>;
-      return rows.map(r => {
-        let steps: string[] = [];
-        try { steps = (JSON.parse(r.config || '{}') as { instructions?: string[] }).instructions || []; } catch { /* ignore */ }
-        return { id: r.id, name: r.name, description: r.description, steps };
-      });
-    } catch { return []; }
+  /** 列出待审批的项目技能草案（projectId 为空时跨全部项目）。 */
+  listSkillDrafts(projectId?: string, limit = 20) {
+    return listProjectSkillDraftsCompat(this.db, projectId, limit);
   }
 
-  /** 批准技能草案：注册进 skill-registry 并持久化 approved。 */
-  async approveSkill(draftId: string): Promise<{ name: string } | null> {
-    const row = this.db.prepare(
-      "SELECT name, description, config FROM wa_skills WHERE id = ? AND status = 'draft'",
-    ).get(draftId) as { name: string; description: string; config: string } | undefined;
-    if (!row) return null;
-    const { registerSkill } = await import('./skill-registry.js');
-    let instructions = '';
-    try { instructions = ((JSON.parse(row.config || '{}') as { instructions?: string[] }).instructions || []).join('\n'); } catch { /* ignore */ }
-    registerSkill({ name: row.name, description: row.description, category: 'custom', content: instructions });
-    this.db.prepare("UPDATE wa_skills SET status = 'approved', updated_at = datetime('now') WHERE id = ?").run(draftId);
-    return { name: row.name };
+  /** 批准项目技能草案：注册进项目作用域（不再进全局表）。 */
+  async approveSkill(draftId: string) {
+    return approveProjectSkillCompat(this.db, draftId);
   }
 
-  /** 拒绝技能草案。 */
+  /** 拒绝项目技能草案。 */
   rejectSkill(draftId: string): boolean {
-    const r = this.db.prepare(
-      "UPDATE wa_skills SET status = 'rejected', updated_at = datetime('now') WHERE id = ? AND status = 'draft'",
-    ).run(draftId);
-    return r.changes > 0;
+    return rejectProjectSkillCompat(this.db, draftId);
   }
 
-  /** 启动时加载所有已批准的记忆衍生技能到 skill-registry。 */
+  /** 启动加载：全局/项目分表；旧行兜底只进项目作用域。 */
   async loadSkillsFromDb(): Promise<number> {
+    const loaded = loadSkillsFromDbCompat(this.db);
+    if (loaded > 0) logger.info({ loaded }, '已从数据库加载已批准技能（全局/项目分表）');
+    return loaded;
+  }
+
+  /** zx_20261121_1 M6：项目经验轻量账（注入侧只读；读不到 ⇒ null，不编空账）。 */
+  getProjectExperienceBrief(projectId: string): ProjectExperienceBrief | null {
+    try { return deriveExperienceBrief(this.db as never, projectId); } catch { return null; }
+  }
+
+  /** zx_20261121_1 M6：开工时是否注入经验段（缺省开；只认明确关）。 */
+  isProjectExperienceInjectEnabled(): boolean {
     try {
-      const { registerSkill } = await import('./skill-registry.js');
-      const rows = this.db.prepare(
-        "SELECT name, description, config FROM wa_skills WHERE status = 'approved'",
-      ).all() as Array<{ name: string; description: string; config: string }>;
-      let loaded = 0;
-      for (const r of rows) {
-        let instructions = '';
-        try { instructions = ((JSON.parse(r.config || '{}') as { instructions?: string[] }).instructions || []).join('\n'); } catch { /* ignore */ }
-        registerSkill({ name: r.name, description: r.description, category: 'custom', content: instructions });
-        loaded++;
-      }
-      if (loaded > 0) logger.info({ loaded }, '已从数据库加载已批准技能');
-      return loaded;
-    } catch { return 0; }
+      const row = this.db.prepare('SELECT value FROM wa_settings WHERE key = ?').get('project.experience_inject') as { value?: string } | undefined;
+      return boolSetting(row?.value);
+    } catch { return true; }
   }
 
   // ==================== Phase C 记忆再巩固 ====================
@@ -2389,16 +2372,8 @@ export class MemoryManager {
 
       const provider = createSafeProvider({ baseURL: m.url, apiKey: m.api_key });
       const model = provider(m.model_name);
-      // zx_20261021_4 批二: 预读带项目上下文 + 反虚构硬约束（读不到项目行照常预读，只少这几行）。
-      const project = (() => {
-        try {
-          const row = this.db.prepare('SELECT name, description, working_dir FROM wa_projects WHERE id = ?').get(projectId) as PreludeProjectContext | undefined;
-          if (!row) return undefined;
-          // zx_20261029_1「知」: 只取概述一句（≤200 字）；须知读不到/没有成功版则不加。
-          const summary = String(loadProjectBrief(this.db, projectId)?.brief?.summary ?? '').trim().slice(0, 200);
-          return summary ? { ...row, brief_summary: summary } : row;
-        } catch { return undefined; }
-      })();
+      // zx_20261021_4 批二 / zx_20261120_1 M4：项目上下文与工作目录解析收在一处（读不到只少这几行）。
+      const project = preludeProjectContext(this.db, taskId, projectId);
       const prompt = buildPreludePrompt({ title, description, acceptance, needCard, req, skeleton, project });
       const result = await generateText({ model, temperature: 0.2, maxTokens: m.max_output_tokens || 4096, prompt });
       const out = result.text || '';

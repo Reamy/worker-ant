@@ -36,7 +36,8 @@ export interface InvariantResult {
   description: string;
   passed: boolean;
   severity: 'error' | 'warning';
-  violations: Array<{ entity: string; detail: string }>;
+  /** `refId`（zx_20261119_1 M1）：可勾选回填的项带**完整**聚合根 id——`entity` 只作展示（截 8 位），不可用于写操作 */
+  violations: Array<{ entity: string; detail: string; refId?: string }>;
   checkedAt: string;
   /** 附加到诊断结果下发的修复指引（供运维看板渲染按钮/文案） */
   remediation?: InvariantRemediation;
@@ -46,16 +47,28 @@ type InvariantCheck = (db: Database.Database) => Omit<InvariantResult, 'checkedA
 
 /** B4: 所有架构不变量定义 */
 const INVARIANTS: InvariantCheck[] = [
-  // 1. 任务已完成→必须有finalize_task调用记录或task.completed事件
+  // 1. 任务已完成→必须有 task.completed 事件
+  //    zx_20261119_1 M1「迹」：判据从「任意 status_changed 也算」收紧为「必须有 task.completed」——
+  //    旧判据连 `status_changed{pending}` 都会放行（弱于本项自己的 guidance 文案），而
+  //    `notification-core` / `task-followup` 等读点只按 task.completed 消费，旧式完成对它们不存在。
   (db) => {
     const name = 'task-completion-audit';
-    const tasks = db.prepare(
-      "SELECT id, title FROM wa_tasks WHERE status = 'completed' AND id NOT IN (SELECT DISTINCT aggregate_id FROM wa_event_log WHERE event_type IN ('task.completed','task.status_changed'))"
-    ).all() as Array<{ id: string; title: string }>;
+    const tasks = db.prepare(`
+      SELECT t.id, t.title,
+             EXISTS(SELECT 1 FROM wa_event_log e WHERE e.aggregate_id = t.id AND e.event_type = 'task.status_changed') AS has_status
+      FROM wa_tasks t
+      WHERE t.status = 'completed'
+        AND NOT EXISTS (SELECT 1 FROM wa_event_log e WHERE e.aggregate_id = t.id AND e.event_type = 'task.completed')
+    `).all() as Array<{ id: string; title: string; has_status: number }>;
     return {
-      name, description: '已完成任务必须有对应事件记录',
+      name, description: '已完成任务必须有 task.completed 事件记录',
       passed: tasks.length === 0, severity: 'warning' as const,
-      violations: tasks.map(t => ({ entity: t.id.slice(0,8), detail: t.title })),
+      // 两类分开写：`仅 status_changed` 是旧式完成（可回填），`无任何事件` 是更重的账目缺口。
+      violations: tasks.map(t => ({
+        entity: t.id.slice(0, 8),
+        detail: `${t.has_status ? '仅 status_changed（旧式完成）' : '无任何完成事件'} · ${t.title}`,
+        refId: t.id,
+      })),
     };
   },
 
@@ -235,13 +248,28 @@ export function runAllInvariants(db: Database.Database): InvariantResult[] {
  * B4: 自动修复某个可修复的不变量违规（幂等、单事务）。
  * 仅支持 INVARIANT_REMEDIATION[].autoFixable=true 的项；不可自动修复项抛错，由界面只读指引。
  */
-export function repairInvariant(db: Database.Database, name: string): { name: string; repaired: number; detail: string } {
+export function repairInvariant(
+  db: Database.Database,
+  name: string,
+  opts?: { ids?: string[] },
+): { name: string; repaired: number; detail: string } {
   const run = db.transaction((): { repaired: number; detail: string } => {
     switch (name) {
       case 'task-completion-audit': {
-        const rows = db.prepare(
-          "SELECT id, project_id, aggregate_version, updated_at FROM wa_tasks WHERE status = 'completed' AND id NOT IN (SELECT DISTINCT aggregate_id FROM wa_event_log WHERE event_type IN ('task.completed','task.status_changed'))"
-        ).all() as Array<{ id: string; project_id: string; aggregate_version: number | null; updated_at: string }>;
+        // zx_20261119_1 M1「迹」（用户裁定：先列清单、人工勾选再回填）：
+        //   传 `ids` 即只回填所选；传空数组即"一条都不修"（显式取消，不退化成全量）。
+        //   不传 `ids` 保持旧的"全量回填"（其他调用方/脚本的既有语义）。
+        const selected = Array.isArray(opts?.ids) ? opts!.ids!.filter((x) => typeof x === 'string' && x) : null;
+        if (selected && selected.length === 0) return { repaired: 0, detail: '未选择任何任务，未回填' };
+        const idClause = selected ? ` AND id IN (${selected.map(() => '?').join(',')})` : '';
+        const rows = db.prepare(`
+          SELECT t.id, t.project_id, t.aggregate_version, t.updated_at,
+                 EXISTS(SELECT 1 FROM wa_event_log e WHERE e.aggregate_id = t.id AND e.event_type = 'task.status_changed') AS has_status
+          FROM wa_tasks t
+          WHERE t.status = 'completed'
+            AND NOT EXISTS (SELECT 1 FROM wa_event_log e WHERE e.aggregate_id = t.id AND e.event_type = 'task.completed')
+            ${idClause}
+        `).all(...(selected ?? [])) as Array<{ id: string; project_id: string; aggregate_version: number | null; updated_at: string; has_status: number }>;
         if (rows.length === 0) return { repaired: 0, detail: '无待回填任务' };
         const ins = db.prepare(
           "INSERT INTO wa_event_log (event_id, event_type, aggregate_type, aggregate_id, aggregate_version, payload, metadata, occurred_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
@@ -249,12 +277,17 @@ export function repairInvariant(db: Database.Database, name: string): { name: st
         for (const t of rows) {
           ins.run(
             crypto.randomUUID(), 'task.completed', 'task', t.id, t.aggregate_version ?? 0,
-            JSON.stringify({ taskId: t.id, task_id: t.id, projectId: t.project_id }),
+            JSON.stringify({ taskId: t.id, task_id: t.id, projectId: t.project_id, backfill: true }),
             JSON.stringify({ source: 'audit-backfill' }),
             `${t.updated_at.replace(' ', 'T')}Z`, new Date().toISOString().slice(0, 19).replace('T', ' '),
           );
         }
-        return { repaired: rows.length, detail: `已回填 ${rows.length} 条 task.completed 审计事件` };
+        const legacy = rows.filter((r) => r.has_status).length;
+        const none = rows.length - legacy;
+        return {
+          repaired: rows.length,
+          detail: `已回填 ${rows.length} 条 task.completed 审计事件（其中旧式完成 ${legacy} 条、完全无事件 ${none} 条）`,
+        };
       }
       case 'stale-executing-tasks': {
         // zx_20260917 M1: 先取 id 列表，再逐条走 `pauseTask`（唯一写入口）——

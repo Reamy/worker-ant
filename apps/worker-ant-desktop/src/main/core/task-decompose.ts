@@ -38,6 +38,8 @@ import { readBoolSetting, type BoolSettingDb } from './settings-bool.js';
 import { QUALITY_BANDS } from './quality-gate.js';
 // zx_20261016_3 M33-b: 目的因的**判据**取一处真源（`four-causes.ts` 零 import）——解析口与提示词同引，不各写一份。
 import { hasFinalCause } from './four-causes.js';
+// zx_20261120_3 M1「职·全」：模板拆解子任务继承父岗位并落来源（与其它建单路径同一把尺）。
+import { deriveTaskPosition, positionContextFields } from './positions.js';
 import { auxModelRequest } from './model-request.js';
 import { ansSignedRequest, ansFailureNote, type AnsCreds } from './ans-signed-request.js';
 import { extractExpectedOutputPaths, normalizeOutputPath } from './output-paths.js';
@@ -48,6 +50,8 @@ import { deriveTaskRequirements, requirementsFromCapabilityWords, type DispatchP
 import { collectPreflightContext, runPreflight, toPreflightRecord, type PreflightContext } from './task-preflight.js';
 // zx_20261109_1 G9：项目须知（仅 ready 且有内容时才注入拆解提示词）。
 import { loadProjectBrief, renderProjectBrief } from './project-brief.js';
+// zx_20261118_2 M4「拆」：版本控制边界（实测）——"哪目录真受 git 管理"由一处探测、一处渲染（零依赖模块）。
+import { collectRepoBoundary, formatRepoBoundary } from './repo-boundary.js';
 
 const logger = createLogger('decompose');
 
@@ -202,8 +206,13 @@ export const DECOMPOSE_MODEL_REQUEST: Record<string, unknown> = auxModelRequest(
  *   "一里程碑一子任务"——否则拆出来的子任务
  *   不承接任何 M 号，里程碑板留下未承接项（`unclaimedMilestones` 恒非空）。空串时**不加这一句**
  *   （保持原提示词逐字不变，不污染既有夹具）。
+ *
+ * `repoBoundaryText`（zx_20261118_2 M4）：`formatRepoBoundary(...)` 的实测事实 + **提交类判据硬规则**。
+ *   为什么**单独一个形参**、不并进 `projectBriefText`：并进去就只能靠字串嗅探才知道"边界段在不在"，
+ *   而这条硬规则必须**仅在边界段存在时**追加（否则会凭空要求一个没被告知过的仓库清单）。
+ *   空串/未传 ⇒ 本段一个字都不加——既有夹具的提示词逐字节不变。
  */
-export function buildDecomposePrompt(taskDescription: string, decompositionPatterns?: string, milestoneHint?: string, parentAcceptance?: string, projectBriefText?: string): string {
+export function buildDecomposePrompt(taskDescription: string, decompositionPatterns?: string, milestoneHint?: string, parentAcceptance?: string, projectBriefText?: string, repoBoundaryText?: string): string {
   const patternHint = decompositionPatterns
     ? `\n\n历史拆解模式参考（同类任务的典型子任务数，供参考而非强制）：\n${decompositionPatterns}`
     : '';
@@ -218,9 +227,14 @@ export function buildDecomposePrompt(taskDescription: string, decompositionPatte
   const briefRule = projectBriefText
     ? `\n\n${projectBriefText}\n\n**硬规则**：子任务描述里点名的文件、端点、命令，必须出现在上面的项目资料或仓库目录中；不确定就改写成「在 <目录职能> 内实现 X，并以 <可执行命令> 核实」。**不得**按框架习惯补上仓库里不存在的文件名。`
     : '';
+  // zx_20261118_2 M4：边界段非空才追加——空时提示词与旧版**逐字节一致**（保既有夹具）。
+  //   这条硬规则与上面 briefRule 的"不得虚构文件名"同源：不生成环境上无法满足的判据。
+  const repoBoundaryRule = repoBoundaryText
+    ? `\n\n${repoBoundaryText}\n\n**硬规则**：若子任务要求「提交 / commit / git add / push」，其涉及的文件必须落在上述受控仓库内；否则不要生成该子任务，或把验收写成「不涉及提交」。`
+    : '';
   return `你是一个任务拆解专家。请将以下任务拆解为${DECOMPOSE_MIN_SUBTASKS}-${DECOMPOSE_MAX_SUBTASKS}个子任务，每个子任务应该是独立可执行的。
 
-任务描述：${taskDescription}${patternHint}${milestoneRule}${parentRule}${briefRule}
+任务描述：${taskDescription}${patternHint}${milestoneRule}${parentRule}${briefRule}${repoBoundaryRule}
 
 请以JSON数组格式返回，每个元素包含：
 - title: 子任务标题（简洁，10字以内）
@@ -385,9 +399,9 @@ export function acceptanceSourcesNotice(derived: number, missing: number): strin
  */
 export async function decomposeTask(
   taskDescription: string,
-  opts: { deps: DecomposeDeps; patterns?: string; milestoneHint?: string; parentAcceptance?: string; projectBriefText?: string; onFailure?: (reason: string) => void },
+  opts: { deps: DecomposeDeps; patterns?: string; milestoneHint?: string; parentAcceptance?: string; projectBriefText?: string; repoBoundaryText?: string; onFailure?: (reason: string) => void },
 ): Promise<DecompositionTemplate[]> {
-  const prompt = buildDecomposePrompt(taskDescription, opts.patterns, opts.milestoneHint, opts.parentAcceptance, opts.projectBriefText);
+  const prompt = buildDecomposePrompt(taskDescription, opts.patterns, opts.milestoneHint, opts.parentAcceptance, opts.projectBriefText, opts.repoBoundaryText);
   const failed = (reason: string): DecompositionTemplate[] => {
     // 留痕失败不影响拆解结论（回调是旁路，不是判据）。
     try { opts.onFailure?.(reason); } catch { /* ignore */ }
@@ -600,14 +614,14 @@ export function planSubtasksFromTemplate(db: AccountingDb, opts: PlanSubtasksOpt
    * 只读一次父行；读不到 ⇒ false（**不因读不到而误抑制**）。
    */
   let parentCtx: Record<string, unknown> = {};
-  let parentPositionId = '';
   try {
     const prow = db.prepare('SELECT context_json, position_id FROM wa_tasks WHERE id = ?').get(opts.parentTaskId) as
       | { context_json?: string | null; position_id?: string | null }
       | undefined;
     parentCtx = JSON.parse(prow?.context_json || '{}') as Record<string, unknown>;
-    parentPositionId = typeof prow?.position_id === 'string' ? prow.position_id : '';
-  } catch { parentCtx = {}; parentPositionId = ''; }
+  } catch { parentCtx = {}; }
+  // zx_20261120_3 M1：父岗位停用/未绑定 ⇒ none（不“带病继承”）；来源随子任务落库。
+  const derivedPosition = deriveTaskPosition(db, { projectId: opts.projectId, parentTaskId: opts.parentTaskId });
   const empty = { created: 0, planned, childIds: [] as string[], noDepCount: 0, droppedDeps: 0, droppedDepNotes: [] as string[], inferredDeps: inferred.inferred, preflight: null as DispatchPreflightRecord | null };
   if (childDepth > MAX_TASK_DEPTH) {
     return { ...empty, refusal: `子任务嵌套深度 ${childDepth} 超过上限 ${MAX_TASK_DEPTH}（父任务已在第 ${opts.depth} 层）` };
@@ -709,6 +723,7 @@ export function planSubtasksFromTemplate(db: AccountingDb, opts: PlanSubtasksOpt
         // zx_20261115_1 M6：父任务不可交互 ⇒ 子任务同样不可交互。
         // zx_20261115_2 M2：再随树带上 node_archetype / dispatch_position / relay_tree（显式 contextExtra 仍可覆盖）。
         ...inheritedConstraintContext(parentCtx),
+        ...positionContextFields(derivedPosition),
         ...(opts.contextExtra ?? {}),
       }, template[i]!.acceptance_source);
       db.prepare(
@@ -720,7 +735,7 @@ export function planSubtasksFromTemplate(db: AccountingDb, opts: PlanSubtasksOpt
         //   （`task-scheduler.getReadyTasks` / `control.exit_plan_mode`）同一口径 ⇒ 模板第 1 个最先起跑。
         //   改前写裸 `i` ⇒ 同批无前置子任务里**最后一个反而最先起跑**。换算只此一处（勿在别处重写算式）。
         'pending', decomposePriority(planned, i), JSON.stringify(ctx), opts.parentTaskId, opts.source,
-        template[i]!.acceptance_criteria || '', depsById[i]!, parentPositionId,
+        template[i]!.acceptance_criteria || '', depsById[i]!, derivedPosition.positionId,
       );
     }
     db.prepare(`RELEASE ${PLAN_SAVEPOINT}`).run();
@@ -808,12 +823,8 @@ export function milestoneHintOf(db: BoolSettingDb, goal: string, projectId: stri
   if (!m) return '';
   const rel = m[1] as string;
   try {
-    // ② 以项目工作目录为根解析
-    let root = '';
-    if (projectId) {
-      const row = db.prepare('SELECT working_dir FROM wa_projects WHERE id = ?').get(projectId) as { working_dir?: string | null } | undefined;
-      root = String(row?.working_dir ?? '');
-    }
+    // ② 以项目工作目录为根解析（取法与边界探测同一处：`readProjectWorkingDir`）
+    const root = readProjectWorkingDir(db, projectId);
     const abs = path.isAbsolute(rel) ? rel : path.join(root, rel);
     const st = fs.statSync(abs);
     if (!st.isFile() || st.size > MILESTONE_HINT_MAX_BYTES) return '';
@@ -824,7 +835,27 @@ export function milestoneHintOf(db: BoolSettingDb, goal: string, projectId: stri
     //   取不到标题的 M 号逐字回退为"仅 M 号"（如实降级）——故 M 号版方案的交出**逐字不变**。
     const titled = milestoneTitledRefsIn(content);
     const ms = refs.map((m) => { const t = titled.get(m); return t ? `${m} ${t}` : m; });
-    return ms.length >= 2 ? ms.join('、') : '';
+    if (ms.length >= 2) return ms.join('、');
+    // zx_20261116_3 M5「拆」：T/B 编号的排期（真标本：怡寿里方案 §10.3 `T01~T18`）——
+    //   与 M 号同族的「表行/标题行」两形态；不足 2 条才回空（不拿 1 条冒充“按里程碑切片”）。
+    // 优先 T（任务级单元）；T 不足 2 条再退 B（批次级）。B0/B2 这类批次号不该与 T 号混进同一份切片清单。
+    const gather = (prefix: 'T' | 'B'): string[] =>
+      [...new Set([...content.matchAll(new RegExp(String.raw`\b(${prefix}\d+(?:\.\d+)?)\b`, 'g'))].map((m) => m[1]!))].sort();
+    const tRefs = gather('T');
+    const unitRefs = tRefs.length >= 2 ? tRefs : gather('B');
+    if (unitRefs.length >= 2) {
+      const unitTitled = new Map<string, string>();
+      for (const line of content.split('\n')) {
+        // 两种表行：`| T01 标题 |`（M 号旧形）与 `| **T01** | 标题 |`（T 号常用形）。
+        const row = /^\s*\|\s*\*{0,2}([TB]\d+(?:\.\d+)?)\*{0,2}\s*\|\s*([^|]+?)\s*\|/.exec(line)
+          || /^\s*\|\s*\*{0,2}([TB]\d+(?:\.\d+)?)\*{0,2}\s+([^|]+?)\s*\|/.exec(line);
+        if (row && !unitTitled.has(row[1]!)) unitTitled.set(row[1]!, row[2]!.trim());
+        const head = /^\s*#{1,6}\s+([TB]\d+(?:\.\d+)?)\s+([^（(]+)/.exec(line);
+        if (head && !unitTitled.has(head[1]!)) unitTitled.set(head[1]!, head[2]!.trim());
+      }
+      return unitRefs.map((u) => { const t = unitTitled.get(u); return t ? `${u} ${t}` : u; }).join('、');
+    }
+    return '';
   } catch {
     return '';
   }
@@ -883,6 +914,24 @@ function readParentAcceptance(db: AccountingDb, taskId: string): string {
       | { acceptance_criteria?: string | null }
       | undefined;
     return String(row?.acceptance_criteria ?? '').trim();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * 项目工作目录的**唯一取法**（本文件内两处共用：`milestoneHintOf` 的路径解析、
+ * `autoDecomposeForTask` 的版本控制边界探测）。**原样返回**（不 trim）：里程碑那一路历来如此，
+ * 边界那一路自行 trim——两处语义各自保留，只把"查哪一列"收成一处。
+ * 读不到 / 坏账 ⇒ 空串（两处都按"没有工作目录"如实降级，不阻断拆解）。
+ */
+function readProjectWorkingDir(db: BoolSettingDb, projectId: string | null | undefined): string {
+  if (!projectId) return '';
+  try {
+    const row = db.prepare('SELECT working_dir FROM wa_projects WHERE id = ?').get(projectId) as
+      | { working_dir?: string | null }
+      | undefined;
+    return String(row?.working_dir ?? '');
   } catch {
     return '';
   }
@@ -1226,12 +1275,25 @@ export async function autoDecomposeForTask(opts: AutoDecomposeOptions): Promise<
         projectBriefText = renderProjectBrief(stored.brief, stored.generatedAt || stored.updatedAt);
       }
     } catch { /* 读须知失败不阻断拆解 */ }
+    // zx_20261118_2 M4「拆」：把"哪目录真受 git 管理"的**实测事实**交给拆解器——
+    //   否则它会许下「提交包含 backend/ 修复代码与方案文件变更」这类执行环境上永远无法满足的判据
+    //   （S3 真标本 `a7fbd7e0`：项目根不是仓、plans/ 不在任何仓内 ⇒ 4 次 awaiting_input、45 分）。
+    //   工作目录取项目行：本函数的两路调用方（引擎 `enter_plan_mode` / 启动路 `tryAutoDecomposeAtStart`）
+    //   都只传 `projectId`，不为此改签名；
+    //   ⚠ IM 路（`im-router.ts` 直调 `decomposeTask`）**不在本批**——它另有一条呼叫面，待后续轮接入；
+    //   读不到 ⇒ 空串 ⇒ 边界段不注入（提示词逐字回到旧版，既有夹具不受影响）。
+    const boundaryFacts = collectRepoBoundary(readProjectWorkingDir(opts.db, opts.projectId));
+    if (boundaryFacts.probeError) {
+      logger.warn({ projectId: opts.projectId, err: boundaryFacts.probeError }, '版本控制边界探测不完整（提示词按已探到的事实注入）');
+    }
+    const repoBoundaryText = formatRepoBoundary(boundaryFacts);
     const template = await decomposeTask(opts.goal, {
       deps,
       ...(opts.patterns ? { patterns: opts.patterns } : {}),
       ...(milestoneHint ? { milestoneHint } : {}),
       ...(parentAcceptance ? { parentAcceptance } : {}),
       ...(projectBriefText ? { projectBriefText } : {}),
+      ...(repoBoundaryText ? { repoBoundaryText } : {}),
       // zx_20261018_3 批二: 真失败要留痕（会话行 0→1）——此前拆解失败**无声**，用户只看到"任务没拆"，
       //   无从分辨是"任务本来就简单"还是"模型端点不通"。回调只画"失败"这一格，正常空答不画。
       onFailure: (reason) => {

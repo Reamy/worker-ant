@@ -71,6 +71,7 @@ import { checkBuildPins, stripKeepingLines } from './lib/rr-pins.js';
 import { engineSrc, stripStepScopePrefix } from './lib/rr-engine-src.js';
 import {
   acceptanceVerdictOf, capScoreByAcceptanceVerdict, isAcceptanceVerified, isUnjudgedReason,
+  ACCEPTANCE_UNJUDGED_SCORE_CAP,
   decideAcceptanceOutcome, recordAcceptanceOutcome,
   type AcceptanceCheckPayload, type AcceptanceUnverifiedReason,
 } from '../apps/worker-ant-desktop/src/main/core/acceptance-check.js';
@@ -193,8 +194,9 @@ async function main(): Promise<void> {
     eq(acceptanceVerdictOf({ checked_at: 't', criteria_total: 2, passed_total: 1 }), 'failed',
       'M1-1 同一兼容口径下计数未达 ⇒ `failed`（老载荷**不因缺 `verified` 而免于判定**）');
     eq(capScoreByAcceptanceVerdict(95, 'not_checked'), 95, '压降只对 `failed` 动作：`not_checked` ⇒ 原值不动');
-    eq(capScoreByAcceptanceVerdict(95, 'unjudged'), 95,
-      '★ zx_20260923_1 M2「没判成 ≠ 没达成」：`unjudged` **也不压分**（它的处置在终态层，不在评分层）');
+    // zx_20261116_3 M3 用户裁定：有题未判成 ⇒ 封 60（不再“不压分”）。
+    eq(capScoreByAcceptanceVerdict(95, 'unjudged'), ACCEPTANCE_UNJUDGED_SCORE_CAP,
+      '★ 用户 2026-11-16 裁定：`unjudged` 封 60（有题未判成不得冒充达成）');
     eq(capScoreByAcceptanceVerdict(95, 'passed'), 95, '压降只对 `failed` 动作：`passed` ⇒ 原值不动');
     ok(capScoreByAcceptanceVerdict(95, 'failed') < 60, '`failed` ⇒ 压到 60 分以下（与 D1「未达交付」同尺）');
     eq(capScoreByAcceptanceVerdict(30, 'failed'), 30, '压降是 `min` 而非赋值：本已更低的分数不得被**抬高**');
@@ -231,14 +233,15 @@ async function main(): Promise<void> {
       const read = JSON.parse((db2.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get('x') as { context_json: string }).context_json) as { acceptance_check?: unknown };
       eq(acceptanceVerdictOf(read.acceptance_check), isUnjudgedReason(why as AcceptanceUnverifiedReason) ? 'unjudged' : 'not_checked',
         `② 且经生产读判据 ⇒ ${isUnjudgedReason(why as AcceptanceUnverifiedReason) ? '`unjudged`（有题未判成：题在、本轮没判成）' : '`not_checked`'}（\`${why}\` 绝不并进 \`failed\`）`);
-      eq(quality(db2, 'x', dir).score, BASE_SCORE, `★ M1-2 正面断言：\`${why}\` 的完成分**逐位等于**无账基线（压降未生效）`);
+      const expectedScore = isUnjudgedReason(why as AcceptanceUnverifiedReason) ? ACCEPTANCE_UNJUDGED_SCORE_CAP : BASE_SCORE;
+      eq(quality(db2, 'x', dir).score, expectedScore, `★ M1-2 正面断言：\`${why}\` 的完成分等于${isUnjudgedReason(why as AcceptanceUnverifiedReason) ? '封顶 60' : '无账基线（压降未生效）'}`);
     }
     // 空数组（模型吐了 JSON 但一条判据都没有）——载荷构造器出的 0/0
     const db3 = mkdb();
     mkTask(db3, 'z', dir);
     const emptyPayload = writeLedgerViaProduction(db3, 'z', 'ok', '[]');
     eq(emptyPayload.criteria_total, 0, '② `[]` ⇒ `criteria_total:0` 的真核验载荷（合法输入，不报未核验）');
-    eq(quality(db3, 'z', dir).score, BASE_SCORE, '★ 且完成分仍等于基线（0/0 不触发压降——边界如实，非"漏了一道闸"）');
+    eq(quality(db3, 'z', dir).score, ACCEPTANCE_UNJUDGED_SCORE_CAP, '★ 且完成分封 60（`empty_checks` 属有题未判成——0/0 不再冒充“全过”）');
   }
 
   // ═════════════════════════════════════════════════════════════════════════
@@ -363,8 +366,10 @@ async function main(): Promise<void> {
     const statusIdx = tdpSrc.indexOf('taskStatusPill(task.status)');
     ok(statusIdx > 0 && statusIdx < badgeIdx, '静态：提示**紧邻状态徽标之后**（同一行、同一 flex 容器）');
     ok(/acceptanceFailed &&/.test(tdpSrc), '静态：提示由**同一个判据**派生（`acceptanceFailed`，非本处另判一遍）');
-    ok(/acceptanceCheck\.verified !== false && \(acceptanceCheck\.failed \?\? \[\]\)\.length > 0/.test(tdpSrc),
-      '★ 静态：判据是"已核验 **且** 有未达项"——与 main 侧 `acceptanceVerdictOf` 同界（未核验不得显示未达）');
+    // zx_20261118_2 M5「豁」：判据随 main 侧一起前移——"有未达项"现在专指**未被用户豁免**的未达项
+    //   （`waived:true` 的不再计入红字徽标），与 `acceptanceVerdictOf` 的 `passed + waived < total` 同界。
+    ok(/acceptanceCheck\.verified !== false && \(acceptanceCheck\.failed \?\? \[\]\)\.some\(\(f\) => \(f as \{ waived\?: boolean \}\)\.waived !== true\)/.test(tdpSrc),
+      '★ 静态：判据是"已核验 **且** 有**未豁免**的未达项"——与 main 侧 `acceptanceVerdictOf`（passed+waived<total）同界');
     ok(/criteria_total/.test(tdpSrc.slice(Math.max(0, badgeIdx - 400), badgeIdx + 400)),
       '静态：提示里带上总数（"N 条未达 / 共 M 条"可复核——`title` 在徽标**文本之前**，窗口须往前取）');
     ok(tdpSrc.includes('「已完成」不等于「已验收」'), '静态：文案点破两种口径的关系（维特根斯坦"意义即用法"的落点）');

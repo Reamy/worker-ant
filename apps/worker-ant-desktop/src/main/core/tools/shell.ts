@@ -13,36 +13,40 @@ import { runShellCommand, truncationNote } from '../shell-exec.js';
 import { networkNoteFor } from '../network-diagnosis.js';
 
 import { validateReadonlyBashCommand, sanitizeLoneSurrogates, searchPathForPattern, paginateReadFile, shellRejectPayload, shellRejectPayloadForChar, buildToolConstraintBrief, evaluateMultiSegment } from '../tool-guards.js';
+// zx_20261119_2 M6「序」：同仓全仓构建/清理的互斥锁（只锁会"翻锅"的命令）。
+import { isRepoWideBuildCommand, buildLockRoot, acquireBuildLock, releaseBuildLock } from '../repo-build-lock.js';
 // zx_20261029_3 M3：四个工具在**唯一执行口** `runShellCommand` 前后登记后台进程（账不是闸，失败不阻断）。
 import { makeShellHooks, leftoverNote } from '../background-jobs.js';
 // zx_20261105_1 M1：每次真正落到 shell 的动作（成功/失败/超时/被守卫拒绝）留一条运行证据。
 //   只写旁路账，**不改**任何工具的参数 schema 与返回字符串。
-import { recordRuntimeEvidence } from '../runtime-evidence.js';
+import { recordRuntimeEvidence, evidenceIdOf } from '../runtime-evidence.js';
 
 export function shellTools(deps: ToolDeps) {
   const { db, taskId, projectId, workingDir, pauseForDecision, commandWriteQueue } = deps;
   // zx_20261105_1 M6：拒绝原因与 `deny_kind` 一并落证据账（传入 payload 时自动取出，字符串照旧）。
-  const noteDeny = (tool: string, command: string, reason: unknown) => {
+  const noteDeny = (tool: string, command: string, reason: unknown): string | null => {
     const o = reason && typeof reason === 'object'
       ? reason as { error?: unknown; message?: unknown; deny_kind?: unknown }
       : null;
     const text = o ? String(o.error ?? o.message ?? '被拒绝') : String(reason ?? '被拒绝');
     const kind = o?.deny_kind == null ? undefined : String(o.deny_kind);
-    recordRuntimeEvidence(db, { taskId, tool, command, ok: false, denyReason: text, denyKind: kind });
+    const id = recordRuntimeEvidence(db, { taskId, tool, command, ok: false, denyReason: text, denyKind: kind });
+    return id ? evidenceIdOf({ id }) : null;
   };
   const noteRun = (
     tool: string,
     command: string,
     r: { ok: boolean; exitCode: number | null; timedOut: boolean; stdout: string; stderr: string },
-  ) => {
-    recordRuntimeEvidence(db, {
+  ): string | null => {
+    const id = recordRuntimeEvidence(db, {
       taskId, tool, command, ok: r.ok, exitCode: r.exitCode, timedOut: r.timedOut,
       outputTail: [r.stdout, r.stderr].filter(Boolean).join('\n'),
     });
+    return id ? evidenceIdOf({ id }) : null;
   };
   return {
     execute_command: {
-      description: '执行通用shell命令（超时30s，配额20次；**可 `cd`、可多步写操作**）。开启 `engine.shell_multi_segment` 时可用 `;`/`&&`/`||` 分段（**每一段都逐段检查**）；**不支持 `|` 管道与后台 `&`**——要管道请用 `bash` 工具。⚠ 工作目录**已经是本任务的项目目录**，一般**无需 `cd`**。',
+      description: '执行通用shell命令（超时30s，配额20次；**可 `cd`、可多步写操作**）。开启 `engine.shell_multi_segment` 时可用 `;`/`&&`/`||` 分段（**每一段都逐段检查**）；**不支持 `|` 管道与后台 `&`**——要管道请用 `bash` 工具；`2>/dev/null` 与 `2>&1` 可用（写文件仍用 `write_file`）。⚠ 工作目录**已经是本任务的项目目录**，一般**无需 `cd`**。',
       parameters: jsonSchema({
         type: 'object' as const,
         properties: {
@@ -94,24 +98,48 @@ export function shellTools(deps: ToolDeps) {
             return JSON.stringify(cmdReject);
           }
         }
+        // zx_20261119_2 M6「序」：全仓构建/清理加**同仓构建锁**——有主即拒（给出路），过期自愈，只删自己那把。
+        let buildLock: { repoRoot: string; lockPath: string } | null = null;
+        if (readBoolSetting(db, 'engine.repo_build_lock') && isRepoWideBuildCommand(args.command)) {
+          const repoRoot = buildLockRoot(workingDir, args.command);
+          const got = acquireBuildLock({ repoRoot, taskId, command: args.command });
+          if (!got.ok) {
+            const h = got.holder;
+            noteDeny('execute_command', args.command, { error: '同仓构建被占用', deny_kind: 'build_locked' });
+            return JSON.stringify({
+              error: `同仓构建进行中（任务 ${h.taskId.slice(0, 8)}，命令：${h.command.slice(0, 80)}，自 ${h.acquiredAt}）。请等其完成，或用 \`git worktree\` 建隔离副本后再构建。`,
+              deny_kind: 'build_locked',
+              holder: { taskId: h.taskId, command: h.command, acquiredAt: h.acquiredAt, expiresAt: h.expiresAt },
+            });
+          }
+          buildLock = { repoRoot, lockPath: got.lockPath };
+        }
+        const releaseIfHeld = (): void => {
+          if (!buildLock) return;
+          releaseBuildLock({ repoRoot: buildLock.repoRoot, taskId, lockPath: buildLock.lockPath });
+          buildLock = null;
+        };
         // zx_20260917 M4·§6.1-3: 子进程落盘**零登记**是判卷盲的第二个来源。基准时刻取在命令**启动前**，
         // 命令返回后按它盘点——归因窗口＝该条命令自身（不是"最近 N 分钟"，§6.1-3 红线）。
         const writeBaselineMs = Date.now();
         // zx_20260916_2 M1: 改走异步外壳——命令跑多久不再等于事件循环被占多久
         const tracked = makeShellHooks(db, { projectId, taskId, tool: 'execute_command', command: args.command, cwd: workingDir });
-        const r = await runShellCommand(args.command, { cwd: workingDir, timeoutMs: 30_000, maxBuffer: 1024 * 1024, ...tracked.hooks });
-        noteRun('execute_command', args.command, r);
+        const r = await (async () => {
+          try { return await runShellCommand(args.command, { cwd: workingDir, timeoutMs: 30_000, maxBuffer: 1024 * 1024, ...tracked.hooks }); }
+          finally { releaseIfHeld(); }
+        })();
+        const runRef = noteRun('execute_command', args.command, r);
         // zx_20261109_1 B2：只记窗口（同步 O(1)）；盘点与补登记合并到 run 结束前一次（见 `command-write-queue.ts`）。
         commandWriteQueue.enqueue({ projectId, taskId, workingDir, sinceMs: writeBaselineMs, via: 'execute_command' });
         if (!r.ok) {
           const netHint = networkNoteFor(r);
-          return JSON.stringify({ error: r.error, stdout: r.stdout.slice(0, 5000), stderr: r.stderr.slice(0, 5000), ...(netHint ? { network_hint: netHint } : {}) });
+          return JSON.stringify({ error: r.error, stdout: r.stdout.slice(0, 5000), stderr: r.stderr.slice(0, 5000), ...(netHint ? { network_hint: netHint } : {}), ...(runRef ? { run_id: runRef } : {}) });
         }
-        return r.stdout.slice(0, 10000) + truncationNote(r) + leftoverNote(db, tracked.jobId);
+        return r.stdout.slice(0, 10000) + truncationNote(r) + leftoverNote(db, tracked.jobId) + (runRef ? `\n[${runRef}]` : '');
       },
     },
     bash: {
-      description: '执行**只读**白名单命令（cat/head/tail/wc/ls/find/tree/pwd/grep/awk/sed/sort/uniq/diff/git/python3/node…）。**支持 `|` 管道**；**不支持 `;`/`&`/`cd`/重定向**。写文件用 write_file，特权命令用 ask_user→run_privileged。',
+      description: '执行**只读**白名单命令（cat/head/tail/wc/ls/find/tree/pwd/grep/awk/sed/sort/uniq/diff/git/python3/node…）。**支持 `|` 管道**；开关 `engine.shell_multi_segment` 开启时**支持只读多段** `;`/`&&`/`||`（每段都按同一白名单逐段检查）。**不支持**单段内 `&`/`cd`/重定向/命令替换。写文件用 write_file，特权命令用 ask_user→run_privileged。',
       parameters: jsonSchema({
         type: 'object' as const,
         properties: { command: { type: 'string', description: '只读命令' } },
@@ -121,7 +149,8 @@ export function shellTools(deps: ToolDeps) {
         const command = args.command.trim();
         // E2 (2026-09-03) 语义模式白名单；zx_20260911_3 M3-4 切分改引号感知（`|` 在 shell 是管道、在 regex 是交替，
         // 此前 split('|') 把 `grep -n "a\|b" f` 切成碎片 → 段首 token 不在白名单 → 只读命令被误拒）。
-        const verdict = validateReadonlyBashCommand(command);
+        // zx_20261119_2 M5：与 `execute_command` 的多段开关同一把尺——开则只读多段放行，关则旧行为。
+        const verdict = validateReadonlyBashCommand(command, { allowMultiSegment: readBoolSetting(db, 'engine.shell_multi_segment') });
         if (!verdict.ok) {
           // zx_20260915 M5/P0-7：**只**接管字符级那一支——`char` 是 `validateReadonlyBashCommand` 落下的界桩，
           // 有它才换文案；其余七支（破坏性/解释器/$()/sed -i/find -exec/重定向/白名单）原样返回（§7.3 红线）。
@@ -134,12 +163,12 @@ export function shellTools(deps: ToolDeps) {
         }
         const tracked = makeShellHooks(db, { projectId, taskId, tool: 'bash', command, cwd: workingDir });
         const r = await runShellCommand(command, { cwd: workingDir, timeoutMs: 30_000, maxBuffer: 1024 * 1024, ...tracked.hooks });
-        noteRun('bash', command, r);
+        const runRef = noteRun('bash', command, r);
         if (!r.ok) {
           const netHint = networkNoteFor(r);
-          return JSON.stringify({ error: r.error, stdout: r.stdout.slice(0, 3000), stderr: r.stderr.slice(0, 3000), ...(netHint ? { network_hint: netHint } : {}) });
+          return JSON.stringify({ error: r.error, stdout: r.stdout.slice(0, 3000), stderr: r.stderr.slice(0, 3000), ...(netHint ? { network_hint: netHint } : {}), ...(runRef ? { run_id: runRef } : {}) });
         }
-        return r.stdout.slice(0, 10000) + truncationNote(r) + leftoverNote(db, tracked.jobId);
+        return r.stdout.slice(0, 10000) + truncationNote(r) + leftoverNote(db, tracked.jobId) + (runRef ? `\n[${runRef}]` : '');
       },
     },
     git_clone: {
@@ -231,14 +260,14 @@ export function shellTools(deps: ToolDeps) {
         //   shell 秒退、进程组由孙进程持有），同样登记；回话里如实补一句"可在活动页查看/停止"。
         const tracked = makeShellHooks(db, { projectId, taskId, tool: 'run_privileged', command: args.command, cwd: workingDir });
         const r = await runShellCommand(args.command, { cwd: workingDir, timeoutMs: 60_000, maxBuffer: 2 * 1024 * 1024, ...tracked.hooks });
-        noteRun('run_privileged', args.command, r);
+        const runRef = noteRun('run_privileged', args.command, r);
         // zx_20261109_1 B2：同 `execute_command`——只记窗口，盘点合并到 run 结束前一次。
         commandWriteQueue.enqueue({ projectId, taskId, workingDir, sinceMs: writeBaselineMs, via: 'run_privileged' });
         if (!r.ok) {
           const netHint = networkNoteFor(r);
-          return JSON.stringify({ error: r.error, stdout: r.stdout.slice(0, 5000), stderr: r.stderr.slice(0, 5000), ...(netHint ? { network_hint: netHint } : {}) });
+          return JSON.stringify({ error: r.error, stdout: r.stdout.slice(0, 5000), stderr: r.stderr.slice(0, 5000), ...(netHint ? { network_hint: netHint } : {}), ...(runRef ? { run_id: runRef } : {}) });
         }
-        return r.stdout.slice(0, 10000) + truncationNote(r) + leftoverNote(db, tracked.jobId);
+        return r.stdout.slice(0, 10000) + truncationNote(r) + leftoverNote(db, tracked.jobId) + (runRef ? `\n[${runRef}]` : '');
       },
     },
   };

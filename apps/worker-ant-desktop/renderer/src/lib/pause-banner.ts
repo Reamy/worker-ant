@@ -9,7 +9,26 @@
  */
 import { PAUSE_REASON_ACCEPTANCE_FAILED, PAUSE_REASON_AWAITING_INPUT, PAUSE_REASON_NO_OUTPUT, PAUSE_REASON_RELAY_TREE_EXPIRED, pauseReasonLabel } from '../../../src/main/core/pause-reason.js';
 
-export function pausedBannerHeadline(input: { reason: string; reasonLabel?: string; failed?: number; total?: number }): string {
+/**
+ * zx_20261120_2 M1「明」：横幅可选的「自动续跑」投影（`task:get.autoResume` 原样传入）。
+ * 形状与 `core/auto-resume-view.ts` 的 `AutoResumeView` 相同——渲染层不直引 main 模块，故在此并列声明。
+ */
+export interface AutoResumeBannerView {
+  due: boolean;
+  reason: string;
+  grants: number;
+  limit: number;
+  resumeBonus: number;
+}
+
+export function pausedBannerHeadline(input: {
+  reason: string; reasonLabel?: string; failed?: number; total?: number; autoResume?: AutoResumeBannerView | null;
+}): string {
+  // 撞顶会自动续跑时，先说清"它会自己继续"——旧文案「可恢复继续」会让用户以为在等自己点。
+  // `due=false` 或未传时逐字节回到下面的旧文案。
+  if (input.autoResume?.due) {
+    return `已暂停：撞步数上限，系统将自动续跑（第 ${input.autoResume.grants}/${input.autoResume.limit} 次）`;
+  }
   if (input.reason === PAUSE_REASON_ACCEPTANCE_FAILED) {
     const failed = Math.max(0, Number(input.failed) || 0);
     const total = Math.max(0, Number(input.total) || 0);
@@ -21,7 +40,11 @@ export function pausedBannerHeadline(input: { reason: string; reasonLabel?: stri
   return label ? `已暂停：${label}` : '已暂停（因未记录）';
 }
 
-export function pausedBannerHint(reason: string): string {
+export function pausedBannerHint(reason: string, autoResume?: AutoResumeBannerView | null): string {
+  // due=true：明说「无需手动点」以及「手动点会接管、作废本次自动续跑」——把两条路的结果都摆出来。
+  if (autoResume?.due) {
+    return `无需手动点「恢复」；点「恢复」会作废本次自动续跑（接管）。本次将获 ${autoResume.resumeBonus} 步续额。`;
+  }
   if (reason === PAUSE_REASON_ACCEPTANCE_FAILED) {
     return '交付了但判卷未过——先看下方「验收标准核对」的未达理由，修完再「恢复」；确认无需返工可「标记完成」。';
   }

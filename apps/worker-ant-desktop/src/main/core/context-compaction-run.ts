@@ -15,7 +15,7 @@ import { createLogger } from './logger.js';
 import { createSafeProvider } from './ai-provider.js';
 import { sanitizeLoneSurrogates } from './tool-guards.js';
 import { estimateTokensFromChars } from './token-estimate.js';
-import { planSummaryChunks, buildRuleDigest, mergeCompactionSummaries, COMPACTION_BUDGET_MS } from './context-compaction.js';
+import { planSummaryChunks, buildRuleDigest, mergeCompactionSummaries, COMPACTION_BUDGET_MS, compactionBudgetMs } from './context-compaction.js';
 
 const logger = createLogger('compaction');
 
@@ -31,7 +31,7 @@ export async function compressConversations(
   conversations: Array<{ role: string; content: string }>,
   maxRows: number = 40,
   // zx_20261110_2 B5「损」: 总预算截止时刻 + 本 run 的中止信号（用户按暂停即中止压缩）。
-  opts?: { deadlineAt?: number; signal?: AbortSignal },
+  opts?: { deadlineAt?: number; signal?: AbortSignal; budgetMs?: number },
 ): Promise<{ ok: boolean; summary: string; degraded?: 'budget' | 'aborted' | 'error' }> {
   try {
     const { generateText } = await import('ai');
@@ -86,7 +86,7 @@ ${convText}
       return { ok: false, summary: '', degraded: 'aborted' };
     }
     if (opts?.deadlineAt != null && Date.now() >= opts.deadlineAt) {
-      logger.warn({ convCount: conversations.length, budgetMs: COMPACTION_BUDGET_MS }, '上下文压缩超出总预算，本轮不推进压缩边界');
+      logger.warn({ convCount: conversations.length, budgetMs: opts?.budgetMs ?? COMPACTION_BUDGET_MS }, '上下文压缩超出总预算，本轮不推进压缩边界');
       return { ok: false, summary: '', degraded: 'budget' };
     }
     logger.warn({ err }, '上下文压缩失败，回退到规则压缩');
@@ -150,10 +150,12 @@ export async function compactTaskConversations(
   while (boundary > 0 && rows[boundary]?.role === 'tool') boundary--;
   const older = rows.slice(0, boundary);
   // zx_20261110_2 B5：总预算从**进入压缩这一刻**起算（跨 chunk 累计），不按段重计。
-  const budgetMs = opts?.budgetMs ?? COMPACTION_BUDGET_MS;
+  // zx_20261116_3 M6：预算随会话量缩放（224 条 ⇒ 45s），不再固定 25s。
+  const budgetMs = opts?.budgetMs ?? compactionBudgetMs(rows.length);
   const comp = await compressConversations(apiKey, baseUrl, modelName, older, 40, {
     deadlineAt: Date.now() + budgetMs,
     signal: opts?.signal,
+    budgetMs,
   });
   // 预算用尽 / 用户中止 ⇒ **回退规则摘要但绝不推进边界**：本轮模型看的是这份临时摘要，
   //   下一轮仍会从同一 boundary 重试压缩（"压了一半就当作压完"会把没进摘要的行永久遮蔽）。

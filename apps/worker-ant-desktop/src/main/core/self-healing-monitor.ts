@@ -8,7 +8,9 @@ import { randomUUID } from 'node:crypto';
 import { createLogger } from './logger.js';
 import { eventBus } from './event-bus.js';
 import { setDeliverableStatus } from './deliverable-lifecycle.js';
-import { PAUSE_REASON_EXEC_TIMEOUT, PAUSE_REASON_PLANNING_TIMEOUT, PAUSE_REASON_STALE_TIMEOUT, PAUSE_REASON_STARTUP_SWEEP, PAUSE_REASON_ABNORMAL_END, PAUSE_REASON_CHILDREN_INCOMPLETE, recordedPauseReason, pauseReasonLabel } from './pause-reason.js';
+import { PAUSE_REASON_EXEC_TIMEOUT, PAUSE_REASON_PLANNING_TIMEOUT, PAUSE_REASON_STALE_TIMEOUT, PAUSE_REASON_STARTUP_SWEEP, PAUSE_REASON_ABNORMAL_END, PAUSE_REASON_CHILDREN_INCOMPLETE, PAUSE_REASON_CHILDREN_FAILED, recordedPauseReason, pauseReasonLabel } from './pause-reason.js';
+// zx_20261116_1 M1: 因由回退的“确无 failed 子”用严格读（读失败返 null，不返 0）——与收口闸同一 SQL 真源。
+import { countFailedChildrenStrict } from './children-gate.js';
 import { pauseTask } from './pause-task.js';
 // zx_20260921 M7（D4 断点④）: 前置可解性判据与如实文案取**唯一真源**（不在此另写一份"前置是不是死了"）
 import { classifyDep, depBlockInfo, depBlocksRun, hasUnrecoverableDep, parseDepIds } from './dep-graph.js';
@@ -249,6 +251,16 @@ export function runHealthScan(db: Database.Database): void {
       const stalled = noticeStalledWaitingParents(db);
       for (const id of stalled.noticed) {
         findings.push({ anomaly: `任务停摆无出路: ${id}`, action: '写入停摆说明', outcome: 'recorded' });
+      }
+    }
+
+    // 4.6（zx_20261116_1 M1）：陈旧 children_failed 因由 ⇒ 降回 children_incomplete。
+    //   先于停摆说明之后的下一轮扫描生效；本轮记 findings，下一轮 noticeStalledWaitingParents 才能按
+    //   children_incomplete 的既有口径判断“子是否全停”。
+    {
+      const rec = reconcileStaleChildrenFailedReasons(db);
+      for (const id of rec.repaired) {
+        findings.push({ anomaly: `暂停因由陈旧: ${id}`, action: '降回等子', outcome: 'healed' });
       }
     }
 
@@ -613,6 +625,50 @@ export function stallNoticeText(stops: readonly StalledChild[]): string {
 /** 「还在动」的状态集——有任何一个就不喊停（与方案 M5 的判据同域）。 */
 const STALL_ACTIVE_STATUSES: readonly string[] = ['executing', 'preparing', 'planning', 'running', 'stabilizing'];
 const STALL_TERMINAL_STATUSES: readonly string[] = ['completed', 'failed', 'archived'];
+
+/**
+ * zx_20261116_1 M1「续」：把**陈旧的 children_failed 因由**降回 children_incomplete。
+ *
+ * 候选：`status='paused'` ∧ 账上因由 `children_failed` ∧ **严格读数确认 0 个 failed 子**。
+ * 为什么需要它：D1 的写入点回退只覆盖“失败子重新到终态”这一条路；历史残态、人工处置、
+ * 其它把失败子改走的路径仍可能留下 `children_failed`。留着它，调度器 `chainStalled` 会
+ * 把该父名下的 pending 子任务全部挡住（父等子、子等父）。
+ *
+ * 只降因由，**不**新增“自动恢复父任务”的机制（避免又开一条 pause→resume 热环）：
+ * 有 pending 子 ⇒ 调度器按 children_incomplete 的既有豁免拉起；无 pending 子 ⇒ 交给既有 D1。
+ * 严格读失败（null）一律跳过——绝不把“读不到”当“确无失败子”。
+ *
+ * 导出供 rr 直引真实现（同 `reconcileStalledSubtasks` / `noticeStalledWaitingParents` 的既有手法）。
+ */
+export function reconcileStaleChildrenFailedReasons(db: Database.Database): { repaired: string[] } {
+  const repaired: string[] = [];
+  try {
+    const rows = db.prepare(
+      "SELECT id, context_json FROM wa_tasks WHERE status = 'paused' AND context_json LIKE '%children_failed%'",
+    ).all() as Array<{ id: string; context_json: string | null }>;
+    for (const r of rows) {
+      if (recordedPauseReason(r.context_json) !== PAUSE_REASON_CHILDREN_FAILED) continue;
+      if (countFailedChildrenStrict(db, r.id) !== 0) continue;
+      const upd = db.prepare(
+        "UPDATE wa_tasks SET updated_at = datetime('now'), context_json = json_set(COALESCE(context_json, '{}'), '$.pause_reason', ?) WHERE id = ? AND status = 'paused'",
+      ).run(PAUSE_REASON_CHILDREN_INCOMPLETE, r.id);
+      if (!upd.changes) continue;
+      db.prepare(
+        "INSERT INTO wa_task_conversations (id, task_id, role, content, token_count, created_at) VALUES (?, ?, 'system', ?, 0, datetime('now'))",
+      ).run(randomUUID(), r.id, `[因由订正] 失败子已恢复/已处置，暂停因由由「${pauseReasonLabel(PAUSE_REASON_CHILDREN_FAILED)}」订正为「${pauseReasonLabel(PAUSE_REASON_CHILDREN_INCOMPLETE)}」；剩余子任务将继续。`);
+      logHealing(db, {
+        anomaly: `暂停因由陈旧: ${r.id}`,
+        action: '降回等子',
+        outcome: 'healed',
+        detail: 'children_failed → children_incomplete（严格读确认 0 failed 子）',
+      });
+      repaired.push(r.id);
+    }
+  } catch (err) {
+    logger.warn({ err: String(err) }, '[自愈] 暂停因由巡检失败（跳过本轮）');
+  }
+  return { repaired };
+}
 
 /**
  * 对"父等子、子全停"的子树写一次停摆说明。

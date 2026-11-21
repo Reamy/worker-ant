@@ -61,14 +61,36 @@ export interface CompletedEmitContext {
 }
 
 /**
+ * `claimCompletedEmit` 的**只读**判定（zx_20261119_1 M1「迹」）：把"为什么没发"变成可记的账。
+ *
+ * 不加这一步时，`claimCompletedEmit` 返回 `false` 的分支是**静默**的——真库标本 `91dfe739`
+ * 完成态无 `task.completed`，而账上既无持久化错误、也无任何一行说明，无从判断"是没调"还是"被判已发过"。
+ * 纯函数、零 IO：`claimCompletedEmit` 改为复用它，行为逐字不变。
+ */
+export interface CompletedEmitDecision {
+  /** 本次 run 身份；空串表示 ctx 上没有 run 身份（旧行为：一律放行） */
+  id: string;
+  /** 本 run 之前已记过的 run 身份（最多 10 条） */
+  seen: string[];
+  /** 是否放行本次发射 */
+  allow: boolean;
+}
+
+export function completedEmitDecision(ctx: CompletedEmitContext, runId?: string | null): CompletedEmitDecision {
+  const id = String(runId ?? ctx.runId ?? '').trim();
+  const seen = Array.isArray(ctx.completedRuns) ? ctx.completedRuns : [];
+  if (!id) return { id: '', seen, allow: true };
+  return { id, seen, allow: !seen.includes(id) };
+}
+
+/**
  * 同一 `run_id` 只放行一次 `task.completed`。返回值 `false` 表示**本 run 已发过**，调用方应跳过。
  * ctx 上没有 run 身份时返回 `true`（保持旧行为——不因未接线而吞事件）。
  */
 export function claimCompletedEmit(ctx: CompletedEmitContext, runId?: string | null): boolean {
-  const id = String(runId ?? ctx.runId ?? '').trim();
-  if (!id) return true;
-  const seen = Array.isArray(ctx.completedRuns) ? ctx.completedRuns : [];
-  if (seen.includes(id)) return false;
-  ctx.completedRuns = [...seen, id].slice(-10);
+  const decision = completedEmitDecision(ctx, runId);
+  if (!decision.allow) return false;
+  if (!decision.id) return true;
+  ctx.completedRuns = [...decision.seen, decision.id].slice(-10);
   return true;
 }

@@ -232,9 +232,16 @@ export function evaluateMultiSegment(command: string, tool: ShellTool, cwd: stri
 /**
  * zx_20261113_2 M9：去掉**安全的 fd 重定向**（`2>&1` / `1>&2`），仅供**校验**使用；
  * 执行仍用原命令。它们只是合并 stderr/stdout，不引入第二条命令，不该被 `&` 字符闸误伤。
+ *
+ * zx_20261119_1 M4「通」：再放行**固定 sink** `/dev/null`（`2>/dev/null`、`>/dev/null`）。
+ * 病根：它只是丢弃输出，却被 `>` 重定向闸当成"写文件"拦下（真库标本：一次成功任务链路里
+ * 15 次 `重定向被禁止`，其中 6 次就是 `2>/dev/null`）。只放行这一个**固定目标**——
+ * `> out.txt` / `2> err.log` / `>> log` 一律仍拒，文案不变。
  */
 export function stripSafeRedirections(command: string): string {
-  return (command || '').replace(/(^|\s)(?:2>&1|1>&2)(?=\s|$)/g, ' ');
+  return (command || '')
+    .replace(/(^|\s)(?:2>&1|1>&2)(?=\s|$)/g, ' ')
+    .replace(/(^|\s)(?:[12]?>{1,2}\s*\/dev\/null)(?=\s|$)/g, ' ');
 }
 
 /** 该工具**按字符**拒绝的第一个字符（按命令中的出现顺序）；无则 `null`。 */
@@ -269,7 +276,9 @@ export function shellRejectAdvice(char: string, tool: ShellTool, cwd: string): s
   const d = displayChar(char);
   let how: string;
   if (tool === 'execute_command' && char === '|') {
-    how = '本工具不支持管道，需要管道请改用 `bash` 工具（它支持 `|`）。';
+    // zx_20261120_2 M2「通」：真库标本里 `… 2>&1 | tail -40` 被拒后模型反复重试——
+    //   它以为管道是为了看输出，其实本工具**已自动截断**。先撤掉这个动机，再给真出路。
+    how = '本工具不支持管道——输出已自动截断，通常无需 `| tail`；确需管道请在 `bash` 里跑单条只读管道。';
   } else if (char === '|') {
     how = '不支持管道。';
   } else if (char === '`' || char === '$') {
@@ -327,6 +336,22 @@ export function shellRejectPayload(
 }
 
 /**
+ * zx_20261120_2 M2「通」：**逐调用**探索拒绝的人话（A3 配额耗尽 / D3 高频收敛两处共用一个纯函数）。
+ *
+ * 病根（F6）：两处内联文案都只说「bash 仍可用」，**没点名**不占本配额的替代
+ * （`read_file`/`search_content`/`list_files`）——模型于是继续 `grep -r` 吃同一本账。
+ * 只改**怎么说**：判据（何时拒）仍归 `ExploreQuotaLedger.gate` 与 D3 门槛，一字不动。
+ *
+ * `kind`：`quota` = 配额耗尽（A3）；`converge` = 高频收敛（D3）。数字口径由调用方传入（同源派生）。
+ */
+export function explorationDenialReason(tool: string, limit: number, kind: 'quota' | 'converge'): string {
+  const cause = kind === 'quota' ? `探索配额耗尽(${limit}次)` : `高频探索(≥${limit}次)`;
+  return `本次调用属**探索类**（目录/文件枚举、只读探测），已因${cause}拒绝。`
+    + `⚠ 这是对**该次调用**的拒绝，**不是**${tool} 被禁用——${tool} 仍可用，跑测试/构建/git 提交等**收尾命令照常放行**，请直接调用。`
+    + '替代出路：`read_file` / `search_content` / `list_files` 不占本配额（盘点文件优先用它们，而不是 `grep -r`）。';
+}
+
+/**
  * zx_20260915 M5/P0-7：**工具能力与限制简报**——规矩**告诉**模型，别让模型去猜（本条是根治）。
  *
  * 内容**全部派生**：白名单条数取自 `SAFE_READONLY_COMMANDS.size`、被拒字符取自 `SHELL_REJECT_CHARS`，
@@ -343,13 +368,17 @@ export function buildToolConstraintBrief(): string {
     '## 工具能力与限制（依工具而定，勿混用）',
     `- \`bash\` = **只读**白名单命令（共 ${SAFE_READONLY_COMMANDS.size} 条：${wl}），`
       + `另按子命令放行 \`jar tf\` / \`unzip -l\`（仅列内容，不解包）；**支持 \`|\` 管道**；`
-      + `按字符不支持 ${fmt('bash')}；另有命令替换 \`$()\` 与重定向亦不支持。`,
+      + `开关 \`engine.shell_multi_segment\` 开启时**支持只读多段** ${MULTI_SEGMENT_SEPARATORS.map((s) => `「${s}」`).join('/')}（每段逐段检查）；`
+      + `单段内按字符不支持 ${SHELL_REJECT_CHARS.bash.filter((c) => c !== ';').map((c) => `「${displayChar(c)}」`).join('、')}；另有命令替换 \`$()\` 与重定向亦不支持。`,
     `- \`execute_command\` = 通用命令（**可 \`cd\`、可写操作**）；**不支持 \`|\` 管道**；`
       + `按字符不支持 ${fmt('execute_command')}。`,
     `- \`execute_command\` 的分段（开关 \`engine.shell_multi_segment\` 开启时）：可用 `
       + `${MULTI_SEGMENT_SEPARATORS.map((s) => `「${s}」`).join('/')} 连接，最多 ${MAX_SHELL_SEGMENTS} 段；`
       + '**每一段**都按同一套判据逐段检查（限制只看首段不算数）。后台 `&`、管道、命令替换、换行仍不支持。',
     '- 两者的工作目录**都已是本任务的项目目录**，一般**无需 `cd`**；写文件一律用 `write_file`/`edit_file`。',
+    // zx_20261120_2 M2「通」：标本里 5 次 `illegal_char` + 2 次 `not_in_whitelist` 都卡在同一个组合场景——
+    //   要 cd 又要管道，两把工具各差一半。此处给出**两边都能跑通**的写法，不是让模型猜。
+    '- 组合场景：需要 `cd` + 管道时——在 `execute_command` 里直接 `cd sub && cmd`（输出自动截断，别接 `| tail`），或在 `bash` 里用绝对路径/`-f` 参数避免 `cd`。',
   ].join('\n');
 }
 
@@ -363,8 +392,7 @@ export type BashVerdict =
  * 校验顺序与原实现逐条一致：破坏性 → 换行/分隔符/命令替换 → `$()`/`${}` → 逐段
  * （解释器 → `sed -i` → `find -exec/-delete` → 重定向 → 白名单）。切分改用 `splitShellPipes`。
  */
-export function validateReadonlyBashCommand(command: string): BashVerdict {
-  if (DESTROY_PATTERNS.some((p) => command.includes(p))) return { ok: false, payload: { error: '破坏性命令被拦截', deny_kind: 'destructive' } };
+function validateReadonlyBashSingle(command: string): BashVerdict {
   // zx_20260915 M5/P0-7：字符判定改用真源 `firstRejectedShellChar`（裸正则删除，判据代码只剩一处）。
   // payload 带 `char` 作**界桩**：调用方据此判断"这次拒绝是不是字符级的"，从而决定换不换文案——
   // 本函数其余七支（破坏性/解释器/$()/sed -i/find -exec/重定向/白名单）的文案一字不动（§7.3 红线）。
@@ -383,7 +411,9 @@ export function validateReadonlyBashCommand(command: string): BashVerdict {
     }
     if (name === 'cd') {
       // zx_20261113_2 M9：`cd` 不是特权命令，是「用错了工具」——点名 execute_command。
-      return { ok: false, payload: { error: 'bash 不支持 cd；请改用 execute_command（它可 cd）。', deny_kind: 'not_in_whitelist' } };
+      // zx_20261120_2 M2「通」：只点名工具仍不够——真库标本在 `bash` 里 `cd backend && mvn …`，
+      //   下一跳要立刻能写出**真能执行**的命令；`mvn -f` 是免 `cd` 的通用正解。
+      return { ok: false, payload: { error: 'bash 不支持 cd；需要进子目录时：改用 execute_command（它可 cd），或 mvn 用 -f <module>/pom.xml 免 cd。', deny_kind: 'not_in_whitelist' } };
     }
     if (name === 'sed' && s.includes(' -i')) return { ok: false, payload: { error: 'sed -i 禁止，用 write_file 修改文件' } };
     if (name === 'find' && /-exec|-delete/.test(s)) return { ok: false, payload: { error: 'find -exec/-delete 禁止' } };
@@ -393,6 +423,44 @@ export function validateReadonlyBashCommand(command: string): BashVerdict {
     }
   }
   return { ok: true };
+}
+
+export interface ReadonlyBashOptions {
+  /**
+   * zx_20261119_2 M5：开关 `engine.shell_multi_segment` 开时，`bash` 允许**只读多段**
+   * （`;` / `&&` / `||`，每段仍走同一份只读白名单）。关 ⇒ 逐字回到旧行为（分隔符一律拒）。
+   */
+  allowMultiSegment?: boolean;
+}
+
+/**
+ * `bash` 工具的**校验**部分（与执行分离，使判据可被受控回归直接验证）。
+ *
+ * zx_20261119_2 M5「通」：多段只读放行——真库一次成功链路里 `illegal_char` 17 次，
+ * 多为把「几条只读命令串起来」塞进 `bash`。开关开时按引号感知切成段，**每段**复用同一份
+ * 只读判定（解释器/`cd`/`sed -i`/`find -exec`/重定向/白名单一项不少）；任一不满足整串拒。
+ * 关 ⇒ 旧路径逐字不变。
+ */
+export function validateReadonlyBashCommand(command: string, opts: ReadonlyBashOptions = {}): BashVerdict {
+  if (DESTROY_PATTERNS.some((p) => command.includes(p))) return { ok: false, payload: { error: '破坏性命令被拦截', deny_kind: 'destructive' } };
+  if (opts.allowMultiSegment && /;|&&|\|\|/.test(command)) {
+    const segments = splitShellSegments(command).map((s) => s.trim()).filter(Boolean);
+    if (segments.length > MAX_SHELL_SEGMENTS) {
+      return {
+        ok: false,
+        payload: {
+          error: `命令共 ${segments.length} 段（按 ${MULTI_SEGMENT_SEPARATORS.map((s) => `「${s}」`).join('/')} 切分），超过单次上限 ${MAX_SHELL_SEGMENTS} 段。请拆成多次单独调用。`,
+          deny_kind: 'illegal_char',
+        },
+      };
+    }
+    for (const seg of segments) {
+      const v = validateReadonlyBashSingle(seg);
+      if (!v.ok) return v;
+    }
+    return { ok: true };
+  }
+  return validateReadonlyBashSingle(command);
 }
 
 /**

@@ -1,4 +1,4 @@
-export { AnsClient, AnsApiError } from './client.js';
+export { AnsClient, AnsApiError, parseRetryAfterMs } from './client.js';
 export type { ConnectionStatus, StatusListener } from './client.js';
 export type { AnsClientConfig, AnsClientOptions } from './types.js';
 export { enrollNode } from './node-enroll.js';

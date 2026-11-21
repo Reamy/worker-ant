@@ -27,26 +27,35 @@ export default function NextActionBar({
   onAction?: (id: NextActionId) => void;
 }) {
   const { cls, Icon } = TONE[action.tone] ?? TONE.unknown;
+  // zx_20261118_2 M1（答）：两行式——标题独占第一行，说明另起一行。
+  //   病根：原实现把 headline / detail / button 塞同一 flex 行，detail 用 `truncate` ⇒
+  //   待答任务的完整问题被截成一行省略号，且长说明把标题挤窄。这里不再用 `truncate`：
+  //   说明按原样换行；超长时块内滚动（max-h-24），不省略、不截断。
   return (
     <div
-      className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-sm ${cls}`}
+      className={`px-3 py-2 rounded-lg border text-sm ${cls}`}
       data-next-action={action.key}
       data-next-tone={action.tone}
       role="status"
     >
-      <Icon className="w-4 h-4 shrink-0" />
-      <span className="font-medium">{action.headline}</span>
-      {action.detail && <span className="text-xs opacity-80 truncate" title={action.detail}>{action.detail}</span>}
-      <div className="flex-1" />
-      {action.action && onAction && (
-        <button
-          type="button"
-          onClick={() => onAction(action.action!.id)}
-          className="shrink-0 inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-md bg-white/70 border border-current/20 hover:bg-white"
-        >
-          {action.action.label}
-          <ArrowRight className="w-3 h-3" />
-        </button>
+      <div className="flex items-center gap-2">
+        <Icon className="w-4 h-4 shrink-0" />
+        <span className="font-medium min-w-0 flex-1">{action.headline}</span>
+        {action.action && onAction && (
+          <button
+            type="button"
+            onClick={() => onAction(action.action!.id)}
+            className="shrink-0 inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-md bg-white/70 border border-current/20 hover:bg-white"
+          >
+            {action.action.label}
+            <ArrowRight className="w-3 h-3" />
+          </button>
+        )}
+      </div>
+      {action.detail && (
+        <p className="mt-1 text-xs opacity-80 whitespace-pre-wrap break-words max-h-24 overflow-y-auto" title={action.detail}>
+          {action.detail}
+        </p>
       )}
     </div>
   );

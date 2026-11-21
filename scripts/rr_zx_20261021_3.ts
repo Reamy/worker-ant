@@ -558,7 +558,9 @@ async function main(): Promise<void> {
     const ex = CODE(`${A}/src/main/core/agent-executor.ts`);
     ok(/built\.domainPackInjections/.test(ex) && /domainPacks: domainPackRows/.test(ex),
       'H-10 ★注入行真传进 `recordContextInjections`');
-    ok(/memoryDomainPackText && !memTextAfterTrim\.includes\(memoryDomainPackText\)/.test(ex),
+    // zx_20261121_1 M6：三处重复的三元表达式收成 `keptSectionInjections` 一处；
+    //   按**更强符号**重定向（仍钉“入文才记账”，且钉到唯一真源）。
+    ok(/keptSectionInjections\(memoryDomainPackText, memoryDomainPackInjections, memTextAfterTrim\)/.test(ex),
       'H-11 ★与知识包同一把尺：只记**真入文**的注入（裁剪后不在文里就不记账）');
 
     // 价目表与兑现方式同集：三档零问题（卖点句都必须有人兑现）。

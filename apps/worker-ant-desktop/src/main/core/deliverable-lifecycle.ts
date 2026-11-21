@@ -122,6 +122,35 @@ export function setDeliverableStatus(
 }
 
 /**
+ * 用户「退休成果」（zx_20261119_1 M5「名」）——`retired` 状态此前**只有引擎**能写（探针处置），
+ * 真库里一条把临时探针登记成成果的行，用户在界面上无从清理。本函数是 GUI 的**唯一写口**：
+ *   · 理由必填（空理由不给退，避免"无声消失"）；
+ *   · 复用 `setDeliverableStatus`（同一事件通道，界面/交付单自动刷新）；
+ *   · 顺带摘掉 ★（已退休件不该再占主成果位）。
+ * 已退休的再点一次 = 幂等（`changed:false`），不改账。
+ */
+export type RetireDeliverableResult =
+  | { ok: true; changed: boolean }
+  // 用 `code` 而非 `reason`：`reason` 是验收拒绝原因的词表口径（rr 按该形状扫全文件），
+  // 退休的两种拒绝是**另一种事**，混用会让词表检查把"退休码"当成"验收原因"。
+  | { ok: false; code: 'not_found' | 'reason_required' };
+
+export function retireDeliverable(db: Database.Database, id: string, reason: string): RetireDeliverableResult {
+  const why = String(reason ?? '').trim();
+  if (!why) return { ok: false, code: 'reason_required' };
+  const row = lookupDeliverable(db, id);
+  if (!row) return { ok: false, code: 'not_found' };
+  if (row.old_status === 'retired') {
+    // 幂等：已退休再点一次只摘 ★（若历史上有），不重复发事件、不改 status。
+    db.prepare('UPDATE wa_deliverables SET is_primary = 0 WHERE id = ?').run(id);
+    return { ok: true, changed: false };
+  }
+  const r = setDeliverableStatus(db, id, 'retired', 'gui:retire');
+  db.prepare('UPDATE wa_deliverables SET is_primary = 0 WHERE id = ?').run(id);
+  return { ok: true, changed: r.changed };
+}
+
+/**
  * zx_20260930 M3-c（庄子「名者，实之宾也」/ 维特根斯坦·同一把尺）：**「建一条成果」的唯一落库口径**。
  *
  * 病根：本仓有**四条**创建成果的路——`write_file` 的 `ensureDocDeliverable`、
@@ -336,7 +365,11 @@ export function docNotProbe(alias = ''): string {
   // ⚠ 已接受的代价：`probe.md` 裸名、`20261021_probe.md` 四位日期前缀仍不算探针（宁漏不误，承 §4.1-①）。
   // GLOB 里 `_` 是字面下划线（不是 LIKE 的单字符通配），故无需 ESCAPE。
   const numeric = (kw: string) => `${c} NOT GLOB '*/[0-9]_${kw}*' AND ${c} NOT GLOB '*/[0-9][0-9]_${kw}*'`;
-  return `(${esc('verify')} AND ${esc('probe')} AND ${esc('tmp')} AND ${numeric('verify')} AND ${numeric('probe')} AND ${numeric('tmp')})`;
+  // zx_20261119_1 M5「名」：`tools/` 下的 `probe-*` / `probe_*` 也算探针。
+  //   真库标本：`reports/tools/probe-withdraw-60.py`（文件头自述"临时探针"）被登记为 completed 成果。
+  //   刻意**只管 tools/ 目录**（工具脚本的落脚处），`reports/probe-xxx.md` 之类仍按现状（宁漏不误）。
+  const toolsProbe = `${c} NOT LIKE '%/tools/probe-%' AND ${c} NOT LIKE '%/tools/probe\\_%' ESCAPE '\\'`;
+  return `(${esc('verify')} AND ${esc('probe')} AND ${esc('tmp')} AND ${numeric('verify')} AND ${numeric('probe')} AND ${numeric('tmp')} AND ${toolsProbe})`;
 }
 
 /**
@@ -356,7 +389,9 @@ export function isProbePath(p: string): boolean {
   if (!s) return false;
   const esc = /\/_[^\n]*?(verify|probe|tmp)/i.test(s);
   const numeric = /\/[0-9]_(verify|probe|tmp)/.test(s) || /\/[0-9][0-9]_(verify|probe|tmp)/.test(s);
-  return esc || numeric;
+  // zx_20261119_1 M5：与上方 `docNotProbe` 的 toolsProbe 逐字同义（只认 `tools/` 下的 probe-* / probe_*）。
+  const toolsProbe = /\/tools\/probe[-_]/i.test(s);
+  return esc || numeric || toolsProbe;
 }
 
 /**

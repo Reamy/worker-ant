@@ -711,7 +711,10 @@ function handleNumberSelection(ctx: ImContext, fromUser: string, msgText: string
         const title = splitTaskInput(pendingPos.taskText.replace(/@\S+/g, '')).title.slice(0, 50) || '来自IM渠道的任务';
         const taskId = crypto.randomUUID();
         db.prepare('INSERT INTO wa_tasks (id, project_id, title, description, priority, status, position_id, context_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-          .run(taskId, pendingPos.projectId, title, pendingPos.taskText, 1, 'pending', picked?.id ?? '', JSON.stringify({ source: 'im', channel: ctx.channelType, externalUser: fromUser }));
+          .run(taskId, pendingPos.projectId, title, pendingPos.taskText, 1, 'pending', picked?.id ?? '', JSON.stringify({
+            source: 'im', channel: ctx.channelType, externalUser: fromUser,
+            position_source: picked ? 'explicit' : 'none',
+          }));
         enqueueJob(db, 'ai-task', { taskId, projectId: pendingPos.projectId, source: 'im', channel: ctx.channelType, externalUser: fromUser });
         linkInboundTask(db, inboundId, taskId);
         void ctx.sendReply(fromUser, picked
@@ -743,12 +746,16 @@ function handleNumberSelection(ctx: ImContext, fromUser: string, msgText: string
       // zx_20261115_3 M4「传」：原文没 @岗位 时按项目默认（恰好一个启用岗位）指派——与主路同一派生。
       let selPositionId = pendingSel.positionId || '';
       let selPositionName = '';
+      let selPositionSource: 'explicit' | 'project_default' | 'none' = selPositionId ? 'explicit' : 'none';
       if (!selPositionId && readBoolSetting(db as never, 'position.default_from_project')) {
         const def = defaultPositionForProject(db as never, proj.id);
-        if (def) { selPositionId = def.id; selPositionName = def.name; }
+        if (def) { selPositionId = def.id; selPositionName = def.name; selPositionSource = 'project_default'; }
       }
       db.prepare('INSERT INTO wa_tasks (id, project_id, title, description, priority, status, position_id, context_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-        .run(taskId, proj.id, title, pendingSel.taskText, 1, 'pending', selPositionId, JSON.stringify({ source: 'im', channel: ctx.channelType, externalUser: fromUser }));
+        .run(taskId, proj.id, title, pendingSel.taskText, 1, 'pending', selPositionId, JSON.stringify({
+          source: 'im', channel: ctx.channelType, externalUser: fromUser,
+          position_source: selPositionSource,
+        }));
       enqueueJob(db, 'ai-task', { taskId, projectId: proj.id, source: 'im', channel: ctx.channelType, externalUser: fromUser });
       // zx_20261108_1 B3: 编号→建单也属于"这句话落到了哪张任务上"，回写入站行。
       linkInboundTask(db, inboundId, taskId);
@@ -2215,7 +2222,11 @@ async function handleCreateTask(ctx: ImContext, toUser: string, msgText: string,
     const isShortMessage = msgText.length <= 10;
     const status = isShortMessage ? 'paused' : 'pending';
 
-    const taskCtx: Record<string, unknown> = { source: 'im', channel: ctx.channelType, externalUser: toUser };
+    const taskCtx: Record<string, unknown> = {
+      source: 'im', channel: ctx.channelType, externalUser: toUser,
+      // zx_20261120_3 M1：IM 建单来源——@岗位/沿用记“显式”，项目默认记“项目默认”，无岗位记“无”。
+      position_source: positionId ? (positionDefaulted ? 'project_default' : 'explicit') : 'none',
+    };
     ctx.db.prepare(
       'INSERT INTO wa_tasks (id, project_id, title, description, priority, status, position_id, context_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
     ).run(taskId, projectId, title, desc, 1, status, positionId, JSON.stringify(taskCtx));

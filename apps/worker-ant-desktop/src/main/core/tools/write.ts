@@ -14,6 +14,10 @@ import { eventBus } from '../event-bus.js';
 import { recordTaskFile } from '../task-file-ledger.js';
 import { jsonSchema } from 'ai';
 import { setDeliverableStatus, promoteTaskFileDeliverables, autoAssignPrimary, selectProbeDeliverables, disposeProbeDeliverables, readAcceptanceCheck, docNotProbe, findDeliverableByPath, createDeliverable, isServiceType, isDocPath, isModuleFilePath } from '../deliverable-lifecycle.js';
+// zx_20261116_1 M6：产出物登记的路径围栏——根 = 项目工作目录 + 数据目录（附件根），越界拒绝。
+import { isInsideAnyRoot, isInsideRoot } from '../path-fence.js';
+// zx_20261118_2 M3：同一个围栏管**自动登记**（write_file/edit_file）——`/tmp` 临时件不再成为成果。
+import { realOrResolved } from '../real-path.js';
 
 /**
  * zx_20261002 M17-①（管子·度量衡 / 维特根斯坦「意义即用法」）: 「先读后改」的**一处真源**。
@@ -27,6 +31,19 @@ import { setDeliverableStatus, promoteTaskFileDeliverables, autoAssignPrimary, s
  *   各写一份就是"提示词说一套、门禁判另一套"（把判据与实现拆成两处的老形状）。
  */
 export const EDIT_FILE_READ_FIRST = '先读后改：修改文件前必须先用 read_file 读过该文件；本任务内新建/改写过的文件（write_file）视为已知，无需再读';
+
+/**
+ * 成果登记的根集合（项目工作目录 + 数据目录），**已取真实路径**。
+ *
+ * 三个调用点同源：`register_deliverable` 的写口围栏、`write_file`/`edit_file` 的自动登记围栏。
+ * 各处自拼 `[workingDir, ctx.dataDir].filter(...)` 就是"改一处忘另一处"的形状——根少一个，
+ * 另一处仍放行，而差异在用户眼里只能表现为"有时登记有时不登记"。
+ */
+function deliverableRoots(workingDir: string, dataDir: string | undefined): string[] {
+  return [workingDir, dataDir]
+    .filter((r): r is string => typeof r === 'string' && r.trim().length > 0)
+    .map(realOrResolved);
+}
 
 export function writeTools(deps: ToolDeps) {
   const { ctx, db, taskId, projectId, workingDir, approvePathWrite, ensureDocDeliverable, ARTIFACT_WRITE_TOOLS, logger } = deps;
@@ -94,38 +111,46 @@ export function writeTools(deps: ToolDeps) {
         // 自动注册 doc 产出物（upsert）
         let deliverableId = '';
         let deliverableOwner = '';
-        try {
-          // zx_20260917 M4·§6.1-4: 登记形状收一处（`ensureDocDeliverable`）——`edit_file` 与子进程落盘读**同一份**。
-          // 本处行为逐字不变，只是搬进了那个函数（含"不夺归属"与 forceEmit 的差别）：
-          //   · 已有登记行 ⇒ 不夺归属(zx_20260913 M2-2)、重写回 draft、不发 forceEmit；
-          //   · 无登记行 ⇒ 新建 doc/draft 并发事件。
-          const ensured = ensureDocDeliverable(db, { projectId, taskId, absPath: fp, displayPath: args.filePath, via: 'write_file' });
-          deliverableId = ensured.id;
-          deliverableOwner = ensured.ownerTaskId ?? '';
-          if (isUpdate && prevContent !== null) {
-            const versionCount = (db.prepare('SELECT COUNT(*) as c FROM wa_deliverable_versions WHERE deliverable_id = ?').get(deliverableId) as { c: number }).c;
-            db.prepare('INSERT INTO wa_deliverable_versions (id, deliverable_id, file_path, content_snapshot, size, version, changed_by) VALUES (?, ?, ?, ?, ?, ?, ?)')
-              .run(crypto.randomUUID(), deliverableId, fp, prevContent, prevContent.length, versionCount + 1, taskId);
-          } else if (!existedBefore && deliverableId) {
-            // zx_20260907 M2(B1): 版本"起点基线"——write_file 新建 doc 文件(.md/.txt/.py)且此前无任何版本快照时，
-            // 落 v1 基线(内容=首次写入)，补"覆盖已有/edit_file 才快照"留下的第0版缺口(维特根斯坦:可判定事实须有可回溯起点)。
-            // 仅对本次新建生效(已存 doc 不补录,不擅改历史)；register_deliverable 后续建行也走"去重已存在"故不重复。
-            try {
-              const cfgV1 = db.prepare("SELECT value FROM wa_settings WHERE key = 'deliverable.first_write_v1'").get() as { value?: string } | undefined;
-              if (boolSetting(cfgV1?.value) && (fp.endsWith('.md') || fp.endsWith('.txt') || fp.endsWith('.py'))) {
-                const vc = (db.prepare('SELECT COUNT(*) as c FROM wa_deliverable_versions WHERE deliverable_id = ?').get(deliverableId) as { c: number }).c;
-                if (vc === 0) {
-                  db.prepare('INSERT INTO wa_deliverable_versions (id, deliverable_id, file_path, content_snapshot, size, version, changed_by) VALUES (?, ?, ?, ?, ?, 1, ?)')
-                    .run(crypto.randomUUID(), deliverableId, fp, args.content, args.content.length, taskId);
+        // zx_20261118_2 M3「名」：**根外写入不建/不改成果行**。
+        //   此前 `ensureDocDeliverable` 不判根，`/tmp/commit-msg-*.txt`、`/tmp/wa-*.py` 这类临时件被登记成成果
+        //   （怡寿里项目 29 条、3 条还成了主成果），而 GUI 打开又按 `deliverable-path.ts` 的同一根围栏拒绝
+        //   ⇒「成果」名不副实。`recordTaskFile` 已在上方照记：提交闸/验收证据要的是"本任务动过这个文件"，
+        //   与"它算不算成果"是两件事，故根外也**不**跳过入册。
+        //   根 = 项目工作目录 + 数据目录，与 `register_deliverable` 的围栏同一个 `deliverableRoots`。
+        if (isInsideAnyRoot(realOrResolved(fp), deliverableRoots(workingDir, ctx.dataDir))) {
+          try {
+            // zx_20260917 M4·§6.1-4: 登记形状收一处（`ensureDocDeliverable`）——`edit_file` 与子进程落盘读**同一份**。
+            // 本处行为逐字不变，只是搬进了那个函数（含"不夺归属"与 forceEmit 的差别）：
+            //   · 已有登记行 ⇒ 不夺归属(zx_20260913 M2-2)、重写回 draft、不发 forceEmit；
+            //   · 无登记行 ⇒ 新建 doc/draft 并发事件。
+            const ensured = ensureDocDeliverable(db, { projectId, taskId, absPath: fp, displayPath: args.filePath, via: 'write_file' });
+            deliverableId = ensured.id;
+            deliverableOwner = ensured.ownerTaskId ?? '';
+            if (isUpdate && prevContent !== null) {
+              const versionCount = (db.prepare('SELECT COUNT(*) as c FROM wa_deliverable_versions WHERE deliverable_id = ?').get(deliverableId) as { c: number }).c;
+              db.prepare('INSERT INTO wa_deliverable_versions (id, deliverable_id, file_path, content_snapshot, size, version, changed_by) VALUES (?, ?, ?, ?, ?, ?, ?)')
+                .run(crypto.randomUUID(), deliverableId, fp, prevContent, prevContent.length, versionCount + 1, taskId);
+            } else if (!existedBefore && deliverableId) {
+              // zx_20260907 M2(B1): 版本"起点基线"——write_file 新建 doc 文件(.md/.txt/.py)且此前无任何版本快照时，
+              // 落 v1 基线(内容=首次写入)，补"覆盖已有/edit_file 才快照"留下的第0版缺口(维特根斯坦:可判定事实须有可回溯起点)。
+              // 仅对本次新建生效(已存 doc 不补录,不擅改历史)；register_deliverable 后续建行也走"去重已存在"故不重复。
+              try {
+                const cfgV1 = db.prepare("SELECT value FROM wa_settings WHERE key = 'deliverable.first_write_v1'").get() as { value?: string } | undefined;
+                if (boolSetting(cfgV1?.value) && (fp.endsWith('.md') || fp.endsWith('.txt') || fp.endsWith('.py'))) {
+                  const vc = (db.prepare('SELECT COUNT(*) as c FROM wa_deliverable_versions WHERE deliverable_id = ?').get(deliverableId) as { c: number }).c;
+                  if (vc === 0) {
+                    db.prepare('INSERT INTO wa_deliverable_versions (id, deliverable_id, file_path, content_snapshot, size, version, changed_by) VALUES (?, ?, ?, ?, ?, 1, ?)')
+                      .run(crypto.randomUUID(), deliverableId, fp, args.content, args.content.length, taskId);
+                  }
                 }
-              }
-            } catch { /* v1 基线 best-effort */ }
-          }
-          // zx_20260906_1 3a: 覆盖已有文件即 bump updated_at——"最近变更"如实(不只随状态流转，内容改写也算变更)
-          if (existedBefore) {
-            db.prepare("UPDATE wa_deliverables SET updated_at = datetime('now') WHERE id = ?").run(deliverableId);
-          }
-        } catch {}
+              } catch { /* v1 基线 best-effort */ }
+            }
+            // zx_20260906_1 3a: 覆盖已有文件即 bump updated_at——"最近变更"如实(不只随状态流转，内容改写也算变更)
+            if (existedBefore) {
+              db.prepare("UPDATE wa_deliverables SET updated_at = datetime('now') WHERE id = ?").run(deliverableId);
+            }
+          } catch {}
+        }
         // 实时文件变更事件（Phase 1）：新文件→file.created，覆盖→file.updated（带 diff）
         try {
           if (!existedBefore) {
@@ -209,21 +234,27 @@ export function writeTools(deps: ToolDeps) {
         //   本工具显式改了某文件 ⇒ 与 `write_file` 同尺登记。**不**按文件名长相判（§6.0bis-e）。
         //   ⚠ 位置必须在**下面那段版本快照之前**：登记后"编辑已注册 doc ⇒ 落版本快照"才对**新建行**生效
         //     （与 `write_file` 的 v1 基线同义；否则新建行永远拿不到第 1 版快照）。
-        try {
-          ensureDocDeliverable(db, { projectId, taskId, absPath: fp, displayPath: args.filePath, via: 'edit_file' });
-        } catch { /* 登记失败不影响编辑主流程 */ }
-        // 2026-09-07: edit_file 版本快照——与 write_file 对齐：编辑已注册文档类交付物(.md/.txt/.py、<50KB、内容确有变化)时
-        // 把修改前全文写入 wa_deliverable_versions(版本号递增)，并 bump updated_at 如实"最近变更"(原两者皆缺→"多次编辑却无版本历史")
-        if (content.length < 50_000 && newContent !== content && (fp.endsWith('.md') || fp.endsWith('.txt') || fp.endsWith('.py'))) {
+        // zx_20261118_2 M3「名」：与 `write_file` 同一个根围栏——根外编辑（`/tmp/...`）**不进成果分支**。
+        //   版本快照挂在成果行上（`exDeliv.id`）：根外若照跑这一支，轻则白查一行，重则命中一条历史脏行、
+        //   把本轮内容写进一条不属于本轮的成果版本表；登记与快照是同一条因果链，故整块一起跳过。
+        //   `recordTaskFile` 在下方照记（提交闸/验收证据需要"本任务动过这个文件"，与"算不算成果"无关）。
+        if (isInsideAnyRoot(realOrResolved(fp), deliverableRoots(workingDir, ctx.dataDir))) {
           try {
-            const exDeliv = db.prepare('SELECT id FROM wa_deliverables WHERE project_id = ? AND file_path = ? LIMIT 1').get(projectId, fp) as { id: string } | undefined;
-            if (exDeliv) {
-              const vc = (db.prepare('SELECT COUNT(*) as c FROM wa_deliverable_versions WHERE deliverable_id = ?').get(exDeliv.id) as { c: number }).c;
-              db.prepare('INSERT INTO wa_deliverable_versions (id, deliverable_id, file_path, content_snapshot, size, version, changed_by) VALUES (?, ?, ?, ?, ?, ?, ?)')
-                .run(crypto.randomUUID(), exDeliv.id, fp, content, content.length, vc + 1, taskId);
-              db.prepare("UPDATE wa_deliverables SET updated_at = datetime('now') WHERE id = ?").run(exDeliv.id);
-            }
-          } catch { /* 快照失败不影响编辑主流程 */ }
+            ensureDocDeliverable(db, { projectId, taskId, absPath: fp, displayPath: args.filePath, via: 'edit_file' });
+          } catch { /* 登记失败不影响编辑主流程 */ }
+          // 2026-09-07: edit_file 版本快照——与 write_file 对齐：编辑已注册文档类交付物(.md/.txt/.py、<50KB、内容确有变化)时
+          // 把修改前全文写入 wa_deliverable_versions(版本号递增)，并 bump updated_at 如实"最近变更"(原两者皆缺→"多次编辑却无版本历史")
+          if (content.length < 50_000 && newContent !== content && (fp.endsWith('.md') || fp.endsWith('.txt') || fp.endsWith('.py'))) {
+            try {
+              const exDeliv = db.prepare('SELECT id FROM wa_deliverables WHERE project_id = ? AND file_path = ? LIMIT 1').get(projectId, fp) as { id: string } | undefined;
+              if (exDeliv) {
+                const vc = (db.prepare('SELECT COUNT(*) as c FROM wa_deliverable_versions WHERE deliverable_id = ?').get(exDeliv.id) as { c: number }).c;
+                db.prepare('INSERT INTO wa_deliverable_versions (id, deliverable_id, file_path, content_snapshot, size, version, changed_by) VALUES (?, ?, ?, ?, ?, ?, ?)')
+                  .run(crypto.randomUUID(), exDeliv.id, fp, content, content.length, vc + 1, taskId);
+                db.prepare("UPDATE wa_deliverables SET updated_at = datetime('now') WHERE id = ?").run(exDeliv.id);
+              }
+            } catch { /* 快照失败不影响编辑主流程 */ }
+          }
         }
         await fsp.writeFile(fp, newContent, 'utf-8');
         // zx_20261022_3 批十二：自有文件账（与 write_file 同一本账）。
@@ -437,6 +468,19 @@ export function writeTools(deps: ToolDeps) {
           }
         }
         const fp = path.isAbsolute(args.filePath) ? args.filePath : path.join(workingDir, args.filePath);
+        // zx_20261116_1 M6（净）：产出物只认**项目工作目录**与**数据目录（附件根）**内的文件。
+        //   病根：`/tmp/probe-isallblank-20261116/*` 曾被登记成 3 条 completed 成果——登记得进、GUI 的
+        //   `deliverable:open` 又会按 `deliverable-path.ts` 的根围栏拒绝（名实不符）。只改 agent 工具；
+        //   GUI 手工登记（`deliverable:create`）不在此围栏内。`..` 已在 `write_file` 侧拒绝；此处再按
+        //   realpath 判根（防符号链接指向根外）。
+        {
+          const roots = deliverableRoots(workingDir, ctx.dataDir);
+          if (roots.length === 0 || !roots.some((root) => isInsideRoot(realOrResolved(fp), root))) {
+            return JSON.stringify({
+              error: `产出物路径越出项目工作目录与数据目录（已拒绝登记）：${fp}；请写到项目内，或先挂为附件`,
+            });
+          }
+        }
         // 去重：原为 **task 级**（`WHERE task_id = ? AND file_path = ?`），改为**工程级**共用语句
         //   （zx_20260928 M3）——同一工程下同一 file_path 至多一行产出物。跨任务命中**只返回既有行、
         //   绝不改它的 `task_id`**（不夺归属，承 zx_20260913 M2-2）。
@@ -447,12 +491,16 @@ export function writeTools(deps: ToolDeps) {
           //   请求是 `daemon` 时会把"另一个值"报成结果；反证标本见 `rr_zx_20260924_1_b9.ts:151` 的夹具形状）。
           // zx_20261022_1 批五（韩非·名实）：`deduplicated:true` 只说"没新建"，没说"这行是谁的"。
           //   跨任务命中时归属**不改**（承 M2-2），但必须如实回传——否则模型以为登记成功、本任务却有 0 行。
+          // zx_20261116_2 M1「属」：登记也算一次**文件级贡献**——即使没有 write_file/edit_file，
+          //   也把 (taskId, fp) 记入 `wa_task_files`，供产出闸/验收取证按归属计数。owner 仍不夺。
+          recordTaskFile(db, taskId, fp, 'register_deliverable');
           const crossOwner = existing.task_id && existing.task_id !== taskId;
           return JSON.stringify({
             ok: true, id: ex.id, name: ex.name, type: ex.type, filePath: fp, deduplicated: true,
             ...(crossOwner ? {
+              attributed: true,
               ownerTaskId: existing.task_id,
-              note: `该文件已登记在任务 ${existing.task_id} 名下（工程级查重，不夺归属）；本任务名下没有这条产出物的记录。`,
+              note: `该文件已登记在任务 ${existing.task_id} 名下（工程级查重，不夺归属）；本任务已记为参与，产出闸/验收会按共享成果计。`,
             } : {}),
           });
         }

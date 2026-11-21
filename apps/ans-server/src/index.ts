@@ -15,7 +15,7 @@ import { cors } from '@elysiajs/cors';
 import { swagger } from '@elysiajs/swagger';
 import { initDatabase } from './db/schema.js';
 import { createLogger } from './utils/logger.js';
-import { RateLimiter } from './utils/rate-limiter.js';
+import { RateLimiter, rateLimitClassOf, readRateLimitEnv, type RateLimitClass } from './utils/rate-limiter.js';
 import { hmacAuth } from './utils/security.js';
 import { healthRoutes } from './routes/health.js';
 import { modelsRoutes } from './routes/models.js';
@@ -129,7 +129,16 @@ import('./utils/security.js').then((m) => {
   }
 });
 
-const rateLimiter = new RateLimiter({ windowMs: 60_000, maxRequests: 60 });
+// zx_20261116_3 M1「限」：分桶限流（billing/model/mgmt/a2a/default），阈值可配。
+// 真事故：全局 60/min 被「每步两次记账 + 多任务并发」打爆，317 次 429。
+const rateLimitCfg = readRateLimitEnv();
+const rateLimiters: Record<RateLimitClass, RateLimiter> = {
+  billing: new RateLimiter({ windowMs: rateLimitCfg.windowMs, maxRequests: rateLimitCfg.limits.billing }),
+  model: new RateLimiter({ windowMs: rateLimitCfg.windowMs, maxRequests: rateLimitCfg.limits.model }),
+  mgmt: new RateLimiter({ windowMs: rateLimitCfg.windowMs, maxRequests: rateLimitCfg.limits.mgmt }),
+  a2a: new RateLimiter({ windowMs: rateLimitCfg.windowMs, maxRequests: rateLimitCfg.limits.a2a }),
+  default: new RateLimiter({ windowMs: rateLimitCfg.windowMs, maxRequests: rateLimitCfg.limits.default }),
+};
 
 // HMAC保护的内部API路由组（ans-client调用的网关/代理/计费/optimal）
 const hmacApi = new Elysia()
@@ -189,12 +198,14 @@ const app = new Elysia({ adapter: node() })
   //   于是每个路由各自决定错误长什么样（`a2a-proxy` 直接把上游 `Error.message` 回给调用方）。
   //   接线抽到 `utils/error-handler.ts`（一处），判据挂**同一个回调** ⇒ 测的是生产那一跳。
   .onError(handleRouteError)
-  // 全局速率限制
+  // 分桶速率限制（zx_20261116_3 M1）：按路径归类，各桶独立计数；key = apiKey（缺省 IP）。
   .derive(({ request }) => {
     const apiKey = request.headers.get('x-api-key');
     const ip = request.headers.get('x-forwarded-for') ?? '127.0.0.1';
-    const key = rateLimiter.getKey(apiKey, ip);
-    rateLimiter.check(key);
+    let pathname = '/';
+    try { pathname = new URL(request.url).pathname; } catch { pathname = String(request.url || '/'); }
+    const cls = rateLimitClassOf(pathname);
+    rateLimiters[cls].check(apiKey ?? ip);
     return {};
   })
   // 公开路由（无需HMAC认证）

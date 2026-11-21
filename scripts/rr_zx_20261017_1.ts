@@ -589,7 +589,9 @@ async function main(): Promise<void> {
       'has-dependencies', 'dependencies-waiting', 'dependencies-dead',
       'has-attachments', 'has-working-dir', 'decomposed', 'local-capacity',
       // zx_20261115_1 M1/M4：岗位级"不参与跨机派单" + 本机"不派出去"（新枚举成员，逐成员枚举须同步）。
-      'position-local-only', 'participate-out-off', 'no-category'];
+      'position-local-only', 'participate-out-off', 'no-category',
+      // zx_20261120_1 M5：研究类只读外派的两条细分理由（无 origin / 开关关）。
+      'repo-binding-missing', 'readonly-code-off'];
     eq(Object.keys(CREATE_DISPATCH_REASON_LABEL).sort(), [...reasons].sort(),
       'R-14d 理由词表逐成员枚举（机器码与上屏文案成对，漏一项是编译期错）');
     for (const r of reasons) {

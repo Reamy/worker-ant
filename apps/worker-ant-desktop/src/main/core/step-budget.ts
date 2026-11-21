@@ -68,6 +68,11 @@ export function resolveExplorationQuota(maxSteps: number, archetype?: string): {
  * 有界是硬约束：无界续额等于"上限不存在"，一次模型死循环就能把 token 烧穿。
  * 三次封顶后 `granted=false`，恢复仍是原上限——此时人该做的是核验产出或拆小任务，不是再点一次恢复。
  *
+ * zx_20261120_2 M4「度」：第二个参数是**基础上限**（不含已经累计的 `step_budget_bonus`），
+ *   不是当前有效上限。此前调用方传的是 `resolveMaxSteps(...)` 的结果（已含续额）⇒
+ *   74 → 148 → 296 复利增长，标本两次就拿到 225 步、估时只有 49 步。传基础值后
+ *   三次续额累计至多 3×基础，与"至多 3 次"一起构成真正的有界。
+ *
  * 直接改传入的 `ctxJson`（调用方负责落库），返回本次结果供文案与账目使用。 */
 export const STEP_CAP_GRANT_LIMIT = 3;
 
@@ -82,21 +87,56 @@ export interface StepCapGrantResult {
   limit: number;
 }
 
-export function grantStepBudgetOnCapHit(ctxJson: unknown, maxSteps: number): StepCapGrantResult {
+export function grantStepBudgetOnCapHit(ctxJson: unknown, baseMaxSteps: number): StepCapGrantResult {
   const o = ctxJson && typeof ctxJson === 'object' ? ctxJson as Record<string, unknown> : null;
   const grants = Math.max(0, Math.floor(Number(o?.step_cap_grants) || 0));
   const bonus = Math.max(0, Math.floor(Number(o?.step_budget_bonus) || 0));
   const limit = STEP_CAP_GRANT_LIMIT;
-  if (!o || !(maxSteps > 0) || !Number.isFinite(maxSteps)) {
+  if (!o || !(baseMaxSteps > 0) || !Number.isFinite(baseMaxSteps)) {
     return { bonus, grantedSteps: 0, granted: false, grants, limit };
   }
   if (grants >= limit) return { bonus, grantedSteps: 0, granted: false, grants, limit };
-  const grantedSteps = Math.ceil(maxSteps);
+  const grantedSteps = Math.ceil(baseMaxSteps);
   const nextBonus = bonus + grantedSteps;
   const nextGrants = grants + 1;
   o.step_budget_bonus = nextBonus;
   o.step_cap_grants = nextGrants;
   return { bonus: nextBonus, grantedSteps, granted: true, grants: nextGrants, limit };
+}
+
+export interface StepCapHitInput {
+  maxSteps: number;
+  stepCount: number;
+  /** 本次 run 开始时从 context 读到的已累计续额（用于反推基础上限）。 */
+  stepBudgetBonus: number;
+}
+
+export interface StepCapHitResult {
+  grant: StepCapGrantResult;
+  continuation: StepCapContinuation | null;
+  baseForGrant: number;
+}
+
+/**
+ * 撞顶当刻的**唯一落账口**（zx_20261120_2 M4「度」）：按基础上限发续额并写 `step_cap_hit`。
+ * 首次基础 = 当前上限 － 已累计续额；后续沿用首次记下的 `base_max_steps`（不随复利抬高）。
+ */
+export function recordStepCapHit(ctxJson: Record<string, unknown>, input: StepCapHitInput): StepCapHitResult {
+  const prevHit = (ctxJson.step_cap_hit ?? {}) as { base_max_steps?: unknown };
+  const prevBase = Number(prevHit.base_max_steps);
+  const baseForGrant = Number.isFinite(prevBase) && prevBase > 0
+    ? prevBase
+    : Math.max(0, input.maxSteps - input.stepBudgetBonus);
+  const grant = grantStepBudgetOnCapHit(ctxJson, baseForGrant);
+  ctxJson.step_cap_hit = {
+    count: grant.grants,
+    steps: input.stepCount,
+    max_steps: input.maxSteps,
+    base_max_steps: baseForGrant,
+    resume_bonus: grant.granted ? grant.grantedSteps : null,
+    at: new Date().toISOString(),
+  };
+  return { grant, continuation: stepCapContinuationOf(ctxJson), baseForGrant };
 }
 
 /** 上一次撞顶留下的续额账（`ctx.step_cap_hit`）；没撞过顶 ⇒ `null`。 */

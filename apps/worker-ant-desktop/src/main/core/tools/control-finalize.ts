@@ -29,7 +29,14 @@ import { readTaskAcceptanceCriteria, criteriaSourceOf, UNVERIFIED_REASON_LABEL, 
 import { mergeFinalizeChecks } from '../run-trace.js';
 // zx_20261113_2 M15：收口时只提示 Git 未提交，不自动提交。
 import { gitWorkingTreeAdvice } from '../git-advisory.js';
-import { MAX_MANUAL_ITEMS, MAX_VERIFICATION_ISSUES, createVerificationFixTask, extractVerificationIssues, isReportDocPath } from '../verification-issues.js';
+import { baselineReconcileChecks } from '../start-baseline-reconcile.js';
+import { recordToolDenialLedger, summarizeCommandFailures, commandFailureCheckLine } from '../tool-denials.js';
+import { roiBudgetCheckLine } from '../context-roi.js';
+import { MAX_DEFERRED_ITEMS, MAX_MANUAL_ITEMS, MAX_VERIFICATION_ISSUES, createVerificationFixTask, extractDeferredItems, extractVerificationIssues, isPlanProposalText, isReportDocPath } from '../verification-issues.js';
+// zx_20261116_1 M2「界」：方案轮的“只形成方案/不动代码”边界沿祖先链继承（只认非终态祖先的明确边界句）。
+import { planOnlyScope } from '../plan-scope.js';
+// zx_20261116_1 M6「序」：派生修复任务与同父在途兄弟串行（窄版，只串在途）。
+import { inFlightSiblingIds } from '../task-siblings.js';
 import { eventBus } from '../event-bus.js';
 import { failedChildren, childNames } from '../children-gate.js';
 import { getTensions } from '../tension-engine.js';
@@ -39,6 +46,8 @@ import { runShellCommand } from '../shell-exec.js';
 // zx_20260922_1 M6（F8）: 「预算到没到顶」的唯一判据（零依赖纯函数，与禁用侧同源）——不在此另算一遍。
 import { budgetCapReached } from '../step-budget.js';
 import { selectProbeDeliverables, disposeProbeDeliverables, autoAssignPrimary, readAcceptanceCheck } from '../deliverable-lifecycle.js';
+// zx_20261116_2 M1「属」：产出物闸按“本任务 own ∪ 本任务写过的共享成果”计数（`wa_task_files` 一处真源）。
+import { taskDeliverableCounts, taskDeliverablePaths, recordContribution } from '../deliverable-attribution.js';
 import { gitRootsOfDirs } from './control.js';
 import { gitGateVerdict, ownedPaths } from '../task-file-ledger.js';
 import { ARCHETYPE_TOOL_CATEGORIES } from '../task-archetype.js';
@@ -62,6 +71,9 @@ export async function runFinalizeTask(deps: ToolDeps, args: { summary: string; q
   const { ctx, db, taskId, projectId, workingDir, checkAcceptanceCriteria, syncQualityColumn, archetypeForFile, formatInsufficiencyReasons, fileSig, addSideTokens, checkMCPRegistrationIntegrity, expectedOutputMiss, docValidationTargets, completionCapFloors, truncatedReads } = deps;
   // 任务完成自检：子任务完成状态 + 产出物注册状态 + AI内容
   const checks: string[] = [];
+  // zx_20261116_2 M2「证」：先把“本任务写了哪些文件 + 收口摘要”落进 contribution，
+  //   再跑验收取证（`collectEvidence` 会读它），避免判卷只看到共享文件、看不到本任务声明。
+  recordContribution(db, taskId, args.summary, 'finalize_task');
 
   // 检查1：直接子任务是否完成
   const myChildren = db.prepare("SELECT id, title, status, context_json FROM wa_tasks WHERE parent_task_id = ?").all(taskId) as Array<{ id: string; title: string; status: string; context_json: string | null }>;
@@ -167,14 +179,43 @@ export async function runFinalizeTask(deps: ToolDeps, args: { summary: string; q
   // 检查2：产出物注册状态（2026-09-07 修正：register_deliverable/write_file 建行即 status='draft'，
   //        finalize 收尾 promoteTaskFileDeliverables 才置 completed——故 draft 属"已注册待收尾提升"，不再误报未注册；
   //        仅对超出 草稿/已注册/已完成/运行中 的异常状态告警）
-  const deliverables = db.prepare('SELECT name, type, status FROM wa_deliverables WHERE task_id = ?').all(taskId) as Array<{ name: string; type: string; status: string }>;
+  // zx_20261116_2 M1「属」：own = 本任务名下的行；shared = 本任务写过（wa_task_files）、owner 不是本任务的行。
+  //   真事故 `18c076d9`：它登记共享方案文件被 dedup，own=0，但它在 wa_task_files 有该文件的 edit 行 ⇒
+  //   旧口径报 `[WARN] 无产出物`，而它确实做了大量编辑。共享成果必须计入，但文案要说清“不是独占”。
+  type DelivRow = { id: string; name: string; type: string; status: string; task_id: string | null; owner_task_title?: string | null };
+  const delivSelect = `SELECT DISTINCT d.id, d.name, d.type, d.status, d.task_id, t.title AS owner_task_title
+       FROM wa_deliverables d LEFT JOIN wa_tasks t ON t.id = d.task_id`;
+  const ownDeliverables = db.prepare(`${delivSelect} WHERE d.task_id = ?`).all(taskId) as DelivRow[];
+  // `wa_task_files` 在老夹具里可能不存在（既有 rr 的手写 DDL）——读不到就按“无共享”论，
+  // 不让一条归属查询把整个 finalize 打断（生产 `initDatabase` 恒有该表）。
+  let sharedRows: DelivRow[] = [];
+  try {
+    sharedRows = db.prepare(
+      `${delivSelect} WHERE d.file_path IN (SELECT path FROM wa_task_files WHERE task_id = ?)
+         AND (d.task_id IS NULL OR d.task_id != ?)`,
+    ).all(taskId, taskId) as DelivRow[];
+  } catch { sharedRows = []; }
+  const byId = new Map<string, DelivRow>();
+  for (const d of [...ownDeliverables, ...sharedRows]) byId.set(d.id, d);
+  const deliverables = [...byId.values()];
+  const sharedDeliverables = deliverables.filter(d => d.task_id !== taskId);
   const abnormal = deliverables.filter(d => !['draft', 'registered', 'completed', 'running'].includes(d.status));
   if (deliverables.length === 0) {
-    checks.push('[WARN] 无产出物');
+    // zx_20261116_2 M4「评」：无登记产出物 ≠ 没干活——有 `wa_task_files` 写入证据时不再报“无产出物”，
+    //   改为 INFO 并如实说“没登记”；完全无产出/无写入才保留 WARN（两向标本）。
+    const written = taskDeliverablePaths(db, taskId);
+    if (written.length > 0) {
+      checks.push(`[INFO] 无登记产出物，但有写入证据（${written.length} 个文件）——不计为“无产出”`);
+    } else {
+      checks.push('[WARN] 无产出物');
+    }
   } else if (abnormal.length > 0) {
     checks.push(`[WARN] 产出物存在异常状态(${abnormal.length}): ${abnormal.map(d => `${d.name}(${d.status})`).join(', ')}`);
+  } else if (ownDeliverables.length === 0 && sharedDeliverables.length > 0) {
+    const owners = [...new Set(sharedDeliverables.map(d => d.owner_task_title || d.task_id || '未记属主').filter(Boolean))].slice(0, 3);
+    checks.push(`[INFO] 本任务名下无独占产出物，参与 ${sharedDeliverables.length} 件共享成果（${owners.join('、')}）——不计“无产出物”`);
   } else {
-    checks.push('[PASS] 所有产出物已注册');
+    checks.push(`[PASS] 所有产出物已注册${sharedDeliverables.length > 0 ? `（另参与 ${sharedDeliverables.length} 件共享成果）` : ''}`);
   }
 
   // 检查3：是否有AI产出内容
@@ -222,16 +263,46 @@ export async function runFinalizeTask(deps: ToolDeps, args: { summary: string; q
     //   若它的产出里再出现 ⚠/❌，就会再派生一个"修复修复任务"）。
     if (!fixCtx.verification_fix_created && !fixCtx.verification_fix) {
       const docRows = db.prepare("SELECT file_path FROM wa_deliverables WHERE task_id = ? AND type = 'doc'").all(taskId) as Array<{ file_path: string | null }>;
-      const contents: string[] = [];
+      const reportContents: string[] = [];
+      const planContents: string[] = [];
       for (const d of docRows) {
-        // 只读报告类文档：源码/配置注释里的 ❌/⚠ 不是核实结论（`openapi.yaml` 的变更注记曾被当成问题立项）。
-        if (!isReportDocPath(d.file_path)) continue;
-        try { contents.push(await fsp.readFile(d.file_path, 'utf-8')); } catch { continue; }
+        if (!d.file_path) continue;
+        // 报告类文档：源码/配置注释里的 ❌/⚠ 不是核实结论（`openapi.yaml` 的变更注记曾被当成问题立项）。
+        // 方案类文档：承接「留到后续批」这类**纯文本**未落地清单（zx_20261117_1 M1）。
+        const isReport = isReportDocPath(d.file_path);
+        const isPlan = /(^|\/)plans\//.test(d.file_path);
+        if (!isReport && !isPlan) continue;
+        let body = '';
+        try { body = await fsp.readFile(d.file_path, 'utf-8'); } catch { continue; }
+        if (isReport) reportContents.push(body);
+        if (isPlan) planContents.push(body);
       }
       // zx_20261021_2 D4（批四）：抽取规则收进 `verification-issues.ts`——取**主语**而非判定列
       //   （旧实现取"第一个含 ❌/⚠️ 的单元格"，真库派生任务因此长出「1. 不通过」「8. ️」）。
       //   零依赖模块，rr 可喂真报告片段直接断言。
-      const { issues, manualItems, manualOverflow, overflow } = extractVerificationIssues(contents);
+      const glyph = extractVerificationIssues(reportContents);
+      // zx_20261117_1 M1「案」：纯文本「留到 B2 后续批」没有 ❌/⚠ 字形，旧抽取看不见（标本 02）。
+      // zx_20261119_2 M1：把同父兄弟标题一并喂进去——行内点名兄弟任务 = 交接，不是缺口。
+      let siblingTitles: string[] = [];
+      try {
+        const parentRow = db.prepare('SELECT parent_task_id FROM wa_tasks WHERE id = ?').get(taskId) as
+          { parent_task_id?: string | null } | undefined;
+        if (parentRow?.parent_task_id) {
+          siblingTitles = (db.prepare('SELECT title FROM wa_tasks WHERE parent_task_id = ? AND id <> ?').all(parentRow.parent_task_id, taskId) as Array<{ title: string }>)
+            .map((r) => String(r.title || ''));
+        }
+      } catch { /* 兄弟标题取不到就只按措辞判，不阻断 */ }
+      const deferred = extractDeferredItems(planContents, { siblingTitles });
+      const mergedIssues = [...glyph.issues];
+      for (const d of deferred.items) if (!mergedIssues.includes(d)) mergedIssues.push(d);
+      const issues = mergedIssues.slice(0, MAX_VERIFICATION_ISSUES);
+      const overflow = glyph.overflow + deferred.overflow + Math.max(0, mergedIssues.length - MAX_VERIFICATION_ISSUES);
+      const manualMerged = [...glyph.manualItems];
+      for (const m of deferred.manualItems) if (!manualMerged.includes(m)) manualMerged.push(m);
+      const manualItems = manualMerged.slice(0, MAX_MANUAL_ITEMS);
+      const manualOverflow = glyph.manualOverflow;
+      const advisories = glyph.advisories;
+      const advisoryOverflow = glyph.advisoryOverflow;
       // zx_20261029_3 M1：待人事项（GUI/真机/外部实例/凭据/部署）**不立项**——派给智能体只能空转。
       //   登记进 context_json 供界面/后续轮次查账；与下面"建修复任务"共用同一份 fixCtx，键不互相覆盖。
       if (manualItems.length > 0) {
@@ -242,20 +313,65 @@ export async function runFinalizeTask(deps: ToolDeps, args: { summary: string; q
             (manualOverflow > 0 ? `；另 ${manualOverflow} 条未列出（展示上限 ${MAX_MANUAL_ITEMS} 条）` : ''),
         );
       }
-      if (issues.length > 0) {
-        // E4 (2026-09-03): 规划/排期类任务默认不自动下钻实现子任务——
-        // 其 ⚠️/❌ 是「待后续实施/待闭环」的里程碑项，而非应立即修复的未落地问题；
-        // 确需实施应单独创建实施任务（三前置：方案口径已确认 + 指定 M 项 + 回归自检）。
-        let planRow: { title: string; description: string } | undefined;
-        try { planRow = db.prepare('SELECT title, description FROM wa_tasks WHERE id = ?').get(taskId) as { title: string; description: string } | undefined; } catch { /* ignore */ }
-        const planText = `${planRow?.title || ''} ${planRow?.description || ''}`;
-        // zx_20260915 P0-9（**刻意不并入** `task-accounting.PLAN_TASK_KEYWORDS`，原因如实登记在此）：
-        // 本判据管的是「方案文档里的 ⚠/❌ 要不要自动下钻修复任务」，与「谁是里程碑主体」是两件事——
-        // 正类这里是 `规划|排期`（**无"方案"**），负类这里是 `核实报告|完成情况核实|审计|盘点`（**无"核验/复核/检查"，却多"盘点"**）。
-        // 强行并表会**同时**改掉两条判据：用里程碑那份词表会把「…方案…」类任务从"下钻修复"翻成"不下钻"。
-        const isPlanProposal = /(规划|排期)/.test(planText) && !/(核实报告|完成情况核实|审计|盘点)/.test(planText);
-        if (isPlanProposal) {
-          checks.push(`[INFO] 方案文档含 ${issues.length} 处 ⚠/❌（属待后续实施/待闭环的里程碑项）——规划类任务不自动下钻实现子任务；如需实施请单独创建实施任务（附：方案口径已确认 + 指定 M 项 + 回归自检）。`);
+      // zx_20261116_1 M3（辨）：提醒/风险/待定 ⇒ 登记、告知、不立项。
+      //   用 `json_set` 只写这一格，保留 `verification_manual_items` / `verification_fix_created` 等兄弟键
+      //   （整体重写 `context_json` 会静默抹掉执行期写入的其它字段）。
+      if (advisories.length > 0) {
+        db.prepare("UPDATE wa_tasks SET context_json = json_set(COALESCE(context_json, '{}'), '$.verification_advisories', json(?)) WHERE id = ?")
+          .run(JSON.stringify(advisories), taskId);
+        checks.push(
+          `[INFO] ${advisories.length} 条属提醒/风险/待定（已登记，不自动立项）：${advisories.map((s, i) => `${i + 1}. ${s}`).join(' ')}` +
+            (advisoryOverflow > 0 ? `；另 ${advisoryOverflow} 条未列出（上限 ${MAX_VERIFICATION_ISSUES} 条）` : ''),
+        );
+      }
+      // E4 (2026-09-03): 规划/排期类任务默认不自动下钻实现子任务——
+      // 其 ⚠️/❌ 是「待后续实施/待闭环」的里程碑项，而非应立即修复的未落地问题；
+      // 确需实施应单独创建实施任务（三前置：方案口径已确认 + 指定 M 项 + 回归自检）。
+      let planRow: { title: string; description: string } | undefined;
+      try { planRow = db.prepare('SELECT title, description FROM wa_tasks WHERE id = ?').get(taskId) as { title: string; description: string } | undefined; } catch { /* ignore */ }
+      const planTitle = planRow?.title || '';
+      const planDescription = planRow?.description || '';
+      // zx_20260915 P0-9（**刻意不并入** `task-accounting.PLAN_TASK_KEYWORDS`，原因如实登记在此）：
+      // 本判据管的是「方案文档里的 ⚠/❌ 要不要自动下钻修复任务」，与「谁是里程碑主体」是两件事——
+      // 正类是"本题交付物是规划/排期"，负类是 `核实报告|完成情况核实|审计|盘点`。
+      // zx_20261117_1 M1「案」：旧口径 `/(规划|排期)/` 对**全题面**扫描，被模板句「实施排期计划…细化规划」
+      //   误命中 ⇒ 「方案实施」任务被判规划类，未落地项不派生后续任务（标本 01 `a55f9aa6`）。
+      //   现改为纯函数 `isPlanProposalText`：先剥方案样板，再按"显式文档意图 > 实施动作 > 标题含规划/排期"判定。
+      const isPlanProposal = isPlanProposalText(planTitle, planDescription);
+      // zx_20261116_1 M2「界」：当前报告任务自己不含“规划/排期”时，再看**非终态祖先**是否明确说了
+      //   “只形成方案/不动代码”。真事故：父任务 `18c076d9` 明写此边界，报告子任务 `7e60cf1c` 却因
+      //   自身题面不含“规划”而放行，派生了修复任务并改了 backend/pom.xml。
+      const ancestorPlanOnly = planOnlyScope(db, taskId);
+      const planOnly = isPlanProposal || !!ancestorPlanOnly;
+      // zx_20261117_1 M1「案」：纯文本未落地项无论规划/实施都要先登记——让「明确未做」在账上可见（标本 02）。
+      // zx_20261119_2 M1：交接项也登记（同一个键），但**不进 issues**——承接方在册，不是缺口。
+      if (deferred.items.length > 0 || deferred.handoffItems.length > 0) {
+        db.prepare("UPDATE wa_tasks SET context_json = json_set(COALESCE(context_json, '{}'), '$.verification_deferred_items', json(?)) WHERE id = ?")
+          .run(JSON.stringify([...deferred.items, ...deferred.handoffItems]), taskId);
+      }
+      if (deferred.items.length > 0) {
+        checks.push(
+          `[INFO] [未落地登记] ${deferred.items.length} 条「留到后续」项：${deferred.items.map((s, i) => `${i + 1}. ${s}`).join(' ')}` +
+            (deferred.overflow > 0 ? `；另 ${deferred.overflow} 条未列出（上限 ${MAX_DEFERRED_ITEMS} 条）` : ''),
+        );
+      }
+      if (deferred.handoffItems.length > 0) {
+        checks.push(
+          `[INFO] [交接登记] ${deferred.handoffItems.length} 条已交由在册子任务/后续批次（不另立修复任务）：${deferred.handoffItems.map((s, i) => `${i + 1}. ${s}`).join(' ')}`,
+        );
+      }
+      if (issues.length > 0 || deferred.items.length > 0) {
+        if (planOnly) {
+          if (ancestorPlanOnly && !isPlanProposal) {
+            // 只登记、不立项；用 json_set 只写这一格，保留 manual/fix 等兄弟键。
+            db.prepare("UPDATE wa_tasks SET context_json = json_set(COALESCE(context_json, '{}'), '$.verification_deferred_items', json(?)) WHERE id = ?")
+              .run(JSON.stringify(issues), taskId);
+            checks.push(`[INFO] 上层任务「${ancestorPlanOnly.title}」为只做方案/不动代码（非终态）——已登记 ${issues.length} 条未落地问题，不自动派修复任务；如需实施请在方案确认后单独建实施任务。`);
+            if (overflow > 0) checks.push(`[INFO] 另有 ${overflow} 条未登记（单批上限 ${MAX_VERIFICATION_ISSUES} 条）`);
+          } else {
+            const glyphCount = glyph.issues.length;
+            checks.push(`[INFO] 方案文档含 ${glyphCount} 处 ⚠/❌${deferred.items.length > 0 ? `、${deferred.items.length} 条「留到后续」项` : ''}（属待后续实施/待闭环的里程碑项）——规划类任务不自动下钻实现子任务；如需实施请单独创建实施任务（附：方案口径已确认 + 指定 M 项 + 回归自检）。`);
+          }
         } else {
           // zx_20260916_3 M1（D1 全覆盖 / 毛选·惩前毖后治病救人）：引擎**自发**补救同样受理于广度闸。
           // 闸满时**如实上报**"发现问题但槽位已满"，而非静默突破上限（旧行为：这条路完全不查上限）。
@@ -269,10 +385,20 @@ export async function runFinalizeTask(deps: ToolDeps, args: { summary: string; q
             //   旧实现建子任务并立即入队，父还在收尾、子已开跑，两边改同一批文件；子任务还会
             //   顶住父的收口闸（`children-gate` 的 `children_incomplete`）。现由调度器（10s 扫描）
             //   在本任务到终态后接续：语义是"报告收口后再修"。
-            const fix = createVerificationFixTask({ db, taskId, projectId, issues });
-            fixCtx.verification_fix_created = fix.id;
-            db.prepare('UPDATE wa_tasks SET context_json = ? WHERE id = ?').run(JSON.stringify(fixCtx), taskId);
-            checks.push(`[WARN] 核实发现 ${issues.length} 个未落地问题，已建立修复任务（前置=本任务，将在本任务收口后由调度器接续，不与本任务并发）`);
+            // zx_20261116_1 M6「序」：同父在途兄弟一并当前置（窄版）——避免修复任务与仍在跑的子任务
+            //   同时改同一份方案文档。`pending/paused/failed/archived` 不纳入（尚未动手/已在等人）。
+            const fix = createVerificationFixTask({
+              db, taskId, projectId, issues,
+              extraDependsOn: inFlightSiblingIds(db, taskId),
+              reportTitle: planTitle,
+            });
+            // zx_20261116_1 M3/M6：只写 `verification_fix_created` 这一格——整体重写 `fixCtx` 会把
+            //   本轮刚写入的 `verification_advisories`（以及执行期写入的其它兄弟键）**静默抹掉**。
+            //   （真标本：C2 修复任务照建后 `verification_advisories` 消失。）
+            db.prepare("UPDATE wa_tasks SET context_json = json_set(COALESCE(context_json, '{}'), '$.verification_fix_created', ?) WHERE id = ?").run(fix.id, taskId);
+            checks.push(fix.merged
+              ? `[WARN] 核实发现 ${issues.length} 个未落地问题，已并入既有修复任务（同父同源去重，未新建行）`
+              : `[WARN] 核实发现 ${issues.length} 个未落地问题，已建立修复任务（前置=本任务，将在本任务收口后由调度器接续，不与本任务并发）`);
             if (overflow > 0) checks.push(`[INFO] 另有 ${overflow} 条未立项（单批上限 ${MAX_VERIFICATION_ISSUES} 条）`);
           }
         }
@@ -599,7 +725,8 @@ export async function runFinalizeTask(deps: ToolDeps, args: { summary: string; q
     taskId,
     workingDir,
     archetype: typeof ctxJson.archetype === 'string' ? ctxJson.archetype : undefined,
-    hasDeliverables: (db.prepare('SELECT COUNT(*) AS c FROM wa_deliverables WHERE task_id = ?').get(taskId) as { c: number }).c > 0,
+    // zx_20261116_2 M1：共享成果也算“有产出物”（否则 document 类共享贡献者会被 CAP1 误压）。
+    hasDeliverables: (() => { const c = taskDeliverableCounts(db, taskId); return c.own + c.shared > 0; })(),
   });
   const scoreWithCap = Math.min(declaredScore, caps.cap);
   // zx_20261104_1 M1：凭据来源取**刚落账**的验收账（上方 `checkAcceptanceCriteria`），被迫收尾按步数/预算触顶事实。
@@ -682,6 +809,24 @@ export async function runFinalizeTask(deps: ToolDeps, args: { summary: string; q
     const gitAdvice = gitWorkingTreeAdvice(workingDir);
     if (gitAdvice) checks.push(gitAdvice);
   } catch { /* 提示失败不阻断收口 */ }
+  // zx_20261119_2 M2「账」：开局既有 / 本轮新增 / 开局已消失 三组对账——开局改动不是本轮产物，
+  //   提交类任务还要求报告逐条说明。只提示，不阻断、不自动提交。
+  try {
+    for (const line of baselineReconcileChecks(db, taskId, workingDir)) checks.push(line);
+  } catch { /* 对账 best-effort */ }
+  // zx_20261119_2 M7「度」：工具拒绝 + 步数账（被迫收尾且拒绝多时升级为 WARN）。只记账，不改评分。
+  try {
+    const premature = (ctxJson.completion_quality as { premature?: boolean } | undefined)?.premature === true;
+    const denialLine = recordToolDenialLedger(db, taskId, { premature });
+    if (denialLine) checks.push(denialLine);
+  } catch { /* 记账失败不阻断收口 */ }
+  // zx_20261120_2 M5「实」：真实命令失败（测试/构建）只记 INFO，不改分——与 run_close 出口同一行函数。
+  try {
+    const cmdLine = commandFailureCheckLine(summarizeCommandFailures(db, taskId));
+    if (cmdLine) checks.push(cmdLine);
+  } catch { /* 同上 */ }
+  // zx_20261120_1 M8「省·见」：按效预算一行（无记录不出行；影子/生效两态同尺）。
+  try { const roiLine = roiBudgetCheckLine(db, taskId); if (roiLine) checks.push(roiLine); } catch { /* best-effort */ }
   // zx_20261109_1 B5（G13）：旧条目**保留**（续跑不抹历史），本轮条目带 `[run <8位>]`，相邻同文去重。
   ctxJson.finalize_checks = mergeFinalizeChecks(ctxJson.finalize_checks, checks, ctx.runId);
   // B1 回写 (2026-09-03_1): 实施任务带 scheme_ref → 完成时回写对应方案里程碑 done + 落地任务 id
@@ -704,6 +849,9 @@ export async function runFinalizeTask(deps: ToolDeps, args: { summary: string; q
     const curCtx = JSON.parse((db.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get(taskId) as { context_json?: string } | undefined)?.context_json || '{}') as { acceptance_check?: unknown };
     if (curCtx.acceptance_check) (ctxJson as Record<string, unknown>).acceptance_check = curCtx.acceptance_check;
   } catch { /* 合并 best-effort */ }
+  // zx_20261116_2 M3「覆」：一次**真 finalize**（验收通过）覆盖旧的人工覆盖——清 `completion_override`，
+  //   否则父任务 D1 会把后来真正收口的任务仍当成“覆盖完成·验收未重判”。历史仍留在会话行 `[覆盖完成]`。
+  delete (ctxJson as Record<string, unknown>).completion_override;
   db.prepare('UPDATE wa_tasks SET context_json = ?, updated_at = datetime(\'now\') WHERE id = ?').run(JSON.stringify(ctxJson), taskId);
   syncQualityColumn(db, taskId);
   // zx_20260904_7 硬映射② (2026-09-04): 张力 speed-vs-quality ≥70 → finalize 前须有产出物或代码/测试编辑（质量优先硬门禁；预算强制收尾跳过）

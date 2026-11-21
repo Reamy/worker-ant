@@ -72,7 +72,7 @@ pnpm dist:win
 pnpm dist:linux
 # 输出: release/工蚁-<version>-linux-x86_64.AppImage / 工蚁-<version>-linux-amd64.deb
 
-# 上传前复制为 ASCII 文件名（如 worker-ant-0.7.0-mac-arm64.dmg），并生成 SHA256SUMS.txt
+# 上传前复制为 ASCII 文件名（如 worker-ant-0.8.0-mac-arm64.dmg），并生成 SHA256SUMS.txt
 #   → apps/worker-ant-desktop/release/github-assets/
 ```
 
@@ -107,15 +107,15 @@ bash scripts/rebuild-ans-native.sh
 
 ```bash
 # 产物文件名用 ASCII（避免上传/下载链路的编码问题）
-gh release create v0.7.0 \
-  release/github-assets/worker-ant-0.7.0-mac-arm64.dmg \
-  release/github-assets/worker-ant-0.7.0-mac-arm64.zip \
-  release/github-assets/worker-ant-0.7.0-win-x64.exe \
-  release/github-assets/worker-ant-0.7.0-linux-x86_64.AppImage \
-  release/github-assets/worker-ant-0.7.0-linux-amd64.deb \
+gh release create v0.8.0 \
+  release/github-assets/worker-ant-0.8.0-mac-arm64.dmg \
+  release/github-assets/worker-ant-0.8.0-mac-arm64.zip \
+  release/github-assets/worker-ant-0.8.0-win-x64.exe \
+  release/github-assets/worker-ant-0.8.0-linux-x86_64.AppImage \
+  release/github-assets/worker-ant-0.8.0-linux-amd64.deb \
   release/github-assets/SHA256SUMS.txt \
   --repo Reamy/worker-ant \
-  --title "工蚁 v0.7.0 — 岗位能约束执行、可补派；IM 听得懂项目#；首启三步" \
+  --title "工蚁 v0.8.0 — 项目经验有主、终端授权有界、设备联动有规则" \
   --notes-file <发布说明.md>
 ```
 

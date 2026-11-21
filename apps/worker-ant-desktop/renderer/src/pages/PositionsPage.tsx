@@ -1,20 +1,29 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Briefcase, Check, Download, Plus, RefreshCw, Save, Send, Trash2, Upload, X } from 'lucide-react';
+import { Briefcase, Check, Clock, Download, Plus, RefreshCw, Save, Send, Trash2, Upload, X } from 'lucide-react';
 import {
+  invoke,
   positions as positionsIpc,
+  positionRoutines as routinesIpc,
   tasks as tasksIpc,
   type PositionDetail,
   type PositionListRow,
   type PositionProfile,
   type PositionWriteBody,
+  type RoutineBoard,
+  type RoutineListRow,
+  type RoutineSuggestion,
+  type PositionSkill,
 } from '../lib/ipc';
+// zx_20261120_3 M4/M6：技能状态词表（纯模块，不进主进程链）。
+import { POSITION_SKILL_STATUS_LABEL } from '../../../src/main/core/position-skill-meta.js';
 // zx_20261113_1 B4「晋」: 晋升目标与来源词表取 main 侧同一份（不在页面手抄第二套中文名）。
 import {
   POSITION_LESSON_SOURCE_LABEL,
   POSITION_PROMOTE_TARGET_LABEL,
   type PositionLessonPromoteTarget,
 } from '../../../src/main/core/positions.js';
+import { routineSkipLabel, routineStatusLabel } from '../lib/routine-view';
 
 interface FormState {
   name: string;
@@ -87,6 +96,7 @@ function formOf(d: PositionDetail): FormState {
 
 const inputCls = 'w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500';
 
+
 export default function PositionsPage() {
   const navigate = useNavigate();
   const [rows, setRows] = useState<PositionListRow[]>([]);
@@ -108,9 +118,28 @@ export default function PositionsPage() {
   const [showDispatch, setShowDispatch] = useState(false);
   const [dispatchForm, setDispatchForm] = useState({ projectId: '', title: '', description: '', acceptance: '' });
   const [dispatching, setDispatching] = useState(false);
+  // zx_20261120_1 M3：例行（到点该做的那件事）+ 建议（只读）+ 绩效看板。
+  const [routines, setRoutines] = useState<RoutineListRow[]>([]);
+  const [routineSuggestions, setRoutineSuggestions] = useState<RoutineSuggestion[]>([]);
+  const [routineBoardData, setRoutineBoardData] = useState<RoutineBoard | null>(null);
+  const [routineError, setRoutineError] = useState('');
+  const [showRoutine, setShowRoutine] = useState(false);
+  const [routineForm, setRoutineForm] = useState({ projectId: '', name: '', cron: '0 9 * * 1', title: '', description: '', acceptance: '' });
+  const [routineSaving, setRoutineSaving] = useState(false);
+  // 例行完成是否也推 IM（缺省不推，只失败推；开关有读写口，承「承诺开关须有 GUI 口」）。
+  const [routineNotify, setRoutineNotify] = useState(false);
+  // zx_20261120_3 M6「积·账」：能力页签——可调用技能 + 经验生命周期。
+  const [detailTab, setDetailTab] = useState<'overview' | 'skills'>('overview');
+  const [skills, setSkills] = useState<PositionSkill[]>([]);
+  const [skillError, setSkillError] = useState('');
+  const [skillSaving, setSkillSaving] = useState(false);
+  const [skillForm, setSkillForm] = useState({ name: '', description: '', steps: '' });
 
   useEffect(() => {
     void loadList();
+    void invoke<{ data?: Record<string, string> }>('settings:getAll')
+      .then((res) => setRoutineNotify(res?.data?.['routine.notify_on_success'] === '1'))
+      .catch(() => { /* 读不到按缺省（不推） */ });
   }, []);
 
   useEffect(() => {
@@ -147,6 +176,16 @@ export default function PositionsPage() {
         setProfile(null);
         setProfileError((e as Error).message);
       }
+      // 技能账与详情分开取：读失败只影响「能力」页签。
+      try {
+        const sk = await positionsIpc.skills(id);
+        setSkills(sk.skills);
+        setSkillError('');
+      } catch (e) {
+        setSkills([]);
+        setSkillError((e as Error).message);
+      }
+      void loadRoutines(id, d.projects.filter((p) => p.enabled).map((p) => p.id));
     } catch (e) {
       setError((e as Error).message);
       setDetail(null);
@@ -268,6 +307,73 @@ export default function PositionsPage() {
     }
   }
 
+  // zx_20261120_3 M6：能力页签动作（草案/审批/生命周期）。
+  async function createSkill() {
+    if (!detail) return;
+    setSkillSaving(true); setSkillError(''); setNotice('');
+    try {
+      const steps = skillForm.steps.split('\n').map((s) => s.trim()).filter(Boolean);
+      await positionsIpc.skillCreate({
+        positionId: detail.position.id,
+        name: skillForm.name.trim(),
+        description: skillForm.description.trim(),
+        steps,
+      });
+      setNotice(`技能草案「${skillForm.name.trim()}」已创建——批准后才可被任务调用。`);
+      setSkillForm({ name: '', description: '', steps: '' });
+      await loadDetail(detail.position.id);
+    } catch (e) {
+      setSkillError((e as Error).message);
+    }
+    setSkillSaving(false);
+  }
+
+  async function decideSkill(id: string, decision: 'approved' | 'rejected') {
+    if (!detail) return;
+    setSkillError(''); setNotice('');
+    try {
+      await positionsIpc.skillDecide(id, decision);
+      setNotice(decision === 'approved' ? '技能已批准——该岗位的任务可在 list_skills 看到并调用。' : '技能已拒绝。');
+      await loadDetail(detail.position.id);
+    } catch (e) {
+      setSkillError((e as Error).message);
+    }
+  }
+
+  async function lessonLifecycle(id: string, action: 'applies' | 'verify' | 'retire' | 'unretire' | 'supersede' | 'unsupersede', extra: { appliesTo?: string; reason?: string; byId?: string } = {}) {
+    if (!detail) return;
+    setError(''); setNotice('');
+    try {
+      await positionsIpc.lessonLifecycle({ id, action, ...extra });
+      setNotice('经验生命周期已更新。');
+      await loadDetail(detail.position.id);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+
+  async function addLessonAsSkill(l: { id: string; content: string }) {
+    if (!detail) return;
+    const name = window.prompt('技能名（≤40 字，可用英文/中文）', '')?.trim();
+    if (!name) return;
+    setSkillSaving(true); setSkillError('');
+    try {
+      await positionsIpc.skillCreate({
+        positionId: detail.position.id,
+        name,
+        description: `来自已采纳经验：${l.content.slice(0, 120)}`,
+        steps: [l.content],
+        sourceLessonId: l.id,
+      });
+      setNotice(`已从经验沉淀技能草案「${name}」——批准后才可调用。`);
+      await loadDetail(detail.position.id);
+      setDetailTab('skills');
+    } catch (e) {
+      setSkillError((e as Error).message);
+    }
+    setSkillSaving(false);
+  }
+
   async function exportPack() {
     if (!detail) return;
     setError('');
@@ -352,6 +458,112 @@ export default function PositionsPage() {
     setDispatching(false);
   }
 
+  async function loadRoutines(positionId: string, projectIds: string[]) {
+    setRoutineError('');
+    try {
+      const r = await routinesIpc.list({ positionId });
+      setRoutines(r.routines);
+    } catch (e) {
+      setRoutines([]);
+      setRoutineError(`例行加载失败：${(e as Error).message}`);
+    }
+    try {
+      setRoutineBoardData(await routinesIpc.board(positionId));
+    } catch {
+      setRoutineBoardData(null);
+    }
+    try {
+      const groups = await Promise.all(projectIds.map((pid) => routinesIpc.suggestions(positionId, pid)));
+      setRoutineSuggestions(groups.flatMap((g) => g.suggestions ?? []));
+    } catch {
+      setRoutineSuggestions([]);
+    }
+  }
+
+  function openRoutine(seed?: Partial<{ projectId: string; name: string; title: string; description: string; acceptance: string; cron: string }>) {
+    setRoutineForm({
+      projectId: seed?.projectId ?? dispatchProjects[0]?.id ?? '',
+      name: seed?.name ?? '',
+      cron: seed?.cron ?? '0 9 * * 1',
+      title: seed?.title ?? '',
+      description: seed?.description ?? '',
+      acceptance: seed?.acceptance ?? '',
+    });
+    setShowRoutine(true);
+  }
+
+  async function submitRoutine() {
+    if (!detail) return;
+    if (!routineForm.projectId) { setError('请选择项目'); return; }
+    if (!routineForm.name.trim()) { setError('例行名称不能为空'); return; }
+    if (!routineForm.title.trim()) { setError('任务标题不能为空'); return; }
+    if (!routineForm.cron.trim()) { setError('cron 表达式不能为空'); return; }
+    setRoutineSaving(true);
+    setError('');
+    try {
+      await routinesIpc.create({
+        position_id: detail.position.id,
+        project_id: routineForm.projectId,
+        name: routineForm.name.trim(),
+        cron: routineForm.cron.trim(),
+        title: routineForm.title.trim(),
+        description: routineForm.description.trim(),
+        acceptance_criteria: routineForm.acceptance.trim(),
+      });
+      setShowRoutine(false);
+      setNotice('例行已创建——到点会自动建单；也可点「立刻跑一次」先试。');
+      await loadDetail(detail.position.id);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+    setRoutineSaving(false);
+  }
+
+  async function toggleRoutine(r: RoutineListRow) {
+    try {
+      await routinesIpc.update(r.id, { enabled: !(r.enabled === 1) });
+      if (detail) await loadRoutines(detail.position.id, dispatchProjects.map((p) => p.id));
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+
+  async function removeRoutine(r: RoutineListRow) {
+    if (!confirm(`删除例行「${r.name}」？历史任务与运行记录会保留。`)) return;
+    try {
+      await routinesIpc.remove(r.id);
+      setNotice('例行已删除（历史任务保留）。');
+      if (detail) await loadRoutines(detail.position.id, dispatchProjects.map((p) => p.id));
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+
+  async function toggleRoutineNotify(next: boolean) {
+    setRoutineNotify(next); // 乐观写；失败回滚（界面诚实）
+    try {
+      await invoke('settings:set', 'routine.notify_on_success', next ? '1' : '0');
+    } catch (e) {
+      setRoutineNotify(!next);
+      setError(`开关保存失败：${(e as Error).message}`);
+    }
+  }
+
+  async function runRoutineNow(r: RoutineListRow) {
+    try {
+      const res = await routinesIpc.runNow(r.id);
+      if (res.ok) {
+        setNotice(`已建单：${res.taskId.slice(0, 8)}（去任务页查看）`);
+        if (res.taskId) navigate(`/tasks/${res.taskId}`);
+      } else {
+        setError(`未跑：${routineSkipLabel(res.skipped) || res.reason}`);
+      }
+      if (detail) await loadRoutines(detail.position.id, dispatchProjects.map((p) => p.id));
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+
   if (loading && rows.length === 0) {
     return <div className="flex justify-center py-12"><div className="animate-spin h-8 w-8 border-2 border-blue-500 border-t-transparent rounded-full" /></div>;
   }
@@ -399,7 +611,14 @@ export default function PositionsPage() {
           {!detail ? (
             <div className="bg-white rounded-lg border p-8 text-center text-gray-400">选择左侧岗位查看详情</div>
           ) : (
-            <div className="space-y-4">
+            <>
+            {/* zx_20261120_3 M6「能力」页签：本机积累全档可用；带走/共享是 Pro/Team 的另一道闸。 */}
+            <div className="flex items-center gap-1 mb-2">
+              <button onClick={() => setDetailTab('overview')} className={`px-3 py-1 rounded-lg text-xs font-medium ${detailTab === 'overview' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>概览</button>
+              <button onClick={() => setDetailTab('skills')} className={`px-3 py-1 rounded-lg text-xs font-medium ${detailTab === 'skills' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>能力（技能 / 生命周期）</button>
+              <span className="text-[10px] text-gray-400 ml-1">本机积累全档可用；带走（Pro）与团队共享（Team）是另一道闸。</span>
+            </div>
+            <div className={detailTab === 'skills' ? 'hidden' : 'space-y-4'}>
               <div className="bg-white rounded-lg border p-4">
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
@@ -548,6 +767,84 @@ export default function PositionsPage() {
                 )}
               </div>
 
+              {/* zx_20261120_1 M3「例·见」：到点该做的那件事——例行列表 / 建议（只读）/ 绩效看板。
+                  档位口径：本机例行全档可用；跨机执行仍走既有 multi_node，不新增闸。 */}
+              <div className="bg-white rounded-lg border p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <h4 className="text-sm font-semibold flex items-center gap-1.5"><Clock className="w-4 h-4 text-blue-500" />例行（到点该做的那件事）</h4>
+                  <label className="flex items-center gap-1 text-[11px] text-gray-500 mr-auto ml-3" title="缺省只在失败时推 IM；勾选后完成也推">
+                    <input type="checkbox" checked={routineNotify} onChange={(e) => void toggleRoutineNotify(e.target.checked)} />
+                    完成也推 IM
+                  </label>
+                  <button
+                    onClick={() => openRoutine()}
+                    disabled={!detail.position.enabled || dispatchProjects.length === 0}
+                    title={dispatchProjects.length === 0 ? '先在「项目启用」勾选一个项目' : '按 cron 到点自动建一条任务'}
+                    className="flex items-center gap-1 text-xs px-2 py-1 rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                  ><Plus className="w-3 h-3" />新建例行</button>
+                </div>
+                {routineError && <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1 mb-2">{routineError}</p>}
+
+                {routineBoardData && (
+                  <div className="mb-3 rounded-lg border bg-gray-50/70 px-3 py-2 text-[12px] text-gray-700 flex flex-wrap gap-x-4 gap-y-1">
+                    <span>例行 <b>{routineBoardData.routine.tasks}</b> 件（完成 {routineBoardData.routine.completed} · 验收通过 {routineBoardData.routine.acceptance_passed}）</span>
+                    <span>临时 {routineBoardData.adhoc.tasks} 件（完成 {routineBoardData.adhoc.completed} · 验收通过 {routineBoardData.adhoc.acceptance_passed}）</span>
+                    <span>平均 token {routineBoardData.routine.avg_tokens == null ? '未记录' : routineBoardData.routine.avg_tokens}</span>
+                    <span>平均步数 {routineBoardData.routine.avg_steps == null ? '未记录' : routineBoardData.routine.avg_steps}</span>
+                    <span>平均时长（估算）{routineBoardData.routine.avg_duration_ms == null ? '未记录' : `${Math.round(routineBoardData.routine.avg_duration_ms / 60000)} 分钟`}</span>
+                  </div>
+                )}
+
+                {routines.length === 0 ? (
+                  <p className="text-xs text-gray-400">还没有例行——把每月/每周重复的活建成例行，到点自动建单；建成普通任务，照常拆解、执行、验收。</p>
+                ) : (
+                  <div className="space-y-2">
+                    {routines.map((r) => (
+                      <div key={r.id} className="rounded-lg border p-2.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="font-medium text-sm truncate">{r.name}</span>
+                              <span className={`text-[10px] px-1.5 py-0.5 rounded ${r.enabled === 1 ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>{r.enabled === 1 ? '启用' : '停用'}</span>
+                              <span className="text-[10px] text-gray-500">{r.project_name || '项目已删除'}</span>
+                            </div>
+                            <p className="text-[11px] text-gray-500 mt-0.5">
+                              cron <code className="bg-gray-100 px-1 rounded">{r.cron}</code> · {r.title}
+                            </p>
+                            <p className="text-[11px] mt-0.5 text-gray-500">
+                              上次：{r.last_run_status ? routineStatusLabel(r.last_run_status) : '从未触发'}
+                              {r.last_run_reason ? `（${routineSkipLabel(r.last_run_reason)}）` : ''}
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-1 flex-shrink-0">
+                            <button onClick={() => void runRoutineNow(r)} disabled={r.enabled !== 1} title="立刻跑一次（仍不叠单）" className="text-xs px-2 py-1 rounded bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50">立刻跑</button>
+                            <button onClick={() => void toggleRoutine(r)} className="text-xs px-2 py-1 rounded bg-gray-100 hover:bg-gray-200">{r.enabled === 1 ? '停用' : '启用'}</button>
+                            <button onClick={() => void removeRoutine(r)} className="p-1.5 hover:bg-red-50 rounded" title="删除例行（历史任务保留）"><Trash2 className="w-4 h-4 text-red-400" /></button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {routineSuggestions.length > 0 && (
+                  <div className="mt-3 rounded-lg border border-blue-100 bg-blue-50/50 p-2.5">
+                    <p className="text-[11px] text-blue-800 mb-1">近 90 天有同类任务反复出现——设为例行？（只建议，不自动建）</p>
+                    <div className="space-y-1">
+                      {routineSuggestions.map((s) => (
+                        <div key={`${s.project_id}:${s.title}`} className="flex items-center justify-between gap-2 text-[12px]">
+                          <span className="truncate">{s.title} · {s.runs} 次 · 最近 {s.last_run_at?.slice(0, 10)}</span>
+                          <button
+                            onClick={() => openRoutine({ projectId: s.project_id, name: s.title.slice(0, 20), title: s.title, cron: '0 9 * * 1' })}
+                            className="text-[11px] px-2 py-0.5 rounded border border-blue-200 text-blue-700 hover:bg-blue-100"
+                          >设为例行</button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
               <div className="bg-white rounded-lg border p-4">
                 <h4 className="text-sm font-semibold mb-2">经验（复盘可迁移教训优先；采纳后注入，晋升后并入岗位四段）</h4>
                 {detail.lessons.length === 0 ? (
@@ -633,6 +930,91 @@ export default function PositionsPage() {
                 )}
               </div>
             </div>
+            {detailTab === 'skills' && (
+              <div className="space-y-4">
+                <div className="bg-white rounded-lg border p-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <h4 className="text-sm font-semibold">可调用技能</h4>
+                    <span className="text-[10px] text-gray-400">只有「已批准」会出现在任务的 list_skills，并可被 skill 工具调用</span>
+                  </div>
+                  {skillError && <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1 mb-2">{skillError}</p>}
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-2">
+                    <input value={skillForm.name} onChange={(e) => setSkillForm({ ...skillForm, name: e.target.value })} className={inputCls} placeholder="技能名（≤40 字）" />
+                    <input value={skillForm.description} onChange={(e) => setSkillForm({ ...skillForm, description: e.target.value })} className={inputCls} placeholder="一句话说明" />
+                    <button onClick={() => void createSkill()} disabled={skillSaving || !skillForm.name.trim() || !skillForm.steps.trim()} className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs hover:bg-blue-700 disabled:opacity-50">沉淀为技能草案</button>
+                  </div>
+                  <textarea value={skillForm.steps} onChange={(e) => setSkillForm({ ...skillForm, steps: e.target.value })} rows={3} className={inputCls} placeholder="步骤（每行一步；批准后作为提示词型技能内容）" />
+                  <div className="mt-3 space-y-1.5">
+                    {skills.length === 0 ? (
+                      <p className="text-xs text-gray-400">暂无岗位技能。可从已采纳经验「沉淀为技能」，或在这里直接写一份草案。</p>
+                    ) : skills.map((s) => (
+                      <div key={s.id} className="flex items-start gap-2 rounded border px-2 py-1.5 text-xs">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="font-medium">{s.name}</span>
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded ${s.status === 'approved' ? 'bg-emerald-100 text-emerald-700' : s.status === 'rejected' ? 'bg-gray-200 text-gray-500' : 'bg-amber-100 text-amber-700'}`}>{POSITION_SKILL_STATUS_LABEL[s.status]}</span>
+                            <span className="text-[10px] text-gray-400">用过 {s.useCount} 次{s.lastUsedAt ? ` · 最近 ${s.lastUsedAt}` : ''}</span>
+                          </div>
+                          {s.description && <p className="text-gray-500 truncate" title={s.description}>{s.description}</p>}
+                          <p className="text-[10px] text-gray-400 truncate" title={s.steps.join(' → ')}>{s.steps.join(' → ')}</p>
+                        </div>
+                        {s.status === 'draft' && (
+                          <div className="flex items-center gap-1 flex-shrink-0">
+                            <button onClick={() => void decideSkill(s.id, 'approved')} className="px-2 py-1 bg-emerald-600 text-white rounded text-[11px] hover:bg-emerald-700">批准</button>
+                            <button onClick={() => void decideSkill(s.id, 'rejected')} className="px-2 py-1 border rounded text-[11px] hover:bg-gray-100">拒绝</button>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="bg-white rounded-lg border p-4">
+                  <h4 className="text-sm font-semibold mb-1">经验生命周期</h4>
+                  <p className="text-[11px] text-gray-500 mb-2">
+                    口径：≥{90} 天未复验/未成功使用为「老化」，≥{180} 天为「待复验」；退役/被替代不再注入与晋升。机器不替人改写已采纳内容。
+                  </p>
+                  {profile && (
+                    <div className="text-[11px] bg-gray-50 border rounded px-2 py-1 mb-2 flex flex-wrap gap-x-3">
+                      <span>待复验 {profile.lessons.stale}</span>
+                      <span>未验证 {profile.lessons.unverified}</span>
+                      <span>已替代 {profile.lessons.superseded}</span>
+                      <span>已退役 {profile.lessons.retired}</span>
+                      <span>可调用技能 {profile.skills.approved}（草案 {profile.skills.draft}）</span>
+                    </div>
+                  )}
+                  {detail.lessons.filter((l) => l.status === 'accepted').length === 0 ? (
+                    <p className="text-xs text-gray-400">还没有已采纳经验。先去「概览」采纳候选。</p>
+                  ) : detail.lessons.filter((l) => l.status === 'accepted').map((l) => (
+                    <div key={l.id} className="rounded border px-2 py-1.5 mb-1.5 text-xs">
+                      <p className="text-gray-800">{l.content}</p>
+                      <div className="flex items-center gap-1.5 flex-wrap mt-1 text-[10px] text-gray-500">
+                        {l.appliesTo ? <span className="px-1.5 py-0.5 rounded bg-sky-50 text-sky-700">适用：{l.appliesTo}</span> : <span>适用条件未标注</span>}
+                        {l.retiredAt && <span className="px-1.5 py-0.5 rounded bg-gray-200 text-gray-600">已退役{l.retireReason ? `：${l.retireReason}` : ''}</span>}
+                        {l.supersededBy && <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">已被替代</span>}
+                        {!l.verifiedAt && <span className="px-1.5 py-0.5 rounded bg-amber-50 text-amber-700">未在本机验证</span>}
+                        <button onClick={() => {
+                          const text = window.prompt('适用条件（≤200 字；空=清除）', l.appliesTo || '');
+                          if (text !== null) void lessonLifecycle(l.id, 'applies', { appliesTo: text });
+                        }} className="px-1.5 py-0.5 border rounded hover:bg-gray-50">适用条件</button>
+                        <button onClick={() => void lessonLifecycle(l.id, 'verify')} className="px-1.5 py-0.5 border rounded hover:bg-gray-50">标记已验证</button>
+                        <button onClick={() => {
+                          if (l.retiredAt) { void lessonLifecycle(l.id, 'unretire'); return; }
+                          const reason = window.prompt('退役原因（≤200 字；空=无原因）', '');
+                          if (reason !== null) void lessonLifecycle(l.id, 'retire', { reason });
+                        }} className="px-1.5 py-0.5 border rounded hover:bg-gray-50">{l.retiredAt ? '撤销退役' : '退役'}</button>
+                        <button onClick={() => {
+                          if (l.supersededBy) { void lessonLifecycle(l.id, 'unsupersede'); return; }
+                          const byId = window.prompt('用哪条已采纳经验的 id 替代它？（可在「概览」经验列表的「来源」行核对）', '');
+                          if (byId && byId.trim()) void lessonLifecycle(l.id, 'supersede', { byId: byId.trim() });
+                        }} className="px-1.5 py-0.5 border rounded hover:bg-gray-50">{l.supersededBy ? '撤销替代' : '标记被替代'}</button>
+                        <button onClick={() => void addLessonAsSkill(l)} className="px-1.5 py-0.5 border rounded hover:bg-gray-50" title="生成技能草案；批准后才可调用">沉淀为技能</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            </>
           )}
         </div>
       </div>
@@ -655,6 +1037,49 @@ export default function PositionsPage() {
             <div className="flex justify-end gap-2 mt-5">
               <button onClick={() => setShowCreate(false)} className="px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">取消</button>
               <button onClick={() => void create()} disabled={saving || !createForm.name.trim()} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50">{saving ? '创建中…' : '创建'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showRoutine && detail && (
+        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50" onClick={() => setShowRoutine(false)}>
+          <div className="bg-white rounded-xl shadow-lg p-5 w-full max-w-lg max-h-[85vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-lg font-bold">新建例行</h3>
+              <button onClick={() => setShowRoutine(false)} className="p-1 hover:bg-gray-100 rounded"><X className="w-4 h-4" /></button>
+            </div>
+            <p className="text-xs text-gray-500 mb-3">到点自动建一条普通任务（岗位固定为「{detail.position.name}」）；上一单没结束就跳过并留痕，不叠单。</p>
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-medium mb-1">项目 *（只列该岗位已启用的项目）</label>
+                <select value={routineForm.projectId} onChange={(e) => setRoutineForm({ ...routineForm, projectId: e.target.value })} className={inputCls}>
+                  {dispatchProjects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                </select>
+              </div>
+              <div><label className="block text-xs font-medium mb-1">例行名称 *（本岗位内唯一）</label><input value={routineForm.name} onChange={(e) => setRoutineForm({ ...routineForm, name: e.target.value })} className={inputCls} placeholder="如 每周报销审核" /></div>
+              <div>
+                <label className="block text-xs font-medium mb-1">触发（cron）*</label>
+                <div className="flex flex-wrap gap-1 mb-1">
+                  {[
+                    ['每天 9:00', '0 9 * * *'],
+                    ['每周一 9:00', '0 9 * * 1'],
+                    ['每月 1 日 9:00', '0 9 1 * *'],
+                  ].map(([label, expr]) => (
+                    <button key={expr} type="button" onClick={() => setRoutineForm({ ...routineForm, cron: expr })} className="text-[11px] px-2 py-0.5 rounded border hover:bg-gray-50">{label}</button>
+                  ))}
+                </div>
+                <input value={routineForm.cron} onChange={(e) => setRoutineForm({ ...routineForm, cron: e.target.value })} className={inputCls} placeholder="0 9 * * 1" />
+                <p className="text-[10px] text-gray-400 mt-1">分 时 日 月 周；多条用换行或分号分隔。到期由调度器触发。</p>
+              </div>
+              <div><label className="block text-xs font-medium mb-1">任务标题 *</label><input value={routineForm.title} onChange={(e) => setRoutineForm({ ...routineForm, title: e.target.value })} className={inputCls} placeholder="审核销售部本周报销单" /></div>
+              <div><label className="block text-xs font-medium mb-1">描述</label><textarea value={routineForm.description} onChange={(e) => setRoutineForm({ ...routineForm, description: e.target.value })} rows={3} className={inputCls} placeholder="背景、范围、约束" /></div>
+              <div><label className="block text-xs font-medium mb-1">验收标准</label><textarea value={routineForm.acceptance} onChange={(e) => setRoutineForm({ ...routineForm, acceptance: e.target.value })} rows={2} className={inputCls} placeholder="可核对的一条条判据" /></div>
+            </div>
+            {error && <p className="text-red-500 text-xs mt-3">错误：{error}</p>}
+            <div className="flex justify-end gap-2 mt-5">
+              <button onClick={() => setShowRoutine(false)} className="px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">取消</button>
+              <button onClick={() => void submitRoutine()} disabled={routineSaving || !routineForm.name.trim() || !routineForm.title.trim() || !routineForm.projectId} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50">{routineSaving ? '创建中…' : '创建'}</button>
             </div>
           </div>
         </div>

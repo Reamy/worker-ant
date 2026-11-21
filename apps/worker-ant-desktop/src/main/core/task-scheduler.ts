@@ -23,7 +23,7 @@ import { autoPullJobType, EXECUTION_TRACE_ROLES } from './resume-ledger.js';
 import { isTerminalTask } from './task-jobs.js';
 // zx_20261023_3 批四：作业来源归一化与 `enqueueJob` 共用一处（`withJobSource`）。
 import { withJobSource } from './job-enqueuer.js';
-import { shouldAutoResumeOnStepCap } from './step-budget.js';
+import { shouldAutoResumeOnStepCap, stepCapContinuationOf } from './step-budget.js';
 import { chainBlockReason } from './task-chain.js';
 // zx_20260929 M5-d（管子·度量衡）：项目并发口径取既有真源（`task-accounting.resolveProjectConcurrency`），
 // 与硬闸 `jobs/ai-task.ts` 读**同一函数、同一数**——此前本处写 `rhythm.maxConcurrency ?? 2` 且只数 executing。
@@ -148,6 +148,8 @@ export class TaskScheduler {
 
   // A1: cron定时调度 —— projectId → ScheduledTask[]
   private cronJobs = new Map<string, ScheduledTask[]>();
+  // zx_20261120_1 M2: 岗位例行 —— routineId → ScheduledTask[]（与项目 cron **分账**，互不覆盖）
+  private routineJobs = new Map<string, ScheduledTask[]>();
 
   constructor(db: Database.Database) {
     this.db = db;
@@ -172,42 +174,7 @@ export class TaskScheduler {
   /** A1: 注册项目的cron定时作业（支持多个表达式，用换行或分号分隔） */
   registerCronJob(projectId: string, cronExpression: string, timezone: string, handler: () => Promise<void>): boolean {
     this.unregisterCronJob(projectId);
-    if (!cronExpression) return false;
-
-    // 支持多个cron表达式：换行符/分号分隔
-    const expressions = cronExpression
-      .split(/[\n;]+/)
-      .map(e => e.trim())
-      .filter(e => e.length > 0);
-
-    if (expressions.length === 0) return false;
-
-    const tasks: ScheduledTask[] = [];
-    let allValid = true;
-
-    for (const expr of expressions) {
-      if (!cron.validate(expr)) {
-        logger.warn({ projectId, cronExpression: expr }, 'cron表达式无效，跳过');
-        allValid = false;
-        continue;
-      }
-      try {
-        const task = cron.schedule(expr, () => {
-          void handler().catch(err => logger.error({ err, projectId }, 'cron作业执行失败'));
-        }, { timezone });
-        tasks.push(task);
-        logger.info({ projectId, cronExpression: expr, timezone }, 'cron定时作业已注册');
-      } catch (err) {
-        logger.error({ err, projectId, cronExpression: expr }, 'cron作业注册失败');
-        allValid = false;
-      }
-    }
-
-    if (tasks.length > 0) {
-      this.cronJobs.set(projectId, tasks);
-      return allValid;
-    }
-    return false;
+    return this.registerCronEntries(this.cronJobs, projectId, cronExpression, timezone, handler, 'project');
   }
 
   /** A1: 注销项目的所有cron定时作业 */
@@ -223,6 +190,72 @@ export class TaskScheduler {
   /** A1: 获取项目cron作业状态 */
   getCronJobStatus(projectId: string): boolean {
     return this.cronJobs.has(projectId);
+  }
+
+  /**
+   * zx_20261120_1 M2: 注册岗位例行（与项目 cron 同一套分段/校验，但**各自一本账**）。
+   * 同一 routineId 重注册即先注销旧的——项目/岗位/绑定变更后不残留旧表达式。
+   */
+  registerRoutineJob(routineId: string, cronExpression: string, timezone: string, handler: () => Promise<void>): boolean {
+    this.unregisterRoutineJob(routineId);
+    return this.registerCronEntries(this.routineJobs, routineId, cronExpression, timezone, handler, 'routine');
+  }
+
+  /** zx_20261120_1 M2: 注销一条例行的全部定时作业。 */
+  unregisterRoutineJob(routineId: string): void {
+    const existing = this.routineJobs.get(routineId);
+    if (existing && existing.length > 0) {
+      for (const task of existing) task.stop();
+      this.routineJobs.delete(routineId);
+      logger.info({ routineId, count: existing.length }, '岗位例行作业已全部注销');
+    }
+  }
+
+  /** zx_20261120_1 M2: 在册例行数（启动接线与 rr 计数用；不解包内部实例）。 */
+  routineJobCount(): number {
+    return this.routineJobs.size;
+  }
+
+  /** 项目 cron 与岗位例行共用的注册体（表达式分段/校验/日志只此一份）。 */
+  private registerCronEntries(
+    map: Map<string, ScheduledTask[]>,
+    ownerId: string,
+    cronExpression: string,
+    timezone: string,
+    handler: () => Promise<void>,
+    kind: 'project' | 'routine',
+  ): boolean {
+    if (!cronExpression) return false;
+    const expressions = cronExpression
+      .split(/[\n;]+/)
+      .map(e => e.trim())
+      .filter(e => e.length > 0);
+    if (expressions.length === 0) return false;
+
+    const tasks: ScheduledTask[] = [];
+    let allValid = true;
+    for (const expr of expressions) {
+      if (!cron.validate(expr)) {
+        logger.warn({ ownerId, kind, cronExpression: expr }, 'cron表达式无效，跳过');
+        allValid = false;
+        continue;
+      }
+      try {
+        const task = cron.schedule(expr, () => {
+          void handler().catch(err => logger.error({ err, ownerId, kind }, 'cron作业执行失败'));
+        }, { timezone });
+        tasks.push(task);
+        logger.info({ ownerId, kind, cronExpression: expr, timezone }, 'cron定时作业已注册');
+      } catch (err) {
+        logger.error({ err, ownerId, kind, cronExpression: expr }, 'cron作业注册失败');
+        allValid = false;
+      }
+    }
+    if (tasks.length > 0) {
+      map.set(ownerId, tasks);
+      return allValid;
+    }
+    return false;
   }
 
   /** zx_20260930 M14-3: 调度器活体——是否在跑（`start()` 之后、`stop()` 之前）。 */
@@ -383,6 +416,10 @@ export class TaskScheduler {
     for (const [pid] of this.cronJobs) {
       this.unregisterCronJob(pid);
     }
+    // zx_20261120_1 M2: 岗位例行同清（与项目 cron 同一退出时机）
+    for (const [rid] of this.routineJobs) {
+      this.unregisterRoutineJob(rid);
+    }
   }
 
   /** 8.6: 检查executing任务是否超时（默认10分钟无心跳） */
@@ -539,6 +576,18 @@ export class TaskScheduler {
         const changed = (this.db.prepare("SELECT status FROM wa_tasks WHERE id = ?").get(r.id) as { status: string } | undefined)?.status;
         if (changed !== 'pending') continue; // CAS 落空（他路已处置）
         eventBus.emit('task.status_changed', { taskId: r.id, task_id: r.id, projectId: r.project_id, newStatus: 'pending', new_status: 'pending' }).catch(() => {});
+        // zx_20261120_2 M1「明」：把「系统要自动续跑」留成人可见的持久信号。
+        //   此前只有一条 `status_changed(pending)`，时间线上看不出"不是我点的恢复"。
+        //   续额步数由 `stepCapContinuationOf` 回读（与发放同一真源），不在本层另算；
+        //   只带 taskId/次数/续额数字，不带题面与产出（R9）。落库失败不改续跑本身，故 catch 吞。
+        const continuation = stepCapContinuationOf(ctx);
+        eventBus.emit('task.execution_signal', {
+          taskId: r.id,
+          task_id: r.id,
+          projectId: r.project_id,
+          signalType: 'step_cap_auto_resume',
+          message: `系统自动续跑（第 ${decision.grants}/${decision.limit} 次，续额 ${continuation?.grantedSteps ?? 0} 步）`,
+        }).catch(() => {});
         const message = `[系统] ${decision.reason}——请按原目标继续推进；若确已收口请直接 finalize_task。`;
         this.pending.set(r.id, { type: 'resume-ai-task', payload: { taskId: r.id, projectId: r.project_id, message } });
         logger.info({ taskId: r.id.slice(0, 8), grants: decision.grants, limit: decision.limit }, '撞顶续额：已自动续跑');
@@ -815,7 +864,7 @@ export class TaskScheduler {
     if (!entry) return;
     this.inflight.delete(key);
     const jobId = entry.jobId;
-    if (!jobId) { logger.info({ key, reason }, '在途键已释放（无作业行）'); return; }
+    if (!jobId) { logger.info({ key, reason, taskId: entry.taskId ? entry.taskId.slice(0, 8) : '' }, '在途键已释放（无作业行）'); return; }
     if (opts.requeue) {
       const next = entry.requeues + 1;
       if (next > INFLIGHT_MAX_REQUEUES) {

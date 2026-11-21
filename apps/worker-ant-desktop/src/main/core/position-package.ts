@@ -25,10 +25,20 @@ import {
   type Position,
   type PositionDb,
 } from './positions.js';
+import {
+  POSITION_SKILL_DESCRIPTION_MAX,
+  POSITION_SKILL_NAME_MAX,
+  POSITION_SKILL_STEPS_MAX,
+  POSITION_SKILL_STEP_MAX,
+} from './position-skill-meta.js';
+import { createPositionSkillDraft, listPositionSkills } from './position-skills.js';
 
 export const POSITION_PACKAGE_KIND = 'worker-ant-position';
-export const POSITION_PACKAGE_VERSION = 1;
+/** zx_20261120_3 M4：v2 增 `positionSkills`（v1 旧包仍可导入）。 */
+export const POSITION_PACKAGE_VERSION = 2;
+export type PositionPackageVersion = 1 | 2;
 export const POSITION_PACKAGE_MAX_LESSONS = 100;
+export const POSITION_PACKAGE_MAX_SKILLS = 50;
 export const POSITION_IMPORT_MODES = ['merge', 'replace'] as const;
 export type PositionImportMode = (typeof POSITION_IMPORT_MODES)[number];
 
@@ -36,6 +46,8 @@ export interface PositionPackageLesson {
   content: string;
   source: string;
   reusable: boolean;
+  /** zx_20261120_3 M3：适用条件随包走（导入后仍需人工采纳/验证）。 */
+  appliesTo?: string;
 }
 
 export interface PositionPackageData {
@@ -47,12 +59,20 @@ export interface PositionPackageData {
   knowledge: string[];
 }
 
+export interface PositionPackageSkill {
+  name: string;
+  description: string;
+  steps: string[];
+}
+
 export interface PositionPackage {
   kind: typeof POSITION_PACKAGE_KIND;
-  version: typeof POSITION_PACKAGE_VERSION;
+  version: PositionPackageVersion;
   exportedAt: string;
   position: PositionPackageData;
   lessons: PositionPackageLesson[];
+  /** v2：只导出**已批准**的岗位技能；导入一律落 draft（永不自动批准）。 */
+  positionSkills?: PositionPackageSkill[];
 }
 
 export type PackageResult<T> = { ok: true; value: T } | { ok: false; code: string; message: string };
@@ -88,8 +108,10 @@ export function buildPositionPackage(
   if (!position) return bad('NOT_FOUND', '岗位不存在（可能已删除）');
   const rows = db
     .prepare(
-      `SELECT content, source, reusable FROM wa_position_lessons
+      `SELECT content, source, reusable, applies_to FROM wa_position_lessons
         WHERE position_id = ? AND status = 'accepted'
+          AND retired_at IS NULL
+          AND (superseded_by IS NULL OR superseded_by = '')
         ORDER BY COALESCE(decided_at, created_at) DESC
         LIMIT ?`,
     )
@@ -110,7 +132,11 @@ export function buildPositionPackage(
       content: String(r.content ?? '').trim().slice(0, POSITION_LESSON_MAX),
       source: normalizeSource(String(r.source ?? 'summary')),
       reusable: Number(r.reusable) === 1,
+      ...(String(r.applies_to ?? '').trim() ? { appliesTo: String(r.applies_to).trim().slice(0, 200) } : {}),
     })).filter((l) => l.content !== ''),
+    positionSkills: listPositionSkills(db, position.id, 'approved')
+      .slice(0, POSITION_PACKAGE_MAX_SKILLS)
+      .map((s) => ({ name: s.name, description: s.description, steps: [...s.steps] })),
   };
   return ok({ package: pkg, fileName: positionPackageFileName(position.name, new Date(nowIso)) });
 }
@@ -151,7 +177,8 @@ export function parsePositionPackage(text: string): PackageResult<PositionPackag
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return bad('BAD_SHAPE', '知识包必须是对象');
   const o = raw as Record<string, unknown>;
   if (o.kind !== POSITION_PACKAGE_KIND) return bad('BAD_KIND', `不是岗位知识包（kind=${String(o.kind ?? '')}）`);
-  if (o.version !== POSITION_PACKAGE_VERSION) return bad('BAD_VERSION', `版本不支持（${String(o.version ?? '')}）`);
+  const version: PositionPackageVersion | null = o.version === 1 ? 1 : o.version === 2 ? 2 : null;
+  if (!version) return bad('BAD_VERSION', `版本不支持（${String(o.version ?? '')}；支持 1/2）`);
   const p = o.position;
   if (!p || typeof p !== 'object' || Array.isArray(p)) return bad('BAD_SHAPE', '缺少 position');
   const po = p as Record<string, unknown>;
@@ -185,16 +212,50 @@ export function parsePositionPackage(text: string): PackageResult<PositionPackag
     if (content.length > POSITION_LESSON_MAX) return bad('LESSON_TOO_LONG', `经验最多 ${POSITION_LESSON_MAX} 字`);
     if (seen.has(content)) return bad('DUPLICATE_LESSON', '知识包里同一句经验出现了两次');
     seen.add(content);
+    const appliesTo = typeof lo.appliesTo === 'string' ? lo.appliesTo.trim().slice(0, 200) : '';
     lessons.push({
       content,
       source: normalizeSource(typeof lo.source === 'string' ? lo.source : 'imported'),
       reusable: lo.reusable === true,
+      ...(appliesTo ? { appliesTo } : {}),
     });
+  }
+
+  const positionSkills: PositionPackageSkill[] = [];
+  if (version >= 2 && o.positionSkills !== undefined) {
+    if (!Array.isArray(o.positionSkills)) return bad('BAD_SHAPE', 'positionSkills 必须是数组');
+    if (o.positionSkills.length > POSITION_PACKAGE_MAX_SKILLS) {
+      return bad('TOO_MANY', `岗位技能最多 ${POSITION_PACKAGE_MAX_SKILLS} 条`);
+    }
+    const seenSkill = new Set<string>();
+    for (const item of o.positionSkills) {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return bad('BAD_SHAPE', '岗位技能条目必须是对象');
+      const so = item as Record<string, unknown>;
+      const name = typeof so.name === 'string' ? so.name.trim() : '';
+      if (!name) return bad('BAD_SHAPE', '岗位技能名不能为空');
+      if (name.length > POSITION_SKILL_NAME_MAX) return bad('NAME_TOO_LONG', `岗位技能名最多 ${POSITION_SKILL_NAME_MAX} 字`);
+      if (seenSkill.has(name)) return bad('DUPLICATE_SKILL', '知识包里同一岗位技能出现了两次');
+      seenSkill.add(name);
+      const description = typeof so.description === 'string' ? so.description.trim() : '';
+      if (description.length > POSITION_SKILL_DESCRIPTION_MAX) return bad('DESCRIPTION_TOO_LONG', `技能说明最多 ${POSITION_SKILL_DESCRIPTION_MAX} 字`);
+      if (!Array.isArray(so.steps)) return bad('BAD_SHAPE', '岗位技能步骤必须是数组');
+      const steps: string[] = [];
+      for (const sv of so.steps) {
+        if (typeof sv !== 'string') return bad('BAD_SHAPE', '岗位技能步骤每项必须是字符串');
+        const t = sv.trim();
+        if (!t) continue;
+        if (t.length > POSITION_SKILL_STEP_MAX) return bad('ITEM_TOO_LONG', `单步最多 ${POSITION_SKILL_STEP_MAX} 字`);
+        steps.push(t);
+      }
+      if (steps.length === 0) return bad('BAD_SHAPE', '岗位技能至少要有一步');
+      if (steps.length > POSITION_SKILL_STEPS_MAX) return bad('TOO_MANY', `单技能步骤最多 ${POSITION_SKILL_STEPS_MAX} 条`);
+      positionSkills.push({ name, description, steps });
+    }
   }
 
   return ok({
     kind: POSITION_PACKAGE_KIND,
-    version: POSITION_PACKAGE_VERSION,
+    version,
     exportedAt: typeof o.exportedAt === 'string' ? o.exportedAt : '',
     position: {
       name: po.name.trim(),
@@ -205,6 +266,7 @@ export function parsePositionPackage(text: string): PackageResult<PositionPackag
       knowledge: knowledge.value,
     },
     lessons,
+    ...(positionSkills.length > 0 ? { positionSkills } : {}),
   });
 }
 
@@ -215,6 +277,9 @@ export interface PositionImportResult {
   addedSections: number;
   addedLessons: number;
   skippedLessons: number;
+  /** zx_20261120_3 M4：技能一律落 draft；同名（任意状态）算 skipped。 */
+  addedSkills: number;
+  skippedSkills: number;
 }
 
 function mergeSection(existing: string[], incoming: string[]): { items: string[]; added: number } {
@@ -248,6 +313,8 @@ export function importPositionPackage(
   let addedSections = 0;
   let addedLessons = 0;
   let skippedLessons = 0;
+  let addedSkills = 0;
+  let skippedSkills = 0;
   let position: Position | null = null;
   let created = false;
 
@@ -300,17 +367,29 @@ export function importPositionPackage(
         source: lesson.source,
         reusable: lesson.reusable,
         origin: 'imported',
+        appliesTo: lesson.appliesTo,
       });
       if (wrote) addedLessons++; else skippedLessons++;
     }
 
+    // zx_20261120_3 M4：包内岗位技能一律落 **draft**（永不自动批准）；同名任意状态算 skipped。
+    for (const sk of pkg.positionSkills ?? []) {
+      const r = createPositionSkillDraft(db, {
+        positionId: position.id,
+        name: sk.name,
+        description: sk.description,
+        steps: sk.steps,
+      });
+      if (r.ok) addedSkills++; else skippedSkills++;
+    }
+
     db.prepare(
       `INSERT INTO wa_position_imports
-         (id, position_id, file_name, mode, added_sections, added_lessons, skipped_lessons, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, position_id, file_name, mode, added_sections, added_lessons, skipped_lessons, added_skills, skipped_skills, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       `pimp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
-      position.id, String(fileName ?? ''), mode, addedSections, addedLessons, skippedLessons, nowIso,
+      position.id, String(fileName ?? ''), mode, addedSections, addedLessons, skippedLessons, addedSkills, skippedSkills, nowIso,
     );
     db.exec('COMMIT');
   } catch (e) {
@@ -320,5 +399,5 @@ export function importPositionPackage(
 
   const final = getPosition(db, position.id);
   if (!final) return bad('INTERNAL', '导入后岗位读不回来');
-  return ok({ position: final, created, mode, addedSections, addedLessons, skippedLessons });
+  return ok({ position: final, created, mode, addedSections, addedLessons, skippedLessons, addedSkills, skippedSkills });
 }

@@ -81,6 +81,9 @@ const TERMINAL_DDL = `CREATE TABLE wa_external_terminals (
   revoked_at TEXT,
   delivered_at TEXT,
   grant_expires_at TEXT,
+    scope_json TEXT NOT NULL DEFAULT '{}',
+    rate_json TEXT NOT NULL DEFAULT '{}',
+    linkage_allowed INTEGER NOT NULL DEFAULT 1,
   source TEXT,
   card_intents_json TEXT
 )`;

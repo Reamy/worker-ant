@@ -95,7 +95,10 @@ CREATE TABLE wa_external_calls (id TEXT PRIMARY KEY, terminal_id TEXT NOT NULL, 
 CREATE TABLE wa_external_terminals (id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
   pair_code TEXT NOT NULL, key_prefix TEXT DEFAULT '', secret_hash TEXT DEFAULT '',
   capabilities_json TEXT DEFAULT '[]', remote_addr TEXT DEFAULT '',
-  created_at TEXT DEFAULT (datetime('now')), approved_at TEXT, grant_expires_at TEXT);
+  created_at TEXT DEFAULT (datetime('now')), approved_at TEXT, grant_expires_at TEXT,
+    scope_json TEXT NOT NULL DEFAULT '{}',
+    rate_json TEXT NOT NULL DEFAULT '{}',
+    linkage_allowed INTEGER NOT NULL DEFAULT 1);
 `;
 
 function mkdb(opts: { trial?: boolean } = {}): DatabaseSync {

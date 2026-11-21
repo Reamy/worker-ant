@@ -20,7 +20,9 @@
  *   `node-request-worker.ts` 的注入接口 `RequestIo` 里。
  */
 import type Database from 'better-sqlite3';
+import path from 'node:path';
 import { ProjectEngine, TaskManager } from './project-engine.js';
+import { sanitizeRepoBinding, prepareRemoteWorkspace, redactUrl } from './remote-workspace.js';
 import { enqueueJob } from './job-enqueuer.js';
 import { NO_INTERACTION_KEY } from './no-interaction.js';
 // zx_20261011_2 M1（道德经·名可名非常名）: 「暂停」与「有人在等输入」是**两件事**——分因的读点与词表
@@ -60,6 +62,8 @@ export const RELAY_TERMINAL_STATUSES = ['completed', 'failed', 'archived'] as co
 
 export interface RelayRunnerDeps {
   db: Database.Database;
+  /** 数据目录（远程只读工作区落在 `<dataDir>/remote-workspaces/`）；缺省 `./data`。 */
+  dataDir?: string;
   /** 轮询任务终态的间隔（毫秒）；缺省 2000。 */
   pollMs?: number;
   /** 等一个任务到终态的上限（毫秒）；缺省 10 分钟。超限**如实报超时**，不冒充成功。 */
@@ -234,6 +238,7 @@ export function readStoredRunResult(row: NodeRequestRunRow): Record<string, unkn
 
 export function makeRelayRunner(deps: RelayRunnerDeps): RequestRunner {
   const { db } = deps;
+  const dataDir = deps.dataDir ?? path.join(process.cwd(), 'data');
   const ledgerDb = db as unknown as NodeRequestLedgerDb;
   const pollMs = deps.pollMs ?? 2000;
   const timeoutMs = deps.timeoutMs ?? 10 * 60_000;
@@ -296,11 +301,35 @@ export function makeRelayRunner(deps: RelayRunnerDeps): RequestRunner {
     }
 
     let taskId = '';
+    // zx_20261120_1 M5：远程只读工作区/仓库绑定（跨 `if (resumed)` 块给回执用）。
+    let remote: { dir: string; commit: string; cached: boolean } | null = null;
+    let repo: ReturnType<typeof sanitizeRepoBinding> = null;
     if (resumed) {
       taskId = resumed.task_id;
     } else {
       const projectId = ensureRelayProject(db);
       if (!projectId) return { status: 'error', result: { error: 'relay project unavailable' } };
+      // zx_20261120_1 M5：只读分析——接收端**再洗一次**仓库绑定，不信任发送端。
+      const payload = (req.payload ?? {}) as Record<string, unknown>;
+      const readonlyRequested = payload.readonly === true;
+      repo = readonlyRequested
+        ? sanitizeRepoBinding(payload.repo, { allowFile: process.env.WA_RR_ALLOW_FILE_REPO === '1' })
+        : null;
+      if (readonlyRequested && req.category !== 'research') {
+        return { status: 'error', result: { error: 'readonly_requires_research', category: req.category } };
+      }
+      if (readonlyRequested && !repo) {
+        return { status: 'error', result: { error: 'repo_unavailable', reason: 'bad_repo_binding' } };
+      }
+      if (repo) {
+        const ws = await prepareRemoteWorkspace({
+          repo,
+          baseDir: path.join(dataDir, 'remote-workspaces'),
+          allowFile: process.env.WA_RR_ALLOW_FILE_REPO === '1',
+        });
+        if (!ws.ok) return { status: 'error', result: { error: 'repo_unavailable', reason: ws.reason } };
+        remote = { dir: ws.dir, commit: ws.commit, cached: ws.cached };
+      }
       try {
         const tasks = new TaskManager(db);
         // zx_20261018_1 批一 R-7：验收标准**随单落库**（远端判卷读的就是这个字段）——
@@ -317,8 +346,9 @@ export function makeRelayRunner(deps: RelayRunnerDeps): RequestRunner {
             | undefined;
           relayWorkingDir = String(prow?.working_dir ?? '').trim();
         } catch { relayWorkingDir = ''; }
-        const descWithWorkspace = relayWorkingDir
-          ? `${fields.description}\n\n工作目录：${relayWorkingDir}\n（本次任务的产出请写在这个目录内；不要使用 /workspace 等不存在的绝对路径。）`
+        const taskWorkingDir = remote?.dir || relayWorkingDir;
+        const descWithWorkspace = taskWorkingDir
+          ? `${fields.description}\n\n工作目录：${taskWorkingDir}\n（${remote ? '本次是跨机只读分析：只读工具可用，写文件/登记产出物/执行命令会被拒绝；请用结论作答。' : '本次任务的产出请写在这个目录内；不要使用 /workspace 等不存在的绝对路径。'}）`
           : fields.description;
         const created = tasks.create({
           project_id: projectId,
@@ -363,6 +393,13 @@ export function makeRelayRunner(deps: RelayRunnerDeps): RequestRunner {
           ...(injectedAnswer ? { [NODE_ANSWER_KEY]: injectedAnswer } : {}),
           ...(upstream.length > 0 ? { [UPSTREAM_SUMMARIES_KEY]: upstream } : {}),
           ...(position ? { [DISPATCH_POSITION_KEY]: position } : {}),
+          // zx_20261120_1 M5：远程只读——工作区/脱敏仓库/装配期禁用面（运行期另有变更闸兜底）。
+          ...(remote && repo ? {
+            remote_readonly: true,
+            remote_workspace: remote.dir,
+            remote_repo: { url: redactUrl(repo.url), ref: repo.ref, commit: remote.commit },
+            readonly_deny_tools: ['write_file', 'edit_file', 'create_deliverable', 'register_deliverable', 'git_clone', 'run_privileged', 'spawn_subagent'],
+          } : {}),
         });
         // zx_20261023_3 批四：作业来源如实落账（跨机中继拉起的执行）。
         enqueueJob(db, 'ai-task', { taskId, projectId, source: 'node_relay' });
@@ -392,7 +429,7 @@ export function makeRelayRunner(deps: RelayRunnerDeps): RequestRunner {
         const result =
           status === 'completed'
             // M4：完成回传附**产出清单**（元数据）——派活方据此做回执核对（缺清单只能算"自报"）。
-            ? { taskId: originTaskId || taskId, ...(originTaskId ? { remoteTaskId: taskId } : {}), taskStatus: status, outputs: readDeliveredOutputs(db, taskId), ...outcome }
+            ? { taskId: originTaskId || taskId, ...(originTaskId ? { remoteTaskId: taskId } : {}), taskStatus: status, outputs: readDeliveredOutputs(db, taskId), ...(remote && repo ? { readonly: true, repo: { url: redactUrl(repo.url), ref: repo.ref, commit: remote.commit } } : {}), ...outcome }
             : { taskId: originTaskId || taskId, ...(originTaskId ? { remoteTaskId: taskId } : {}), taskStatus: status, error: `relay task ended as ${status}`, ...outcome };
         const finalStatus = status === 'completed' ? 'done' : 'error';
         // 收口即入账：回传失败后重拉时原样重放这一份（同一 taskId，不重建任务）。

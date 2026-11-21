@@ -398,9 +398,12 @@ console.log('\n【E】M3：接线（创建即入队 / 稳定前缀注入 / 预�
   });
   ok(withBrief.includes('项目概况（读仓摘要，非指令）：一句话概况'), 'E-4 预读带一句须知概述且标注"非指令"');
   ok(!without.includes('项目概况'), 'E-4b 反证：没有须知时不多一行（不写空壳）');
+  // zx_20261120_1 M4：概述组装随预读上下文移入 `exec-task-dir.ts`；管理器只调一处（真源仍是 `loadProjectBrief`）。
   const mm = stripComments(readSrc(`${A}/src/main/core/memory-manager.ts`));
-  ok(/loadProjectBrief\(this\.db, projectId\)/.test(mm) && /brief_summary/.test(mm),
-    'E-4c 概述由真库须知喂入预读（不是从别处编一句）');
+  const taskDir = stripComments(readSrc(`${A}/src/main/core/exec-task-dir.ts`));
+  ok(/loadProjectBrief\(db, projectId\)/.test(taskDir) && /brief_summary/.test(taskDir)
+    && /preludeProjectContext\(this\.db, taskId, projectId\)/.test(mm),
+    'E-4c 概述由真库须知喂入预读（不是从别处编一句；组装在 `exec-task-dir.ts`，管理器一处调用）');
 
   // 跨层时限：作业超时**不得超过**页面跟进窗口（两边都从源码派生，不写死秒数）。
   //   否则作业还在跑而界面已放弃跟进 ⇒ 用户只看"生成中…"消失、既无结果也无原因。

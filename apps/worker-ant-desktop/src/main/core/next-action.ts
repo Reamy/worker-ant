@@ -43,6 +43,30 @@ export interface NextAction {
   action?: { label: string; id: NextActionId };
 }
 
+/** 第一行动作**实际该走哪条通道**（不是按钮文案）。 */
+export type NextActionRoute = 'reply' | 'start' | 'resume' | 'ignore';
+
+/**
+ * zx_20261116_1 M4「接」：把 `NextActionId` 落到**正确的 IPC 通道**——唯一真源。
+ *
+ * 病根（2026-11-16 真事故）：`nextActionForTask({status:'pending'})` 给出 `start_task`（文案「开始执行」），
+ * 页面却把 `start_task` 一律接到 `task:resume`；而 `task:resume` 只接受 paused/failed/completed，
+ * pending 会被 `INVALID_STATUS` 拒——用户点第一行「开始执行」得到的是“任务状态为 pending，无法恢复”。
+ * 操作栏的「执行」走 `task:updateStatus('running')` 才是通的。
+ *
+ * 判据按**状态**分流，不按按钮文案猜：
+ *   · pending ⇒ `start`（task:updateStatus 'running'，有依赖闸兜底）
+ *   · failed / paused / completed / ghost（executing）⇒ `resume`（保留对话继续）
+ *   · answer_task ⇒ `reply`；其余 id ⇒ `ignore`
+ *
+ * `start_task + executing` 只会在 ghost 路径出现（live/queued 不产生动作），故按 resume 处理是安全的。
+ */
+export function resolveNextActionRoute(aid: NextActionId, status: string): NextActionRoute {
+  if (aid === 'answer_task') return 'reply';
+  if (aid === 'start_task') return String(status ?? '') === 'pending' ? 'start' : 'resume';
+  return 'ignore';
+}
+
 /** 「多久没新进展」才算卡住。10 分钟：比看门狗（600s abort）宽一档，不致于把正常慢步报成卡死。 */
 export const STALL_AFTER_MS = 10 * 60_000;
 

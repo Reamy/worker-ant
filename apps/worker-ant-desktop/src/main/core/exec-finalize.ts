@@ -28,13 +28,17 @@ import { promoteTaskFileDeliverables, selectProbeDeliverables, disposeProbeDeliv
 import { registerClaimedArtifacts } from './task-artifacts.js';
 import { unfinishedChildren } from './children-gate.js';
 import { buildTaskOutcome } from './task-outcome.js';
+import { emitCompletionEvent, verifyCompletionEvent } from './completion-emit.js';
 import { adjustProjectStrategy, recordStrategyOutcome, type ExecutionMetrics } from './feedback-engine.js';
 import { createLogger } from './logger.js';
 import type { AdaptiveStrategy, TaskArchetype } from './task-archetype.js';
 import { unverifiedReasonText } from './acceptance-check.js';
-import { claimCompletedEmit, mergeFinalizeChecks } from './run-trace.js';
+import { mergeFinalizeChecks } from './run-trace.js';
 // zx_20261113_2 M15：收口时只提示 Git 未提交，不自动提交。
 import { gitWorkingTreeAdvice } from './git-advisory.js';
+import { baselineReconcileChecks } from './start-baseline-reconcile.js';
+import { recordToolDenialLedger, summarizeCommandFailures, commandFailureCheckLine } from './tool-denials.js';
+import { roiBudgetCheckLine } from './context-roi.js';
 // zx_20261110_2 B5：后置账的身份与去重口（零依赖模块，与 `task-jobs` 同形）。
 import { markCompletedRun } from './postlude.js';
 import type { AcceptanceSummary, AcceptanceVerdict } from './acceptance-check.js';
@@ -119,10 +123,20 @@ export function finalizeRunClose(o: {
   //   放在终态早退之后、各暂停/完成分支之前 ⇒ 无论本次是 completed 还是 paused，账上都留这一行。
   try {
     const advice = gitWorkingTreeAdvice(workingDir);
-    if (advice) {
+    // zx_20261119_2 M2「账」：开局既有 / 本轮新增 / 开局已消失 三组对账（run_close 出口同尺）。
+    let reconcile: string[] = [];
+    try { reconcile = baselineReconcileChecks(db, taskId, workingDir); } catch { /* best-effort */ }
+    // zx_20261119_2 M7「度」：工具拒绝 + 步数账（run_close 出口同尺；premature 在收口后才有，这里只记 INFO）。
+    try { const denialLine = recordToolDenialLedger(db, taskId); if (denialLine) reconcile.push(denialLine); } catch { /* best-effort */ }
+    // zx_20261120_2 M5「实」：真实命令失败（测试/构建）只记 INFO，不改分——与 finalize 出口同一行函数。
+    try { const cmdLine = commandFailureCheckLine(summarizeCommandFailures(db, taskId)); if (cmdLine) reconcile.push(cmdLine); } catch { /* best-effort */ }
+    // zx_20261120_1 M8「省·见」：按效预算一行（无记录不出行；影子/生效两态同尺）。
+    try { const roiLine = roiBudgetCheckLine(db, taskId); if (roiLine) reconcile.push(roiLine); } catch { /* best-effort */ }
+    const lines = [advice, ...reconcile].filter((s): s is string => !!s);
+    if (lines.length > 0) {
       const row = db.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get(taskId) as { context_json?: string } | undefined;
       const c = JSON.parse(row?.context_json || '{}') as Record<string, unknown>;
-      c.finalize_checks = mergeFinalizeChecks(c.finalize_checks, [advice], ctx.runId);
+      c.finalize_checks = mergeFinalizeChecks(c.finalize_checks, lines, ctx.runId);
       db.prepare('UPDATE wa_tasks SET context_json = ? WHERE id = ?').run(JSON.stringify(c), taskId);
     }
   } catch { /* 提示失败不阻断收口 */ }
@@ -260,9 +274,8 @@ export function finalizeRunClose(o: {
   // zx_20260915 P0-2(d): 完成事件带上验收三态之一（无标准/未通过/已验证）——此前事件里**完全没有**验收，
   //   下游只能各自去猜（或干脆不猜）。`criteria_total/passed_total` 取自落库载荷，不另算一份。
   // zx_20261109_1 B5：同一 run 只发一次（本路与 finalize_task 路共用 `ctx.completedRuns`）；载荷带 `run_id`。
-  if (claimCompletedEmit(ctx)) {
-    eventBus.emit('task.completed', { taskId, task_id: taskId, projectId, run_id: ctx.runId, ...buildTaskOutcome(db, taskId, fileMutationCount), acceptance: closeAcceptance ?? undefined }).catch(() => {});
-  }
+  // zx_20261119_1 M1「迹」：与 finalize 出口同一实现（判已发过/发射失败都不再静默）。
+  emitCompletionEvent({ db, ctx, taskId, projectId, fileMutationCount, acceptance: closeAcceptance ?? undefined, tag: 'run_close' });
   // zx_20261115_3 M1「归」：产出对账——写作账里有、工程内尚无登记行的文件，先补登记再提升。
   //   （有界 20、非探针、盘上仍在；**不夺归属**：已有登记行的文件一律跳过。）
   //   ⚠ 必须排在 `promoteTaskFileDeliverables` 之前：新建行此刻是 draft，紧接着被提升为 completed，
@@ -277,6 +290,8 @@ export function finalizeRunClose(o: {
   } catch { /* 补登记 best-effort，不阻断收口 */ }
   // zx_20260906 批1: 成果随任务交付——达标收尾把本任务 doc 草稿产出物推进 completed（未达标 forced 场景内部跳过）
   promoteTaskFileDeliverables(db, taskId, 'run_close');
+  // zx_20261119_1 M1「迹」：收口自检（与 finalize 出口同一实现）。
+  verifyCompletionEvent({ db, ctx, taskId, tag: 'run_close' });
   console.log(`[Agent] 任务完成: ${title.slice(0, 50)} steps=${stepCount} quality=${qualityScore.score}分`);
 
   // 道法自然：记录策略表现 + 调整项目策略（闭环反馈）

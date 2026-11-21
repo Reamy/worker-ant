@@ -20,18 +20,21 @@
  * ⚠ 端口接口定义在此（**生产者侧**），门模块只按结构消费（`import type`），不反向依赖——同 `PairingPort` 范式。
  */
 import { randomUUID } from 'node:crypto';
-import type { AnsDevice, DeviceControlOutcome } from './device-registry.js';
+import { normalizeRoomName, type AnsDevice, type DeviceControlOutcome } from './device-registry.js';
 import { deviceCallName } from './device-name.js';
 import { teamFeatureRefusal } from './team-gate.js';
 import type { LicenseSettingDb } from './license.js';
 // zx_20261018_1 批二「意」：意图协议（词表/校验）+ 计划账（resolve 与 execute 之间的那本账）。
 import { INTENT_CAPABILITY, publicIntents, validateIntent } from './intent-protocol.js';
 import { deviceKindClassOf, type DeviceKindClass } from './device-kind.js';
+// zx_20261121_2 M2「授·行」：门内执行点的三把尺（范围/频率/联动）。
+import { defaultGrant, rateLimitVerdict, scopeAllowsDevice, type TerminalGrant } from './external-grant.js';
 import {
   claimIntentPlan,
   createIntentPlan,
   executeClaimedIntentPlan,
   getIntentPlan,
+  parsePlanJson,
   INTENT_PLAN_TTL_SEC,
   type IntentStep,
   type IntentSkip,
@@ -236,6 +239,8 @@ export interface ExternalCapabilitiesPayload {
   /** 已登记的房间名（非空、去重；批三接真源，此前由装配层给空表）。 */
   rooms: string[];
   devices: RedactedDevice[];
+  /** zx_20261121_2 M2：这台终端被限制在什么范围（脱敏，只回范围本身）。 */
+  scope?: TerminalGrant['scope'];
 }
 
 /** 计划由谁排出（zx_20261029_2 M2）：规则表优先，规则排不出才请模型补一步棋。 */
@@ -278,6 +283,10 @@ export type TaskRequestOutcome =
 /** "控一台设备"那一跳的注入面——真实现由 `main/index.ts` 装配（本模块不引 `tools/device.ts`）。 */
 export interface ExternalCapabilityDeps {
   listDevices(): AnsDevice[];
+  /** zx_20261121_2 M2：该终端的授权边界；缺省（旧装配/测试）⇒ 全部/不限/允许。 */
+  getGrant?(terminalId: string): TerminalGrant;
+  /** zx_20261121_2 M2：按 id/名解析设备（与门内 `controlDevice` 同一把解析尺）；缺省 ⇒ 不做范围复核。 */
+  resolveDevice?(ref: { deviceId?: string; name?: string }): AnsDevice | null;
   /**
    * 执行一次 `device_control`。返回体取 `device-registry.DeviceControlOutcome`（工具/面板/门**同形**）。
    * 传进来的已是终端报的**原始内层参数**（`{deviceId|name, action, args}`）——"按名解析成哪台设备"由装配层
@@ -361,6 +370,45 @@ export function createExternalCapabilityPort(
     return id;
   };
 
+  /** 授权边界（缺省全部/不限/允许——旧装配与测试不传也能跑）。 */
+  const grantOf = (terminalId: string): TerminalGrant => {
+    try { return deps.getGrant?.(terminalId) ?? defaultGrant(); } catch { return defaultGrant(); }
+  };
+
+  /** 范围复核：解析不到设备 ⇒ 交给门内控制闸（不在这里猜“查无此设备”）。 */
+  const outOfScope = (terminalId: string, ref: { deviceId?: string; name?: string }): AnsDevice | null => {
+    if (!deps.resolveDevice) return null;
+    try {
+      const dev = deps.resolveDevice(ref);
+      if (!dev) return null;
+      return scopeAllowsDevice(grantOf(terminalId).scope, dev) ? null : dev;
+    } catch { return null; }
+  };
+
+  /** 频率闸：查该终端近 24h 的调用时刻，按滚动窗口判。 */
+  const rateRefusal = (terminalId: string): { window: string; limit: number; used: number } | null => {
+    try {
+      const limits = grantOf(terminalId).rate;
+      if (!limits.perMinute && !limits.perHour && !limits.perDay) return null;
+      // resolve 零副作用、不计频；execute 的 args 只有 `planId`，resolve 的 args 带 `intent`。
+      const rows = db.prepare(
+        "SELECT created_at FROM wa_external_calls WHERE terminal_id = ? AND created_at >= datetime('now','-1 day') AND NOT (capability = 'intent_control' AND args_json LIKE '%\"intent\"%')",
+      ).all(terminalId) as Array<{ created_at?: string }>;
+      const times = rows
+        .map((r) => Date.parse(String(r.created_at ?? '').replace(' ', 'T') + 'Z'))
+        .filter((t) => Number.isFinite(t));
+      const v = rateLimitVerdict(limits, times, Date.now());
+      return v.ok ? null : { window: v.window, limit: v.limit, used: v.used };
+    } catch { return null; }
+  };
+
+  /** 意图计划的联动许可：多步或涉多台设备才要求。 */
+  const linkageRefusal = (terminalId: string, steps: Array<{ call_name: string }>): boolean => {
+    if (grantOf(terminalId).linkageAllowed) return false;
+    const names = new Set(steps.map((s) => String(s.call_name ?? '').trim()).filter(Boolean));
+    return steps.length > 1 || names.size > 1;
+  };
+
   /**
    * `task_request` 的执行路（M5b）——闸序的前四步已由 `invoke` 走过，这里只做**载荷校验 → 在途闸 → 执行 → 留痕**。
    * 请求过了闸但执行没成 ⇒ **200 + `ok:false`**（与设备传动失败同形，不当协议错误），`taskId` 照回。
@@ -429,13 +477,21 @@ export function createExternalCapabilityPort(
       const locked = refusal();
       if (locked) return { status: 403, body: { error: 'team_required', message: locked } };
       const caps = EXTERNAL_CAPABILITIES.filter((c) => allowed.includes(c));
-      const rooms = [...new Set((deps.listRooms?.() ?? []).map((r) => r.trim()).filter((r) => r.length > 0))].sort();
+      const grant = grantOf(terminalId);
+      const inScope = deps.listDevices().filter((d) => scopeAllowsDevice(grant.scope, d));
+      // rooms 仍以装配层 `listRooms` 为真源（R-25）；范围收窄时只保留范围内的房间。
+      const scopedRooms = new Set(inScope.map((d) => normalizeRoomName(String(d.room ?? '')).toLowerCase()).filter(Boolean));
+      const scopeRooms = new Set(grant.scope.rooms.map((r) => normalizeRoomName(r).toLowerCase()));
+      const rooms = [...new Set((deps.listRooms?.() ?? [...scopedRooms]).map((r) => r.trim()).filter(Boolean))]
+        .filter((r) => grant.scope.mode === 'all' || scopedRooms.has(normalizeRoomName(r).toLowerCase()) || scopeRooms.has(normalizeRoomName(r).toLowerCase()))
+        .sort();
       const payload: ExternalCapabilitiesPayload = {
         terminal_id: terminalId,
         capabilities: caps,
         intents: publicIntents(),
         rooms,
-        devices: redactedDevices(deps.listDevices()),
+        devices: redactedDevices(inScope),
+        scope: grant.scope,
       };
       return { status: 200, body: payload };
     },
@@ -462,6 +518,23 @@ export function createExternalCapabilityPort(
       if (!allowed.includes(capability)) {
         record({ terminalId, capability, args: inner, result: 'denied', reason: 'capability_not_granted', remoteAddr });
         return { status: 403, body: { error: 'capability_not_granted', capability } };
+      }
+      // zx_20261121_2 M2：频率闸（设备控制与任务请求都算真副作用；resolve 不计）。
+      const rate = rateRefusal(terminalId);
+      if (rate) {
+        record({ terminalId, capability, args: inner, result: 'denied', reason: 'rate_limited', remoteAddr });
+        return { status: 429, body: { error: 'rate_limited', window: rate.window, limit: rate.limit, used: rate.used } };
+      }
+      // zx_20261121_2 M2：设备范围闸（只对设备控制；任务请求不走设备）。
+      if (capability === 'device_control') {
+        const dev = outOfScope(terminalId, {
+          deviceId: typeof inner.deviceId === 'string' ? inner.deviceId : undefined,
+          name: typeof inner.name === 'string' ? inner.name : undefined,
+        });
+        if (dev) {
+          record({ terminalId, capability, args: inner, result: 'denied', reason: 'out_of_scope', remoteAddr });
+          return { status: 403, body: { error: 'out_of_scope', device: dev.name, scope: grantOf(terminalId).scope } };
+        }
       }
 
       // M5b：任务请求是**另一条执行路**（交本机任务引擎跑），前四道闸与设备控制同族，之后各走各的。
@@ -546,6 +619,18 @@ export function createExternalCapabilityPort(
         }
         return { status: 409, body: { error: reason, skipped, ...message } };
       }
+      // zx_20261121_2 M2：联动许可（多步/多设备）与设备范围（逐步解析）在**建计划前**复核。
+      if (linkageRefusal(terminalId, outcome.steps)) {
+        record({ terminalId, capability, args: asRecord(body), result: 'denied', reason: 'linkage_not_allowed', remoteAddr });
+        return { status: 403, body: { error: 'linkage_not_allowed', message: '该终端未被允许联动（多步/多设备）；请在「协同 → 门」开启，或改用单设备意图。' } };
+      }
+      const outside = outcome.steps
+        .filter((s) => !!outOfScope(terminalId, { name: s.call_name }))
+        .map((s) => s.call_name);
+      if (outside.length > 0) {
+        record({ terminalId, capability, args: asRecord(body), result: 'denied', reason: 'out_of_scope', remoteAddr });
+        return { status: 403, body: { error: 'out_of_scope', devices: outside } };
+      }
       const now = deps.now?.() ?? new Date();
       const plan = createIntentPlan(db, {
         terminalId, capability, params: v.params,
@@ -585,6 +670,12 @@ export function createExternalCapabilityPort(
         record({ terminalId, capability, args: { planId }, result: 'denied', reason: 'capability_not_granted', remoteAddr });
         return { status: 403, body: { error: 'capability_not_granted', capability } };
       }
+      // zx_20261121_2 M2：执行前频率闸（真副作用才计）。
+      const rate = rateRefusal(terminalId);
+      if (rate) {
+        record({ terminalId, capability, args: { planId }, result: 'denied', reason: 'rate_limited', remoteAddr });
+        return { status: 429, body: { error: 'rate_limited', window: rate.window, limit: rate.limit, used: rate.used } };
+      }
       const existing = getIntentPlan(db, planId);
       if (!existing) {
         record({ terminalId, capability, args: { planId }, result: 'denied', reason: 'plan_not_found', remoteAddr });
@@ -595,6 +686,17 @@ export function createExternalCapabilityPort(
         record({ terminalId, capability, args: { planId }, result: 'denied', reason: 'plan_not_yours', remoteAddr });
         return { status: 403, body: { error: 'plan_not_yours' } };
       }
+      // zx_20261121_2 M2：计划建后授权可能被收窄——执行前按**当前**grant 复核，不执行旧边界下的计划。
+      const planned = parsePlanJson(existing).steps;
+      if (linkageRefusal(terminalId, planned)) {
+        record({ terminalId, capability, args: { planId }, result: 'denied', reason: 'linkage_not_allowed', remoteAddr });
+        return { status: 403, body: { error: 'linkage_not_allowed', message: '该终端未被允许联动（多步/多设备）。' } };
+      }
+      const outside = planned.filter((s) => !!outOfScope(terminalId, { name: s.call_name })).map((s) => s.call_name);
+      if (outside.length > 0) {
+        record({ terminalId, capability, args: { planId }, result: 'denied', reason: 'out_of_scope', remoteAddr });
+        return { status: 403, body: { error: 'out_of_scope', devices: outside } };
+      }
       const now = deps.now?.() ?? new Date();
       const claim = claimIntentPlan(db, planId, now);
       if (!claim.ok) {
@@ -603,6 +705,10 @@ export function createExternalCapabilityPort(
       }
       // 逐步执行与收口走**共享执行器**（门外/本地工具/面板三路同一份次序；see `intent-plans.ts`）。
       const { status, steps: results } = await executeClaimedIntentPlan(db, claim.plan, async (step) => {
+        // 逐步骤再核一次范围（grant 可能在认领与执行之间被收窄）。
+        if (outOfScope(terminalId, { name: step.call_name })) {
+          return { ok: false, denied: true, reason: 'out_of_scope' };
+        }
         const outcome = await deps.controlDevice({
           name: step.call_name,
           action: step.action,

@@ -903,7 +903,9 @@ async function main(): Promise<void> {
       && /const content = `任务「\$\{taskRow\.title\}」验收未达：\$\{failedItems\}`/.test(execSrc)
       && /recordPitfallCandidate\(db, taskRow\.project_id, \{ taskTitle: taskRow\.title, failedItems \}\)/.test(execSrc),
       'B-9c 验收失败块：摘要单源（summarizeAcceptanceFailures）同喂记忆与候选卡写口');
-    ok(/cards: cardRows/.test(execSrc) && /memoryCardText && !memTextAfterTrim\.includes\(memoryCardText\)/.test(execSrc),
+    // zx_20261121_1 M6：三处重复的三元表达式收成 `keptSectionInjections` 一处；
+    //   按**更强符号**重定向（仍钉“入文才记账”，且钉到唯一真源）。
+    ok(/cards: cardRows/.test(execSrc) && /keptSectionInjections\(memoryCardText, memoryCardInjections, memTextAfterTrim\)/.test(execSrc),
       'B-9d 注入账：裁剪后回读记忆块，卡段被丢 ⇒ 零行');
     ok(/memoryCardText = built\.cardText/.test(execSrc) && /memoryCardInjections = built\.cardInjections/.test(execSrc),
       'B-9e 执行体接管 `built.cardText/cardInjections`（不另起一份卡来源）');
@@ -1396,7 +1398,10 @@ async function main(): Promise<void> {
       pair_code TEXT NOT NULL, key_prefix TEXT, secret_hash TEXT,
       capabilities_json TEXT NOT NULL DEFAULT '[]', last_remote_addr TEXT, last_seen_at TEXT,
       created_at TEXT DEFAULT (datetime('now')), approved_at TEXT, revoked_at TEXT,
-      delivered_at TEXT, grant_expires_at TEXT, source TEXT DEFAULT 'remote'
+      delivered_at TEXT, grant_expires_at TEXT,
+    scope_json TEXT NOT NULL DEFAULT '{}',
+    rate_json TEXT NOT NULL DEFAULT '{}',
+    linkage_allowed INTEGER NOT NULL DEFAULT 1, source TEXT DEFAULT 'remote'
     )`);
     const r = createPairRequestGuarded(db, '书房的派单机', '192.168.1.20', { source: 'lan' });
     ok(r.ok, 'D-4a 局域网发现可转成待批申请');

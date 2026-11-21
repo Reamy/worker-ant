@@ -277,8 +277,12 @@ console.log('\n[S2b M3-1 四处创建路径落 pending（父亦 pending）]');
   //   与两处 `ORDER BY priority DESC` 读点同口径（裸 `i` 在 DESC 下 ⇒ 同批无前置子任务**最后一个最先跑**）。
   //   按本仓纪律**改钉更强的新真源**：断言"序号那一格经换算写出"，而不是把那一段从判据里删掉
   //   （删掉＝钉子在原地拔掉，裸 `i` 复辟也照样绿）。
-  ok(ipc.includes("'pending', decomposePriority(tpl.subtasks.length, i), JSON.stringify({ depth: 1, auto_decomposed: true, parent_task_id: id, template: tpl.id }), id, 'template'"),
-    '模板拆解：子任务落 pending，且 priority 经唯一换算 `decomposePriority(tpl.subtasks.length, i)` 写出（反证：旧字面量 paused）');
+  // zx_20261120_3 M1：模板子任务增 `position_id` 与来源键——按更强的新形状钉（不删原主张）。
+  ok(ipc.includes("'pending', decomposePriority(tpl.subtasks.length, i), JSON.stringify({")
+    && ipc.includes('depth: 1, auto_decomposed: true, parent_task_id: id, template: tpl.id')
+    && ipc.includes('positionContextFields({ positionId: wantedPositionId')
+    && ipc.includes(", 'template', tpl.subtasks[i]!.acceptance_criteria, depIds, wantedPositionId)"),
+    '模板拆解：子任务落 pending，priority 经唯一换算，且岗位随父继承（M1 新形状）');
   ok(!ipc.includes("'pending', i, JSON.stringify({ depth: 1, auto_decomposed: true, parent_task_id: id"),
     '反证：裸序号 `i` 直接进 priority 槽位的写法已除（否则同批"最后一个最先起跑"的病根复现）');
   // zx_20260924 缺陷B（用户报「父任务从来没落过拆解标记」）：本断言原**逐字钉住病根本身**——

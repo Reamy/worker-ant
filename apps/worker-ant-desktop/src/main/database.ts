@@ -29,8 +29,16 @@ import { BACKGROUND_JOBS_DDL } from './core/background-jobs.js';
 import { PROJECT_NODES_DDL } from './core/project-node-policy.js';
 // zx_20261112_1 B1: 岗位库 DDL 真源与内置种子幂等播种（rr 夹具同引 DDL）。
 import { POSITIONS_DDL, seedBuiltinPositions } from './core/positions.js';
+// zx_20261120_3 M4「积·技」：岗位可调用技能表（DDL 真源在 position-skills.ts）。
+import { POSITION_SKILLS_DDL } from './core/position-skills.js';
+// zx_20261121_1 M1「属·表」：项目可调用技能表（DDL 真源在 project-skills.ts；rr 夹具同引）。
+import { PROJECT_SKILLS_DDL, migrateLegacyProjectSkills } from './core/project-skills.js';
+// zx_20261120_1 M1: 岗位例行两表 DDL 真源（rr 夹具同引，防夹具与生产建表漂移）。
+import { POSITION_ROUTINES_DDL } from './core/position-routines.js';
 // zx_20261105_1 M1: 运行证据表 DDL 真源（rr 夹具同引，防夹具与生产建表漂移）。
 import { RUNTIME_EVIDENCE_DDL } from './core/runtime-evidence.js';
+// zx_20261121_2 M4：设备联动规则/运行账 DDL 真源（rr 夹具同引）。
+import { DEVICE_AUTOMATION_DDL } from './core/device-automation.js';
 
 export function initDatabase(dataDir: string, dbName = 'worker-ant-server.db'): Database.Database {
   // 确保数据目录存在
@@ -426,6 +434,15 @@ export function initDatabase(dataDir: string, dbName = 'worker-ant-server.db'): 
     "ALTER TABLE wa_position_lessons ADD COLUMN promoted_to TEXT",
     "ALTER TABLE wa_position_lessons ADD COLUMN promoted_at TEXT",
     "ALTER TABLE wa_position_lessons ADD COLUMN origin TEXT NOT NULL DEFAULT 'local'",
+    // zx_20261120_3 M3「积·命」：生命周期列（旧库补列；新库由 POSITIONS_DDL 建出）。
+    "ALTER TABLE wa_position_lessons ADD COLUMN applies_to TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE wa_position_lessons ADD COLUMN verified_at TEXT",
+    "ALTER TABLE wa_position_lessons ADD COLUMN superseded_by TEXT",
+    "ALTER TABLE wa_position_lessons ADD COLUMN retired_at TEXT",
+    "ALTER TABLE wa_position_lessons ADD COLUMN retire_reason TEXT NOT NULL DEFAULT ''",
+    // zx_20261120_3 M4「积·技」：岗位包导入回执增技能计数（旧库补列；新库由 POSITIONS_DDL 建出）。
+    "ALTER TABLE wa_position_imports ADD COLUMN added_skills INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE wa_position_imports ADD COLUMN skipped_skills INTEGER NOT NULL DEFAULT 0",
     "UPDATE wa_position_lessons SET source = 'summary' WHERE source = 'task_close'",
     // zx_20261115_1 M1「职」: 岗位从四段自由文本长出三项**能约束执行**的设置（工具面 / MCP / 沙箱）
     //   与一项派单开关（参与跨机派单）。缺省值与"未设置"语义一一对应：空数组=沿用默认，空串=继承项目。
@@ -584,10 +601,25 @@ export function initDatabase(dataDir: string, dbName = 'worker-ant-server.db'): 
   //   内置 13 岗只在首次播种（`wa_settings.positions_seed_version` 标记），删掉的内置岗不会被复活。
   db.exec(POSITIONS_DDL);
   seedBuiltinPositions(db);
+  // zx_20261120_3 M4：岗位技能表（草案/已批准/已拒绝；批准后才注册进 skill-registry）。
+  db.exec(POSITION_SKILLS_DDL);
+  // zx_20261121_1 M1：项目技能表（项目归属；批准后才注册进项目作用域）。
+  db.exec(PROJECT_SKILLS_DDL);
+  // zx_20261120_3 M3：旧本地经验“收口即验证”——回填 verified_at=created_at（幂等；导入行保持未验证）。
+  //   ⚠ 必须排在 POSITIONS_DDL 之后（建表前跑会被 try/catch 吞掉）。
+  try {
+    db.prepare("UPDATE wa_position_lessons SET verified_at = created_at WHERE verified_at IS NULL AND origin = 'local'").run();
+  } catch { /* 老库缺表/缺列如实跳过 */ }
+
+  // ===== 岗位例行（zx_20261120_1 M1: 到点该做的那件事）=====
+  //   DDL 真源在 `core/position-routines.ts` 的 `POSITION_ROUTINES_DDL`（rr 夹具同引这一份）。
+  db.exec(POSITION_ROUTINES_DDL);
 
   // ===== 运行证据（zx_20261105_1 M1: 判卷可引用的执行留痕）=====
   //   DDL 真源在 `core/runtime-evidence.ts` 的 `RUNTIME_EVIDENCE_DDL`（rr 夹具同引这一份）。
   db.exec(RUNTIME_EVIDENCE_DDL);
+  // zx_20261121_2 M4：设备联动规则 + 运行账（DDL 真源 `device-automation.ts`）。
+  db.exec(DEVICE_AUTOMATION_DDL);
 
   // ===== 局域网设备台账 + 控制审计（zx_20261004 M7/M9: K-3 协议无关发现 / K-6 显式授权白名单）=====
   //   语义单一真源在 `core/device-registry.ts`（upsert 去重/控制闸/审计全在那里），此处只建表。
@@ -687,8 +719,17 @@ export function initDatabase(dataDir: string, dbName = 'worker-ant-server.db'): 
     revoked_at TEXT,
     delivered_at TEXT,
     -- zx_20261018_1 批一: 授权到期（NULL = 长期）；判据在 core/external-terminals.ts。
-    grant_expires_at TEXT
+    grant_expires_at TEXT,
+    -- zx_20261121_2 M1: 授权边界（设备范围/频率/是否允许联动）；判据在 core/external-grant.ts。
+    --   缺省 all/不限/允许 = 与现状一致，不静默收紧存量授权。
+    scope_json TEXT NOT NULL DEFAULT '{}',
+    rate_json TEXT NOT NULL DEFAULT '{}',
+    linkage_allowed INTEGER NOT NULL DEFAULT 1
   )`);
+  // 老库补列（幂等；列已存在即跳过）。
+  try { db.exec("ALTER TABLE wa_external_terminals ADD COLUMN scope_json TEXT NOT NULL DEFAULT '{}'"); } catch { /* 列已存在 */ }
+  try { db.exec("ALTER TABLE wa_external_terminals ADD COLUMN rate_json TEXT NOT NULL DEFAULT '{}'"); } catch { /* 列已存在 */ }
+  try { db.exec("ALTER TABLE wa_external_terminals ADD COLUMN linkage_allowed INTEGER NOT NULL DEFAULT 1"); } catch { /* 列已存在 */ }
   db.exec(`CREATE INDEX IF NOT EXISTS idx_wa_ext_term_prefix ON wa_external_terminals(key_prefix)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_wa_ext_term_status ON wa_external_terminals(status, created_at DESC)`);
 
@@ -1068,6 +1109,17 @@ export function initDatabase(dataDir: string, dbName = 'worker-ant-server.db'): 
   const residual = db.prepare("SELECT id FROM wa_tasks WHERE status IN ('executing','preparing')").all() as Array<{ id: string }>;
   for (const t of residual) {
     pauseTask(db, { taskId: t.id, reason: PAUSE_REASON_STARTUP_SWEEP });
+  }
+
+  // zx_20261121_1 M1：旧 `wa_skills.project_id` 行迁入 `wa_project_skills`。
+  //   逐行核对通过才删旧行；失败保留旧行，由 `loadSkillsFromDb` 的项目作用域兜底注册。
+  try {
+    const skillMig = migrateLegacyProjectSkills(db);
+    if (skillMig.legacy > 0) {
+      console.log('[DB] 项目技能迁移:', skillMig.legacy, '行 →', skillMig.migrated, '行；删除旧行:', skillMig.deleted ? '是' : `否（核对未过 ${skillMig.left} 行）`);
+    }
+  } catch (e) {
+    console.warn('[DB] 项目技能迁移跳过:', (e as Error).message);
   }
 
   console.log('[DB] 数据库已初始化:', dbPath);

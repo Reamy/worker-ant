@@ -36,8 +36,10 @@ import {
   countApprovedTerminals,
   countCloudAccounts,
   countDevices,
+  countCustomPositions,
   countIMChannels,
   countMaxKnowledgeCardsInAnyProject,
+  countPositionRoutines,
   countTaskTemplates,
   countTeamLibraryMemories,
   type CapacityDb,
@@ -71,6 +73,9 @@ export interface TierUsageCounts {
   /** zx_20261101_1 M4「授」：IM 渠道数与用户自建任务模板数（`limit === 0` = 不限）。 */
   imChannels: { used: number; limit: number };
   taskTemplates: { used: number; limit: number };
+  /** zx_20261120_3 M7：自建岗位 / 岗位例行（第九、十维容量）。 */
+  customPositions: { used: number; limit: number };
+  positionRoutines: { used: number; limit: number };
   /**
    * zx_20261101_2 M6「衡」：设备云账号数（第八维）。
    * ⚠ 本档在最低可用档之前（社区）时 `minTierLabel` 非空——那格的 `0` 是「不可接入」不是「不限」，
@@ -169,6 +174,8 @@ export function tierUsageCounts(
     teamLibraryMemories: { used: db ? countTeamLibraryMemories(db as unknown as CapacityDb) : 0, limit: limits.maxTeamLibraryMemories },
     imChannels: { used: db ? countIMChannels(db as unknown as CapacityDb) : 0, limit: limits.maxIMChannels },
     taskTemplates: { used: db ? countTaskTemplates(db as unknown as CapacityDb) : 0, limit: limits.maxTaskTemplates },
+    customPositions: { used: db ? countCustomPositions(db as unknown as CapacityDb) : 0, limit: limits.maxCustomPositions },
+    positionRoutines: { used: db ? countPositionRoutines(db as unknown as CapacityDb) : 0, limit: limits.maxPositionRoutines },
     cloudAccounts: {
       used: db ? countCloudAccounts(db as unknown as CapacityDb) : 0,
       limit: limits.maxCloudAccounts,
@@ -220,6 +227,9 @@ export function upgradeDifferences(from: LicenseTier, to?: LicenseTier | null): 
   if (a.maxTaskTemplates !== b.maxTaskTemplates) quotas.push(b.maxTaskTemplates === 0 ? '不限任务模板' : `任务模板 ${b.maxTaskTemplates} 套`);
   // zx_20261101_2 M6「衡」：设备云账号（第八维）。
   if (a.maxCloudAccounts !== b.maxCloudAccounts) quotas.push(b.maxCloudAccounts === 0 ? '不限设备云账号' : `设备云账号 ${b.maxCloudAccounts} 个`);
+  // zx_20261120_3 M7：自建岗位 / 岗位例行（0 = 不限，不写成 "0 个"）。
+  if (a.maxCustomPositions !== b.maxCustomPositions) quotas.push(b.maxCustomPositions === 0 ? '不限自建岗位' : `自建岗位 ${b.maxCustomPositions} 个`);
+  if (a.maxPositionRoutines !== b.maxPositionRoutines) quotas.push(b.maxPositionRoutines === 0 ? '不限岗位例行' : `岗位例行 ${b.maxPositionRoutines} 套`);
 
   return { toTier: target, toLabel: TIER_LABEL[target], capabilities, quotas };
 }

@@ -1329,15 +1329,21 @@ function groupL(): void {
     const want = [
       `${A}/renderer/src/components/ServiceCallCard.tsx`,
       `${A}/renderer/src/lib/ipc.ts`,
+      `${A}/src/main/core/project-experience.ts`, // zx_20261121_1 M4：经验账只读调用账作展示
       `${A}/src/main/core/project-knowledge-materials.ts`, // zx_20261003 M5：panorama 综合纳入「调用账成败」作旁证
       `${A}/src/main/core/tools/resource.ts`,
       `${A}/src/main/ipc/project.ipc.ts`,
     ].sort();
-    // ⚠ 就地改钉（zx_20261003 M5）：消费方由**四→五**——M5 让 `synthesizeProjectKnowledge` 综合项目知识全景时
-    //   纳入「调用账成败」作**旁证**（经 `project-knowledge-materials.ts` 只读调 `describeServiceCalls`）。
-    //   这不违约束①「只收账、不据此做决策」：知识综合是**只读喂文本**给 LLM，**非**调度/选型/熔断路径，
-    //   也不回写、不据以自动动作。新增消费方属该 pin 的**本意**（多一个即须**显式**登记并说明缘由）。
-    eq(importers.slice().sort(), want, 'L-9-c ★import 面**恰五处**（M11 四处 + M5 知识综合一处；新增消费方即变红 ⇒ 守住"只收账、不据此做决策"）', importers.join(','));
+    // ⚠ 就地改钉（zx_20261003 M5）：消费方由**四→五**；zx_20261121_1 M4 再**五→六**——
+    //   项目经验账把调用成败作**只读展示**（`project-experience.ts` 只调 `describeServiceCalls`）。
+    //   这不违约束①「只收账、不据此做决策」：经验账不写账、不进调度/选型/熔断路径，
+    //   也不自动动作；下方 L-9-f/L-9-g 另钉“只读且派发不读”。
+    eq(importers.slice().sort(), want, 'L-9-c ★import 面**恰六处**（M11 四处 + M5 知识综合 + M4 经验展示；新增消费方即变红 ⇒ 守住"只收账、不据此做决策"）', importers.join(','));
+    ok(!/recordServiceCall\(/.test(stripC(RD(`${A}/src/main/core/project-experience.ts`))),
+      'L-9-f ★经验账只读调用账（不写账、不据此自动动作）');
+    ok(!/project-experience\.js/.test(stripC(RD(`${A}/src/main/core/capability-dispatch.ts`)))
+      && !/project-experience\.js/.test(stripC(RD(`${A}/src/main/core/exec-model-select.ts`))),
+      'L-9-g ★派发/选型不读经验账（账未准不自动化）');
     ok(!/recordServiceCall\(|describeServiceCalls\(/.test(stripC(RD(`${A}/renderer/src/components/ServiceCallCard.tsx`))),
       'L-9-d ★渲染层只取词表/类型，**不调**记账写读（记账是 main 侧的事）');
     ok(!/recordServiceCall\(|describeServiceCalls\(/.test(stripC(RD(`${A}/renderer/src/lib/ipc.ts`))),

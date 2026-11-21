@@ -19,7 +19,8 @@
  */
 import { createRequire } from 'node:module';
 import { MemoryManager } from '../apps/worker-ant-desktop/src/main/core/memory-manager.js';
-import { executeSkill, listSkills } from '../apps/worker-ant-desktop/src/main/core/skill-registry.js';
+import { executeSkillForTask, listProjectSkills, listSkills } from '../apps/worker-ant-desktop/src/main/core/skill-registry.js';
+import { PROJECT_SKILLS_DDL } from '../apps/worker-ant-desktop/src/main/core/project-skills.js';
 
 // node:sqlite 是较新内置模块，esbuild 会把 `node:sqlite` 改写为 `sqlite`（找不到），
 // 故用 createRequire 运行时加载规避。
@@ -57,6 +58,10 @@ db.exec(`
     use_count INTEGER DEFAULT 0, last_used_at TEXT, similar_to TEXT DEFAULT '',
     last_reinforced_at TEXT, success_count INTEGER DEFAULT 0, failure_count INTEGER DEFAULT 0
   );
+  CREATE TABLE wa_projects (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', working_dir TEXT DEFAULT '',
+    context_json TEXT DEFAULT '{}', created_at TEXT DEFAULT (datetime('now'))
+  );
   CREATE TABLE wa_skills (
     id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, description TEXT DEFAULT '',
     category TEXT DEFAULT 'custom', enabled INTEGER DEFAULT 1, version INTEGER DEFAULT 1,
@@ -65,6 +70,9 @@ db.exec(`
     project_id TEXT, status TEXT DEFAULT 'draft'
   );
 `);
+db.exec(PROJECT_SKILLS_DDL);
+db.prepare("INSERT INTO wa_projects (id, name) VALUES ('proj-1','项目一')").run();
+db.prepare("INSERT INTO wa_projects (id, name) VALUES ('proj-2','项目二')").run();
 
 // ===== 桩 AnsClient（getOptimalModel 返回 null；本测试中 _distillSkillWithLLM 被 monkey-patch，不会真正调用） =====
 const ansClient = { getOptimalModel: async () => null } as unknown as import('@worker-ant/ans-client').AnsClient;
@@ -89,8 +97,8 @@ async function main(): Promise<void> {
   console.log('[1] extractProceduralSkills 生成技能草案');
   const extracted = await memory.extractProceduralSkills('proj-1');
   assert('extracted >= 1', extracted >= 1, `实际=${extracted}`);
-  const skillRow = db.prepare("SELECT id, status FROM wa_skills WHERE name = 'smoke_skill'").get() as { id: string; status: string } | undefined;
-  assert('wa_skills 已写入 draft', !!skillRow && skillRow.status === 'draft', `row=${JSON.stringify(skillRow)}`);
+  const skillRow = db.prepare("SELECT id, status FROM wa_project_skills WHERE name = 'smoke_skill'").get() as { id: string; status: string } | undefined;
+  assert('wa_project_skills 已写入 draft', !!skillRow && skillRow.status === 'draft', `row=${JSON.stringify(skillRow)}`);
   const compiled = db.prepare("SELECT context_json FROM wa_memories WHERE id = 'm1'").get() as { context_json: string };
   assert('源记忆标记 skill_compiled', compiled.context_json.includes('skill_compiled'), compiled.context_json);
 
@@ -106,11 +114,12 @@ async function main(): Promise<void> {
   console.log('\n[4] approveSkill 注册进 skill-registry');
   const approved = await memory.approveSkill(drafts1[0]!.id);
   assert('approveSkill 返回名称', approved?.name === 'smoke_skill', `返回=${JSON.stringify(approved)}`);
-  assert('skill 已注册', listSkills().some(s => s.name === 'smoke_skill'), `skills=${JSON.stringify(listSkills().map(s => s.name))}`);
-  const approvedRow = db.prepare("SELECT status FROM wa_skills WHERE id = ?").get(drafts1[0]!.id) as { status: string };
-  assert('wa_skills 状态改为 approved', approvedRow.status === 'approved', approvedRow.status);
+  assert('skill 已注册进项目作用域', listProjectSkills('proj-1').some(s => s.name === 'smoke_skill'), `skills=${JSON.stringify(listProjectSkills('proj-1').map(s => s.name))}`);
+  assert('skill 未进全局作用域（项目有主）', !listSkills().some(s => s.name === 'smoke_skill'), `global=${JSON.stringify(listSkills().map(s => s.name))}`);
+  const approvedRow = db.prepare("SELECT status FROM wa_project_skills WHERE id = ?").get(drafts1[0]!.id) as { status: string };
+  assert('wa_project_skills 状态改为 approved', approvedRow.status === 'approved', approvedRow.status);
 
-  console.log('\n[5] storeSkillDraft 同名去重（回归：bug#2 同名 approved 时 UNIQUE 崩溃）');
+  console.log('\n[5] storeSkillDraft 跨项目同名（各归各项目，不再全局 UNIQUE 崩溃）');
   let dupCrash = false;
   let dupId = '';
   try {
@@ -120,17 +129,19 @@ async function main(): Promise<void> {
     console.log(`    (异常: ${(e as Error).message})`);
   }
   assert('未抛 UNIQUE 异常', !dupCrash);
-  assert('返回已有 id（去重）', dupId === drafts1[0]!.id, `dupId=${dupId} 原id=${drafts1[0]!.id}`);
+  assert('跨项目同名得到各自的 id', dupId !== drafts1[0]!.id, `dupId=${dupId} 原id=${drafts1[0]!.id}`);
+  assert('proj-1 仍只有自己那条', listProjectSkills('proj-1').filter(s => s.name === 'smoke_skill').length === 1,
+    JSON.stringify(listProjectSkills('proj-1').map(s => s.name)));
 
-  console.log('\n[6] executeSkill 执行已批准技能');
-  const execResult = await executeSkill('smoke_skill', '');
+  console.log('\n[6] executeSkillForTask 执行已批准技能');
+  const execResult = (await executeSkillForTask('proj-1', undefined, 'smoke_skill', '')).result;
   assert('返回提示词型指令', execResult.includes('smoke_skill') && execResult.includes('步骤1'), execResult.slice(0, 120));
 
   console.log('\n[7] rejectSkill 拒绝新草案');
   const draft2Id = memory.storeSkillDraft('proj-1', { name: 'reject_skill', description: '待拒绝', steps: ['a'] });
   const rejected = memory.rejectSkill(draft2Id);
   assert('rejectSkill 返回 true', rejected === true);
-  const rejectedRow = db.prepare("SELECT status FROM wa_skills WHERE id = ?").get(draft2Id) as { status: string };
+  const rejectedRow = db.prepare("SELECT status FROM wa_project_skills WHERE id = ?").get(draft2Id) as { status: string };
   assert('状态改为 rejected', rejectedRow.status === 'rejected', rejectedRow.status);
 
   console.log('\n[8] loadSkillsFromDb 重新加载已批准技能');

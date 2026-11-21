@@ -240,7 +240,10 @@ function sectionE(): void {
     'E1 项目覆盖两个专用 IPC 在册（不走 project:update 整体覆写）');
   ok(proj.includes('writeProjectModelOverride(db'), 'E2 写入复用单键写入器');
   ok(proj.includes('sanitizeModelSelection(rawModelSelection)'), 'E3 task:get 回传洗形后的 modelSelection');
-  ok(proj.includes("parsedCtx.model_selection"), 'E4 读点取 `context_json.model_selection`（与写点同键）');
+  // zx_20261120_2 M1「明」：task:get 把 context_json 收敛为**一次**解析（`ctxObj`），
+  //   选型/派发/自动续跑三处共用；按新真源重钉：解析仍在，键名不变。
+  ok(/JSON\.parse\(ctxJson\)/.test(proj) && /ctxObj\.model_selection/.test(proj),
+    'E4 读点取 `context_json.model_selection`（与写点同键）');
 
   const ipc = CODE('apps/worker-ant-desktop/renderer/src/lib/ipc.ts');
   ok(ipc.includes("'project:model_override_get'") && ipc.includes("'project:model_override_set'"),

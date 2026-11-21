@@ -250,7 +250,8 @@ async function main(): Promise<void> {
   // ═════════════════════════════════════════════════════════════════════════
   console.log('\n【S2b】M2 不压分（处置在终态层，不在评分层）+ 因由词表');
   {
-    eq(capScoreByAcceptanceVerdict(95, 'unjudged'), 95, '★ 「没判成 ≠ 没达成」：`unjudged` **不压分**（压降只对 `failed` 动作）');
+    // zx_20261116_3 M3 用户裁定：有题未判成 ⇒ 封 60、goal=false（不再“不压分”）。
+    eq(capScoreByAcceptanceVerdict(95, 'unjudged'), 60, '★ 用户 2026-11-16 裁定：`unjudged` 封 60（有题未判成不得冒充达成）');
     eq(capScoreByAcceptanceVerdict(95, 'not_checked'), 95, '对照：`not_checked` 也不压分（A4 原样）');
     ok(capScoreByAcceptanceVerdict(95, 'failed') < 60, '对照：`failed` 仍压到 60 分以下（本轮的"不压分"没有顺手松开它）');
 
@@ -260,10 +261,10 @@ async function main(): Promise<void> {
     eq(quality(db, 'u', workingDir).score, BASE_SCORE, '前置：无账基线分 = 95（压降一旦生效必现形）');
     writeLedgerViaProduction(db, 'u', 'exception', null);
     const q = quality(db, 'u', workingDir);
-    eq(q.score, BASE_SCORE, '★ 真 `assessCompletionQuality`：`unjudged` 的完成分**逐位等于**基线（不是"少压一点"）');
+    eq(q.score, 60, '★ 真 `assessCompletionQuality`：`unjudged` 封 60（用户裁定，不再是逐位等于基线）');
     ok(q.feedback.includes('验收未判成') && !q.feedback.includes('验收未通过'),
       '★ 且 `feedback` **点名**该态而非"压了分却说没事"（文案与实际同源，不许静默）');
-    ok(q.feedback.includes('未压分'), '★ 且明写"未压分"——用户读得出"分没降 ≠ 判过了"', q.feedback.slice(0, 80));
+    ok(q.feedback.includes('待重判'), '★ 且明写"待重判"——用户读得出"分被压 ≠ 判过了"', q.feedback.slice(0, 80));
 
     // 因由词表（renderer/main 共用同一 label 表）
     const lbl = PAUSE_REASON_LABEL[PAUSE_REASON_ACCEPTANCE_UNJUDGED];

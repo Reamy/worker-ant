@@ -405,10 +405,12 @@ async function main(): Promise<void> {
       'core/exec-claim.ts',      // 清点（`json_remove`）：CAS 认领时把已成过去的因清掉——方向与"写点"相反。
                                  // zx_20260921 M8: 本笔随 `executeTask` 入口段整段搬离 `core/agent-executor.ts`，
                                  //   码与用途**一字未改**，白名单按**新落点**在册（判据按符号/文件列举，不写数字）。
-      'core/jobs/ai-task.ts',    // 升级既有因（`json_set`，**不改状态**）：父已在收口闸处 paused 并录因，此处只把因升为 children_failed
+      'core/jobs/ai-task.ts',    // 升级/回退既有因（`json_set`，**不改状态**）：父已在收口闸处 paused 并录因，
+                                 //   zx_20261116_1 M1 起失败子处置后也在此降回 children_incomplete
+      'core/self-healing-monitor.ts', // zx_20261116_1 M1：陈旧 children_failed 因由巡检降回 children_incomplete（只降因，不改状态）
     ];
     eq(sqlSites.filter((f) => !ALLOW.includes(f)), [],
-      `G-2 ★ \`${KEY}\` 的 SQL 写点 ⊆ 白名单（实测 ${sqlSites.join(', ')}；两处均为"非置停"用途，理由见方案订正⑦）`);
+      `G-2 ★ \`${KEY}\` 的 SQL 写点 ⊆ 白名单（实测 ${sqlSites.join(', ')}；三处均为"非置停"用途，理由见方案订正⑦）`);
     eq(sqlSites.length, ALLOW.length, `G-2 白名单**逐条都用上了**（${sqlSites.length}/${ALLOW.length}，防"名单外挂僵尸条目"）`);
     // 反证：只读该键不算写点——同一谓词喂"json_extract 读 + 另处无关 json_set"的样本须不命中，
     //   否则新加的列表摘录会把读写面搅在一起（本判据就成了"凡提到该键皆白名单"的空转）。
@@ -868,8 +870,13 @@ async function main(): Promise<void> {
       && body.slice(body.indexOf('const capNonExploration'), body.indexOf('// A3: 工具配额限制'))
         .includes('makeNonExplorationCappedTool('),
       '★ I 静态：唯一包装入口内仍由 `makeNonExplorationCappedTool` 构造桩（不另立第二份实现）');
-    ok(/收尾命令照常放行/.test(cappedLoop) && /不是/.test(cappedLoop),
-      '★ I 静态：被拒的**正文自带出路**（明说"拒的是本次探索调用、收尾命令不受影响"）——123 次撞回即模型没读懂"已禁用"');
+    // zx_20261120_2 M2「通」：正文改由唯一纯函数 `explorationDenialReason` 产出（两处拒绝共用）。
+    //   按新真源重钉：执行体只调用该函数；文案仍在（且新增免费替代一句），不是删掉出路。
+    const guardSrc = strip(path.join(MAIN, 'core/tool-guards.ts'));
+    ok(/explorationDenialReason\(/.test(cappedLoop)
+      && /收尾命令照常放行/.test(guardSrc) && /不是/.test(guardSrc)
+      && /read_file/.test(guardSrc) && /search_content/.test(guardSrc),
+      '★ I 静态：被拒的**正文自带出路**（明说"拒的是本次探索调用、收尾命令不受影响"，并点名免费替代）');
   }
 
   // ═════════════════════════════════════════════════════════════════════════

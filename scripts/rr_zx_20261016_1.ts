@@ -115,7 +115,10 @@ function mkTerminalDb(): DatabaseSync {
     pair_code TEXT NOT NULL, key_prefix TEXT, secret_hash TEXT,
     capabilities_json TEXT NOT NULL DEFAULT '[]', last_remote_addr TEXT, last_seen_at TEXT,
     created_at TEXT DEFAULT (datetime('now')), approved_at TEXT, revoked_at TEXT, delivered_at TEXT,
-    grant_expires_at TEXT)`);
+    grant_expires_at TEXT,
+    scope_json TEXT NOT NULL DEFAULT '{}',
+    rate_json TEXT NOT NULL DEFAULT '{}',
+    linkage_allowed INTEGER NOT NULL DEFAULT 1)`);
   return d;
 }
 

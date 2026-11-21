@@ -193,7 +193,9 @@ function makeOrchestratorDb(opts: { withDevices?: boolean } = {}): DatabaseSync 
   ins.run('node.resource_group', 'node:n-self');
   ins.run('node.role', 'primary'); // 能派的分档（worker 只接不分）
   ins.run('ans_api_key', 'dummy'); //gitleaks:allow
-  ins.run('license.trial_started_at', new Date(Date.parse('2026-11-06T00:00:00.000Z')).toISOString()); // 试用 ⇒ team
+  // 试用起算点取**相对现在**（zx_20261120_1）：写死 2026-11-06 会让本套件在 14 天后随真实墙钟过期而假红
+  //   （判据不得依赖真实墙钟）。业务时刻仍由 `NOW` 固定，这里只保证"此刻仍在试用"。
+  ins.run('license.trial_started_at', new Date(Date.now() - 86_400_000).toISOString()); // 试用 ⇒ team
   d.prepare("INSERT INTO wa_projects (id, status, context_json) VALUES ('p1', 'active', ?)")
     .run(JSON.stringify({ dispatch_mode: 'capability', rhythm: { maxConcurrency: 2 } }));
   d.prepare("INSERT INTO wa_project_nodes (project_id, node_id) VALUES ('p1', 'n-peer')").run();

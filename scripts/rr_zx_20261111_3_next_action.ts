@@ -410,7 +410,9 @@ function sectionW(): void {
   ok(/const projectNextAction = nextActionForProject\(\{/.test(proj), 'W-9 项目详情把事实喂给派生（接线那一跳按语句形状钉）');
 
   const task = readSrc(`${A}/renderer/src/pages/TaskDetailPage.tsx`);
-  ok(/import \{ nextActionForTask, type NextActionId \}/.test(task), 'W-10 任务详情引同一份派生');
+  // zx_20261116_1 M4：同一份派生现在还要把“动作 → 实际通道”的路由一并引进来（更强的新真源）。
+  ok(/import \{ nextActionForTask, resolveNextActionRoute, type NextActionId \}/.test(task),
+    'W-10 任务详情引同一份派生（含 M4 动作路由）');
   eq((task.match(/<NextActionBar /g) ?? []).length, 1, 'W-11 任务详情恰一处第一行');
   ok(/depState: depInfo\.total > 0 \? depInfo\.state : 'met'/.test(task),
     'W-12 ★无前置 ⇒ met（"没有前置"不得被当成"前置未满足"）');

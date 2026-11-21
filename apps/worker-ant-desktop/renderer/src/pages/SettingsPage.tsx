@@ -122,12 +122,19 @@ const ADVANCED_BOOL_KEYS: readonly string[] = BOOL_SETTING_KEYS.filter(
   (k) => !EXPOSED_BOOL_KEYS.includes(k) && !ELSEWHERE_BOOL_KEYS.includes(k),
 );
 
+/**
+ * zx_20261120_1 M7：高级区里**缺省关**的键——读口必须与引擎同一把 `parseTriState`，
+ * 不能用 `boolSetting`（缺省会显示成开）。目前只有上下文按效预算。
+ */
+const ADVANCED_DEFAULT_OFF_KEYS = new Set(['context.roi_budget']);
+
 const ADVANCED_GROUPS: Array<{ label: string; prefix: string }> = [
   { label: '交付与展示', prefix: 'deliverable.' },
   { label: '引擎行为', prefix: 'engine.' },
   { label: '记忆', prefix: 'memory.' },
   { label: 'IM 通知', prefix: 'im.' },
   { label: '岗位', prefix: 'position.' },
+  { label: '项目经验', prefix: 'project.' },
   { label: '界面与常驻', prefix: 'ui.' },
   { label: '其它', prefix: '' },
 ];
@@ -138,6 +145,8 @@ const advancedGroupOf = (key: string): string =>
 const ADVANCED_BOOL_LABELS: Record<string, string> = {
   'position.default_from_project': '项目只有唯一岗位时建单默认指派它',
   'position.ask_when_multiple': '项目有多个岗位时，IM 建单先问一次派给谁',
+  'project.experience_inject': '项目经验开工注入（≤120 token，缺省开）',
+  'device.automation_on': '设备联动规则运行时（缺省开，团队版）',
   'deliverable.acceptance_on_close': '收口时自动验收',
   'deliverable.probe_disposition': '探针文件处置',
   'deliverable.primary_prefer_created': '优先「已创建」置主',
@@ -164,6 +173,10 @@ const ADVANCED_BOOL_LABELS: Record<string, string> = {
   'plan.link_at_create': '新建任务时可关联方案',
   'notification.pause_and_deviation': '暂停/偏离通知',
   'ans_auto_start': '自动托管本机 ANS',
+  // zx_20261119_2 M6「序」：同仓构建互斥（缺省即开；高级区 engine 组）
+  'engine.repo_build_lock': '同仓构建互斥（只锁全仓 clean/build）',
+  'context.roi_budget': '上下文按效预算（仅负收益来源降上限；缺省影子）',
+  'node.remote_readonly_code': '跨机只读代码分析（研究类 + 项目有 origin）',
 };
 
 // 搜索：分区关键词（卡片级过滤）——中文分词做不到，就按"用户会打的词"列在这里。
@@ -435,7 +448,9 @@ export default function SettingsPage() {
         setProfileAutoBootstrap(boolSetting(all['profile_auto_bootstrap']));
         // zx_20261107_1 B8：高级区自动枚举——键全部由白名单派生，本页不手抄；读口仍是同一把 `boolSetting` 尺
         const adv: Record<string, boolean> = {};
-        for (const k of ADVANCED_BOOL_KEYS) adv[k] = boolSetting(all[k]);
+        for (const k of ADVANCED_BOOL_KEYS) {
+          adv[k] = ADVANCED_DEFAULT_OFF_KEYS.has(k) ? parseTriState(all[k]) === 'true' : boolSetting(all[k]);
+        }
         setAdvBool(adv);
         const pn: Record<string, string> = {};
         for (const o of POLICY_OVERRIDES) pn[o.key] = all[o.key] ?? '';
@@ -1219,6 +1234,9 @@ export default function SettingsPage() {
                 <UsageBar label="A2A 服务" used={usage.a2aServers.used} limit={usage.a2aServers.limit} />
                 <UsageBar label="IM 渠道" used={usage.imChannels.used} limit={usage.imChannels.limit} />
                 <UsageBar label="任务模板" used={usage.taskTemplates.used} limit={usage.taskTemplates.limit} />
+                {/* zx_20261120_3 M7：自建岗位 / 岗位例行（只拦新增；已有不受影响）。 */}
+                <UsageBar label="自建岗位" used={usage.customPositions.used} limit={usage.customPositions.limit} />
+                <UsageBar label="岗位例行" used={usage.positionRoutines.used} limit={usage.positionRoutines.limit} />
                 {/* zx_20261101_2 M6「衡」：设备云账号是第八维；社区档那格的 0 是「不可接入」不是「不限」，
                     故 `minTierLabel` 非空时如实写「需专业版」（口径同 main 的 `capacityDisplay`）。 */}
                 {usage.cloudAccounts.minTierLabel

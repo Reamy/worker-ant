@@ -139,8 +139,11 @@ async function s2(): Promise<void> {
   ok(/resolveAncestorSchemeRef\(db, taskId\)/.test(exe), 'create_task 走祖先链解析');
   // zx_20261106_1 M3（按符号重定向到更强真源）：ctx 现经 `withAcceptanceSource` 包装——
   //   判据来源随子任务上下文一并落库；`buildChildContext` 仍是底座（不放松，钉得更紧）。
-  ok(/JSON\.stringify\(withAcceptanceSource\(buildChildContext\(parentCtx, childDepth\)/.test(exe),
-    'create_task INSERT 仍走 buildChildContext（并经 withAcceptanceSource 落判据来源）');
+  // zx_20261120_3 M1：ctx 外再展开 `positionContextFields`（来源落库）——钉更强的形状：
+  //   仍以 buildChildContext 为底座、经 withAcceptanceSource 包判据来源，并显式合并岗位来源。
+  ok(/JSON\.stringify\(\{\s*\.\.\.withAcceptanceSource\(buildChildContext\(parentCtx, childDepth\)/.test(exe)
+    && /positionContextFields\(derivedPosition\)/.test(exe),
+    'create_task INSERT 仍走 buildChildContext（并经 withAcceptanceSource 落判据来源 + 岗位来源）');
   ok(/resolveAncestorSchemeRef\(db, taskId\)/.test(exe) && /subagentSr/.test(exe), 'spawn_subagent 同走祖先链（两条路径都继承）');
 }
 
@@ -213,7 +216,8 @@ async function s3(): Promise<void> {
   eq(sanitizeLoneSurrogates('😀'), '😀', '合法代理对（emoji）不误伤');
   ok(!/\uD83D/.test(sanitizeLoneSurrogates('x\uD83dy')), '净化后可安全进 JSON（E13 反例归零）');
 
-  ok(/validateReadonlyBashCommand\(command\)/.test(exe) && !/command\.split\('\|'\)/.test(exe), 'bash 改走引号感知校验（裸 split 已移除）');
+  // zx_20261119_2 M5：`bash` 校验入口增了第二参（只读多段开关）——按符号重钉，仍是同一份引号感知校验。
+  ok(/validateReadonlyBashCommand\(command[,)]/.test(exe) && !/command\.split\('\|'\)/.test(exe), 'bash 改走引号感知校验（裸 split 已移除）');
   ok(/searchPathForPattern\(/.test(exe), 'search_content 走单文件语义真源');
   ok(/sanitizeLoneSurrogates\(/.test(exe), '压缩前净化接线在案');
 }

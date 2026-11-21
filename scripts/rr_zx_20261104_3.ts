@@ -104,7 +104,10 @@ CREATE TABLE wa_devices (
 CREATE TABLE wa_external_terminals (
   id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending',
   pair_code TEXT NOT NULL DEFAULT '', key_prefix TEXT NOT NULL DEFAULT '', secret_hash TEXT NOT NULL DEFAULT '',
-  capabilities_json TEXT NOT NULL DEFAULT '[]', grant_expires_at TEXT, last_remote_addr TEXT NOT NULL DEFAULT '',
+  capabilities_json TEXT NOT NULL DEFAULT '[]', grant_expires_at TEXT,
+    scope_json TEXT NOT NULL DEFAULT '{}',
+    rate_json TEXT NOT NULL DEFAULT '{}',
+    linkage_allowed INTEGER NOT NULL DEFAULT 1, last_remote_addr TEXT NOT NULL DEFAULT '',
   last_seen_at TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT 'remote',
   created_at TEXT NOT NULL DEFAULT (datetime('now')), approved_at TEXT, revoked_at TEXT, delivered_at TEXT
 );

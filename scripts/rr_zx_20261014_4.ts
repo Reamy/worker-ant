@@ -145,7 +145,10 @@ const TERMINAL_DDL = `CREATE TABLE wa_external_terminals (
     approved_at TEXT,
     revoked_at TEXT,
     delivered_at TEXT,
-    grant_expires_at TEXT
+    grant_expires_at TEXT,
+    scope_json TEXT NOT NULL DEFAULT '{}',
+    rate_json TEXT NOT NULL DEFAULT '{}',
+    linkage_allowed INTEGER NOT NULL DEFAULT 1
   )`;
 
 /** P 组夹具库：只有 `wa_external_terminals` 的内存库。 */
@@ -472,7 +475,9 @@ async function main(): Promise<void> {
     const ddl = m?.[1] ?? '';
     ok(ddl.length > 0, 'P-0a ★生产 DDL：`wa_external_terminals` 在册');
     for (const col of ['id', 'name', 'status', 'pair_code', 'key_prefix', 'secret_hash', 'capabilities_json',
-      'last_remote_addr', 'last_seen_at', 'created_at', 'approved_at', 'revoked_at', 'delivered_at', 'grant_expires_at']) {
+      'last_remote_addr', 'last_seen_at', 'created_at', 'approved_at', 'revoked_at', 'delivered_at', 'grant_expires_at',
+      // zx_20261121_2 M1：授权边界三列。
+      'scope_json', 'rate_json', 'linkage_allowed']) {
       ok(new RegExp(`(^|\\s)${col}\\s`).test(ddl), `P-0b DDL 列 ${col}`);
     }
   }

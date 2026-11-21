@@ -27,6 +27,17 @@ export interface ConvRow {
 export const COMPACTION_BUDGET_MS = 25_000;
 
 /**
+ * zx_20261116_3 M6「轻」：压缩总预算随会话量缩放（25s + 每 50 条约 5s，上限 90s）。
+ *
+ * 病根（真标本 2026-11-16 17:21:54）：`convCount=224`、`budgetMs=25000`，压缩超预算后
+ * “本轮不推进压缩边界” ⇒ 上下文继续涨。固定 25s 对大会话明显不够；按量给时间，仍保留 90s 硬上限。
+ */
+export function compactionBudgetMs(convCount: number): number {
+  const n = Math.max(0, Number(convCount) || 0);
+  return Math.min(90_000, COMPACTION_BUDGET_MS + Math.floor(n / 50) * 5_000);
+}
+
+/**
  * 按 maxRows 分段：每段即一次 LLM 调用的输入上限（沿用原 maxRows 的"限制单次输入规模"语义），
  * 各段并集**覆盖全部输入**且保持原序。空输入返回空数组。
  */

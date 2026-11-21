@@ -17,6 +17,8 @@ export const INJECTION_SOURCES = [
   'project_profile',
   // zx_20261113_1 B3「用」：岗位块（说明/规范/技能/知识/可迁移经验）逐条一行。
   'position',
+  // zx_20261121_1 M6「用·注」：项目经验段（规模/浪费坑/真命令失败），≤120 token。
+  'project_experience',
 ] as const;
 
 export type InjectionSource = (typeof INJECTION_SOURCES)[number];
@@ -29,6 +31,7 @@ export const INJECTION_SOURCE = {
   domainPack: 'domain_pack',
   projectProfile: 'project_profile',
   position: 'position',
+  projectExperience: 'project_experience',
 } as const satisfies Record<string, InjectionSource>;
 
 export const INJECTION_SOURCE_LABEL: Record<InjectionSource, string> = {
@@ -38,6 +41,7 @@ export const INJECTION_SOURCE_LABEL: Record<InjectionSource, string> = {
   domain_pack: '领域包',
   project_profile: '项目画像',
   position: '岗位',
+  project_experience: '项目经验',
 };
 
 /** 词表外的历史值如实显示原键（不猜、不丢）。 */

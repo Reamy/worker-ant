@@ -17,6 +17,23 @@ export const OPTION_SEP_RE = /\s*[/|,、;；]\s*/;
  *  标记本身的真源也只此一处，读点不再手抄 `'[选项:'`。 */
 export const OPTION_BLOCK_RE = /\[选项[:：]\s*([^\]]*)\]/;
 
+/**
+ * 把「一条选项里塞了多行」的形状拆成逐条（zx_20261118_2 M1）。
+ *
+ * 病根（真库标本 S6）：`b50aa9e4` 的 `awaiting_input.options` 是**一个元素**
+ * `'A. …\nB. …\nC. …\nD. …'`。GUI 的 `<button>` 不保空白，`\n` 被折叠成空格 ⇒
+ * 四个候选在页面上连成一行；IM/门禁的 `formatOptions` 也会把整串当一个选项。
+ *
+ * 只按**换行**拆：逗号/竖线/顿号是选项**分隔符**（`parseOptions` 负责那些），
+ * 在这里顺手拆会把一条选项的正文切断。空行与纯空白丢弃；已分开的数组原样返回。
+ */
+export function normalizeOptionItems(options: readonly string[]): string[] {
+  return options
+    .flatMap((o) => String(o ?? '').split(/\r?\n/))
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 /** 渲染选项为唯一展示形态：`A / B`（展示、落库、发 IM 共用） */
 export function formatOptions(opts: readonly string[]): string {
   return opts

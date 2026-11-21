@@ -219,7 +219,9 @@ async function main(): Promise<void> {
     ok(iGate >= 0 && iSaved > iGate, 'C-15 包壳先于 Step1 的 savedTools 捕获（还原不会绕过闸）');
     ok(/const nowStatus = \(db\.prepare\('SELECT status FROM wa_tasks WHERE id = \?'\)\.get\(taskId\)/.test(ex),
       'C-16 闸在**调用时**读库（不是装配时快照）');
-    ok(/const verdict = mutationGateVerdict\(nowStatus, name\)/.test(ex), 'C-17 接线用本模块判据（无第二份等价物）');
+    // zx_20261120_1 M5：第三参可选（远程只读禁用面）；判据仍只有 mutationGateVerdict 一处。
+    ok(/const verdict = mutationGateVerdict\(nowStatus, name(?:, readonlyDenyTools)?\)/.test(ex),
+      'C-17 接线用本模块判据（无第二份等价物）');
     ok(/return JSON\.stringify\(\{ error: verdict\.message, refused: verdict\.reason, tool: name \}\)/.test(ex),
       'C-18 被拒时如实回因由（模型能看出是"没执行"而非"执行失败"）');
   }

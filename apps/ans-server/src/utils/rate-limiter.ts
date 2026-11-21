@@ -15,6 +15,46 @@ export interface RateLimiterOptions {
   maxRequests?: number; // 窗口内最大请求数
 }
 
+/** zx_20261116_3 M1「限」：路由桶。全局单桶会把记账/模型/管理/协议挤在一起（真事故 317 次 429）。 */
+export type RateLimitClass = 'billing' | 'model' | 'mgmt' | 'a2a' | 'default';
+
+/** 路径 → 桶。纯函数，rr 直跑；未知路径回落 `default`（不与管理桶混）。 */
+export function rateLimitClassOf(pathname: string): RateLimitClass {
+  const p = String(pathname || '/');
+  if (p.startsWith('/api/v1/billing')) return 'billing';
+  if (p.startsWith('/api/v1/models') || p.startsWith('/api/v1/gateway') || p.startsWith('/api/v1/optimal')) return 'model';
+  if (p.startsWith('/api/v1/a2a') || p.startsWith('/api/v1/mcp') || p.startsWith('/mcp') || p.startsWith('/.well-known/agent.json')) return 'a2a';
+  if (p.startsWith('/api/v1/')) return 'mgmt';
+  return 'default';
+}
+
+export interface RateLimitEnvConfig {
+  windowMs: number;
+  limits: Record<RateLimitClass, number>;
+}
+
+/**
+ * zx_20261116_3 M1：限流阈值从 env 读，非法值回落默认（不抛）。
+ * `ANS_RATE_LIMIT_MAX` 是全局兜底；`ANS_RATE_LIMIT_<CLASS>` 可逐桶覆盖。
+ */
+export function readRateLimitEnv(env: NodeJS.ProcessEnv = process.env): RateLimitEnvConfig {
+  const num = (key: string, dflt: number): number => {
+    const v = Number(env[key]);
+    return Number.isFinite(v) && v > 0 ? Math.floor(v) : dflt;
+  };
+  const globalMax = num('ANS_RATE_LIMIT_MAX', 240);
+  return {
+    windowMs: num('ANS_RATE_LIMIT_WINDOW_MS', 60_000),
+    limits: {
+      billing: num('ANS_RATE_LIMIT_BILLING', globalMax),
+      model: num('ANS_RATE_LIMIT_MODEL', globalMax),
+      mgmt: num('ANS_RATE_LIMIT_MGMT', 120),
+      a2a: num('ANS_RATE_LIMIT_A2A', 60),
+      default: num('ANS_RATE_LIMIT_DEFAULT', globalMax),
+    },
+  };
+}
+
 export class RateLimiter {
   private store = new Map<string, RateLimitEntry>();
   private windowMs: number;

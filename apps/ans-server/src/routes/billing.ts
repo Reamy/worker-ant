@@ -79,11 +79,20 @@ export function billingRoutes(db: Database.Database) {
         ({ query }) => {
           const days = Number(query?.days) || 30;
           const since = new Date(Date.now() - days * 86400000).toISOString().replace('T', ' ').slice(0, 19);
+          // zx_20261117_2「名」：回包补 `model_name`（人可见的模型名）。
+          //   病根：此前只投影 `model_id`，渲染层首选 `model_name` 恒 undefined ⇒ 兜到
+          //   `model_id.slice(0,20)`；Ollama 等 UUID 主键模型（`27683d97-…` = `qwen3.5:9b`）
+          //   在运维看板「Token 消耗（按模型）」里显示成 UUID 前缀。
+          //   分寸：JOIN **只取显示名**，`GROUP BY` 仍只按 `b.model_id`——聚合真源不变，
+          //   不做 zx_20261112_2 B4 明令禁止的「id 或 name」双条件聚合；孤儿账（模型表查无
+          //   此 id）回 `model_name = null`，由渲染层如实兜底显示原 id，不伪造、不并账。
           const rows = db
             .prepare(
               `
-        SELECT model_id, SUM(tokens_in) as total_tokens_in, SUM(tokens_out) as total_tokens_out, SUM(cost) as total_cost, COUNT(*) as call_count
-        FROM ans_billing_records WHERE created_at >= ? GROUP BY model_id ORDER BY total_cost DESC
+        SELECT b.model_id, m.name as model_name, SUM(b.tokens_in) as total_tokens_in, SUM(b.tokens_out) as total_tokens_out, SUM(b.cost) as total_cost, COUNT(*) as call_count
+        FROM ans_billing_records b
+        LEFT JOIN ans_ai_models m ON m.id = b.model_id
+        WHERE b.created_at >= ? GROUP BY b.model_id ORDER BY total_cost DESC
       `,
             )
             .all(since);

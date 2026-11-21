@@ -420,13 +420,19 @@ async function main(): Promise<void> {
       '静态：`readAcceptanceCheck` 委托 `parseAcceptance` 的 `raw` 视图——同一份解析的第三个**出口**，不是第三个**解析点**');
     eq((dlc.match(/JSON\.parse\(row\.context_json/g) || []).length, 1, '静态：`acceptance_check` 的 JSON.parse 全文件**仍恰一处**');
 
-    // 静态：**两个** emit 出口都带 `acceptance`（少一处即红——正是本条要治的不对称）
-    const emits = [...aeSrc.matchAll(/eventBus\.emit\('task\.completed', \{([^}]*)\}/g)].map((m) => m[1]!);
-    eq(emits.length, 2, `静态：agent-executor 内 task.completed 恰两处 emit（扫到 ${emits.length} 处，防扫描面退化）`);
-    eq(emits.filter((e) => !e.includes('acceptance:')).length, 0, '★ 两处**都**带 `acceptance`（两个出口同一形状）');
-    ok(emits.some((e) => e.includes('readAcceptanceCheck(db, taskId)')) && emits.some((e) => e.includes('closeAcceptance')),
-      '且两处各取自本路的真源（finalize 直读落库账 / run_close 读同一次验收的 `closeAccNow`——'
-      + 'zx_20260916_3 M4 起后者也是**落库账**，不再是"当轮返回载荷"），不互抄也不各跑一遍');
+    // 静态：完成事件的两个收口出口**共用一处** emit（少带 `acceptance` 即红——本条治的不对称不变）。
+    // zx_20261119_1 M1「迹」：两出口的发射收进 `completion-emit.ts`（同一实现、同一形状），
+    //   故扫描面随之变成：执行体∪工具模块内**仅剩** update_task_status 那 1 处 + 统一口 1 处。
+    const emits = [...aeSrc.matchAll(/eventBus\s*\.\s*emit\('task\.completed',\s*\{([^}]*)\}/g)].map((m) => m[1]!);
+    eq(emits.length, 1, `静态：执行体 ∪ 工具模块内 task.completed 恰 1 处 emit（update_task_status 路；扫到 ${emits.length} 处）`);
+    eq(emits.filter((e) => !/acceptance[:,]/.test(e)).length, 0, '★ 该处带 `acceptance`');
+    const ceSrc = stripComments(RD(`${A}/src/main/core/completion-emit.ts`));
+    const ceEmits = [...ceSrc.matchAll(/eventBus\s*\.\s*emit\('task\.completed',\s*\{([^}]*)\}/g)].map((m) => m[1]!);
+    eq(ceEmits.length, 1, '静态：两个收口出口共用 1 处 emit（完成事件统一口）');
+    eq(ceEmits.filter((e) => !/acceptance[:,]/.test(e)).length, 0, '★ 统一口带 `acceptance`（两出口同形）');
+    ok(aeSrc.includes('acceptance: toAcceptanceSummary(readAcceptanceCheck(db, taskId))')
+      && stripComments(RD(`${A}/src/main/core/exec-finalize.ts`)).includes('acceptance: closeAcceptance ?? undefined'),
+      '且两处调用各取自本路的真源（finalize 直读落库账 / run_close 读同一次验收的 `closeAccNow`），不互抄也不各跑一遍');
   }
 
   // ═════════════════════════════════════════════════════════════════════════
@@ -736,11 +742,17 @@ async function main(): Promise<void> {
     ok(!aeSrc.includes("'sdk'"),
       "静态：`'sdk'` 相位**已退场**（SDK 二次失败改走 pauseTask 落 paused，zx_20260923 M1/T1）");
 
-    const doneEmits = [...aeSrc.matchAll(/eventBus\.emit\('task\.completed', \{([^}]*)\}/g)].map((m) => m[1]!);
-    eq(doneEmits.length, 2, `静态：agent-executor 内 task.completed 恰 2 处 emit（扫到 ${doneEmits.length} 处）`);
-    eq(doneEmits.filter((e) => !e.includes('buildTaskOutcome(db, taskId')).length, 0,
+    const doneEmits = [...aeSrc.matchAll(/eventBus\s*\.\s*emit\('task\.completed',\s*\{([^}]*)\}/g)].map((m) => m[1]!);
+    // zx_20261119_1 M1：两出口收进统一口后，执行体∪工具模块内只剩 update_task_status 1 处；
+    //   统一口的 1 处单独扫（两处都须经 buildTaskOutcome 带果、都带 acceptance）。
+    const ceSrc2 = stripComments(RD(`${A}/src/main/core/completion-emit.ts`));
+    const ceDone = [...ceSrc2.matchAll(/eventBus\s*\.\s*emit\('task\.completed',\s*\{([^}]*)\}/g)].map((m) => m[1]!);
+    eq(doneEmits.length + ceDone.length, 2,
+      `静态：完成事件 emit 共 2 处（update_task_status + 统一口；扫到 ${doneEmits.length + ceDone.length} 处）`);
+    const allDoneEmits = [...doneEmits, ...ceDone];
+    eq(allDoneEmits.filter((e) => !/buildTaskOutcome\(db, (taskId|args\.targetTaskId)/.test(e)).length, 0,
       '★ 两处**都**经 buildTaskOutcome 带果（quality/deliverables/run_mutations 同源，不各算一份）');
-    eq(doneEmits.filter((e) => !e.includes('acceptance:')).length, 0, '★ 两处都带 acceptance（与"带果"同批，两个出口同一形状）');
+    eq(allDoneEmits.filter((e) => !/acceptance[:,]/.test(e)).length, 0, '★ 两处都带 acceptance（与"带果"同批，同一形状）');
 
     // 扫描面**只限 D1 函数体**：本文件另有 4 处 `scheduler.enqueue('resume-ai-task', …)`
     // （:354/:369 目标偏离重试、:619/:634 SDK 回落）系**既有**路径，与 D1 无关，不能进扫描面。
@@ -1481,8 +1493,12 @@ async function main(): Promise<void> {
       ok(aeSrc.includes("engine.milestone_subject_check"), '★ 回退开关在登记段被读');
       ok(BOOL_SETTING_KEYS.includes('engine.milestone_subject_check'),
         '★ 回退开关 `engine.milestone_subject_check` 在 `BOOL_SETTING_KEYS` 名册内（否则关不掉＝白设）');
-      ok(/isPlanProposal = \/\(规划\|排期\)\//.test(aeSrc),
-        '反证：`:1121` 的 `isPlanProposal` **仍是自己的词表**（刻意不并入，理由就地注明——并表会同时改掉"下钻修复"那条判据）');
+      // zx_20261117_1 M1「案」：旧裸正则被纯函数 `isPlanProposalText` 取代——按**更强新真源**重定向：
+      //   钉"检查 7 仍用自己的判据函数（未并入里程碑词表）"与"旧裸正则已删"。
+      ok(aeSrc.includes('isPlanProposalText(planTitle, planDescription)'),
+        '反证：检查 7 仍用**自己的**规划判据 `isPlanProposalText`（未并入里程碑词表）');
+      ok(!/isPlanProposal = \/\(规划\|排期\)\//.test(aeSrc),
+        '★ 旧裸正则 `isPlanProposal = /(规划|排期)/` 已删（判据代码只剩一处）');
       // 每个关键词各造一例，防"词表里躺着一个永不命中的死词"
       const deadV = VERIFICATION_TASK_KEYWORDS.filter((k) => !milestoneSubjectVerdict(`前置说明${k}`, 'code').ok);
       eq(deadV, [...VERIFICATION_TASK_KEYWORDS], '★ 核验类词表逐词生效（无一枚死词）');

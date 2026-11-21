@@ -30,6 +30,8 @@ import { createLogger } from './logger.js';
 // zx_20261018_3 批四：设置键零依赖真源（renderer 设置页同引这一份）。
 import { MACHINE_CONCURRENCY_SETTING_KEY } from './settings-keys.js';
 export { MACHINE_CONCURRENCY_SETTING_KEY } from './settings-keys.js';
+// zx_20261118_2 M6「计」：完成账「未达目标」的判据只在零依赖模块一处（与 ai-task 简报同引）。
+import { isIncompleteCompletion } from './completion-truth.js';
 
 /** 仅需 prepare().run()/.get()/.all() 的最小库接口——使本模块可脱 electron，在受控回归里用内存库跑真逻辑 */
 export interface AccountingStmt {
@@ -204,6 +206,39 @@ export function countActiveChildren(db: AccountingDb, taskId: string): number {
 }
 
 /**
+ * zx_20261116_3 M5「拆」：**可启动**子任务数——真正会抢跑的那些。
+ *
+ * 病根（真标本：18 项 T01~T18 计划）：`countActiveChildren` 把**被前置挡住的 pending** 也算在途，
+ * 于是父任务只能先建 5 条、等前序终态再补建，被唤醒多轮。被 `depends_on` 挡住的 pending
+ * 不会并发抢跑（调度器 `hasUnmetDependencies` 本来就不放行），不占槽位才符合“广度”的本意。
+ * 仍计入：executing/running，以及 pending 且前置已全部 completed（或本来无前置）。
+ */
+export function countStartableChildren(db: AccountingDb, taskId: string): number {
+  let rows: Array<{ status: string; depends_on?: string | null }>;
+  try {
+    rows = db.prepare(
+      "SELECT status, depends_on FROM wa_tasks WHERE parent_task_id = ? AND status NOT IN ('completed','failed','archived')",
+    ).all(taskId) as Array<{ status: string; depends_on?: string | null }>;
+  } catch {
+    // 老夹具/老库可能没有 `depends_on` 列（手写 DDL）——退回“非终态即占位”，不因一列缺失打断广度闸。
+    return countActiveChildren(db, taskId);
+  }
+  let n = 0;
+  for (const r of rows) {
+    if (r.status === 'executing' || r.status === 'running') { n++; continue; }
+    if (r.status !== 'pending') continue;
+    const deps = String(r.depends_on ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+    if (deps.length === 0) { n++; continue; }
+    const allDone = deps.every((dep) => {
+      const st = (db.prepare('SELECT status FROM wa_tasks WHERE id = ?').get(dep) as { status?: string } | undefined)?.status;
+      return st === 'completed';
+    });
+    if (allDone) n++;
+  }
+  return n;
+}
+
+/**
  * 槽位闸：满则返回**当下可执行**的拒绝理由；未满返回 null（放行）。
  *
  * 承 zx_20260904_5 D2/D4 的旧文案「请合并或直接完成」——那句在闸满时**与闸无关**：
@@ -212,7 +247,8 @@ export function countActiveChildren(db: AccountingDb, taskId: string): number {
  * 现文案给三条当下可执行的路，并说明"已终态不占位"这一事实，避免把"槽位其实空着"误读成"满"。
  */
 export function childBreadthRefusal(db: AccountingDb, taskId: string): string | null {
-  const active = countActiveChildren(db, taskId);
+  // zx_20261116_3 M5：只数**可启动**子任务；被前置挡住的 pending 不占位。
+  const active = countStartableChildren(db, taskId);
   if (active < MAX_CHILD_BREADTH) return null;
   return childBreadthRefusalFor(active);
 }
@@ -224,7 +260,7 @@ export function childBreadthRefusal(db: AccountingDb, taskId: string): string | 
  * 故能建几行必须在插入前算出；截断时仍要说同一句真因，不因"还没插到满"另写一句。
  */
 export function childBreadthRefusalFor(active: number): string {
-  return `当前任务已有 ${active} 个**在途**子任务（上限 ${MAX_CHILD_BREADTH}；已 completed/failed/archived 的子任务不占位）。`
+  return `当前任务已有 ${active} 个**可启动**子任务（上限 ${MAX_CHILD_BREADTH}；被前置挡住的 pending 不占位；已 completed/failed/archived 的子任务不占位）。`
     + `此刻可走的路：① 把剩余工作交给某个**在途**子任务——用 send_message 给它追加指令；`
     + `② 直接在本任务内收口（finalize_task）；`
     + `③ 先处置/收尾在途子任务，待其终态后槽位自动空出，再重试本次调用。`
@@ -510,6 +546,13 @@ export interface ChildCompletionClass {
   archived: number;
   /** `incomplete` 的拆分：尚未了结（pending/running/paused…）数 */
   open: number;
+  /**
+   * zx_20261118_2 M6：**completed 但完成账表明「未达目标」**的数量
+   * （`completion_quality.premature===true` 或 `goal_achieved===false`）。
+   * `done` 是"置了 completed"，`unachieved` 是"置了 completed 但没做成"——两者分开报，
+   * 否则父任务的自检会把 45 分的子任务并进「所有 N 个已完成」（真库 S5）。
+   */
+  unachieved: number;
 }
 
 /**
@@ -519,14 +562,17 @@ export interface ChildCompletionClass {
 export function classifyChildCompletion(
   children: Array<{ status?: string | null; context_json?: string | null }>,
 ): ChildCompletionClass {
-  const c: ChildCompletionClass = { total: children.length, done: 0, emptyShell: 0, failed: 0, incomplete: 0, archived: 0, open: 0 };
+  const c: ChildCompletionClass = { total: children.length, done: 0, emptyShell: 0, failed: 0, incomplete: 0, archived: 0, open: 0, unachieved: 0 };
   for (const ch of children) {
     if (ch.status === 'failed') { c.failed++; continue; }
     if (ch.status === 'archived') { c.archived++; c.incomplete++; continue; }
     if (ch.status !== 'completed') { c.open++; c.incomplete++; continue; }
-    let shell = false;
-    try { shell = (JSON.parse(ch.context_json || '{}') as { auto_completed_without_output?: unknown }).auto_completed_without_output === true; } catch { /* 脏 ctx 不作空壳认定 */ }
+    let ctx: Record<string, unknown> = {};
+    try { ctx = JSON.parse(ch.context_json || '{}') as Record<string, unknown>; } catch { /* 脏 ctx 不作空壳认定 */ }
+    const shell = ctx.auto_completed_without_output === true;
     if (shell) c.emptyShell++; else c.done++;
+    // 空壳已单独计；未达目标只算"有产出/有完成账但账上没达成"的那一类，避免一子两计。
+    if (!shell && isIncompleteCompletion(ctx)) c.unachieved++;
   }
   return c;
 }
@@ -544,21 +590,23 @@ export function childCompletionCheckLabel(c: ChildCompletionClass): string {
   //   含 `archived` 归档，见 `classifyChildCompletion`），绝不出现"全部完成"字样；且头句不得把
   //   未了结者算进"已完成/已终结"的那个 N 里（旧文案 `已终结 ${total}（…）` 把 pending 也算作
   //   "已终结"，名实不符）。真库标本 `7c39678e`：7 完成 + 8 归档 ⇒ 旧文案谎报「所有15个子任务已完成」。
-  if (c.incomplete === 0 && c.emptyShell === 0 && c.failed === 0) return `[PASS] 所有${c.total}个子任务已完成`;
+  // zx_20261118_2 M6：`unachieved` 也是"不能说全部完成"的一档——它是置了 completed 但账上没达成。
+  if (c.incomplete === 0 && c.emptyShell === 0 && c.failed === 0 && c.unachieved === 0) return `[PASS] 所有${c.total}个子任务已完成`;
   // zx_20261028_2 M4：**无一完成**是另一档事实——旧文案把它写成「[PASS] 共 N …」，读的人会以为收口条件已满足。
   //   （真库标本：模板拆出的子任务全部被归档，父仍以 [PASS] 收口。）
   if (c.done === 0 && c.incomplete > 0) {
     return `[WARN] 共 ${c.total} 个子任务，无一完成（归档 ${c.archived} 个、未了结 ${c.open} 个、失败 ${c.failed} 个${c.emptyShell > 0 ? `、未产出 ${c.emptyShell} 个` : ''}）——这批子任务均未交付成果，请逐条核验后再收口`;
   }
   const notes: string[] = [];
+  if (c.unachieved > 0) notes.push('未达目标者为"置完成但账上没达成"（完成 ≠ 达成），请核验后决定是否补做');
   if (c.emptyShell > 0) notes.push('未产出者为"置完成但无产出证据"的空壳（未交付任何成果），请核验后决定是否补做');
   if (c.failed > 0) notes.push('存在失败子任务，请核验后决定是否补做');
   if (c.incomplete > 0) notes.push('归档/未了结者未交付成果，请人工核验');
   const head = c.incomplete > 0
-    ? `共 ${c.total} 个子任务（完成 ${c.done} 个、归档/未了结 ${c.incomplete} 个${c.failed > 0 ? `、失败 ${c.failed} 个` : ''}${c.emptyShell > 0 ? `、未产出 ${c.emptyShell} 个` : ''}）`
+    ? `共 ${c.total} 个子任务（完成 ${c.done} 个${c.unachieved > 0 ? `（其中未达目标 ${c.unachieved} 个）` : ''}、归档/未了结 ${c.incomplete} 个${c.failed > 0 ? `、失败 ${c.failed} 个` : ''}${c.emptyShell > 0 ? `、未产出 ${c.emptyShell} 个` : ''}）`
     : c.failed > 0
-      ? `已终结 ${c.total}（其中失败 ${c.failed} 个、未产出 ${c.emptyShell} 个）`
-      : `已完成 ${c.total}（其中未产出 ${c.emptyShell} 个）`;
+      ? `已终结 ${c.total}（其中失败 ${c.failed} 个、未产出 ${c.emptyShell} 个${c.unachieved > 0 ? `、未达目标 ${c.unachieved} 个` : ''}）`
+      : `已完成 ${c.total}（其中未产出 ${c.emptyShell} 个${c.unachieved > 0 ? `、未达目标 ${c.unachieved} 个` : ''}）`;
   return `[PASS] ${head}——${notes.join('；')}`;
 }
 

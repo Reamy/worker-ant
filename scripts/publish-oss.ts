@@ -113,7 +113,7 @@ function buildCommitMessage(title: string, localHead: string, summary: string[],
     lines.push('本次变更未能从上一枚公开提交自动定位（旧提交无 Local-Head 尾注或本地基线不可达）。', '');
   }
   lines.push(
-    'AGPL-3.0-only。本仓为**产品代码快照**；不含内部商业计划 / 历史归档 / 内务协作说明。',
+    'AGPL-3.0-only.',
     '',
     `Local-Head: ${localHead}`,
   );

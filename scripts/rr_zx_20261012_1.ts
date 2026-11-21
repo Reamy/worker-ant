@@ -239,15 +239,18 @@ async function main(): Promise<void> {
     // zx_20261021_3 批一：装配面新增「领域包」段，其吞点同形补痕 ⇒ 26 → 27。
     // zx_20261022_3 批八：再添「项目画像」段 ⇒ 27 → 28。
     // zx_20261023_5 批二：再添「项目知识卡」段 ⇒ 28 → 29。
+    // zx_20261121_1 M6：再添「项目经验」段 ⇒ 29 → 30。
     //   计数是**历史累加**的，单独一个数说不清"新段真接上了"——故逐段按名钉到成员。
-    eq(cnts, [29, 6, 2],
-      'A-3 ★逐成员枚举：装配 29 段 / 前瞻 6 处 / 图 2 处（读侧吞点逐条改，无遗漏）');
+    eq(cnts, [30, 6, 2],
+      'A-3 ★逐成员枚举：装配 30 段 / 前瞻 6 处 / 图 2 处（读侧吞点逐条改，无遗漏）');
     eq(CODE(files[0]!).match(/recordMemoryFailure\(MEM_FAIL\.contextSection, err, \{ section: '领域包' \}\)/g)?.length,
       1, 'A-3b ★新段「领域包」的吞点**按段名**钉在成员上（计数涨了不等于新段接上了）');
     eq(CODE(files[0]!).match(/recordMemoryFailure\(MEM_FAIL\.contextSection, err, \{ section: '项目画像' \}\)/g)?.length,
       1, 'A-3c ★新段「项目画像」的吞点**按段名**钉在成员上（计数涨了不等于新段接上了）');
     eq(CODE(files[0]!).match(/recordMemoryFailure\(MEM_FAIL\.contextSection, err, \{ section: '项目知识卡' \}\)/g)?.length,
       1, 'A-3d ★新段「项目知识卡」的吞点**按段名**钉在成员上（计数涨了不等于新段接上了）');
+    eq(CODE(files[0]!).match(/recordMemoryFailure\(MEM_FAIL\.contextSection, err, \{ section: '项目经验' \}\)/g)?.length,
+      1, 'A-3e ★新段「项目经验」的吞点**按段名**钉在成员上（计数涨了不等于新段接上了）');
     // 反证：`memory-failure.ts` 自身不得有吞点（它就是"留痕"那一跳）。
     eq(emptyCatchCount(`${A}/src/main/core/memory-failure.ts`), 0,
       'A-4 反证：计数器模块自身零空吞（否则"记一笔"这一步自己会静默失败）');

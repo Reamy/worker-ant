@@ -392,6 +392,9 @@ CREATE TABLE wa_external_terminals (
   revoked_at TEXT,
   delivered_at TEXT,
   grant_expires_at TEXT,
+    scope_json TEXT NOT NULL DEFAULT '{}',
+    rate_json TEXT NOT NULL DEFAULT '{}',
+    linkage_allowed INTEGER NOT NULL DEFAULT 1,
   source TEXT DEFAULT 'remote',
   card_intents_json TEXT DEFAULT ''
 )`;

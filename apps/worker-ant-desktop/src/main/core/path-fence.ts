@@ -48,6 +48,24 @@ export function isInsideRoot(candidate: string, root: string): boolean {
   return candAbs === rootAbs || candAbs.startsWith(rootAbs + path.sep);
 }
 
+/**
+ * 是否**落在任一给定根之下**（含根自身）。多根围栏（项目工作目录 + 数据目录）的**唯一口径**
+ * （zx_20261118_2 M3「名」）。
+ *
+ * 逐根复用 `isInsideRoot`（分隔符比对、空值保守）——调用点若各自写 `roots.some(r => cand.startsWith(r))`，
+ * 同名前缀误判（`/a/bc` 被 `/a/b` 认作子路径）与"少拼一次 `path.sep`"就会**一处修了另一处没修**。
+ * 根数组为空 ⇒ `false`：没有授权目录 ≠ 处处可写（与 `isInsideRoot` 的空根保守同向）。
+ *
+ * ⚠ 入参若是盘上路径，**调用方须先过 `real-path.ts` 的 `realOrResolved`**——本模块刻意零 `node:fs`
+ *   （见文件头：拖进 pino 就会污染每一个直跑 `core/tools/*` 的受控回归）；符号链接绕过的判定靠
+ *   "候选与根两侧同尺归一"，归一不属于字符串判据。
+ */
+export function isInsideAnyRoot(absPath: string, roots: readonly string[]): boolean {
+  const cand = String(absPath ?? '').trim();
+  if (!cand) return false;
+  return roots.some((root) => isInsideRoot(cand, root));
+}
+
 /** 敏感路径表（硬边界，不可审批）。**改这里即改行为**，须有方案依据。 */
 export const SENSITIVE_PATHS = [
   '/etc/passwd', '/etc/shadow', '/etc/sudoers', '/etc/ssh/',

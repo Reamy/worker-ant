@@ -135,7 +135,7 @@ export function normalizeRoomName(room: string): string {
  * `panel` = 设备面板手动（无 ref）；`external` = 外部 AI 终端经门（`ref` ⇒ terminal_id）。
  * 空串 `''` = **认不出**（历史行 / 未知来源）——如实不猜，面板据此不渲染来源标签。
  */
-export type DeviceActionActorKind = 'task' | 'panel' | 'external' | '';
+export type DeviceActionActorKind = 'task' | 'panel' | 'external' | 'rule' | '';
 
 /** 一条控制审计（`wa_device_actions` 的投影）。 */
 export interface DeviceActionRow {

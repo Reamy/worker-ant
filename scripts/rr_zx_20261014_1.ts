@@ -202,6 +202,11 @@ async function main(): Promise<void> {
       ['devices:control', 'device_control'],
       ['devices:intent_execute', 'device_control'],
       ['devices:miio_token', 'device_control'],
+      // zx_20261121_2 M6：联动规则四个写口同归 Team 控制闸（创/改/删/启停）。
+      ['devices:ruleCreate', 'device_control'],
+      ['devices:ruleUpdate', 'device_control'],
+      ['devices:ruleDelete', 'device_control'],
+      ['devices:ruleToggle', 'device_control'],
     ];
     // zx_20261101_2 M1: 设备云账号三写口（保存/测试/同步）同归 Pro「设备发现」——
     //   逐 handler 枚举（不写幻数）：新增云账号写口漏闸即红。

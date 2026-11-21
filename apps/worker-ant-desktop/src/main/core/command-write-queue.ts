@@ -96,19 +96,28 @@ export class CommandWriteQueue {
     // zx_20261113_2 M13：运行期产物不登记为交付物；同路径只登记一次。
     const uniqueFiles = [...new Set(files)].filter((f) => !isRuntimeArtifactPath(f));
     if (uniqueFiles.length === 0) return { found: 0, registered: 0 };
-    const shown = uniqueFiles.slice(0, Math.max(1, o.limit));
+    // zx_20261116_3 M6「轻」：按 200 一批登记，单窗口硬上限 1000；不再只登记前 20 条。
+    const perBatch = Math.max(1, o.limit);
+    const cap = Math.min(uniqueFiles.length, 1000);
     // 来源如实：一条命令 ⇒ 旧形（`execute_command`）；合并了多条 ⇒ 全部列出（`execute_command+run_privileged`）。
     const via = win.vias.join('+');
     let registered = 0;
-    for (const absPath of shown) {
-      // 单条失败只跳该条：一条坏登记不该让整轮盘点作废（与旧实现同一纪律）
-      try { o.register(absPath, via, win); registered++; } catch { /* 单条登记失败跳过 */ }
+    for (let i = 0; i < cap; i += perBatch) {
+      for (const absPath of uniqueFiles.slice(i, Math.min(i + perBatch, cap))) {
+        // 单条失败只跳该条：一条坏登记不该让整轮盘点作废（与旧实现同一纪律）
+        try { o.register(absPath, via, win); registered++; } catch { /* 单条登记失败跳过 */ }
+      }
     }
-    if (uniqueFiles.length > shown.length) {
+    if (uniqueFiles.length > cap) {
       // 如实记：截断了就说截断了（不冒充"就这些"）
       logger.warn(
-        { taskId: win.taskId.slice(0, 8), vias: win.vias, found: uniqueFiles.length, registered: shown.length },
-        '子进程落盘补登记触发上限，只登记了前若干项',
+        { taskId: win.taskId.slice(0, 8), vias: win.vias, found: uniqueFiles.length, registered, omitted: uniqueFiles.length - cap },
+        '子进程落盘补登记达到单窗口 1000 上限，余量未逐条登记',
+      );
+    } else if (registered < uniqueFiles.length) {
+      logger.warn(
+        { taskId: win.taskId.slice(0, 8), vias: win.vias, found: uniqueFiles.length, registered },
+        '子进程落盘补登记有失败项',
       );
     }
     return { found: uniqueFiles.length, registered };

@@ -552,9 +552,13 @@ console.log('\n【J】B5 完成账可回查（判据回显 / evidence_refs / run
   const worldCode = stripKeepingLines(fs.readFileSync(WORLD_SRC, 'utf-8')).join('\n');
   ok(execCode.includes('ctx.runId = newRunId()') && execCode.includes('ctx.completedRuns = []'),
     'J23 每次执行入口生成新 run_id 并重置已发名单');
-  ok(execCode.includes('if (claimCompletedEmit(ctx))') && execCode.includes('run_id: ctx.runId')
-    && finalizeCode.includes('if (claimCompletedEmit(ctx))') && finalizeCode.includes('run_id: ctx.runId'),
-    'J24 两个完成出口都经 `claimCompletedEmit` 且事件带 run_id（run 级幂等同在一处）');
+  // zx_20261119_1 M1「迹」：两出口的发射收进 `completion-emit.ts`（同一实现）——
+  //   钉的形状随之改为"两出口都走同一发射口 + 幂等门与 run_id 在那一处"，比原先两处各写一遍更强。
+  const completionEmitCode = stripKeepingLines(fs.readFileSync(
+    path.join(ROOT, 'apps/worker-ant-desktop/src/main/core/completion-emit.ts'), 'utf-8')).join('\n');
+  ok(execCode.includes('emitCompletionEvent({') && finalizeCode.includes('emitCompletionEvent({')
+    && completionEmitCode.includes('claimCompletedEmit(ctx)') && completionEmitCode.includes('run_id: ctx.runId'),
+    'J24 两个完成出口都走同一发射口（`emitCompletionEvent`），`claimCompletedEmit` 幂等门与 run_id 同在一处');
   ok(controlCode.includes('mergeFinalizeChecks(ctxJson.finalize_checks, checks, ctx.runId)')
     && closeCode.includes('mergeFinalizeChecks(ctxJson.finalize_checks, [unverifiedInfo], ctx.runId)'),
     'J25 两处 finalize_checks 写口都经合并函数（不裸覆写旧账）');

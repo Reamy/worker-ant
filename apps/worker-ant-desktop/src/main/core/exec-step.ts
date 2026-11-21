@@ -46,10 +46,14 @@ import { reassessComplexityDuringExecution, type ComplexityLevel, type TaskArche
 //   自己记账（那里才有退出码与输出尾），此处只补"工具整个没跑成"这一支，避免同一次调用记两条。
 import { recordRuntimeEvidence } from './runtime-evidence.js';
 import { readBoolSetting } from './settings-bool.js';
+// zx_20261120_2 M2「通」：逐调用探索拒绝的人话与 A3/D3 两处共用同一纯函数（只改怎么说，不改判据）。
+import { explorationDenialReason } from './tool-guards.js';
 import { countActiveChildren, MAX_CHILD_BREADTH, goalDeviationCapReached } from './task-accounting.js';
 // zx_20260930 M9: 记账上报**本就走签名路**（`AnsClient.post`），但失败被 `.catch(() => {})` 咽掉；
 //   留痕需要有 logger（本文件此前没有——同族 exec-*.ts 都是这个形状）。
 import { createLogger } from './logger.js';
+// zx_20261116_3 M1「限」：计费/质量账改走批量队列（429 时保留重试，不永丢）。
+import { enqueueBilling } from './billing-reporter.js';
 // zx_20261012_3 批二（「算得真」）：本步 token 增量的**唯一**口径（真值差分 or usage 缺席时的字符估）。
 import { stepTokenDelta, estimateTokensFromChars } from './token-estimate.js';
 import {
@@ -248,12 +252,16 @@ export function createStepHandler(d: StepScope) {
         d.totalCostUsed += stepCostCny;
         const rec = { endpoint_id: 'agent-step', model_id: d.modelName, project_id: d.projectId, tokens_in: stepPrompt, tokens_out: stepComp, cost: stepCostCny, currency: 'CNY' };
         const ac = (await d.ctx.getAnsClient()) as { post?: (p: string, b: unknown) => Promise<unknown> };
-        // zx_20260930 M9: 这一路**本就走签名路**（`AnsClient.post` → `requestWithRetry` 签三头，与
-        //   `ans-signed-request` 同一把尺 `createHmacSignature`）——本轮的改动只在这里：
-        //   原先 `.catch(() => {})` 把失败咽成一声不响 ⇒ 记账恒失败也无人知。**不阻塞执行**的口径不变。
-        ac.post?.('/api/v1/billing/records', rec).catch((e: unknown) => {
-          logger.warn({ error: (e as Error)?.message, model: d.modelName, tokens: stepTokens }, '[exec-step] ANS 记账上报失败');
-        });
+        // zx_20261116_3 M1「限」：入批量队列（key 含 task/run/step，同一步只报一次）。
+        //   429 由 `AnsClient` 按 Retry-After 重试；仍失败则留在队列等下一轮，最多 5 次后如实丢弃。
+        if (ac.post) {
+          enqueueBilling({
+            path: '/api/v1/billing/records',
+            body: rec,
+            key: `${d.taskId}:${String(d.ctx.runId ?? 'no-run')}:${d.stepCount}:billing`,
+            post: ac.post.bind(ac),
+          });
+        }
       } catch { /* ANS 记账失败不阻塞执行 */ }
       // zx_20261112_2 B4：同时报**质量账**——`ans_model_quality_logs` 是选型（可靠性/成功率）的原料。
       //   归档前的老服务每步都报，现桌面只报计费 ⇒ 本地模型的成败从未回馈选型。与计费同口径：
@@ -272,9 +280,14 @@ export function createStepHandler(d: StepScope) {
           ...(latency !== undefined ? { latency_ms: latency } : {}),
         };
         const acQ = (await d.ctx.getAnsClient()) as { post?: (p: string, b: unknown) => Promise<unknown> };
-        acQ.post?.('/api/v1/billing/quality', qualityRec).catch((e: unknown) => {
-          logger.warn({ error: (e as Error)?.message, model: d.modelName }, '[exec-step] ANS 质量账上报失败');
-        });
+        if (acQ.post) {
+          enqueueBilling({
+            path: '/api/v1/billing/quality',
+            body: qualityRec,
+            key: `${d.taskId}:${String(d.ctx.runId ?? 'no-run')}:${d.stepCount}:quality`,
+            post: acQ.post.bind(acQ),
+          });
+        }
       } catch { /* 质量账失败不阻塞执行 */ }
     }
     // zx_20261108_1 B5（名实相符）：Token/费用预算**在执行中逐拍评估**。
@@ -573,9 +586,7 @@ export function createStepHandler(d: StepScope) {
           for (const k of mixedPeers) {
             // ⚠ 记进 `cappedTools` 而**非** `disabledTools`：该工具仍然可用（见其声明处注释）
             d.cappedTools.add(k);
-            capNonExploration(k,
-              `本次调用属**探索类**（目录/文件枚举、只读探测），已因探索配额耗尽(${limit.hard}次)拒绝。`
-              + `⚠ 这是对**该次调用**的拒绝，**不是**${k} 被禁用——${k} 仍可用，跑测试/构建/git 提交等**收尾命令照常放行**，请直接调用。`);
+            capNonExploration(k, explorationDenialReason(k, limit.hard, 'quota'));
           }
           const parts: string[] = [];
           if (purePeers.length > 0) parts.push(`已禁用 ${purePeers.join('、')}`);
@@ -609,9 +620,7 @@ export function createStepHandler(d: StepScope) {
       }
       for (const k of cappedKeys) {
         d.cappedTools.add(k);
-        capNonExploration(k,
-          `本次调用属**探索类**（目录/文件枚举、只读探测），已因高频探索(≥${convergeHard}次)拒绝。`
-          + `⚠ 这是对**该次调用**的拒绝，**不是**${k} 被禁用——${k} 仍可用，跑测试/构建/git 提交等**收尾命令照常放行**，请直接调用。`);
+        capNonExploration(k, explorationDenialReason(k, convergeHard, 'converge'));
       }
       const parts: string[] = [];
       if (pureKeys.length > 0) parts.push(`已禁用 ${pureKeys.join('、')}`);

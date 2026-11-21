@@ -235,7 +235,67 @@ export interface TemplateHit {
 }
 
 /** 该不该拆（守卫原因）；非 null 即不拆 */
-export type TemplateSkip = 'explicit_subtasks' | 'planning_intent' | 'repair_intent';
+export type TemplateSkip = 'explicit_subtasks' | 'planning_intent' | 'repair_intent'
+  // zx_20261119_1 M2「循」：命中了 auto 模板但**不够格**拆解时的两种如实原因。
+  | 'intent_mismatch' | 'weak_evidence';
+
+// ── zx_20261119_1 M2「循」：auto 模板按「意图 + 更强证据」匹配 ─────────────────────────
+//
+// 病根（真库标本 S1）：诊断任务自动提炼的模板 `91afb105` 靠标题命中 `新后/后端/提现` 三个 bigram，
+//   把一个**接口实施任务**拆成 4 个诊断子任务（合计约 451k tokens，重做了两小时前已完成的工作）。
+//   既有判据只看**来文**是不是修复/规划意图，从不看**模板来源**是什么意图；标题 2 命中即放行。
+//
+// 治法：auto 模板（系统/自定义模板不受影响）须同时过两道门——
+//   ① 意图相容：模板文本与来文意图同类（任一侧判不出则不作否定，退回证据门）；
+//   ② 证据强度：标题命中 ≥3，且至少 1 个命中词不是纯中文 bigram（bigram 太容易撞）。
+
+export type TaskIntent = 'diagnose' | 'plan' | 'implement' | 'other';
+
+/** 任务文本 → 意图。判据复用既有两个真源；实施词表只此一处。 */
+export function intentOfText(text: string): TaskIntent {
+  const t = String(text || '');
+  if (isRepairOrDiagnosisIntent(t)) return 'diagnose';
+  if (isPlanningOrOptimizationIntent(t)) return 'plan';
+  if (/(实现|实施|开发|改造|替换|迁移|升级|接入|新增|构建|编写|重构|调整)/.test(t)) return 'implement';
+  return 'other';
+}
+
+/** 高信号命中词：含英文/数字，或 ≥3 个汉字（排除 `新后/后端/提现` 这类 bigram）。 */
+function isStrongKeyword(kw: string): boolean {
+  const s = String(kw || '');
+  return /[a-z0-9]/i.test(s) || s.replace(/[^一-鿿]/g, '').length >= 3;
+}
+
+export interface AutoTemplateRejectInput {
+  tpl: Pick<TaskTemplate, 'name' | 'description' | 'source'>;
+  field: 'title' | 'description';
+  /** 已在对应文本里命中的关键词 */
+  hits: readonly string[];
+  /** 用来判意图的来文（标题+描述） */
+  incomingText: string;
+}
+
+/**
+ * auto 模板的**不合格原因**；`null` 表示合格（或本就不是 auto 模板）。
+ * 与 `autoTemplateEligible` 同一判据——后者只是 `=== null`，不另写一遍。
+ */
+export function autoTemplateRejectReason(input: AutoTemplateRejectInput): 'intent_mismatch' | 'weak_evidence' | null {
+  const { tpl, field, hits, incomingText } = input;
+  if (tpl.source !== 'auto') return null;
+  const tplIntent = intentOfText(`${tpl.name} ${tpl.description}`);
+  const incomingIntent = intentOfText(incomingText);
+  if (tplIntent !== 'other' && incomingIntent !== 'other' && tplIntent !== incomingIntent) return 'intent_mismatch';
+  if (field === 'title') {
+    if (hits.length < 3) return 'weak_evidence';
+    if (!hits.some(isStrongKeyword)) return 'weak_evidence';
+  }
+  return null;
+}
+
+/** auto 模板是否具备匹配资格（`true` 亦覆盖内置/自定义模板）。 */
+export function autoTemplateEligible(input: AutoTemplateRejectInput): boolean {
+  return autoTemplateRejectReason(input) === null;
+}
 
 /** 语义兜底喂给 embedding 的文本上限（标题+描述合取后截断——过长会稀释相似度，单一真源） */
 export const TEMPLATE_SEMANTIC_TEXT_MAX = 500;
@@ -270,10 +330,23 @@ function bestTemplateBy(pool: TaskTemplate[], score: (tpl: TaskTemplate) => numb
 }
 
 /** 在**指定文本**里按关键词找模板（命中 ≥ minHits），连同命中的那几个词一起返回 */
-function pickIn(pool: TaskTemplate[], text: string, minHits: number): { template: TaskTemplate; hitKeywords: string[] } | null {
+function pickIn(
+  pool: TaskTemplate[],
+  text: string,
+  minHits: number,
+  opts: { field: 'title' | 'description'; incomingText: string; enforceAuto: boolean },
+): { template: TaskTemplate; hitKeywords: string[] } | null {
   const lower = (text || '').toLowerCase();
   const hitsOf = (tpl: TaskTemplate): number => tpl.keywords.filter(kw => lower.includes(kw)).length;
-  const template = bestTemplateBy(pool, hitsOf, minHits);
+  // zx_20261119_1 M2：auto 模板先过「意图相容 + 证据强度」门（内置/自定义模板不受影响）。
+  const candidates = opts.enforceAuto
+    ? pool.filter((tpl) => {
+        const hits = tpl.keywords.filter(kw => lower.includes(kw));
+        if (hits.length < minHits) return false;
+        return autoTemplateEligible({ tpl, field: opts.field, hits, incomingText: opts.incomingText });
+      })
+    : pool;
+  const template = bestTemplateBy(candidates, hitsOf, minHits);
   if (!template) return null;
   return { template, hitKeywords: template.keywords.filter(kw => lower.includes(kw)) };
 }
@@ -289,11 +362,18 @@ function pickIn(pool: TaskTemplate[], text: string, minHits: number): { template
  * 而描述里白纸黑字的「形成…规划排期方案…写入 plans/backend/20260924.md」从未被读过。
  * 现改为**两侧都参与**：标题 ≥2（原样保留），或 描述 ≥3（描述更长、撞词更易，故门槛抬高）。
  */
-export function matchTaskTemplate(db: Database.Database, title: string, description: string): TemplateHit | null {
+export function matchTaskTemplate(
+  db: Database.Database,
+  title: string,
+  description: string,
+  opts?: { enforceAutoEligibility?: boolean },
+): TemplateHit | null {
   const pool = ensurePool(db);
-  const byTitle = pickIn(pool, title || '', TITLE_MIN_HITS);
+  const enforceAuto = opts?.enforceAutoEligibility !== false;
+  const incomingText = [title || '', description || ''].filter(Boolean).join('\n');
+  const byTitle = pickIn(pool, title || '', TITLE_MIN_HITS, { field: 'title', incomingText, enforceAuto });
   if (byTitle) return { ...byTitle, field: 'title' };
-  const byDesc = pickIn(pool, description || '', DESC_MIN_HITS);
+  const byDesc = pickIn(pool, description || '', DESC_MIN_HITS, { field: 'description', incomingText, enforceAuto });
   if (byDesc) return { ...byDesc, field: 'description' };
   return null;
 }
@@ -314,11 +394,19 @@ export function decideTemplateMatch(db: Database.Database, title: string, descri
   //   让描述整段不参与语义兜底（与 zx_20260924 缺陷C 同一病根，那次只修了关键词腿）。
   const semanticText = [titleText, descText].filter(Boolean).join('\n').slice(0, TEMPLATE_SEMANTIC_TEXT_MAX);
   const hit = matchTaskTemplate(db, titleText, descText);
-  if (/子任务|报告\s*[A-Za-z]/.test(fullText)) return { skip: 'explicit_subtasks', hit, semanticText };
+  // zx_20261119_1 M2：合格命中为空时，回头看"本可命中谁、为什么不够格"——诊断不许只剩一句"没命中"。
+  const rawHit = hit ? null : matchTaskTemplate(db, titleText, descText, { enforceAutoEligibility: false });
+  const ineligibleReason = rawHit && rawHit.template.source === 'auto'
+    ? autoTemplateRejectReason({ tpl: rawHit.template, field: rawHit.field, hits: rawHit.hitKeywords, incomingText: fullText })
+    : null;
+  const shownHit = hit ?? rawHit;
+  if (/子任务|报告\s*[A-Za-z]/.test(fullText)) return { skip: 'explicit_subtasks', hit: shownHit, semanticText };
   // 修复/排查意图**先于**规划意图判：一段文字既含"修复"又含"方案"时，真相是"先定位再给方案"，
   //   报成 planning_intent 会让用户以为该交给 AI 做规划。两者都属"不套模板"，仅文案不同。
   if (isRepairOrDiagnosisIntent(fullText)) return { skip: 'repair_intent', hit, semanticText };
   if (isPlanningOrOptimizationIntent(fullText)) return { skip: 'planning_intent', hit, semanticText };
+  // zx_20261119_1 M2：以上三种"本就不套模板"的意图优先；都不命中时，才把 auto 模板的不合格原因报出来。
+  if (ineligibleReason) return { skip: ineligibleReason, hit: shownHit, semanticText };
   return { skip: null, hit, semanticText };
 }
 

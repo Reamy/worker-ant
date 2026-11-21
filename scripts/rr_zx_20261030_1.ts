@@ -740,7 +740,10 @@ function sectionQ(): void {
       status TEXT NOT NULL DEFAULT 'pending', pair_code TEXT NOT NULL, key_prefix TEXT,
       secret_hash TEXT, capabilities_json TEXT NOT NULL DEFAULT '[]', last_remote_addr TEXT,
       last_seen_at TEXT, created_at TEXT DEFAULT (datetime('now')), approved_at TEXT,
-      revoked_at TEXT, delivered_at TEXT, grant_expires_at TEXT)`);
+      revoked_at TEXT, delivered_at TEXT, grant_expires_at TEXT,
+    scope_json TEXT NOT NULL DEFAULT '{}',
+    rate_json TEXT NOT NULL DEFAULT '{}',
+    linkage_allowed INTEGER NOT NULL DEFAULT 1)`);
     const ins = d.prepare('INSERT INTO wa_external_terminals (id, name, status, pair_code) VALUES (?,?,?,?)');
     ins.run('term-ok', '已批', 'approved', 'c1');
     ins.run('term-wait', '待批', 'pending', 'c2');

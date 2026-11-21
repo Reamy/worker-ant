@@ -27,6 +27,18 @@ import { suggestCriteriaFromText, PROPOSED_ACCEPTANCE_KEY } from '../acceptance-
 import { mergeTaskContext } from '../context-merge.js';
 // zx_20261106_1 M3：子任务判据来源随上下文落库（模型给的标 model、留空标 missing、辩论/角色标 intentional_empty）。
 import { withAcceptanceSource } from '../task-decompose.js';
+// zx_20261120_3 M1「职·全」：辩论/蚁群子任务继承父岗位（与 create_task / spawn_subagent 同一把尺）。
+import { deriveTaskPosition, positionContextFields, resolveTaskPosition } from '../positions.js';
+/** zx_20261120_3 M4：当前任务**有效**岗位 id（停用/未绑定 ⇒ 空，不暴露岗位技能）。 */
+function currentTaskPositionId(db: unknown, taskId: string, projectId: string): string {
+  try {
+    const d = db as { prepare(sql: string): { get(...a: unknown[]): unknown } };
+    const row = d.prepare('SELECT position_id FROM wa_tasks WHERE id = ?').get(taskId) as { position_id?: unknown } | undefined;
+    const pid = String(row?.position_id ?? '').trim();
+    if (!pid) return '';
+    return resolveTaskPosition(d as never, projectId, pid)?.id ?? '';
+  } catch { return ''; }
+}
 
 const logger = createLogger('tools-resource');
 
@@ -109,7 +121,8 @@ export function resourceTools(deps: ToolDeps) {
       execute: async (args: { prompt: string; taskTitle: string; agentType?: string; dependsOn?: string; acceptance_criteria?: string; allow_duplicate?: boolean }) => {
         const parentRow = db.prepare('SELECT context_json, position_id FROM wa_tasks WHERE id = ?').get(taskId) as { context_json?: string | null; position_id?: string | null } | undefined;
         const parentCtx = JSON.parse(parentRow?.context_json || '{}') as Record<string, unknown>;
-        const parentPositionId = typeof parentRow?.position_id === 'string' ? parentRow.position_id : '';
+        // zx_20261120_3 M1：与 create_task/辩论/蚁群同一派生（父岗位停用/未绑定 ⇒ none）。
+        const derivedPosition = deriveTaskPosition(db, { projectId, parentTaskId: taskId });
         const childDepth = (parentCtx.depth as number || 0) + 1;
         // zx_20260916_3 M1（D2 裁定：统一为 5）：原为 2 —— 与 create_task 的 5 是**同名同义两值**
         //（"嵌套深度"在两个出口被两样地用）。且 `childDepth > 2` 使任何 depth≥2 的任务调本工具必被拒
@@ -138,6 +151,8 @@ export function resourceTools(deps: ToolDeps) {
             // zx_20261115_1 M6 + zx_20261115_2 M2：不可交互/类目原型/跨机岗位白名单/树预算随树继承
             //   （父读不到 ⇒ 不多键；子代理不会因"没人能答"而停在审批上，工具面也不因拆解而放宽）。
             ...inheritedConstraintContext(parentCtx),
+            // zx_20261120_3 M1：来源与父 id（岗位写口仍是下面 INSERT 的 position_id）。
+            ...positionContextFields(derivedPosition),
           },
           // zx_20261106_1 M3：判据来源 —— 模型给了标 model，留空标 missing（候选判据只是候选，不算已设）。
           (args.acceptance_criteria || '').trim() ? 'model' : 'missing',
@@ -173,7 +188,7 @@ export function resourceTools(deps: ToolDeps) {
           const ctx = repeatIndex > 1 ? { ...subagentCtx, subagent_repeat_index: repeatIndex } : subagentCtx;
           db.prepare(
             "INSERT INTO wa_tasks (id, project_id, title, description, status, priority, context_json, parent_task_id, source, depends_on, acceptance_criteria, position_id) VALUES (?, ?, ?, ?, 'pending', 1, ?, ?, 'agent', ?, ?, ?)"
-          ).run(id, projectId, title, args.prompt, JSON.stringify(ctx), taskId, depIds.join(','), (args.acceptance_criteria || '').trim(), parentPositionId);
+          ).run(id, projectId, title, args.prompt, JSON.stringify(ctx), taskId, depIds.join(','), (args.acceptance_criteria || '').trim(), derivedPosition.positionId);
           return { repeatIndex, created: true };
         })();
         if (decision.reusedId) {
@@ -281,6 +296,8 @@ export function resourceTools(deps: ToolDeps) {
         const perspectives = args.perspectives.split(/[,，]/).map(s => s.trim()).filter(Boolean).slice(0, 5);
         const tasks: Array<{ taskId: string; perspective: string }> = [];
         const skipped: string[] = [];
+        // zx_20261120_3 M1：继承父任务岗位（父岗位停用/未绑定 ⇒ none，不“带病继承”）。
+        const derivedPosition = deriveTaskPosition(db, { projectId, parentTaskId: taskId });
         for (const p of perspectives) {
           // zx_20260916_3 M1（D1 全覆盖）：引擎自发建子同样受理于广度闸；闸满即**停建**并如实登记，
           // 不静默突破（新子任务落 'pending' 即计入在途，故逐条调用即天然把同批已建者算进去）。
@@ -289,8 +306,8 @@ export function resourceTools(deps: ToolDeps) {
           // acceptance_criteria 显式留空：辩视角子任务的"验收"由父任务的 decide 汇总裁定，
           // 引擎在此无许诺者——写一条恒真的标准（如"给出该视角结论"）只会造出冒名的 verified=true。
           db.prepare(
-            "INSERT INTO wa_tasks (id, project_id, parent_task_id, title, description, status, acceptance_criteria, context_json, source) VALUES (?, ?, ?, ?, ?, 'pending', '', ?, 'agent')"
-          ).run(id, projectId, taskId, `[辩论-${p}] ${args.question.slice(0, 80)}`, `从"${p}"视角分析：${args.question}`, JSON.stringify({ depth: (JSON.parse((db.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get(taskId) as { context_json: string })?.context_json || '{}').depth || 0) + 1, debate: true, perspective: p, acceptance_source: 'intentional_empty' }));
+            "INSERT INTO wa_tasks (id, project_id, parent_task_id, title, description, status, acceptance_criteria, context_json, source, position_id) VALUES (?, ?, ?, ?, ?, 'pending', '', ?, 'agent', ?)"
+          ).run(id, projectId, taskId, `[辩论-${p}] ${args.question.slice(0, 80)}`, `从"${p}"视角分析：${args.question}`, JSON.stringify({ depth: (JSON.parse((db.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get(taskId) as { context_json: string })?.context_json || '{}').depth || 0) + 1, debate: true, perspective: p, acceptance_source: 'intentional_empty', ...positionContextFields(derivedPosition) }), derivedPosition.positionId);
           enqueueJob(db, 'ai-task', { taskId: id, projectId, source: 'debate', message: `从"${p}"视角分析：${args.question}` });
           tasks.push({ taskId: id, perspective: p });
         }
@@ -318,14 +335,16 @@ export function resourceTools(deps: ToolDeps) {
         if (roles.length === 0) roles.push({ role: 'generalist', description: '通用任务执行', priority: 1 });
         const tasks: Array<{ taskId: string; role: string }> = [];
         const skipped: string[] = [];
+        // zx_20261120_3 M1：同辩论——蚁群子任务继承父岗位。
+        const derivedPosition = deriveTaskPosition(db, { projectId, parentTaskId: taskId });
         for (const r of roles) {
           // zx_20260916_3 M1（D1 全覆盖）：同 debate——引擎自发建子受理于同一道广度闸。
           if (childBreadthRefusal(db, taskId)) { skipped.push(r.role); continue; }
           const id = crypto.randomUUID();
           // 同 debate：角色子任务的标准由父任务 decide 汇总裁定，引擎无许诺者，显式留空不造冒名通过。
           db.prepare(
-            "INSERT INTO wa_tasks (id, project_id, parent_task_id, title, description, status, priority, acceptance_criteria, context_json, source) VALUES (?, ?, ?, ?, ?, 'pending', ?, '', ?, 'agent')"
-          ).run(id, projectId, taskId, `[Swarm-${r.role}] ${args.objective.slice(0, 60)}`, `角色: ${r.role}\n职责: ${r.description}\n目标: ${args.objective}`, r.priority, JSON.stringify({ depth: (JSON.parse((db.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get(taskId) as { context_json: string })?.context_json || '{}').depth || 0) + 1, swarm: true, role: r.role }));
+            "INSERT INTO wa_tasks (id, project_id, parent_task_id, title, description, status, priority, acceptance_criteria, context_json, source, position_id) VALUES (?, ?, ?, ?, ?, 'pending', ?, '', ?, 'agent', ?)"
+          ).run(id, projectId, taskId, `[Swarm-${r.role}] ${args.objective.slice(0, 60)}`, `角色: ${r.role}\n职责: ${r.description}\n目标: ${args.objective}`, r.priority, JSON.stringify({ depth: (JSON.parse((db.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get(taskId) as { context_json: string })?.context_json || '{}').depth || 0) + 1, swarm: true, role: r.role, ...positionContextFields(derivedPosition) }), derivedPosition.positionId);
           enqueueJob(db, 'ai-task', { taskId: id, projectId, source: 'swarm', message: `角色: ${r.role}\n目标: ${args.objective}` });
           tasks.push({ taskId: id, role: r.role });
         }
@@ -522,20 +541,22 @@ export function resourceTools(deps: ToolDeps) {
       },
     },
     list_skills: {
-      description: '列出当前可用的AI技能（含名称/说明/来源分类），再用 skill 工具按名称调用。技能来源：内置(code_review/security_check) + ANS服务端插件技能 + .agents目录技能 + 记忆衍生技能(程序性记忆提炼、已批准)。',
+      description: '列出当前可用的AI技能（含名称/说明/来源分类/作用域 scope），再用 skill 工具按名称调用。技能来源：内置(code_review/security_check) + ANS服务端插件技能 + .agents目录技能 + 本项目经验技能 + 岗位技能。同名按 岗位 > 项目 > 全局 取更具体的一条。',
       parameters: jsonSchema({ type: 'object' as const, properties: {}, required: [] }),
       execute: async () => {
         try {
-          const { listSkills } = await import('../skill-registry.js');
+          const { listSkillsForTask } = await import('../skill-registry.js');
           await ensureSkillsLoaded();
-          return JSON.stringify(listSkills());
+          // zx_20261121_1 M2：岗位 > 项目 > 全局；未指派岗位/无项目技能时退化为旧行为。
+          const pid = currentTaskPositionId(db, taskId, projectId);
+          return JSON.stringify(listSkillsForTask(projectId, pid ?? undefined));
         } catch (e) {
           return JSON.stringify({ error: `技能列表获取异常: ${(e as Error).message}` });
         }
       },
     },
     skill: {
-      description: '调用已注册的AI技能执行专项任务。技能来源：内置(code_review/security_check) + ANS服务端插件技能 + .agents目录技能 + 记忆衍生技能(程序性记忆提炼、已批准)。可用技能清单用 list_skills 查询。',
+      description: '调用已注册的AI技能执行专项任务。技能来源：内置(code_review/security_check) + ANS服务端插件技能 + .agents目录技能 + 本项目经验技能 + 岗位技能；同名按 岗位 > 项目 > 全局。可用技能清单用 list_skills 查询。',
       parameters: jsonSchema({
         type: 'object' as const,
         properties: {
@@ -545,11 +566,22 @@ export function resourceTools(deps: ToolDeps) {
         required: ['name'],
       }),
       execute: async (args: { name: string; input?: string }) => {
-        // 从技能注册表执行（内置 + ANS + .agents 统一）
+        // zx_20261121_1 M2：解析顺序 岗位 > 项目 > 全局；命中哪层记哪层的真调用账。
         try {
-          const { executeSkill } = await import('../skill-registry.js');
+          const { executeSkillForTask } = await import('../skill-registry.js');
           await ensureSkillsLoaded();
-          return await executeSkill(args.name, args.input || '', { projectId, taskId, workingDir });
+          const pid = currentTaskPositionId(db, taskId, projectId);
+          const out = await executeSkillForTask(projectId, pid ?? undefined, args.name, args.input || '', { projectId, taskId, workingDir });
+          try {
+            if (out.scope === 'position' && pid) {
+              const { recordPositionSkillUse } = await import('../position-skills.js');
+              recordPositionSkillUse(db as never, { positionId: pid, name: args.name });
+            } else if (out.scope === 'project') {
+              const { recordProjectSkillUse } = await import('../project-skills.js');
+              recordProjectSkillUse(db as never, { projectId, name: args.name });
+            }
+          } catch { /* 记账失败不改变执行结果 */ }
+          return out.result;
         } catch {
           return JSON.stringify({ error: `技能执行异常: ${args.name}` });
         }

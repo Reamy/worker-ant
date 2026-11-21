@@ -54,6 +54,12 @@ export const POSITIONS_DDL = `
     promoted_to TEXT, promoted_at TEXT,
     -- 来源边界：local（本机任务沉淀）/ imported（岗位知识包导入，永不自动采纳）。
     origin TEXT NOT NULL DEFAULT 'local',
+    -- zx_20261120_3 M3「积·命」：生命周期四件套（适用条件 / 本机验证时刻 / 被替代 / 退役）。
+    applies_to TEXT NOT NULL DEFAULT '',
+    verified_at TEXT,
+    superseded_by TEXT,
+    retired_at TEXT,
+    retire_reason TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     decided_at TEXT, decided_by TEXT,
     UNIQUE(position_id, task_id)
@@ -64,6 +70,8 @@ export const POSITIONS_DDL = `
     id TEXT PRIMARY KEY, position_id TEXT NOT NULL, file_name TEXT NOT NULL DEFAULT '',
     mode TEXT NOT NULL, added_sections INTEGER NOT NULL DEFAULT 0,
     added_lessons INTEGER NOT NULL DEFAULT 0, skipped_lessons INTEGER NOT NULL DEFAULT 0,
+    -- zx_20261120_3 M4：包 v2 技能导入回执（一律落 draft）。
+    added_skills INTEGER NOT NULL DEFAULT 0, skipped_skills INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 `;
@@ -147,6 +155,10 @@ export const POSITION_PROMOTE_SUGGEST_MIN = 3;
 export const POSITION_LESSON_SCAN_MAX = 50;
 
 export const POSITION_LESSON_STATUSES = ['pending', 'accepted', 'rejected'] as const;
+/** zx_20261120_3 M3：经验时效四态（纯派生，不落库）。 */
+export type LessonFreshness = 'fresh' | 'aging' | 'stale' | 'unverified';
+export const LESSON_AGING_DAYS = 90;
+export const LESSON_STALE_DAYS = 180;
 export type PositionLessonStatus = (typeof POSITION_LESSON_STATUSES)[number];
 
 /**
@@ -156,7 +168,7 @@ export type PositionLessonStatus = (typeof POSITION_LESSON_STATUSES)[number];
  *   · `imported` 岗位知识包导入（一律 pending，人工采纳后才算数）；
  *   · `task_close` 旧库历史值，语义等同 summary（迁移已归一，保留标签防旧行显示空）。
  */
-export const POSITION_LESSON_SOURCES = ['retrospective', 'summary', 'imported', 'task_close'] as const;
+export const POSITION_LESSON_SOURCES = ['retrospective', 'summary', 'imported', 'task_close', 'project_knowledge'] as const;
 export type PositionLessonSource = (typeof POSITION_LESSON_SOURCES)[number];
 
 export const POSITION_LESSON_SOURCE_LABEL: Record<PositionLessonSource, string> = {
@@ -164,6 +176,7 @@ export const POSITION_LESSON_SOURCE_LABEL: Record<PositionLessonSource, string> 
   summary: '项目摘要',
   imported: '导入候选',
   task_close: '项目摘要',
+  project_knowledge: '项目知识',
 };
 export const POSITION_LESSON_DECISIONS = ['accepted', 'rejected'] as const;
 export type PositionLessonDecision = (typeof POSITION_LESSON_DECISIONS)[number];
@@ -259,6 +272,15 @@ export interface PositionLesson {
   promotedAt: string;
   /** 来源边界：`local` 本机沉淀 / `imported` 岗位知识包导入。 */
   origin: string;
+  /** zx_20261120_3 M3：适用条件/触发场景（空=未标注）。 */
+  appliesTo: string;
+  /** 本机证据时刻（本地候选=收口时刻；导入=NULL，待本机复验）。 */
+  verifiedAt: string;
+  /** 被哪条新经验替代（空=未替代；被替代不再注入/晋升）。 */
+  supersededBy: string;
+  /** 退役时刻与原因（空=未退役）。 */
+  retiredAt: string;
+  retireReason: string;
   createdAt: string;
   decidedAt: string;
   decidedBy: string;
@@ -273,6 +295,10 @@ export interface PositionLesson {
    * 这是"岗位以岗位为中心、跨项目复用"的直接证据（项目侧知识不外流，岗位经验可跨项目）。
    */
   crossProjectCount: number;
+  /** zx_20261120_3 M3：注入选择器现场标注的时效（不落库；非注入读面为 undefined）。 */
+  freshness?: LessonFreshness;
+  /** 最近一次 `outcome=completed` 的注入时刻（真源=注入账）。 */
+  lastUsedAt?: string;
 }
 
 export interface PositionProjectBinding {
@@ -302,6 +328,14 @@ export type PositionWriteResult =
 export interface PositionDb {
   prepare: Database.Database['prepare'];
   exec: Database.Database['exec'];
+}
+
+/** 只读库面（`{prepare}`）——派生/解析岗位只查不写；`AccountingDb` 等窄接口可直接传入。 */
+export interface PositionReadDb {
+  prepare(sql: string): {
+    get(...args: unknown[]): unknown;
+    all(...args: unknown[]): unknown;
+  };
 }
 
 /* ── 内置种子 ───────────────────────────────────────────────────────────── */
@@ -596,6 +630,11 @@ function rowToLesson(raw: Record<string, unknown>): PositionLesson {
     promotedTo,
     promotedAt: String(raw.promoted_at ?? ''),
     origin: String(raw.origin ?? 'local'),
+    appliesTo: String(raw.applies_to ?? ''),
+    verifiedAt: String(raw.verified_at ?? ''),
+    supersededBy: String(raw.superseded_by ?? ''),
+    retiredAt: String(raw.retired_at ?? ''),
+    retireReason: String(raw.retire_reason ?? ''),
     createdAt: String(raw.created_at ?? ''),
     decidedAt: String(raw.decided_at ?? ''),
     decidedBy: String(raw.decided_by ?? ''),
@@ -680,13 +719,13 @@ export function listPositions(db: PositionDb): PositionListRow[] {
   }));
 }
 
-export function getPosition(db: PositionDb, id: string): Position | null {
+export function getPosition(db: PositionReadDb, id: string): Position | null {
   if (!id) return null;
   const row = db.prepare('SELECT * FROM wa_positions WHERE id = ?').get(id) as Record<string, unknown> | undefined;
   return row ? rowToPosition(row) : null;
 }
 
-export function getPositionByName(db: PositionDb, name: string): Position | null {
+export function getPositionByName(db: PositionReadDb, name: string): Position | null {
   const n = name.trim();
   if (!n) return null;
   const row = db.prepare('SELECT * FROM wa_positions WHERE name = ?').get(n) as Record<string, unknown> | undefined;
@@ -865,7 +904,7 @@ export function setProjectPositionEnabled(db: PositionDb, projectId: string, pos
  * 复用 `listProjectEnabledPositions`（"能派给谁"的唯一读法）——不另写一份过滤 SQL。
  * 开关 `position.default_from_project` 由**调用方**判（缺省开）；本函数只回答"默认是谁"。
  */
-export function defaultPositionForProject(db: PositionDb, projectId: string): { id: string; name: string } | null {
+export function defaultPositionForProject(db: PositionReadDb, projectId: string): { id: string; name: string } | null {
   // zx_20261115_3 M4 收口修（真标本：8 个 IM/建单回归套件因夹具无岗位表而"创建任务失败"）：
   //   默认岗位是**加料**，不是建单的必要条件——表缺失/读失败一律当作"没有默认"（null），
   //   绝不把读不到的岗位表变成"这条任务建不出来"。判据仍只有"恰好一个"那一条。
@@ -879,7 +918,122 @@ export function defaultPositionForProject(db: PositionDb, projectId: string): { 
   }
 }
 
-export function listProjectEnabledPositions(db: PositionDb, projectId: string): Position[] {
+/* ── 建单岗位派生（zx_20261120_3 M1「职·全」） ───────────────────────────── */
+
+/**
+ * 岗位来源（任务详情/建单回执上屏的唯一词表）。
+ *   explicit       显式指派
+ *   parent         继承自父任务
+ *   project_default 项目默认（项目恰好一个启用岗位）
+ *   routine        岗位例行建单
+ *   remote         跨机派来的任务（用 `context_json.dispatch_position`，不写本机 position_id）
+ *   none           本单明确无岗位
+ *   legacy         旧任务未记录来源（不回溯猜）
+ */
+export const TASK_POSITION_SOURCES = ['explicit', 'parent', 'project_default', 'routine', 'remote', 'none', 'legacy'] as const;
+export type TaskPositionSource = (typeof TASK_POSITION_SOURCES)[number];
+export const TASK_POSITION_SOURCE_LABEL: Record<TaskPositionSource, string> = {
+  explicit: '显式指派',
+  parent: '继承自父任务',
+  project_default: '项目默认',
+  routine: '岗位例行',
+  remote: '跨机派单',
+  none: '未指派',
+  legacy: '未记录（旧任务）',
+};
+
+export interface DerivedTaskPosition {
+  positionId: string;
+  source: TaskPositionSource;
+  parentTaskId?: string;
+  /** 项目默认/父/显式命中的岗位名（回执用；读不到为空）。 */
+  positionName?: string;
+  /** 显式给了但不可用（停用/未绑定/已删）——调用方必须拒绝，不得静默落空。 */
+  invalidExplicit?: boolean;
+}
+
+export interface DeriveTaskPositionOpts {
+  projectId: string;
+  explicitPositionId?: string;
+  parentTaskId?: string;
+  /** 用户显式选了“不指派” ⇒ 不继承、不默认。 */
+  explicitNone?: boolean;
+  /** 由调用方按 `position.default_from_project` 开关决定；本函数不读设置。 */
+  allowProjectDefault?: boolean;
+}
+
+/**
+ * **所有建单路径的唯一派生**：显式 > 父继承 > 项目默认 > 无。
+ *
+ * 三条纪律：
+ *   ① 显式给了不可用岗位 ⇒ `invalidExplicit:true`，调用方**拒绝**（不降级成父/默认）；
+ *   ② 父岗位停用/项目未绑定 ⇒ **不继承**（落 none），不“带病继承”；
+ *   ③ 纯读（只查 `wa_tasks` / 岗位表）——不写库、不读设置、不依赖时钟。
+ */
+export function deriveTaskPosition(db: PositionReadDb, opts: DeriveTaskPositionOpts): DerivedTaskPosition {
+  const projectId = String(opts.projectId ?? '').trim();
+  const explicit = String(opts.explicitPositionId ?? '').trim();
+  if (explicit) {
+    const p = resolveTaskPosition(db, projectId, explicit);
+    return p
+      ? { positionId: p.id, source: 'explicit', positionName: p.name }
+      : { positionId: '', source: 'none', invalidExplicit: true };
+  }
+  if (opts.explicitNone) return { positionId: '', source: 'none' };
+  const parentId = String(opts.parentTaskId ?? '').trim();
+  if (parentId) {
+    try {
+      const row = db.prepare('SELECT position_id FROM wa_tasks WHERE id = ?').get(parentId) as { position_id?: unknown } | undefined;
+      const pid = String(row?.position_id ?? '').trim();
+      if (pid) {
+        const p = resolveTaskPosition(db, projectId, pid);
+        // 父岗位停用/项目解绑 ⇒ **不继承也不落默认**（落 none）——不把“父岗已失效”悄悄换成另一个岗。
+        return p
+          ? { positionId: p.id, source: 'parent', parentTaskId: parentId, positionName: p.name }
+          : { positionId: '', source: 'none' };
+      }
+    } catch { /* 父行读不到 ⇒ 按“父没岗位”走默认；读不到不等于父岗无效 */ }
+  }
+  if (opts.allowProjectDefault) {
+    const def = defaultPositionForProject(db, projectId);
+    if (def) return { positionId: def.id, source: 'project_default', positionName: def.name };
+  }
+  return { positionId: '', source: 'none' };
+}
+
+/** 派生结果 → `context_json` 的来源两键（只这两键，不碰兄弟键）。 */
+export function positionContextFields(d: DerivedTaskPosition): Record<string, unknown> {
+  return {
+    position_source: d.source,
+    ...(d.parentTaskId ? { position_inherited_from: d.parentTaskId } : {}),
+  };
+}
+
+/**
+ * 从任务上下文读来源（zx_20261120_3 M2「职·见」）——**不回溯猜**：
+ *   · 有 `position_source` 词表值 ⇒ 原值；
+ *   · 无键但有 `position_id` ⇒ `legacy`（旧任务未记录来源）；
+ *   · 无键、无本机岗位、有 `dispatch_position` ⇒ `remote`（跨机派来的）；
+ *   · 其余 ⇒ `legacy`。
+ */
+export function taskPositionSourceOf(
+  ctx: Record<string, unknown> | null | undefined,
+  hasPositionId: boolean,
+): { source: TaskPositionSource; parentTaskId?: string } {
+  const o = ctx && typeof ctx === 'object' && !Array.isArray(ctx) ? ctx : {};
+  const raw = String((o as Record<string, unknown>).position_source ?? '').trim();
+  if ((TASK_POSITION_SOURCES as readonly string[]).includes(raw)) {
+    const source = raw as TaskPositionSource;
+    const parent = String((o as Record<string, unknown>).position_inherited_from ?? '').trim();
+    return source === 'parent' && parent ? { source, parentTaskId: parent } : { source };
+  }
+  if (hasPositionId) return { source: 'legacy' };
+  const dispatch = (o as Record<string, unknown>).dispatch_position;
+  if (dispatch && typeof dispatch === 'object' && !Array.isArray(dispatch)) return { source: 'remote' };
+  return { source: 'legacy' };
+}
+
+export function listProjectEnabledPositions(db: PositionReadDb, projectId: string): Position[] {
   if (!projectId) return [];
   const rows = db
     .prepare(
@@ -936,7 +1090,13 @@ export interface PositionProfile {
   taskArchived: number;
   acceptancePassed: number;
   projectCount: number;
-  lessons: { total: number; pending: number; accepted: number; rejected: number; promoted: number };
+  lessons: {
+    total: number; pending: number; accepted: number; rejected: number; promoted: number;
+    /** zx_20261120_3 M3：退役/被替代/待复验/未验证（只统计已采纳可迁移的注入候选）。 */
+    retired: number; superseded: number; stale: number; unverified: number;
+  };
+  /** zx_20261120_3 M4/M6：可调用技能账（草案/已批准/已拒绝/使用次数）。 */
+  skills: { draft: number; approved: number; rejected: number; uses: number; lastUsedAt: string };
   injections: {
     available: boolean;
     reason: string;
@@ -950,7 +1110,7 @@ export interface PositionProfile {
   lastActive: string;
 }
 
-export function positionProfile(db: PositionDb, positionId: string): PositionProfile | null {
+export function positionProfile(db: PositionDb, positionId: string, opts: { now?: string } = {}): PositionProfile | null {
   const pid = String(positionId ?? '').trim();
   if (!pid) return null;
   const position = getPosition(db, pid);
@@ -982,7 +1142,9 @@ export function positionProfile(db: PositionDb, positionId: string): PositionPro
               COALESCE(SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END), 0) AS pending,
               COALESCE(SUM(CASE WHEN status = 'accepted' THEN 1 ELSE 0 END), 0) AS accepted,
               COALESCE(SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END), 0) AS rejected,
-              COALESCE(SUM(CASE WHEN promoted_to IS NOT NULL AND promoted_to <> '' THEN 1 ELSE 0 END), 0) AS promoted
+              COALESCE(SUM(CASE WHEN promoted_to IS NOT NULL AND promoted_to <> '' THEN 1 ELSE 0 END), 0) AS promoted,
+              COALESCE(SUM(CASE WHEN retired_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS retired,
+              COALESCE(SUM(CASE WHEN superseded_by IS NOT NULL AND superseded_by <> '' THEN 1 ELSE 0 END), 0) AS superseded
          FROM wa_position_lessons
         WHERE position_id = ?`,
     )
@@ -1023,6 +1185,41 @@ export function positionProfile(db: PositionDb, positionId: string): PositionPro
     };
   }
 
+  // zx_20261120_3 M3：时效计数只对「可进注入池」的经验（已采纳/可迁移/未退役/未替代）统计。
+  let stale = 0;
+  let unverified = 0;
+  try {
+    const nowIso = opts.now ?? new Date().toISOString();
+    const usage = lessonCompletedUseMap(db, pid);
+    const rows = db.prepare(
+      `SELECT * FROM wa_position_lessons
+        WHERE position_id = ? AND status = 'accepted' AND reusable = 1
+          AND retired_at IS NULL AND (superseded_by IS NULL OR superseded_by = '')`,
+    ).all(pid) as Array<Record<string, unknown>>;
+    for (const r of rows) {
+      const l = rowToLesson(r);
+      const f = lessonFreshness(l, usage.get(l.id), nowIso);
+      if (f === 'stale') stale++;
+      else if (f === 'unverified') unverified++;
+    }
+  } catch { /* 读不到按 0，不抛 */ }
+
+  // zx_20261120_3 M6：技能账（真源=wa_position_skills；表缺失/读不到按 0，不抛）。
+  const skills = { draft: 0, approved: 0, rejected: 0, uses: 0, lastUsedAt: '' };
+  try {
+    const rows = db.prepare(
+      `SELECT status, COUNT(*) AS n, COALESCE(SUM(use_count), 0) AS uses, COALESCE(MAX(last_used_at), '') AS last
+         FROM wa_position_skills WHERE position_id = ? GROUP BY status`,
+    ).all(pid) as Array<{ status?: unknown; n?: unknown; uses?: unknown; last?: unknown }>;
+    for (const r of rows) {
+      const s = String(r.status ?? '');
+      if (s === 'draft' || s === 'approved' || s === 'rejected') skills[s] += Number(r.n) || 0;
+      skills.uses += Number(r.uses) || 0;
+      const last = String(r.last ?? '');
+      if (last > skills.lastUsedAt) skills.lastUsedAt = last;
+    }
+  } catch { /* 旧库无表 ⇒ 全 0 */ }
+
   const projects = listPositionProjects(db, pid).filter((p) => !p.archived && p.enabled);
   return {
     positionId: pid,
@@ -1039,7 +1236,12 @@ export function positionProfile(db: PositionDb, positionId: string): PositionPro
       accepted: Number(lesson?.accepted) || 0,
       rejected: Number(lesson?.rejected) || 0,
       promoted: Number(lesson?.promoted) || 0,
+      retired: Number(lesson?.retired) || 0,
+      superseded: Number(lesson?.superseded) || 0,
+      stale,
+      unverified,
     },
+    skills,
     injections,
     lastActive: String(task?.last_active ?? ''),
   };
@@ -1108,6 +1310,10 @@ export function insertPositionLessonCandidate(
     source?: string;
     reusable?: boolean;
     origin?: 'local' | 'imported';
+    /** zx_20261120_3 M3：适用条件（导入/桥接可带；空=未标注）。 */
+    appliesTo?: string;
+    /** zx_20261120_3 M5：显式覆盖验证时刻（项目知识桥接传 null = 未在本机任务验证）。 */
+    verifiedAt?: string | null;
   },
 ): boolean {
   const positionId = String(input.positionId ?? '').trim();
@@ -1115,16 +1321,24 @@ export function insertPositionLessonCandidate(
   const content = String(input.content ?? '').trim().slice(0, POSITION_LESSON_MAX);
   if (!positionId || !taskId || !content) return false;
   const id = `les_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  const origin = input.origin === 'imported' ? 'imported' : 'local';
+  // zx_20261120_3 M3：本地候选在收口时已有本机证据（验收通过），记 verified_at；
+  //   导入经验**未在本机验证**，留 NULL，待人工 verify。
+  const verifiedAt = input.verifiedAt !== undefined
+    ? input.verifiedAt
+    : (origin === 'local' ? new Date().toISOString() : null);
   try {
     const r = db.prepare(
       `INSERT OR IGNORE INTO wa_position_lessons
-         (id, position_id, task_id, project_id, content, status, source, reusable, origin)
-       VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+         (id, position_id, task_id, project_id, content, status, source, reusable, origin, verified_at, applies_to)
+       VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
     ).run(
       id, positionId, taskId, String(input.projectId ?? ''), content,
       String(input.source ?? 'summary'),
       input.reusable ? 1 : 0,
-      input.origin === 'imported' ? 'imported' : 'local',
+      origin,
+      verifiedAt,
+      String(input.appliesTo ?? '').trim().slice(0, 200),
     );
     return r.changes > 0;
   } catch (e) {
@@ -1254,6 +1468,8 @@ export function promotePositionLesson(
   const lesson = rowToLesson(row);
   if (lesson.status !== 'accepted') return { ok: false, code: 'NOT_ACCEPTED', message: '只有已采纳的经验才能晋升' };
   if (!lesson.reusable) return { ok: false, code: 'NOT_REUSABLE', message: '这条经验不可迁移（项目摘要或复盘判定不可复用），不能晋升为岗位规范' };
+  if (lesson.retiredAt) return { ok: false, code: 'RETIRED', message: '这条经验已退役——先「撤销退役」再晋升' };
+  if (lesson.supersededBy) return { ok: false, code: 'SUPERSEDED', message: '这条经验已被新经验替代——先「撤销替代」再晋升' };
   if (lesson.promotedTo) {
     return { ok: false, code: 'ALREADY_PROMOTED', message: `这条经验已晋升到「${POSITION_PROMOTE_TARGET_LABEL[lesson.promotedTo as PositionLessonPromoteTarget] ?? lesson.promotedTo}」` };
   }
@@ -1344,11 +1560,142 @@ export function listAcceptedLessons(db: PositionDb, positionId: string, limit = 
  * 这个只回答"哪些有资格进岗位块"——`accepted ∧ reusable=1 ∧ 未晋升`。
  * 项目摘要（reusable=0）与不可复用复盘**永远不被选中**：岗位不是项目流水账。
  */
+/* ── 经验生命周期（zx_20261120_3 M3「积·命」） ─────────────────────────── */
+
+export type LessonLifecycleResult =
+  | { ok: true }
+  | { ok: false; code: 'NOT_FOUND' | 'BAD_INPUT' | 'BAD_STATE' | 'INTERNAL'; message: string };
+
+/**
+ * 时效四态（纯函数，`nowIso` 注入，不读墙钟）：
+ *   证据时刻 = max(verified_at, 最近一次 completed 注入时刻)；
+ *   ≥180 天 stale、≥90 天 aging；verified_at 空 unverified；其余 fresh。
+ */
+export function lessonFreshness(
+  lesson: Pick<PositionLesson, 'verifiedAt'>,
+  lastCompletedUseAt: string | null | undefined,
+  nowIso: string,
+): LessonFreshness {
+  const verified = Date.parse(String(lesson.verifiedAt ?? ''));
+  if (!Number.isFinite(verified)) return 'unverified';
+  const used = lastCompletedUseAt ? Date.parse(lastCompletedUseAt) : NaN;
+  const evidence = Number.isFinite(used) ? Math.max(verified, used) : verified;
+  const now = Date.parse(String(nowIso ?? ''));
+  if (!Number.isFinite(now)) return 'unverified';
+  const days = (now - evidence) / 86_400_000;
+  if (days >= LESSON_STALE_DAYS) return 'stale';
+  if (days >= LESSON_AGING_DAYS) return 'aging';
+  return 'fresh';
+}
+
+/** 每条经验最近一次「注入且结局完成」的时刻（真源=注入账 `lesson:<id>`；不另立计数器）。 */
+export function lessonCompletedUseMap(db: PositionDb, positionId: string): Map<string, string> {
+  const out = new Map<string, string>();
+  try {
+    const rows = db.prepare(
+      `SELECT substr(ci.ref_id, 8) AS lid, MAX(ci.updated_at) AS at
+         FROM wa_context_injections ci
+         JOIN wa_position_lessons l ON l.id = substr(ci.ref_id, 8)
+        WHERE ci.source = 'position' AND ci.ref_id LIKE 'lesson:%' AND ci.outcome = 'completed'
+          AND l.position_id = ?
+        GROUP BY ci.ref_id`,
+    ).all(positionId) as Array<{ lid?: unknown; at?: unknown }>;
+    for (const r of rows) {
+      const id = String(r.lid ?? '').trim();
+      const at = String(r.at ?? '').trim();
+      if (id && at) out.set(id, at);
+    }
+  } catch { /* 注入账缺表/缺列 ⇒ 空（时效退化为只看 verified_at，不抛） */ }
+  return out;
+}
+
+function lifecycleLesson(db: PositionDb, id: string): PositionLesson | null {
+  const row = db.prepare('SELECT * FROM wa_position_lessons WHERE id = ?').get(String(id ?? '').trim()) as Record<string, unknown> | undefined;
+  return row ? rowToLesson(row) : null;
+}
+
+export function setLessonApplies(db: PositionDb, lessonId: string, appliesTo: string): LessonLifecycleResult {
+  const text = String(appliesTo ?? '').trim();
+  if (text.length > 200) return { ok: false, code: 'BAD_INPUT', message: `适用条件最多 200 字（当前 ${text.length}）` };
+  if (!lifecycleLesson(db, lessonId)) return { ok: false, code: 'NOT_FOUND', message: '经验不存在（可能已删除）' };
+  try {
+    db.prepare('UPDATE wa_position_lessons SET applies_to = ? WHERE id = ?').run(text, String(lessonId).trim());
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, code: 'INTERNAL', message: (e as Error)?.message || String(e) };
+  }
+}
+
+export function verifyLesson(db: PositionDb, lessonId: string, nowIso = new Date().toISOString()): LessonLifecycleResult {
+  if (!lifecycleLesson(db, lessonId)) return { ok: false, code: 'NOT_FOUND', message: '经验不存在（可能已删除）' };
+  try {
+    db.prepare('UPDATE wa_position_lessons SET verified_at = ? WHERE id = ?').run(nowIso, String(lessonId).trim());
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, code: 'INTERNAL', message: (e as Error)?.message || String(e) };
+  }
+}
+
+export function retireLesson(db: PositionDb, lessonId: string, reason: string, nowIso = new Date().toISOString()): LessonLifecycleResult {
+  const why = String(reason ?? '').trim();
+  if (why.length > 200) return { ok: false, code: 'BAD_INPUT', message: `退役原因最多 200 字（当前 ${why.length}）` };
+  if (!lifecycleLesson(db, lessonId)) return { ok: false, code: 'NOT_FOUND', message: '经验不存在（可能已删除）' };
+  try {
+    db.prepare('UPDATE wa_position_lessons SET retired_at = ?, retire_reason = ? WHERE id = ?')
+      .run(nowIso, why, String(lessonId).trim());
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, code: 'INTERNAL', message: (e as Error)?.message || String(e) };
+  }
+}
+
+export function unretireLesson(db: PositionDb, lessonId: string): LessonLifecycleResult {
+  if (!lifecycleLesson(db, lessonId)) return { ok: false, code: 'NOT_FOUND', message: '经验不存在（可能已删除）' };
+  try {
+    db.prepare("UPDATE wa_position_lessons SET retired_at = NULL, retire_reason = '' WHERE id = ?").run(String(lessonId).trim());
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, code: 'INTERNAL', message: (e as Error)?.message || String(e) };
+  }
+}
+
+/** `oldId` 被 `byId` 替代：同岗位、by 已采纳且未退役/未替代；被替代者不再注入/晋升。 */
+export function supersedeLesson(db: PositionDb, oldId: string, byId: string): LessonLifecycleResult {
+  const oldL = lifecycleLesson(db, oldId);
+  const byL = lifecycleLesson(db, byId);
+  if (!oldL || !byL) return { ok: false, code: 'NOT_FOUND', message: '经验不存在（可能已删除）' };
+  if (oldL.id === byL.id) return { ok: false, code: 'BAD_INPUT', message: '不能用自己替代自己' };
+  if (oldL.positionId !== byL.positionId) return { ok: false, code: 'BAD_INPUT', message: '只能在同一岗位内替代' };
+  if (oldL.status !== 'accepted' || byL.status !== 'accepted') {
+    return { ok: false, code: 'BAD_STATE', message: '只有已采纳的经验才能标记替代' };
+  }
+  if (byL.retiredAt || byL.supersededBy) {
+    return { ok: false, code: 'BAD_STATE', message: '替代者已退役/已被替代，不能再承担替代' };
+  }
+  try {
+    db.prepare('UPDATE wa_position_lessons SET superseded_by = ? WHERE id = ?').run(byL.id, oldL.id);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, code: 'INTERNAL', message: (e as Error)?.message || String(e) };
+  }
+}
+
+export function unsupersedeLesson(db: PositionDb, lessonId: string): LessonLifecycleResult {
+  if (!lifecycleLesson(db, lessonId)) return { ok: false, code: 'NOT_FOUND', message: '经验不存在（可能已删除）' };
+  try {
+    db.prepare('UPDATE wa_position_lessons SET superseded_by = NULL WHERE id = ?').run(String(lessonId).trim());
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, code: 'INTERNAL', message: (e as Error)?.message || String(e) };
+  }
+}
+
 export function selectPositionLessonsForInjection(
   db: PositionDb,
   positionId: string,
   limit = POSITION_BLOCK_ITEMS,
   query = '',
+  nowIso = new Date().toISOString(),
 ): PositionLesson[] {
   const pid = String(positionId ?? '').trim();
   if (!pid) return [];
@@ -1360,15 +1707,25 @@ export function selectPositionLessonsForInjection(
       `SELECT * FROM wa_position_lessons
         WHERE position_id = ? AND status = 'accepted' AND reusable = 1
           AND (promoted_to IS NULL OR promoted_to = '')
+          AND retired_at IS NULL
+          AND (superseded_by IS NULL OR superseded_by = '')
         ORDER BY COALESCE(decided_at, created_at) DESC
         LIMIT ?`,
     )
     .all(pid, scan) as Array<Record<string, unknown>>;
-  const lessons = rows.map(rowToLesson);
+  const usage = lessonCompletedUseMap(db, pid);
+  const lessons = rows.map((r) => {
+    const l = rowToLesson(r);
+    const lastUsedAt = usage.get(l.id);
+    return { ...l, ...(lastUsedAt ? { lastUsedAt } : {}), freshness: lessonFreshness(l, lastUsedAt, nowIso) };
+  });
   if (!text) return lessons;
-  // 有文本 ⇒ 按词面相关性稳定排序（同分保持"最近在前"），再截取 `limit`。
+  // 有文本 ⇒ 词面相关性为主；`stale/unverified` 减 0.1（不静默丢弃，只是排在后面）。
   const scored = lessons
-    .map((l, i) => ({ l, i, s: lessonRelevance(l.content, text) }))
+    .map((l, i) => ({
+      l, i,
+      s: lessonRelevance(l.content, text) - ((l.freshness === 'stale' || l.freshness === 'unverified') ? 0.1 : 0),
+    }))
     .sort((a, b) => b.s - a.s || a.i - b.i)
     .slice(0, limit)
     .map((x) => x.l);
@@ -1460,7 +1817,7 @@ function stableHash(text: string): string {
   return h.toString(16).padStart(8, '0');
 }
 
-type BlockLesson = Pick<PositionLesson, 'content' | 'status'> & { id?: string };
+type BlockLesson = Pick<PositionLesson, 'content' | 'status'> & { id?: string; freshness?: LessonFreshness };
 
 /**
  * 岗位注入块的**条目级**版本（≤1200 字）。优先级：说明 > 规范 > 技能 > 知识 > 经验（各最多 3 条）。
@@ -1471,6 +1828,7 @@ export function positionBlockDetail(
   position: BlockSource,
   lessons: ReadonlyArray<BlockLesson> = [],
   maxChars = POSITION_BLOCK_MAX,
+  availableSkills: readonly string[] = [],
 ): PositionBlockDetail {
   const name = String(position.name ?? '').trim();
   if (!name) return { text: '', items: [] };
@@ -1508,7 +1866,9 @@ export function positionBlockDetail(
     {
       label: '经验', kind: 'lesson', joiner: '；',
       items: accepted.map((l) => {
-        const text = String(l.content).trim();
+        // zx_20261120_3 M3：旧了/未在本机验证的，注入时**明说**（不静默丢，也不冒充新鲜）。
+        const prefix = l.freshness === 'stale' ? '[待复验] ' : l.freshness === 'unverified' ? '[未验证] ' : '';
+        const text = `${prefix}${String(l.content).trim()}`;
         return { text, refId: `lesson:${l.id ?? stableHash(text)}` };
       }),
     },
@@ -1532,6 +1892,11 @@ export function positionBlockDetail(
         preview: item.text.slice(0, 80),
       });
     }
+  }
+  // zx_20261120_3 M4：可调用技能只列**名字**（步骤在 skill 工具里按需取，不预占上下文）。
+  if (availableSkills.length > 0) {
+    const line = `可调用技能（用 skill 工具）：${availableSkills.slice(0, 10).join('、')}`;
+    if (used + 1 + line.length <= maxChars) lines.push(line);
   }
   return { text: lines.join('\n'), items };
 }
@@ -1641,7 +2006,7 @@ export function scorePositionsForTask(
  * 建单/派活时的**可指派**判据：岗位存在且启用 ∧ 项目已绑定且启用。
  * 返回 `null` = 不可指派；调用点据此**拒绝建单**，不静默降级成"未指派"（那会让用户以为派上了）。
  */
-export function resolveTaskPosition(db: PositionDb, projectId: string, positionId: string): Position | null {
+export function resolveTaskPosition(db: PositionReadDb, projectId: string, positionId: string): Position | null {
   const proj = String(projectId ?? '').trim();
   const pid = String(positionId ?? '').trim();
   if (!proj || !pid) return null;
@@ -1693,7 +2058,15 @@ export function applyTaskPositionChange(db: PositionDb, taskId: string, position
   }
   if (wanted === current) return { ok: true, changed: false, from: current, to: wanted, projectId };
   try {
-    db.prepare('UPDATE wa_tasks SET position_id = ? WHERE id = ?').run(wanted, id);
+    // zx_20261120_3 M2：改派即**显式**——来源改 explicit，并清掉继承来的父 id（读改写，保留兄弟键）。
+    //   坏 JSON 不覆盖（宁可来源不更新，也不抹掉附件/目标/方案）。
+    db.prepare(
+      `UPDATE wa_tasks SET position_id = ?,
+         context_json = CASE WHEN json_valid(COALESCE(context_json,'{}'))
+           THEN json_remove(json_set(COALESCE(context_json,'{}'), '$.position_source', ?), '$.position_inherited_from')
+           ELSE context_json END
+       WHERE id = ?`,
+    ).run(wanted, wanted ? 'explicit' : 'none', id);
   } catch (e) {
     return { ok: false, code: 'NOT_FOUND', message: `岗位写入失败：${(e as Error)?.message || String(e)}` };
   }

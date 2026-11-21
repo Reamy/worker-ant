@@ -34,7 +34,9 @@ export type TierCapacityField =
   | 'maxTeamLibraryMemories'
   | 'maxIMChannels'
   | 'maxTaskTemplates'
-  | 'maxCloudAccounts';
+  | 'maxCloudAccounts'
+  | 'maxCustomPositions'
+  | 'maxPositionRoutines';
 
 /** 各维度的人话名（拒因文案唯一词表，不散在调用点）。 */
 export const CAPACITY_LABEL: Record<TierCapacityField, string> = {
@@ -46,6 +48,8 @@ export const CAPACITY_LABEL: Record<TierCapacityField, string> = {
   maxIMChannels: 'IM 渠道',
   maxTaskTemplates: '任务模板',
   maxCloudAccounts: '设备云账号',
+  maxCustomPositions: '自建岗位',
+  maxPositionRoutines: '岗位例行',
 };
 
 /** 读容量用的最小库接口（同 `SeatDb` 形：可脱 better-sqlite3 被 rr 直跑）。 */
@@ -189,4 +193,17 @@ export function countTaskTemplates(db: CapacityDb): number {
     db,
     "SELECT COUNT(*) AS c FROM wa_task_templates WHERE COALESCE(source, '') IN ('user', 'team_library')",
   );
+}
+
+/**
+ * zx_20261120_3 M7「传·档」：**自建岗位**数（只数 `builtin=0`）。
+ * ⚠ 内置 13 岗不占用户额度——它们随包预置，不由用户新增。
+ */
+export function countCustomPositions(db: CapacityDb): number {
+  return countOf(db, 'SELECT COUNT(*) AS c FROM wa_positions WHERE COALESCE(builtin, 0) = 0');
+}
+
+/** 岗位例行数（`wa_position_routines` 全量；停用仍占位，删行才释放）。 */
+export function countPositionRoutines(db: CapacityDb): number {
+  return countOf(db, 'SELECT COUNT(*) AS c FROM wa_position_routines');
 }

@@ -8,17 +8,25 @@ import fs from "node:fs";
 import path from "node:path";
 import { isPlanOrImplTask } from "./task-accounting.js";
 import { deliverableScopeSql, docNotProbe, markTaskVerifiedVia } from "./deliverable-lifecycle.js";
-import { proposeAcceptanceCriteria, recordProposedCheck, recordAcceptanceOutcome, decideAcceptanceOutcome, parseAcceptanceChecks, enforceEvidenceBoundChecks, splitCriteriaLines, summarizeAcceptanceFailures, type AcceptanceOutcome, type AcceptanceCheckPayload, type ProposedCriteria } from "./acceptance-check.js";
+import { proposeAcceptanceCriteria, recordProposedCheck, recordAcceptanceOutcome, decideAcceptanceOutcome, parseAcceptanceChecks, enforceEvidenceBoundChecks, splitCriteriaLines, summarizeAcceptanceFailures, type AcceptanceOutcome, type AcceptanceCheckPayload, type EvidenceCommandIndex, type ProposedCriteria } from "./acceptance-check.js";
 import { addSideTokens, usageTokensOf, logger, type AgentContext } from "./agent-executor.js";
 import { collectEvidence, renderEvidence } from "./exec-evidence.js";
 import { renderOwnedRepoEvidence } from "./task-file-ledger.js";
 import { evidenceIdOf } from "./runtime-evidence.js";
+// zx_20261117_1 M4「忆」：验收失败记忆解除（零依赖模块，rr 可直跑）。
+import { resolveAcceptanceFailureMemory } from "./acceptance-memory.js";
 import { createSafeProvider } from "./ai-provider.js";
 import { auxModelRequest } from "./model-request.js";
 import { criteriaPathRefs, collectPathBases, resolveCriteriaPaths } from "./acceptance-paths.js";
+// zx_20261119_2 M4「径」：项目根找不到时，去一层子仓按后缀再认一次（有界）。
+import { collectRepoBoundary } from "./repo-boundary.js";
+import { resolveTaskWorkingDir } from "./exec-task-dir.js";
+import { findPathCandidates } from "./path-candidates.js";
 import { loadStoredSnapshot } from "./world-snapshot.js";
 import { loadProjectBrief, renderProjectBriefForJudge } from "./project-brief.js";
 import { recordPitfallCandidate } from "./knowledge-cards.js";
+// zx_20261118_2 M5「豁」：用户逐条豁免（GUI 写口落 context_json，引擎只读）。
+import { readAcceptanceWaivers } from "./acceptance-waiver.js";
 
 /**
  * Phase A (2026-08-26) 慎终如始：LLM 逐条核对验收标准。
@@ -46,16 +54,28 @@ export function proposeAcceptanceForTask(db: Database.Database, taskId: string):
     ).all(taskId) as Array<{ name: string; type: string; status: string; file_path: string | null }>;
     // zx_20261022_1 批三：相对路径字面量按**本项目工作目录**解析（不再按进程 cwd、也不只剩在册行一条路）。
     //   读不到 working_dir ⇒ 不注入 ⇒ 代拟②照旧如实记"相对路径无法解析"，不猜。
+    // zx_20261120_1 M4：一处解析（远程只读任务按其 clone 工作区；本地任务逐字不变）。
     let workingDir = '';
-    try {
-      const p = db.prepare('SELECT working_dir FROM wa_projects WHERE id = (SELECT project_id FROM wa_tasks WHERE id = ?)')
-        .get(taskId) as { working_dir?: string | null } | undefined;
-      workingDir = String(p?.working_dir ?? '').trim();
-    } catch { /* 读不到项目行 ⇒ 只少这一条解析基准，不阻断代拟 */ }
+    try { workingDir = resolveTaskWorkingDir(db, taskId).dir; } catch { /* 读不到 ⇒ 只少这一条解析基准，不阻断代拟 */ }
+    // zx_20261119_2 M4：项目根不是仓、子目录才是仓时（怡寿里 `/代码`），相对路径要能在子仓里认出来。
+    //   候选根 = 自身仓根（若是）+ 一层子仓；只在项目根那条解析失败时才被 `proposeAcceptanceCriteria` 调用。
+    let candidateRoots: Array<{ root: string; label: string }> = [];
+    if (workingDir) {
+      try {
+        const b = collectRepoBoundary(workingDir);
+        candidateRoots = [
+          ...(b.selfIsRepo ? [{ root: workingDir, label: '' }] : []),
+          ...b.repos.map((name) => ({ root: path.join(workingDir, name), label: name })),
+        ];
+      } catch { /* 探测失败 ⇒ 不注入候选（行为退回旧口径） */ }
+    }
     const proposed = proposeAcceptanceCriteria({
       title: t.title, description: t.description, deliverables,
       pathExists: (p) => fs.existsSync(p),
       resolveRelative: workingDir ? (p) => (path.isAbsolute(p) ? p : path.join(workingDir, p)) : undefined,
+      resolveRelativeCandidates: candidateRoots.length > 0
+        ? (p) => findPathCandidates(candidateRoots, p)
+        : undefined,
     });
     return proposed.proposed.length > 0 ? proposed : null;
   } catch {
@@ -138,7 +158,8 @@ export async function checkAcceptanceCriteria(
          FROM wa_tasks t LEFT JOIN wa_projects p ON p.id = t.project_id
         WHERE t.id = ?`,
     ).get(taskId) as { project_id?: string | null; working_dir?: string | null } | undefined;
-    const workingDir = String(prow?.working_dir ?? '').trim();
+    // zx_20261120_1 M4：同上，一处解析；远程只读任务的判据路径按 clone 工作区解析。
+    const workingDir = resolveTaskWorkingDir(db, taskId).dir || String(prow?.working_dir ?? '').trim();
     const projectId = String(prow?.project_id ?? '');
     const refs = criteriaPathRefs(criteria);
     if (workingDir && refs.length > 0) {
@@ -208,6 +229,8 @@ export async function checkAcceptanceCriteria(
   let text: string | null = null;
   /** 本任务运行证据的可引用集（元素 `run:<id>`）；取证失败为空集 ⇒ 运行类判据一律降级（fail-closed） */
   let evidenceIndex: ReadonlySet<string> = new Set();
+  /** zx_20261117_1 M3「证」：命令索引——区分"执行 run"与 grep run；tree 供父任务引用直接子任务证据。 */
+  let commandIndex: EvidenceCommandIndex | undefined;
   try {
     // zx_20260917 M4（§6.1/6.2）: 取数与渲染收口到 `collectEvidence`/`renderEvidence`——
     //   从前这里**自己**以 `task_id = 本任务` 为界问四处（`convs`/`deliverables`/`docFiles`/`validationSummary`），
@@ -215,6 +238,10 @@ export async function checkAcceptanceCriteria(
     //   两处改动：产出物两路改走**整棵树**；渲染仍是这一段（提示词形状逐字节不变）。
     const bundle = collectEvidence(db, taskId);
     evidenceIndex = new Set(bundle.runtimeEvidence.map(evidenceIdOf));
+    commandIndex = {
+      own: new Map(bundle.runtimeEvidence.map((r) => [evidenceIdOf(r), { tool: r.tool, command: r.command ?? '' }])),
+      tree: new Map((bundle.childRuntimeEvidence ?? []).map((r) => [evidenceIdOf(r), { tool: r.tool, command: r.command ?? '' }])),
+    };
     const evidenceBase = renderEvidence(
       bundle,
       (p) => { try { return fs.existsSync(p) ? fs.readFileSync(p, 'utf-8') : null; } catch { return null; } },
@@ -246,7 +273,7 @@ export async function checkAcceptanceCriteria(
         //   同名旧版文档也读进来，遂对着已废止的方案判新交付（`f79b1abb` 假阴性）：旧地图判新路。
         // zx_20261105_1 M1（王阳明·知行合一）：每条判据须附 `evidence_refs`；运行类判据
         //   只有引用本任务账上的 `run:<id>` 才算数——没跑过的"重启不报错"不成立。
-        prompt: `以下是工蚁系统一个任务的验收标准与已完成工作内容。请逐条判断验收标准是否已达成。\n\n验收标准：\n${criteria}\n\n已完成工作：\n${evidence || '（无产出记录）'}\n\n只按下所列文件与记录判卷；未列出的旧版本不是本轮交付，不得据其判定未达成。\n\n每条判据须附 evidence_refs（数组），元素取自证据串中的 run:<id>、文件路径或会话行；没有证据的条目一律 passed:false。`
+        prompt: `以下是工蚁系统一个任务的验收标准与已完成工作内容。请逐条判断验收标准是否已达成。\n\n验收标准：\n${criteria}\n\n已完成工作：\n${evidence || '（无产出记录）'}\n\n只按下所列文件与记录判卷；未列出的旧版本不是本轮交付，不得据其判定未达成。\n\n若判据是「只读/不改源码」，只以本 run 的写工具记录为准；证据串 [run 起点基线] 中已存在的未跟踪/已修改文件不得算作本 run 违反只读；没有 [run 起点基线] 时按“无法区分历史与本次”，对只读类判据只认同批写工具记录，不拿 git status 的未跟踪文件定罪。\n\n若证据串含 [子任务异常账] 或 [覆盖链]，总体结论必须逐条点名并说明是否接受；未点名的总体结论不得判通过。\n\n每条判据须附 evidence_refs（数组），元素取自证据串中的 run:<id>、文件路径或会话行；没有证据的条目一律 passed:false。`
           // zx_20261109_1 G10：有 ready 须知时才追加；空串 ⇒ 提示词逐字节不变。
           + (projectHintBlock
             ? `\n\n${projectHintBlock}\n\n判据引用的路径若在仓库中不存在，须判 passed:false 或说明无法核实，不得因"框架通常如此"判通过。`
@@ -267,10 +294,18 @@ export async function checkAcceptanceCriteria(
   // zx_20261105_1 M1：先解析、再**按证据强制降级**，最后才定夺——"模型说通过"不是结论，
   //   "模型说通过且引用了本任务真跑过的 run:<id>"才是。解析失败/空数组分别落 no_json/empty_checks。
   const parsed = kind === 'ok' ? parseAcceptanceChecks(text || '') : null;
-  const enforced = parsed ? enforceEvidenceBoundChecks(parsed, evidenceIndex) : null;
+  const enforced = parsed ? enforceEvidenceBoundChecks(parsed, evidenceIndex, commandIndex) : null;
   // zx_20261109_1 B5：带上**输入判据的有序行**——模型缺 `criterion` 时按它回填；条数对不上则如实落
   //   `criteria_echo_missing`（unjudged），不再出现 `5/5 + passed:[]` 这种计数与明细打架的账。
-  const decided = decideAcceptanceOutcome({ kind, text, checks: enforced, criteriaOrder: splitCriteriaLines(criteria) });
+  // zx_20261118_2 M5：读用户已写下的逐条豁免（GUI 写口）。脏 ctx / 无键 ⇒ 空数组，
+  //   `decideAcceptanceOutcome` 的 `failed` 过滤与这里同尺——豁免只影响"要不要拒收"，
+  //   不改模型判过的 `passed_total`。
+  let waivers: ReturnType<typeof readAcceptanceWaivers> = [];
+  try {
+    const wrow = db.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get(taskId) as { context_json?: string } | undefined;
+    waivers = readAcceptanceWaivers(JSON.parse(wrow?.context_json || '{}') as Record<string, unknown>);
+  } catch { /* 脏 ctx ⇒ 无豁免，不阻断判卷 */ }
+  const decided = decideAcceptanceOutcome({ kind, text, checks: enforced, criteriaOrder: splitCriteriaLines(criteria), waivers });
   // 四出口归一：无模型/未吐 JSON/异常/真通过**都**在这里落一笔（此前只有真通过才落库 ⇒ 台账恒 0）
   // zx_20260923_1 M1: 返回值是**账上生效的那一笔**——若本条是"非结论"而账上已有真结论，
   //   守卫会保留旧账（`maySupersedeLedger`），此时 `payload.verified === true` 表明"我这笔没落上"。
@@ -317,6 +352,21 @@ export async function checkAcceptanceCriteria(
         }
       }
     } catch { /* 验收失败记忆 best-effort */ }
+  }
+
+  // zx_20261117_1 M4「忆」：**本轮真通过**才解除旧警——用 `decided.outcome.ran && passed`，
+  //   不用 `payload.verified` 单条件（那可能是账本守卫保留的旧结论，不是本轮判成的）。
+  if (decided.outcome.ran && decided.outcome.passed && payload.verified === true
+      && (payload.criteria_total ?? 0) > 0 && (payload.passed_total ?? 0) >= (payload.criteria_total ?? 0)) {
+    try {
+      if (ctx.memory) {
+        const taskRow = db.prepare('SELECT project_id, title FROM wa_tasks WHERE id = ?').get(taskId) as { project_id: string; title: string } | undefined;
+        if (taskRow?.project_id && taskRow.title) {
+          const resolved = resolveAcceptanceFailureMemory(db, ctx.memory, taskRow.project_id, taskRow.title, taskId);
+          if (resolved) logger.info({ taskId: taskId.slice(0, 8) }, '验收通过——本项目验收失败记忆已标 [已解除]');
+        }
+      }
+    } catch { /* 解除旧警 best-effort，不阻断收口 */ }
   }
   return { outcome: decided.outcome, block, payload };
 }

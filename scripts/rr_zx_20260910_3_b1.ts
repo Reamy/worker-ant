@@ -256,7 +256,20 @@ ok((dlc.match(/isAcceptanceVerified\(/g) || []).length === 1
 ok(!/if \(ac && typeof ac === 'object' && ac\.checked_at\)/.test(pip), '旧的"只认 checked_at"读法已移除');
 // project.ipc 是只读消费方：acceptance_check 一律只读（写路径唯一在 recordAcceptanceOutcome），
 // 故此处无回填 SQL、也无需 verified:false 排除——若将来在此新增写/回填，本条会失败以提醒补排除条件。
-ok(!/acceptance_check\s*=/.test(pip), 'project.ipc 对 acceptance_check 只读（无写/回填 ⇒ 无需排除条件；若新增写点本条报警）');
+// zx_20261118_2 M5「豁」：project.ipc 新增了**用户豁免**写口（`task:waiveAcceptance`），
+//   这是唯一允许的写点。断言随之钉得更强：不是"全文只读"，而是"写点恰 1 处 ∧ 只在豁免写口内
+//   ∧ 只改 failed/waived_total 且保留兄弟键"——任何第二处整份覆写仍会被这条抓住。
+{
+  const waiveWriteSites = (pip.match(/acceptance_check\s*=/g) || []).length;
+  ok(waiveWriteSites === 1, 'project.ipc 对 acceptance_check 的写点恰 1 处（仅 M5 用户豁免写口；其余路径仍只读）');
+  const wStart = pip.indexOf("ipcMain.handle('task:waiveAcceptance'");
+  const wEnd = pip.indexOf("ipcMain.handle('tasks:children'", wStart);
+  const wBody = wStart >= 0 && wEnd > wStart ? pip.slice(wStart, wEnd) : '';
+  ok(wBody.includes('acceptance_check =') && wBody.includes('...(acc as Record<string, unknown>)') && wBody.includes('waived_total: waivedTotal'),
+    'project.ipc 的写点只改 failed/waived_total 且保留兄弟键（不是整份覆写）');
+  ok(!/ctx\.acceptance_check\s*=/.test(pip.slice(0, wStart)) && !/ctx\.acceptance_check\s*=/.test(pip.slice(wEnd)),
+    'task:updateStatus 等其余路径仍不写 acceptance_check');
+}
 ok((dlc.match(/context_json LIKE '%checked_at%'/g) || []).length === 1, '回填 SQL 全树唯一（deliverable-lifecycle 单点，勿再散落第二处）');
 ok(dlc.includes("NOT LIKE '%\"verified\":false%'"), 'deliverable-lifecycle 回填 SQL 追加 verified:false 排除');
 // zx_20260914 M2-3③: 打标与打标前置判定**共用同一个解析处**（此前 markDocAcceptanceVerified 自行 parse + 自判，是第三份手抄）

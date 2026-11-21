@@ -25,6 +25,9 @@ import {
   type CloudAccountView,
   type CloudAccountProviderId,
   type DevicesListPayload,
+  type DeviceRule,
+  type RulePreview,
+  type RuleRunRow,
 } from '../lib/ipc';
 import { useLiveQuery } from '../lib/useLiveQuery';
 // zx_20261029_2 M2：布尔 setting 判据取 main 侧**零依赖**真源（settings-bool 不引 electron/sqlite），
@@ -407,6 +410,7 @@ function DeviceRow({ dev, onChanged, locked, selected, onToggleSelect }: {
  *   · `task`     ⇒ 任务「标题」· 项目「名」（`taskRefs` 读时现查；查无 ⇒ 回退 id 前缀）
  *   · `external` ⇒ 外部终端「名」（`terminalRefs` 读时现查；查无 ⇒ 回退 id 前缀）
  *   · `panel`    ⇒ 面板手动（本地按钮，无外部引用）
+ *   · `rule`     ⇒ 本机联动规则（`actor_ref` = 规则 id）
  *   · `''`       ⇒ **整段不渲染**（本轮之前的历史行没有身份列——"认不出"就不假装认得出；
  *                    `database.ts` 已按**事实**把 `task_id != ''` 的旧行回填成 `task`：那时只有任务路带 id）
  * ⚠ 与设备列**同一把尺**：存 id、名字读时现查（名字会变，快照即失真）；查无即如实回退 8 位前缀。
@@ -423,6 +427,9 @@ function SourceChip({ a, taskRef, terminalName }: { a: DeviceActionRow; taskRef?
           : <span className="font-mono truncate max-w-[8rem]" title={`终端已不在库：${a.actor_ref}`}>外部终端 {a.actor_ref.slice(0, 8)}</span>}
       </span>
     );
+  }
+  if (a.actor_kind === 'rule') {
+    return <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 shrink-0" title={`规则 id：${a.actor_ref}`}>联动规则</span>;
   }
   if (a.actor_kind === 'task') {
     return (
@@ -1187,6 +1194,176 @@ function IntentSceneBlock({ devices, locked }: { devices: AnsDevice[]; locked: b
   );
 }
 
+/** zx_20261121_2 M6：设备联动规则（本机用户资产；Team `device_control` 闸）。 */
+function DeviceRulesSection({ devices, locked }: { devices: AnsDevice[]; locked: boolean }) {
+  const [rules, setRules] = useState<DeviceRule[]>([]);
+  const [runs, setRuns] = useState<RuleRunRow[]>([]);
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState('');
+  const [kind, setKind] = useState<'device_state' | 'time'>('device_state');
+  const [triggerId, setTriggerId] = useState(devices[0]?.id ?? '');
+  const [attrKey, setAttrKey] = useState('state');
+  const [op, setOp] = useState<'eq' | 'ne' | 'gt' | 'lt' | 'contains'>('eq');
+  const [value, setValue] = useState('');
+  const [at, setAt] = useState('08:00');
+  const [days, setDays] = useState('');
+  const [actionId, setActionId] = useState(devices.find(d => d.authorized && d.controllable)?.id ?? devices[0]?.id ?? '');
+  const [action, setAction] = useState('');
+  const [cooldown, setCooldown] = useState('60');
+  const [preview, setPreview] = useState<RulePreview | null>(null);
+
+  const load = useCallback(async () => {
+    try { const d = await devicesApi.rulesList(); setRules(d.rules); setRuns(d.runs); setErr(''); }
+    catch (e) { setErr((e as Error)?.message || String(e)); }
+  }, []);
+  useEffect(() => { void load(); }, [load]);
+
+  const actionDev = devices.find(d => d.id === actionId);
+  const actionOptions = actionDev?.capabilities ?? [];
+  const deviceName = (id: string) => devices.find(d => d.id === id)?.name || id.slice(0, 8);
+
+  function ruleInput(): Record<string, unknown> {
+    return {
+      name: name.trim() || '未命名规则',
+      trigger: kind === 'time'
+        ? { type: 'time', at, ...(days.trim() ? { days: days.split(/[，,]/).map(s => Number(s.trim())).filter(n => Number.isInteger(n) && n >= 0 && n <= 6) } : {}) }
+        : { type: 'device_state', deviceId: triggerId, key: attrKey || 'state', op, value },
+      action: { type: 'device', deviceId: actionId, action: action.trim() },
+      cooldownSec: Number(cooldown) || 60,
+    };
+  }
+
+  async function create(): Promise<void> {
+    setBusy(true); setErr('');
+    try { await devicesApi.ruleCreate(ruleInput()); await load(); setOpen(false); setName(''); setValue(''); }
+    catch (e) { setErr((e as Error)?.message || String(e)); }
+    finally { setBusy(false); }
+  }
+  async function test(): Promise<void> {
+    setBusy(true); setErr(''); setPreview(null);
+    try { const r = await devicesApi.rulePreview({ input: ruleInput() }); setPreview(r.preview); }
+    catch (e) { setErr((e as Error)?.message || String(e)); }
+    finally { setBusy(false); }
+  }
+  async function toggle(r: DeviceRule): Promise<void> {
+    try { await devicesApi.ruleToggle(r.id, !r.enabled); await load(); }
+    catch (e) { setErr((e as Error)?.message || String(e)); }
+  }
+  async function remove(r: DeviceRule): Promise<void> {
+    if (!confirm(`删除联动规则「${r.name}」？`)) return;
+    try { await devicesApi.ruleDelete(r.id); await load(); }
+    catch (e) { setErr((e as Error)?.message || String(e)); }
+  }
+
+  const triggerText = (r: DeviceRule) => r.trigger.type === 'time'
+    ? `每天 ${r.trigger.at}${r.trigger.days?.length ? `（周${r.trigger.days.join('/')}）` : ''}`
+    : `${deviceName(r.trigger.deviceId)} ${r.trigger.key || 'state'} ${r.trigger.op} ${r.trigger.value}`;
+
+  return (
+    <div className="bg-white rounded-lg border p-4">
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="font-semibold flex items-center gap-2"><Router className="w-4 h-4 text-emerald-600"/>联动规则 <span className="text-xs font-normal text-gray-400">（{rules.filter(r => r.enabled).length}/{rules.length} 启用）</span></h3>
+        <button type="button" onClick={() => setOpen(v => !v)} disabled={locked} className="text-xs px-2 py-1 rounded bg-emerald-50 text-emerald-700 hover:bg-emerald-100 disabled:opacity-50">{open ? '收起' : '新建规则'}</button>
+      </div>
+      <p className="text-[11px] text-gray-400 mb-2">状态/属性变化或每天定时 → 控制一台设备。动作仍走设备控制闸（未授权/高危/离线会被拒并留痕）；冷却内不重复执行。</p>
+      {locked && <p className="text-[11px] text-amber-700 mb-2">团队版能力：升级后可启用联动规则。</p>}
+      {err && <p className="text-[11px] text-red-600 mb-2">{err}</p>}
+
+      {open && !locked && (
+        <div className="mb-3 rounded border border-emerald-200 bg-emerald-50/40 p-2.5 space-y-1.5 text-[11px]">
+          <div className="flex items-center gap-2"><label className="w-12 text-gray-500">名称</label><input value={name} onChange={e => setName(e.target.value)} placeholder="如：热了开空调" className="flex-1 border rounded px-1.5 py-0.5" /></div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <label className="w-12 text-gray-500">触发</label>
+            <label className="inline-flex items-center gap-1"><input type="radio" checked={kind === 'device_state'} onChange={() => setKind('device_state')} />设备状态</label>
+            <label className="inline-flex items-center gap-1"><input type="radio" checked={kind === 'time'} onChange={() => setKind('time')} />每天时刻</label>
+          </div>
+          {kind === 'device_state' ? (
+            <div className="flex items-center gap-2 flex-wrap">
+              <select value={triggerId} onChange={e => setTriggerId(e.target.value)} className="border rounded px-1.5 py-0.5">
+                {devices.map(d => <option key={d.id} value={d.id}>{d.name}{d.room ? `（${d.room}）` : ''}</option>)}
+              </select>
+              <input value={attrKey} onChange={e => setAttrKey(e.target.value)} placeholder="state 或属性名" className="w-28 border rounded px-1.5 py-0.5" />
+              <select value={op} onChange={e => setOp(e.target.value as typeof op)} className="border rounded px-1.5 py-0.5">
+                <option value="eq">=</option><option value="ne">≠</option><option value="gt">&gt;</option><option value="lt">&lt;</option><option value="contains">包含</option>
+              </select>
+              <input value={value} onChange={e => setValue(e.target.value)} placeholder="值" className="w-24 border rounded px-1.5 py-0.5" />
+            </div>
+          ) : (
+            <div className="flex items-center gap-2 flex-wrap">
+              <input type="time" value={at} onChange={e => setAt(e.target.value)} className="border rounded px-1.5 py-0.5" />
+              <input value={days} onChange={e => setDays(e.target.value)} placeholder="星期 0=周日，逗号分隔（空=每天）" className="w-56 border rounded px-1.5 py-0.5" />
+            </div>
+          )}
+          <div className="flex items-center gap-2 flex-wrap">
+            <label className="w-12 text-gray-500">动作</label>
+            <select value={actionId} onChange={e => { setActionId(e.target.value); setAction(''); }} className="border rounded px-1.5 py-0.5">
+              {devices.map(d => <option key={d.id} value={d.id}>{d.name}{d.room ? `（${d.room}）` : ''}{d.authorized ? '' : ' · 未授权'}</option>)}
+            </select>
+            {actionOptions.length > 0 ? (
+              <select value={action} onChange={e => setAction(e.target.value)} className="border rounded px-1.5 py-0.5">
+                <option value="">选择动作</option>
+                {actionOptions.map(a => <option key={a} value={a}>{a}</option>)}
+              </select>
+            ) : (
+              <input value={action} onChange={e => setAction(e.target.value)} placeholder="动作名（设备未自述能力）" className="w-40 border rounded px-1.5 py-0.5" />
+            )}
+            <label className="text-gray-500">冷却</label>
+            <input value={cooldown} onChange={e => setCooldown(e.target.value)} className="w-16 border rounded px-1.5 py-0.5" />秒
+          </div>
+          {preview && (
+            <p className={`rounded px-2 py-1 ${preview.wouldRun ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}`}>
+              试运行：{preview.wouldRun ? '会触发' : '不会触发'} — {preview.reason}
+              {preview.wouldRun && preview.deviceName ? `；目标「${preview.deviceName}」 ${preview.action}（${preview.verdict}）` : ''}
+            </p>
+          )}
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={() => void test()} disabled={busy} className="px-2.5 py-0.5 border rounded text-gray-700 hover:bg-white disabled:opacity-50">试运行（不写库）</button>
+            <button type="button" onClick={() => void create()} disabled={busy || !actionId || !action.trim()} className="px-2.5 py-0.5 bg-emerald-600 text-white rounded hover:bg-emerald-700 disabled:opacity-50">{busy ? '保存中…' : '保存规则'}</button>
+            <button type="button" onClick={() => { setOpen(false); setPreview(null); }} className="px-2.5 py-0.5 border rounded text-gray-600 hover:bg-white">取消</button>
+          </div>
+        </div>
+      )}
+
+      {rules.length === 0 ? (
+        <p className="text-xs text-gray-400 py-1">{locked ? '升级后可建规则。' : '暂无联动规则——点「新建规则」写第一条。'}</p>
+      ) : (
+        <div className="space-y-1.5">
+          {rules.map(r => (
+            <div key={r.id} className="rounded border bg-gray-50 px-2.5 py-1.5 flex items-center gap-2 flex-wrap text-[11px]">
+              <label className="inline-flex items-center gap-1">
+                <input type="checkbox" checked={r.enabled} onChange={() => void toggle(r)} disabled={locked} />
+                <span className="font-medium text-gray-800">{r.name}</span>
+              </label>
+              <span className="text-gray-500">当 {triggerText(r)}</span>
+              <span className="text-gray-500">→ {deviceName(r.action.deviceId)} {r.action.action}</span>
+              <span className="text-gray-400">冷却 {r.cooldownSec}s</span>
+              <span className="text-gray-400 ml-auto">{r.lastRunAt ? `上次 ${formatDbTime(r.lastRunAt)}` : '未运行'}</span>
+              <button type="button" onClick={() => void remove(r)} disabled={locked} className="text-red-500 hover:underline disabled:opacity-50">删除</button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {runs.length > 0 && (
+        <div className="mt-2 pt-2 border-t border-gray-100">
+          <p className="text-[10px] text-gray-400 mb-1">最近运行</p>
+          <div className="space-y-0.5 max-h-32 overflow-y-auto">
+            {runs.slice(0, 12).map(run => (
+              <div key={run.id} className="flex items-center gap-2 text-[10px]">
+                <span className={`px-1 rounded ${run.result === 'ok' ? 'bg-emerald-50 text-emerald-700' : run.result === 'skipped' ? 'bg-gray-100 text-gray-500' : 'bg-red-50 text-red-600'}`}>{run.result}</span>
+                <span className="text-gray-500">{String(run.detail.reason || '')}</span>
+                <span className="text-gray-400 ml-auto">{formatDbTime(run.createdAt)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function DevicesPage() {
   // liveTypes 是**刷新触发**，不是数据源：两类设备事件都只让本页重新读台账（数据仍只有本地库一个来源）。
   const q = useLiveQuery<DevicesListPayload>(async () => devicesApi.list(), [], {
@@ -1648,6 +1825,8 @@ export default function DevicesPage() {
           </div>
 
           <IntentSceneBlock devices={devices} locked={locked} />
+
+          <DeviceRulesSection devices={devices} locked={locked} />
         </div>
       </details>
 

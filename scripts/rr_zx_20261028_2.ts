@@ -225,8 +225,9 @@ console.log('\n【B】M2：task:list 不搬整份 context_json');
   eq(Object.keys(digest).sort(), ['assigned_at', 'assigned_node_id', 'assigned_request_id', 'awaiting_input',
     'bottleneck_score', 'budget_max_tokens', 'completion_quality', 'completion_summary', 'dynamic_priority',
     'pause_reason', 'pending_approval', 'reason', 'remote_attempts', 'remote_category', 'remote_result_at',
-    'strategy_source', 'tokens_used', 'verification_fix', 'verification_fix_of'],
-  'B-2e 摘录恰含渲染层实际用到的 19 个键（逐项枚举，不用总数冒充；zx_20261106_3 增远端进度与改派账七键）');
+    'steps_ledger', 'strategy_source', 'tokens_used', 'tool_denials', 'verification_fix', 'verification_fix_of',
+    'verification_fix_of_title'],
+  'B-2e 摘录恰含渲染层实际用到的 22 个键（逐项枚举，不用总数冒充；zx_20261106_3 增远端进度与改派账七键；zx_20261119_2 增修复来源标题与工具拒绝/步数账）');
   eq([digest.dynamic_priority, digest.tokens_used, digest.reason, digest.awaiting_input], [7, 1234, 'abandoned_by_user', 1],
     'B-2f 摘录逐值与 ctx 一致（缩放/类型不是另说一套）');
   eq([digest.verification_fix, digest.verification_fix_of], [1, 'task-origin'],

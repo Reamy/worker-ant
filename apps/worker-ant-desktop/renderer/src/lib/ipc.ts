@@ -10,6 +10,9 @@ import type { SimplificationReport } from '../../../src/main/core/simplification
 import type { HealingRecord } from '../../../src/main/core/self-healing-monitor.js';
 // zx_20261002 M11: 调用账聚合的返回形状同法取 main 侧真源（`service-call-ledger.ts`），不手抄。
 import type { ServiceCallReport } from '../../../src/main/core/service-call-ledger.js';
+// zx_20261121_1 M5：项目经验账返回形状取 main 侧真源（`project-experience.ts`），仅类型引用。
+import type { ProjectExperience } from '../../../src/main/core/project-experience.js';
+export type { ProjectExperience };
 // zx_20261016_3 批四（M34）：自产提案的形状与**决策词表**同取自 main 侧真源（`core/self-evolve.ts`，
 //   该模块刻意做成零运行期 import 正是为了 renderer 能引它的值——见其头注释）。手抄一份会漂的镜像不行。
 import { PROPOSAL_DECISIONS, type SelfEvolveProposal, type ProposalDecision } from '../../../src/main/core/self-evolve.js';
@@ -18,6 +21,9 @@ import type { AnsNode, NodePatch } from '../../../../../packages/shared-types/sr
 // zx_20261004 M9/M10: 设备台账与控制结果的返回形状取 main 侧**零依赖语义模块**真源（`device-registry.ts`），
 //   不手抄镜像（手抄的形状会随真源漂移而悄悄变错）。仅类型引用，打包期整条擦除。
 import type { AnsDevice, DeviceActionRow, DeviceControlOutcome, DeviceShadow, TaskRef } from '../../../src/main/core/device-registry.js';
+// zx_20261121_2 M6：联动规则/运行账/试运行形状取 main 零 LLM 真源（仅类型引用）。
+import type { DeviceRule, RulePreview, RuleRunRow } from '../../../src/main/core/device-automation.js';
+export type { DeviceRule, RulePreview, RuleRunRow };
 // zx_20261018_1 批五: 意图演练的计划形状同取 main 侧真源（步骤/略过件——不另写一份）。
 import type { IntentSkip, IntentStep } from '../../../src/main/core/intent-plans.js';
 // zx_20261013_1 批五: MQTT 配置上屏形状取自 main 侧零依赖适配层真源 `device-mqtt.ts`（仅类型，打包期擦除）。
@@ -94,6 +100,9 @@ import type { ExternalCallRow } from '../../../src/main/core/external-calls.js';
 // zx_20261106_3 B7：A2A 地址发现的待接入项形状取 main 侧真源（`agent-discovery.ts`），仅类型引用。
 import type { DiscoveredAgent } from '../../../src/main/core/agent-discovery.js';
 import type { DiscoveryPairResult, DiscoveryPendingPayload, ExternalListPayload, InboundStatusPayload, LanPendingPayload, TerminalBrowseStatusPayload } from '../../../src/main/ipc/external.ipc.js';
+// zx_20261121_2 M3：授权边界形状取 main 纯模块真源（仅类型引用）。
+import type { TerminalGrant } from '../../../src/main/core/external-grant.js';
+export type { TerminalGrant };
 // zx_20261017_1 批二: 审计行的形状取 main 侧词表真源（仅类型，打包期擦除）。
 import type { AuditEventRow, AuditSource } from '../../../src/main/core/audit-labels.js';
 // zx_20261017_1 批六: 团队共享库的条目形状与候选形状取共享真源/main core（仅类型，打包期擦除）。
@@ -275,6 +284,13 @@ export const projects = {
 
   knowledgePanorama: (id: string) => ipcCall<Record<string, unknown>>('project:knowledgePanorama', { id }),
 
+  // zx_20261121_1 M5：项目经验账（只读；每次现算，UI 刷新即重算）
+  experience: (id: string) => ipcCall<{ experience: ProjectExperience }>('project:experience', { id }),
+
+  // zx_20261121_1 M7：采纳预算——只写项目 context_json.budget.max_tokens_per_task 一个键。
+  experienceAdoptBudget: (id: string, maxTokens: number) =>
+    ipcCall<{ previous: number | null; next: number }>('project:experienceAdoptBudget', { id, maxTokens }),
+
   // zx_20260908 M2(B1): 项目「成果交付单」凝练聚合（done里程碑→落地任务 / 已验收doc·主要成果 / 高质任务）
   // zx_20260908_1 B1: 可选 window('30'/'7'=近N天/'all') 按窗口归口(primary 为累计位)
   deliveryDigest: (id: string, window?: string) =>
@@ -397,6 +413,7 @@ export const packs = {
 // ===== 岗位（zx_20261112_1 B1）=====
 // 形状取 main 侧真源 `core/positions.ts`（仅类型，打包期擦除）；渲染层不手抄第二份。
 export type { Position, PositionListRow, PositionDetail, PositionLesson, PositionProfile, PositionProjectBinding } from '../../../src/main/core/positions.js';
+export type { PositionSkill, PositionSkillStatus } from '../../../src/main/core/position-skill-meta.js';
 import type {
   Position,
   PositionDetail,
@@ -407,6 +424,7 @@ import type {
   PositionProjectBinding,
   ProjectPositionBoardRow,
 } from '../../../src/main/core/positions.js';
+import type { PositionSkill } from '../../../src/main/core/position-skill-meta.js';
 
 export interface PositionWriteBody {
   name: string;
@@ -424,6 +442,45 @@ export interface PositionWriteBody {
   participate?: boolean;
   enabled?: boolean;
 }
+
+// zx_20261120_1 M9：运维概览——形状取 main 侧真源（仅类型，打包期擦除）。
+export type { OpsOverview } from '../../../src/main/core/ops-overview.js';
+import type { OpsOverview } from '../../../src/main/core/ops-overview.js';
+
+export const ops = {
+  overview: () => ipcCall<OpsOverview>('ops:overview'),
+};
+
+// zx_20261120_1 M3：岗位例行——形状取 main 侧真源（仅类型，打包期擦除）。
+export type { RoutineListRow, RoutineSuggestion, RoutineBoard } from '../../../src/main/core/position-routines.js';
+import type { RoutineListRow, RoutineSuggestion, RoutineBoard } from '../../../src/main/core/position-routines.js';
+
+export interface RoutineWriteBody {
+  position_id?: string;
+  project_id?: string;
+  name?: string;
+  cron?: string;
+  timezone?: string;
+  title?: string;
+  description?: string;
+  acceptance_criteria?: string;
+  priority?: number;
+  enabled?: boolean;
+}
+
+export const positionRoutines = {
+  list: (filter?: { positionId?: string; projectId?: string; enabledOnly?: boolean }) =>
+    ipcCall<{ routines: RoutineListRow[] }>('positionRoutine:list', filter ?? {}),
+  create: (body: RoutineWriteBody) => ipcCall<{ id: string }>('positionRoutine:create', body),
+  update: (id: string, body: RoutineWriteBody) => ipcCall<{ id: string }>('positionRoutine:update', { id, ...body }),
+  remove: (id: string) => ipcCall<{ deleted: boolean }>('positionRoutine:delete', { id }),
+  runNow: (id: string) =>
+    ipcCall<{ ok: boolean; taskId: string; runId: string; skipped: string | null; reason: string }>('positionRoutine:runNow', { id }),
+  suggestions: (positionId: string, projectId: string, days?: number) =>
+    ipcCall<{ suggestions: RoutineSuggestion[] }>('positionRoutine:suggestions', { positionId, projectId, days }),
+  board: (positionId: string, projectId?: string, days?: number) =>
+    ipcCall<RoutineBoard>('positionRoutine:board', { positionId, projectId, days }),
+};
 
 export const positions = {
   list: () => ipcCall<{ positions: PositionListRow[] }>('positions:list'),
@@ -455,6 +512,22 @@ export const positions = {
   // zx_20261113_2 M17：编辑经验（缩短后再晋升）。
   updateLesson: (id: string, content: string) =>
     ipcCall<{ lesson: PositionLesson }>('positions:updateLesson', { id, content }),
+  // zx_20261120_3 M3：经验生命周期（适用条件/复验/退役/替代）。
+  lessonLifecycle: (input: { id: string; action: 'applies' | 'verify' | 'retire' | 'unretire' | 'supersede' | 'unsupersede'; appliesTo?: string; reason?: string; byId?: string }) =>
+    ipcCall<{ ok: boolean }>('positions:lessonLifecycle', input),
+  // zx_20261120_3 M5：项目知识 → 岗位候选（只落 pending）。
+  captureProjectKnowledge: (input: { projectId: string; positionId: string; section: string; content: string; sourceRef?: string }) =>
+    ipcCall<{ ok: boolean; created: boolean; lessonId: string }>('positions:captureProjectKnowledge', input),
+  // zx_20261120_3 M4/M6：可调用岗位技能。
+  skills: (positionId: string, status?: 'draft' | 'approved' | 'rejected') =>
+    ipcCall<{ skills: PositionSkill[] }>('positions:skills', { positionId, status }),
+  skillCreate: (input: { positionId: string; name: string; description?: string; steps: string[]; sourceLessonId?: string }) =>
+    ipcCall<{ skill: PositionSkill }>('positions:skillCreate', input),
+  skillDecide: (id: string, decision: 'approved' | 'rejected') =>
+    ipcCall<{ skill: PositionSkill }>('positions:skillDecide', { id, decision }),
+  // zx_20261120_3 M8：岗位注入预演（只读，与执行期同一构造）。
+  injectPreview: (positionId: string, query: string) =>
+    ipcCall<{ text: string; items: Array<{ kind: string; refId: string; chars: number; preview: string }>; chars: number }>('positions:injectPreview', { positionId, query }),
   // zx_20261113_1 B4「晋」: 已采纳的可迁移经验晋升到岗位四段之一 / 撤回。
   promoteLesson: (id: string, target: PositionLessonPromoteTarget) =>
     ipcCall<{ position: Position; lesson: PositionLesson }>('positions:promoteLesson', { id, target }),
@@ -552,6 +625,11 @@ export const tasks = {
 
   updateStatus: (id: string, status: string) =>
     ipcCall<{ id: string; status: string }>('task:updateStatus', { id, status }),
+
+  // zx_20261118_2 M5「豁」：用户逐条豁免验收（GUI 用户裁定；agent 工具无此路）。
+  //   只写豁免账与完成凭据，不自动改状态——是否收口仍由用户点「标记完成」。
+  waiveAcceptance: (id: string, criteria: string[], reason: string) =>
+    ipcCall<{ id: string; waived: string[]; waivedTotal: number; at: string }>('task:waiveAcceptance', { id, criteria, reason }),
 
   // zx_20261012_2 批二: 归档（放弃）——独立动作（弃 ≠ 败）。main 侧走唯一写手 `archiveTask`。
   archive: (id: string, reason?: string) =>
@@ -708,8 +786,8 @@ export const admin = {
       proposals: SelfEvolveProposal[];
     }>('admin:diagnostics'),
 
-  repairInvariant: (name: string) =>
-    ipcCall<{ name: string; repaired: number; detail: string }>('admin:repairInvariant', { name }),
+  repairInvariant: (name: string, ids?: string[]) =>
+    ipcCall<{ name: string; repaired: number; detail: string }>('admin:repairInvariant', { name, ids }),
 
   // zx_20261016_3 批四（M34）：自产提案的**人工闸**（approve / reject / rollback）。
   //   ⚠ 只此一途——引擎侧**没有**任何定时/自动应用路径（红线：绝不自动改源码）。
@@ -720,19 +798,44 @@ export const admin = {
   selfEvolveDecisions: PROPOSAL_DECISIONS,
 };
 
-// ===== Skill (记忆衍生技能草稿审批) =====
+// ===== Skill (记忆衍生技能草稿审批 + 项目归属) =====
+export interface SkillDraftRow {
+  id: string;
+  name: string;
+  description: string;
+  steps: string[];
+  projectId?: string;
+  projectName?: string;
+}
+
+export interface LocalSkillRow {
+  id: string;
+  name: string;
+  description?: string;
+  category?: string;
+  status?: string;
+  created_at?: string;
+  project_id?: string;
+  project_name?: string;
+  scope?: 'global' | 'project';
+}
+
 export const skills = {
   listDrafts: (projectId?: string) =>
-    ipcCall<{ drafts: Array<{ id: string; name: string; description: string; steps: string[] }> }>('skills:listDrafts', { projectId }),
+    ipcCall<{ drafts: SkillDraftRow[] }>('skills:listDrafts', { projectId }),
 
   approve: (draftId: string) =>
-    ipcCall<{ name: string }>('skills:approve', { draftId }),
+    ipcCall<{ name: string; scope?: 'project'; projectId?: string }>('skills:approve', { draftId }),
 
   reject: (draftId: string) =>
     ipcCall<{ rejected: boolean }>('skills:reject', { draftId }),
 
   list: () =>
-    ipcCall<{ skills: Array<Record<string, unknown>> }>('skills:list'),
+    ipcCall<{ skills: LocalSkillRow[] }>('skills:list'),
+
+  /** zx_20261121_1 M3：显式把已批准的项目技能提升为全局（冲突即拒）。 */
+  promote: (id: string) =>
+    ipcCall<{ skill: LocalSkillRow }>('skills:promote', { id }),
 };
 
 // ===== Task Template (B1: 任务模板管理) =====
@@ -804,6 +907,10 @@ export const deliverables = {
 
   update: (id: string, name?: string, description?: string) =>
     ipcCall<Record<string, unknown>>('deliverable:update', { id, name, description }),
+
+  // zx_20261119_1 M5「名」：退休（一次性的探针/临时件不再冒充成果）。理由必填；已退休再点是幂等。
+  retire: (id: string, reason: string) =>
+    ipcCall<{ id: string; status: string; changed: boolean }>('deliverable:retire', { id, reason }),
 
   runtime: (id: string) => ipcCall<Record<string, unknown>>('deliverable:runtime', id),
 
@@ -995,8 +1102,10 @@ export const external = {
    */
   list: () => ipcCall<ExternalListPayload>('external:list'),
   /** 点同意：铸发凭据（库只存 hash）+ 记被允许的能力。**不回**明文（罗尔斯·无知之幕）。 */
-  approve: (pairingId: string, capabilities?: string[]) => ipcCall<{ ok: true }>('external:approve', { pairingId, capabilities }),
+  approve: (pairingId: string, capabilities?: string[], grant?: TerminalGrant) => ipcCall<{ ok: true }>('external:approve', { pairingId, capabilities, grant }),
   reject: (pairingId: string) => ipcCall<{ ok: true }>('external:reject', { pairingId }),
+  /** zx_20261121_2 M3：改已授权终端的设备范围/频率/联动许可。 */
+  grantUpdate: (terminalId: string, grant: TerminalGrant) => ipcCall<{ ok: true }>('external:grantUpdate', { terminalId, grant }),
   /** 吊销一台已批准终端（其凭据**立即**失效）。 */
   revoke: (terminalId: string) => ipcCall<{ ok: true }>('external:revoke', { terminalId }),
   /**
@@ -1231,6 +1340,14 @@ export const devices = {
   channelAuth: (channelId: string) => ipcCall<DeviceChannelAuthPayload>('devices:channel_auth', { channelId }),
   miioToken: (address: string, token?: string) =>
     ipcCall<MiioTokenState>('devices:miio_token', token === undefined ? { address } : { address, token }),
+  // zx_20261121_2 M6：设备联动规则（Team `device_control` 闸；试运行零写入）。
+  rulesList: () => ipcCall<{ rules: DeviceRule[]; runs: RuleRunRow[] }>('devices:rulesList'),
+  ruleCreate: (input: unknown) => ipcCall<{ rule: DeviceRule }>('devices:ruleCreate', { input }),
+  ruleUpdate: (id: string, input: unknown) => ipcCall<{ rule: DeviceRule }>('devices:ruleUpdate', { id, input }),
+  ruleDelete: (id: string) => ipcCall<{ deleted: boolean }>('devices:ruleDelete', { id }),
+  ruleToggle: (id: string, enabled: boolean) => ipcCall<{ enabled: boolean }>('devices:ruleToggle', { id, enabled }),
+  rulePreview: (input: { id?: string; input?: unknown }) => ipcCall<{ preview: RulePreview }>('devices:rulePreview', input),
+  ruleRuns: (ruleId?: string, limit?: number) => ipcCall<{ runs: RuleRunRow[] }>('devices:ruleRuns', { ruleId, limit }),
 };
 
 // ===== License（许可与激活，zx_20261005 M8）=====

@@ -9,7 +9,7 @@
  *
  * 加/删一个导览项 = 在 `NAV_GROUPS` 里加/删 `tour` 字段一处；两处自动同源，不会分家。
  */
-import { LayoutDashboard, FolderKanban, MessageSquare, Settings, Cpu, Users, Package, Wand2, Server, Globe, Puzzle, Brain, Key, Box, User, Briefcase, LayoutTemplate, History, Network, Router, ScrollText, Library, Inbox } from 'lucide-react';
+import { LayoutDashboard, FolderKanban, MessageSquare, Settings, Cpu, Users, Package, Wand2, Server, Globe, Puzzle, Brain, Key, Box, User, Briefcase, LayoutTemplate, History, Network, Router, ScrollText, Library, Inbox, Activity } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
 export interface NavItem {
@@ -68,7 +68,9 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     label: '运维管理',
     items: [
-      { to: '/', icon: LayoutDashboard, label: '运维看板' },
+      { to: '/', icon: LayoutDashboard, label: '总览' },
+      // zx_20261120_1 M9：独立运维页——调度/在途/锁/DB/IM/cron/ANS/磁盘一页看清（只读）。
+      { to: '/ops', icon: Activity, label: '运维' },
       { to: '/activity', icon: History, label: '活动' },
       { to: '/api-keys', icon: Key, label: 'API Keys' },
       { to: '/preferences', icon: User, label: '用户偏好' },

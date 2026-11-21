@@ -147,7 +147,7 @@ export function memoryTools(deps: ToolDeps) {
         if (!ctx.memory) return JSON.stringify({ error: '记忆管理器不可用' });
         const drafts = ctx.memory.listSkillDrafts(projectId, 20);
         if (drafts.length === 0) return '暂无待审批的技能草案';
-        return drafts.map((d, i) => `${i + 1}. [${d.name}] ${d.description}\n${d.steps.map(s => `   - ${s}`).join('\n')}`).join('\n');
+        return drafts.map((d, i) => `${i + 1}. [${d.name}] ${d.description}${d.projectName ? `（项目：${d.projectName}）` : ''}\n${d.steps.map(s => `   - ${s}`).join('\n')}`).join('\n');
       },
     },
     propose_skill: {
@@ -165,8 +165,12 @@ export function memoryTools(deps: ToolDeps) {
         if (!ctx.memory) return JSON.stringify({ error: '记忆管理器不可用' });
         const steps = args.steps.split('\n').map(s => s.trim()).filter(s => s.length > 0);
         if (steps.length === 0) return JSON.stringify({ error: '步骤不能为空' });
-        const id = ctx.memory.storeSkillDraft(projectId, { name: args.name, description: args.description, steps });
-        return JSON.stringify({ draftId: id, status: 'draft', note: '技能草案已登记，待用户批准后生效' });
+        try {
+          const id = ctx.memory.storeSkillDraft(projectId, { name: args.name, description: args.description, steps });
+          return JSON.stringify({ draftId: id, status: 'draft', note: '技能草案已登记到本项目，待用户批准后在本项目内生效' });
+        } catch (e) {
+          return JSON.stringify({ error: (e as Error).message, hint: '技能名/步骤不合规或同名草案已存在；换一个名字或先到「技能」页处理已有草案' });
+        }
       },
     },
     search_knowledge_graph: {

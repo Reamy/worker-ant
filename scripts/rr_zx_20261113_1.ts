@@ -587,7 +587,11 @@ function sectionK(): void {
     ok(!r.ok && r.code === code, label, r.ok ? 'parsed' : r.code);
   };
   bad((o) => { o.kind = 'x'; }, 'K9 坏 kind 拒绝', 'BAD_KIND');
-  bad((o) => { o.version = 2; }, 'K10 坏版本拒绝', 'BAD_VERSION');
+  // zx_20261120_3 M4：v2 起是合法版本（增岗位技能）——坏版本改用真不支持的 99；
+  //   同时正面钉 v1/v2 都可解析（兼容旧包，不是放宽）。
+  bad((o) => { o.version = 99; }, 'K10 坏版本拒绝', 'BAD_VERSION');
+  ok(parsePositionPackage(JSON.stringify({ ...pkg, version: 1 })).ok, 'K10b v1 旧包兼容');
+  ok(parsePositionPackage(JSON.stringify({ ...pkg, version: 2 })).ok, 'K10c v2 新包接受');
   bad((o) => { (o.position as Record<string, unknown>).name = ''; }, 'K11 空岗位名拒绝', 'BAD_SHAPE');
   bad((o) => { const l = o.lessons as Array<Record<string, unknown>>; l.push({ ...l[0] }); }, 'K12 包内重复经验拒绝', 'DUPLICATE_LESSON');
   bad((o) => { o.lessons = Array.from({ length: 101 }, (_, i) => ({ content: `经验${i}`, reusable: true })); }, 'K13 经验超量拒绝', 'TOO_MANY');

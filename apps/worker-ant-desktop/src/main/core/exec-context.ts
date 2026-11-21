@@ -59,6 +59,8 @@ import {
   resolveTaskPosition,
   sanitizeDispatchPosition,
 } from './positions.js';
+// zx_20261120_3 M4「积·技」：已批准岗位技能名（只列名字，步骤按需经 skill 工具取）。
+import { approvedPositionSkillNames } from './position-skills.js';
 import { truncateHistoryTail, contentChars } from './context-compaction.js';
 import {
   buildBudgetContextBlock, classifyTaskGuidance, truncateCtx,
@@ -322,6 +324,8 @@ export async function buildTaskContext(o: {
         const detail = positionBlockDetail(
           position,
           selectPositionLessonsForInjection(db, pid, undefined, `${title}\n${description}`),
+          undefined,
+          approvedPositionSkillNames(db as never, pid),
         );
         if (detail.text) {
           add('position', detail.text);

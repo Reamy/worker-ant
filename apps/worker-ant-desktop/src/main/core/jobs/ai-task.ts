@@ -12,8 +12,10 @@ import { autoDecomposeForTask, claimAutoDecompose, releaseAutoDecomposeClaim, cr
 import { assessComplexity, isComplexOrPlanish } from '../task-archetype.js';
 import { describeExecutionError } from '../exec-error.js';
 // zx_20260915 P0-3(c): 「有失败子」这一问只在 children-gate.ts 一处回答（含回退开关），五处闸同取
-import { failedChildren, childNames } from '../children-gate.js';
-import { PAUSE_REASON_CHILDREN_INCOMPLETE, PAUSE_REASON_CHILDREN_FAILED, PAUSE_REASON_GOAL_DEVIATION, PAUSE_REASON_ABNORMAL_END, PAUSE_REASON_GHOST_LOOP, PAUSE_REASON_RELAY_TREE_EXPIRED, PAUSE_REASON_LABEL } from '../pause-reason.js';
+import { failedChildren, childNames, countFailedChildrenStrict } from '../children-gate.js';
+import { PAUSE_REASON_CHILDREN_INCOMPLETE, PAUSE_REASON_CHILDREN_FAILED, PAUSE_REASON_GOAL_DEVIATION, PAUSE_REASON_ABNORMAL_END, PAUSE_REASON_GHOST_LOOP, PAUSE_REASON_RELAY_TREE_EXPIRED, PAUSE_REASON_LABEL, PAUSE_REASON_AWAITING_INPUT, recordedPauseReason, pauseReasonLabel } from '../pause-reason.js';
+// zx_20261118_2 M6：完成账「未达目标」的判据只在零依赖模块一处（与 task-accounting 同引）。
+import { isIncompleteCompletion } from '../completion-truth.js';
 // zx_20261115_2 M1：中继任务树的时窗——起跑前读一次预算，过期即停（不把 LLM 的拆解预算白花掉）。
 import { readRelayTree } from '../relay-tree.js';
 // zx_20261110_2 B3「恒」: 恢复入口的裁决不再看**状态词**，改看**派生执行态**——
@@ -36,8 +38,12 @@ import { MEM_TYPE_FAILURE_KNOWLEDGE, MEM_TYPE_SUBAGENT_EXPERIENCE } from '../mem
 import { calibrateProjectThresholds } from '../feedback-engine.js';
 import { triggerF3Notification } from '../../services/im-router.js';
 import { boolSetting, readBoolSetting } from '../settings-bool.js';
+// zx_20261120_3 M1「职·全」：自治任务继承触发任务岗位，否则项目默认。
+import { deriveTaskPosition, positionContextFields } from '../positions.js';
 import { buildUnansweredBanner, composeResumeInput } from '../pause-settlement.js';
 import { markEngineDrafted } from '../turn-authorship.js';
+// zx_20261119_2 M3「审」：父任务强制收口前的有界机检（只核子任务产出物是否在盘上）。
+import { preflightChildrenArtifacts, buildArtifactPrecheckNote } from '../parent-artifact-precheck.js';
 import { bumpResumeLedger } from '../resume-ledger.js';
 // zx_20261103_1「续」: 「恢复时是否强制收口」只在 `shouldForceFinalize` 一处回答——用户从已完成态
 //   追加输入的那一次，消息是人的新指令，不得被整合指令顶掉。
@@ -135,7 +141,7 @@ const GOAL_DEVIATION_CONVERGENCE_NOTE =
   `[目标偏离收敛] 目标已多次偏离（≥${GOAL_DEVIATION_MAX_RESTARTS} 次），不再自动恢复。任务保持暂停，请人工介入：`
   + `① 回复聚焦指令后恢复（最直接）；`
   + `② 若需拆分推进：把剩余里程碑交给**某个在途子任务**（send_message 追加指令），或先在**本任务内**收口；`
-  + `③ create_task 仅在有**空闲槽位**时可用（上限 ${MAX_CHILD_BREADTH} 个在途子任务；已 completed/failed/archived 的子任务不占位——`
+  + `③ create_task 仅在有**空闲槽位**时可用（上限 ${MAX_CHILD_BREADTH} 个**可启动**子任务；被前置挡住的 pending 不占位；已 completed/failed/archived 的子任务不占位——`
   + `若子任务都已完成，槽位已自动空出，可直接重试）（zx_20260904_5 D2/D4 · zx_20260916_3 M1）。`;
 
 /**
@@ -434,16 +440,6 @@ export function writeSubagentExperience(
 }
 
 /**
- * zx_20261106_1 M4：完成账是否表明"没达成目标"。
- * 口径与 IM/收口卡片同源（`completion_quality`）：`premature`（被迫收尾）或 `goal_achieved===false` 任一为真。
- * 没有这笔账（存量数据/非完成子）一律不算未达——不替它补结论。
- */
-function isIncompleteCompletion(ctx: Record<string, unknown>): boolean {
-  const q = ctx.completion_quality as { premature?: unknown; goal_achieved?: unknown } | undefined;
-  return q?.premature === true || q?.goal_achieved === false;
-}
-
-/**
  * M3-7: 汇总某父任务下每个子的"交付了什么"——每子一行，只读既有真源。
  * 摘要取 `context_json.completion_summary`（finalize_task 写入，`agent-executor.ts:1002`），
  * 缺失时先由该子自己的 `[工具调用]` 标记行派生工具摘要，再无则回退最近一条 assistant 回合；
@@ -509,13 +505,23 @@ export function buildChildBriefs(db: Database.Database, parentId: string): strin
     // zx_20261022_3 批十二：子任务**结局**（含暂停因）必须随摘要回传——父任务醒来后要据此决定
     //   「续跑/修复/换路」；旧摘要只说"完成"，暂停子与完成子长得一样（真标本 094a8b47 等父永不知情）。
     const pauseReason = typeof ctx.pause_reason === 'string' ? ctx.pause_reason : '';
+    // zx_20261118_2 M2（问）：暂停子在等用户答复时，**问题原文**必须随简报回传。
+    //   病根（真库 S1）：简报只写「暂停·等待用户答复」，父任务被唤醒后看不到子问了什么，
+    //   于是自己把同一个「提交口径」又问了一遍（a7fbd7e0 11:51:20 → b50aa9e4 11:52:01）。
+    const awaitQ = typeof (ctx.awaiting_input as { question?: unknown } | undefined)?.question === 'string'
+      ? String((ctx.awaiting_input as { question: string }).question).trim()
+      : '';
+    const awaitSnippet = awaitQ ? plainTextSnippet(awaitQ, 80) : '';
     // zx_20261106_1 M4：`completed` 不等于"达成目标"——完成账上 `premature`（被迫收尾）或
     //   `goal_achieved=false` 时如实写「完成·未达目标」，否则父任务把"跑完了"当"做成了"。
     const stPart = k.status === 'paused'
-      ? `暂停·${pauseReason ? (PAUSE_REASON_LABEL[pauseReason as keyof typeof PAUSE_REASON_LABEL] ?? pauseReason) : '未注明原因'}`
+      ? `暂停·${pauseReason ? (PAUSE_REASON_LABEL[pauseReason as keyof typeof PAUSE_REASON_LABEL] ?? pauseReason) : '未注明原因'}${pauseReason === PAUSE_REASON_AWAITING_INPUT && awaitSnippet ? `（问题：${awaitSnippet}）` : ''}`
       : k.status === 'completed' ? '完成'
       : k.status === 'failed' ? '失败'
       : k.status;
+    const awaitHint = k.status === 'paused' && pauseReason === PAUSE_REASON_AWAITING_INPUT && awaitSnippet
+      ? '；该子正在等你答复，请勿重复提问'
+      : '';
     const statusPart = stPart === '完成' && isIncompleteCompletion(ctx)
       ? `完成·未达目标${(ctx.completion_quality as { premature?: unknown } | undefined)?.premature === true ? '（被迫收尾）' : ''}`
       : stPart;
@@ -526,7 +532,17 @@ export function buildChildBriefs(db: Database.Database, parentId: string): strin
         ? `结论 ${verdictLabelOf(sub.verdict)}${sub.limitations.length > 0 ? `｜限定 ${sub.limitations.slice(0, 3).join('；')}` : ''}`
         : '未提供结构化结论'
       : '';
-    out.push(`${k.title}｜${statusPart}｜${summary}｜${delivPart}｜${accPart}${subPart ? `｜${subPart}` : ''}`);
+    // zx_20261117_1 M6「名/费」：某直接子任务已有成功执行 run ⇒ 父任务简报带上 run:<id> 与一句
+    //   "可直接复用/自跑，不必再派复跑子任务"（标本 05：单命令任务派生 6 个验证子任务、145 步/65 万 tokens）。
+    //   只加提示，不改调度；五段形状仍是 `｜` 五段（提示用 `；` 接在末段后，旧断言不退）。
+    let runHint = '';
+    try {
+      const run = db.prepare(
+        "SELECT id FROM wa_task_runtime_evidence WHERE task_id = ? AND tool IN ('execute_command','bash') AND ok = 1 AND (exit_code IS NULL OR exit_code = 0) ORDER BY created_at DESC, rowid DESC LIMIT 1",
+      ).get(k.id) as { id?: string } | undefined;
+      if (run?.id) runHint = `；已有成功运行证据 run:${run.id}——若本任务也可执行，可直接复用结论或自跑一次，不必再派复跑子任务`;
+    } catch { /* 证据表缺失 ⇒ 不提示 */ }
+    out.push(`${k.title}｜${statusPart}｜${summary}${awaitHint}｜${delivPart}｜${accPart}${subPart ? `｜${subPart}` : ''}${runHint}`);
   }
   return out;
 }
@@ -569,7 +585,7 @@ export function checkParentTaskAfterChildDone(
     if (!isTerminalTask(db, taskId) && me.status !== 'paused') return;
     const pid = me.parent_task_id;
     // 先问父任务是否处于等子态——不在等子态则本函数无话可说（早退，不做任何写）
-    const parent = db.prepare('SELECT status FROM wa_tasks WHERE id = ?').get(pid) as { status: string } | undefined;
+    const parent = db.prepare('SELECT status, context_json FROM wa_tasks WHERE id = ?').get(pid) as { status: string; context_json?: string | null } | undefined;
     if (!parent || (parent.status !== 'paused' && parent.status !== 'pending')) return;
     // zx_20260915 P0-3(c)（**先失败、后未完成**）: 有失败子 ⇒ 父**不得**恢复。
     // 若在此放行，父会被置回 pending、resume 又被收口闸拦回 paused：pause→resume→re-pause 空转，
@@ -577,6 +593,26 @@ export function checkParentTaskAfterChildDone(
     // 此处只把父的暂停因**如实升级**为 children_failed——原来的 children_incomplete 会让用户以为
     // "子任务跑完就自动好"，而事实是有一个子已经失败了。
     const failedKids = failedChildren(db, pid);
+    // zx_20261116_1 M1（续·反者道之动）：失败子已恢复/已处置 ⇒ 把父的因由从 children_failed
+    //   **降回** children_incomplete。病根：升级只发生在“有失败子”的那一刻，失败子后来重试成功时
+    //   本函数因“仍有 pending 兄弟”早退（下方 `pending === 0`），因由便永远停在 children_failed；
+    //   而调度器 `chainStalled` 只豁免 children_incomplete ⇒ 剩余 pending 子任务被永久挡住
+    //   （父等子、子等父的互锁；真标本 `18c076d9` 的 3 个 pending 子任务）。
+    //   严格读：只有“确无 failed 子”（count === 0）才降；读失败（null）一律跳过，绝不把读不到当没有。
+    //   `json_set` 只改这一格，兄弟键（如 world_snapshot、task_goal）原样保留。
+    if (
+      failedKids.length === 0
+      && parent.status === 'paused'
+      && recordedPauseReason(parent.context_json) === PAUSE_REASON_CHILDREN_FAILED
+      && countFailedChildrenStrict(db, pid) === 0
+    ) {
+      db.prepare("UPDATE wa_tasks SET updated_at = datetime('now'), context_json = json_set(COALESCE(context_json, '{}'), '$.pause_reason', ?) WHERE id = ?")
+        .run(PAUSE_REASON_CHILDREN_INCOMPLETE, pid);
+      // 因由变更此前**无痕**（只写 context、不发事件、不写会话行）——留一条系统行，活动时间线可查。
+      db.prepare("INSERT INTO wa_task_conversations (id, task_id, role, content, token_count, created_at) VALUES (?, ?, 'system', ?, 0, datetime('now'))")
+        .run(crypto.randomUUID(), pid, `[因由订正] 失败子已恢复/已处置，暂停因由由「${pauseReasonLabel(PAUSE_REASON_CHILDREN_FAILED)}」订正为「${pauseReasonLabel(PAUSE_REASON_CHILDREN_INCOMPLETE)}」；剩余子任务将继续。`);
+      console.log(`[D1] 父任务暂停因由订正: ${pid.slice(0, 8)}（children_failed → children_incomplete）`);
+    }
     if (failedKids.length > 0) {
       if (parent.status === 'paused') {
         db.prepare("UPDATE wa_tasks SET updated_at = datetime('now'), context_json = json_set(COALESCE(context_json, '{}'), '$.pause_reason', ?) WHERE id = ?").run(PAUSE_REASON_CHILDREN_FAILED, pid);
@@ -601,13 +637,33 @@ export function checkParentTaskAfterChildDone(
       //   归档与真完成是两件事：都算"已停"，但都不能说成"完成"。
       const kids = db.prepare('SELECT status, context_json FROM wa_tasks WHERE parent_task_id = ?').all(pid) as Array<{ status: string; context_json: string | null }>;
       const pausedKids = kids.filter((k) => k.status === 'paused').length;
+      // zx_20261118_2 M2（问）：暂停子里有多少是**在等用户答复**（而非普通人工暂停）。
+      //   抬头必须点名这一种，否则父任务只看到「暂停 1 个」，会自己再问一遍同一个问题（真库 S1）。
+      const awaitingKids = kids.filter((k) => {
+        if (k.status !== 'paused') return false;
+        try { return (JSON.parse(k.context_json || '{}') as { pause_reason?: unknown }).pause_reason === PAUSE_REASON_AWAITING_INPUT; } catch { return false; }
+      }).length;
       const archivedKids = kids.filter((k) => k.status === 'archived').length;
+      // zx_20261116_2 M3「覆」：覆盖完成的子任务虽 status=completed，但验收未重判——不能并进“已完成”。
+      const overrideKids = kids.filter((k) => {
+        if (k.status !== 'completed') return false;
+        try { return !!JSON.parse(k.context_json || '{}').completion_override; } catch { return false; }
+      }).length;
       // zx_20261106_1 M4：终态 ≠ 达成——完成的子里若有"被迫收尾/未达目标"，header 必须点名，
       //   否则父任务读到"全部结束"就按"都做成了"收口（与子行里的「完成·未达目标」也对不上）。
       const incompleteKids = kids.filter((k) => {
         if (k.status !== 'completed') return false;
         try { return isIncompleteCompletion(JSON.parse(k.context_json || '{}') as Record<string, unknown>); } catch { return false; }
       }).length;
+      // zx_20261119_1 M3「止」：**唯一的"已停"子只是在等用户答复 ⇒ 父保持暂停**。
+      //   真库标本 S2：唯一子 08:58:03 问「D-1/D-2/D-3 选哪个」并暂停，父任务 08:58:11 被唤醒
+      //   （抬头只说「暂停 1 个」），随即自行重做了一遍方案，事后把子任务归档——子任务已花 103,735 tokens。
+      //   答复路径不变：用户答复 → 子恢复 → 子完成时本函数（`me.status` 终态）再唤醒父。
+      //   混合场景（另有归档/未达目标子）仍唤醒——那种情况父确有需要复核的东西。
+      if (pausedKids > 0 && awaitingKids === pausedKids && archivedKids === 0 && incompleteKids === 0 && overrideKids === 0) {
+        console.log(`[D1] 子任务在等用户答复，父任务保持暂停: ${pid.slice(0, 8)}（等待 ${awaitingKids} 个）`);
+        return;
+      }
       db.prepare("UPDATE wa_tasks SET status = 'pending', updated_at = datetime('now') WHERE id = ?").run(pid);
       // zx_20260915 P0-3(d): 该转移此前**无事件**（事件溯源里不存在，界面停在 paused 需手刷）——
       // zx_20260910_1 M3「暂停点补发 status_changed」的同一条病，此处是唯一漏网的那一个转移。
@@ -616,11 +672,14 @@ export function checkParentTaskAfterChildDone(
       const briefs = buildChildBriefs(db, pid);
       // 全完成 ⇒ 沿用既有文案（rr 与界面均按此句识别）；含暂停/归档 ⇒ 如实分列，不把"停了"说成"完成"。
       //   无归档时"其中暂停 N 个"逐字不变；归档为 0 不出现在文案里（既有识别句保持）。
-      const allDone = pausedKids === 0 && archivedKids === 0 && incompleteKids === 0 && kids.every((k) => k.status === 'completed');
+      const allDone = pausedKids === 0 && archivedKids === 0 && incompleteKids === 0 && overrideKids === 0
+        && kids.every((k) => k.status === 'completed');
       // 计数项以数字开头时前面留一空格（「其中 1 个未达目标」）；「暂停/归档」项的既有文案逐字不变。
       const stopDetail = [
         incompleteKids > 0 ? ` ${incompleteKids} 个未达目标` : '',
-        pausedKids > 0 ? `暂停 ${pausedKids} 个` : '',
+        overrideKids > 0 ? ` ${overrideKids} 个覆盖完成·验收未重判` : '',
+        // zx_20261118_2 M2：仅有普通暂停时逐字不变；有 awaiting 子才追加这一句。
+        pausedKids > 0 ? `暂停 ${pausedKids} 个${awaitingKids > 0 ? `，其中 ${awaitingKids} 个在等你答复，勿重复提问、勿代为产出` : ''}` : '',
         archivedKids > 0 ? `归档 ${archivedKids} 个` : '',
       ].filter(Boolean).join('、');
       const header = allDone
@@ -798,8 +857,17 @@ export function registerAiTaskHandlers(ctx: JobContext, scheduler: {
       }
       const nextTitle = backlog.shift()!;
       const newTaskId = crypto.randomUUID();
-      db.prepare("INSERT INTO wa_tasks (id, project_id, title, description, status, priority, source, context_json) VALUES (?, ?, ?, ?, ?, 0, 'autonomous', ?)")
-        .run(newTaskId, projectId, nextTitle, '[自治创建] 来自项目backlog', 'pending', JSON.stringify({ autonomous_chain_depth: chainDepth + 1, triggered_by: taskId }));
+      // zx_20261120_3 M1：触发任务有岗位 ⇒ 继承；否则项目默认（按设置）。
+      const derivedPosition = deriveTaskPosition(db, {
+        projectId,
+        parentTaskId: taskId,
+        allowProjectDefault: readBoolSetting(db, 'position.default_from_project'),
+      });
+      db.prepare("INSERT INTO wa_tasks (id, project_id, title, description, status, priority, source, context_json, position_id) VALUES (?, ?, ?, ?, ?, 0, 'autonomous', ?, ?)")
+        .run(newTaskId, projectId, nextTitle, '[自治创建] 来自项目backlog', 'pending', JSON.stringify({
+          autonomous_chain_depth: chainDepth + 1, triggered_by: taskId,
+          ...positionContextFields(derivedPosition),
+        }), derivedPosition.positionId);
       ctx.backlog = backlog;
       ctx.autonomous_chain_depth = chainDepth + 1;
       db.prepare("UPDATE wa_projects SET context_json = ?, updated_at = datetime('now') WHERE id = ?").run(JSON.stringify(ctx), projectId);
@@ -1232,7 +1300,17 @@ export function registerAiTaskHandlers(ctx: JobContext, scheduler: {
       // zx_20260916_3 M5（O-F）: 这句此前**没有任何首标**，落库成 `role='user'` 行后在对话流里跟人说的话一模一样
       //   （实测⑥：34 行 `role='user'` 命中里 18 行是它）。经 `markEngineDrafted` 加首标——role 仍是 'user'，
       //   故恢复回放照常送达（改成 system 会被逐字跳过，见 core/turn-authorship.ts 的头注释）。
-      const forceFinalizeMsg = markEngineDrafted('你是工蚁系统的AI助手。你的所有子任务已经全部完成，请现在整合所有产出（特别是工作目录中的.md文件），生成最终报告，然后立即调用finalize_task完成任务。不要探索、不要创建新任务、不要搜索——只需要整合已有成果并finalize。');
+      // zx_20261119_2 M3「审」：强制收口前先做一次**有界机检**（只核子任务产出物是否在盘上），
+      //   把"缺什么"写进提示词。机检由引擎做，不放开给模型探索；只报缺，不冒充验收。
+      let artifactPrecheckNote = '';
+      try {
+        const precheck = preflightChildrenArtifacts(db, taskId);
+        artifactPrecheckNote = buildArtifactPrecheckNote(precheck);
+        db.prepare("UPDATE wa_tasks SET context_json = json_set(COALESCE(context_json, '{}'), '$.parent_artifact_precheck', json(?)) WHERE id = ?")
+          .run(JSON.stringify(precheck), taskId);
+      } catch { /* 机检失败不阻断收口 */ }
+      const forceFinalizeMsg = markEngineDrafted('你是工蚁系统的AI助手。你的所有子任务已经全部完成，请现在整合所有产出（特别是工作目录中的.md文件），生成最终报告，然后立即调用finalize_task完成任务。不要探索、不要创建新任务、不要搜索——只需要整合已有成果并finalize。'
+        + (artifactPrecheckNote ? `\n\n${artifactPrecheckNote}` : ''));
       // P0-5(c) 注入三规则（①替掉自造块 ②前置不吞真实消息 ③forceFinalize 亦前置）由
       //   `composeResumeInput` 一处实现——回归直跑它，而非在此复刻一份判据。
       const { resumeMsg, finalMsg } = composeResumeInput({

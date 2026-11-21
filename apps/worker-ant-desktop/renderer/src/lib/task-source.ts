@@ -5,6 +5,7 @@ const TASK_SOURCE_LABEL: Record<string, string> = {
   'auto-decompose': '自动拆解',
   'auto-decompose-roll': '滚动拆解',
   cron: '定时',
+  routine: '岗位例行',
   template: '模板',
 };
 

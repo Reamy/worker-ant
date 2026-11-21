@@ -154,11 +154,12 @@ function seed(): void {
 
 // ═══ A｜来源分账 ═════════════════════════════════════════════════════════════
 function sectionA(): void {
-  console.log('\n【A】来源分账：六源固定顺序 + 历史来源不丢 + 合计逐项同值');
+  console.log('\n【A】来源分账：七源固定顺序 + 历史来源不丢 + 合计逐项同值');
 
-  // zx_20261113_1 B3「用」: 词表加第六源 position——按**更强形状**重定向，不删旧五源、不放宽。
-  eq(INJECTION_SOURCES, ['memory', 'knowledge', 'knowledge_card', 'domain_pack', 'project_profile', 'position'],
-    'A1 ★来源词表六源（写口/读口/界面同引这一处）');
+  // zx_20261113_1 B3「用」: 词表加第六源 position；zx_20261121_1 M6 加第七源 project_experience。
+  // 按**更强形状**重定向：新源在册，旧六源一个不删、不放宽。
+  eq(INJECTION_SOURCES, ['memory', 'knowledge', 'knowledge_card', 'domain_pack', 'project_profile', 'position', 'project_experience'],
+    'A1 ★来源词表七源（写口/读口/界面同引这一处）');
   eq(Object.values(INJECTION_SOURCE).sort(), [...INJECTION_SOURCES].sort(), 'A2 常量映射与词表同集');
   eq(injectionSourceLabel('memory'), '记忆', 'A3 已知来源给人话名');
   eq(injectionSourceLabel('legacy_import'), 'legacy_import', 'A4 ★词表外历史来源原样上屏（不改写、不丢弃）');

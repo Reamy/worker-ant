@@ -43,15 +43,27 @@ function trimmedLabels(trimmed: Record<string, number>): string {
     .join('、');
 }
 
+export interface RoiBudgetView {
+  applied: boolean;
+  unchanged: boolean;
+  reason: string;
+  caps: Record<string, number>;
+  samples: number;
+  at: string;
+}
+
 export default function TaskContextLedger({
   ledger,
   error,
   injections,
+  roiBudget,
 }: {
   /** `null` = 本轮执行没有落分账（旧任务）；`undefined` 不应出现（main 总会给键）。 */
   ledger: ContextLedgerView | null;
   error: string;
   injections: InjectionSummaryRow[];
+  /** zx_20261120_1 M8：按效预算（影子/生效/样本不足三态）；无记录 ⇒ 不渲染。 */
+  roiBudget?: RoiBudgetView | null;
 }) {
   const [open, setOpen] = useState(false);
   const total = Number(ledger?.totalTokens) || 0;
@@ -106,6 +118,15 @@ export default function TaskContextLedger({
               )}
               {ledger.cost != null && ledger.cost > 0 && <span>估算费用 <span className="font-mono text-gray-800">¥{ledger.cost.toFixed(4)}</span></span>}
             </div>
+            {roiBudget && (
+              <div className="text-[11px] text-gray-600 bg-gray-50 border border-gray-200 rounded px-2 py-1">
+                <span className="font-medium">按效预算</span>
+                {roiBudget.applied ? '（已生效）' : '（影子，未生效）'}：
+                {roiBudget.unchanged
+                  ? roiBudget.reason || '样本不足，未给建议'
+                  : `${Object.entries(roiBudget.caps).map(([k, v]) => `${k} → ${v} token`).join(' / ')}；样本 ${roiBudget.samples}（相关，非因果）`}
+              </div>
+            )}
             <p className="text-[10px] text-gray-400">口径：token 为 chars÷4 估算（`core/token-estimate.ts` 一处真源）；「实报 token」取 provider usage。两者不可相加。</p>
           </>
         )}

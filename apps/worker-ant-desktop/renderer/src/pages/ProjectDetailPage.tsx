@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { projects, tasks, admin, invoke, deliverables, knowledge } from '../lib/ipc';
+import { projects, tasks, admin, invoke, deliverables, knowledge, positions as positionsApi } from '../lib/ipc';
 import { useActivity } from '../lib/activity';
 import { useStaleness } from '../lib/useLiveQuery';
 import { useSettings } from '../lib/settingsStore';
@@ -23,7 +23,9 @@ import NextActionBar from '../components/NextActionBar';
 import { nextActionForProject, type NextActionId } from '../../../src/main/core/next-action.js';
 import { ArrowLeft, Play, Pause, Check, Archive, Edit, Trash2, Brain, Clock, Terminal, Activity, AlertTriangle, Lightbulb, RefreshCw, Package, BookOpen, Network, Users } from 'lucide-react';
 // zx_20261029_1「知」: 须知的渲染数据类型与 main 侧同形（IPC 只传纯数据）。
-import type { ProjectBriefRecord, ProjectModelOverridePayload, KnowledgeBusinessStatus } from '../lib/ipc';
+import type { ProjectBriefRecord, ProjectModelOverridePayload, KnowledgeBusinessStatus, ProjectExperience } from '../lib/ipc';
+// zx_20261121_1 M5：坑位人话名取 main 零依赖词表，不在页面手抄第二份。
+import { PITFALL_LABEL, EXPERIENCE_MIN_COMPLETED } from '../../../src/main/core/project-experience-labels.js';
 // zx_20260910_3 M3(G3): 布尔 setting 判据**两侧共用同一文件**——渲染层不再自带第二份写法
 import { boolSetting } from '../../../src/main/core/settings-bool.js';
 // zx_20260920_1 M7: ★ 的语义是「**高于**基线」。基线抬到 0.6 后若仍写 `> 0.5`，则**每条新记忆默认带 ★**
@@ -82,7 +84,7 @@ export default function ProjectDetailPage() {
   //   新增「本项成果」页签：取数与全局页**同一个端口** `deliverables.list(projectId)`，
   //   类型/状态文案取**同一份词表**（DELIVERABLE_TYPE_LABEL/DELIVERABLE_STATUS_LABEL），
   //   行点开也进**同一个**就地抽屉 ⇒ 不产生第二套"什么叫已完成"的判据。
-  const [activeTab, setActiveTab] = useState<'overview' | 'memories' | 'milestones' | 'tensions' | 'deliverables' | 'packs'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'memories' | 'milestones' | 'tensions' | 'deliverables' | 'packs' | 'positions'>('overview');
   // 首屏「阻塞 N」直达里程碑区：页签切过去才在 DOM 里，故先挂起意图、渲染完再滚（已在场上则直接滚）。
   const milestonesScrollPending = useRef(false);
   useEffect(() => {
@@ -123,7 +125,22 @@ export default function ProjectDetailPage() {
   const [tensionConfigs, setTensionConfigs] = useState<Record<string, Record<string, unknown>>>({});
   // 多维度健康视图 + 知识全景
   const [healthViews, setHealthViews] = useState<Record<string, Record<string, unknown>>>({});
+  // zx_20261120_3 M8：项目「岗位」页签——岗位×任务、注入预演、项目知识沉淀入口。
+  const [posBoard, setPosBoard] = useState<Array<{ id: string; name: string; enabled: boolean; taskTotal: number; taskCompleted: number; taskActive: number; pendingLessons: number }>>([]);
+  const [posBoardErr, setPosBoardErr] = useState('');
+  const [posPreviewId, setPosPreviewId] = useState('');
+  const [posPreviewQuery, setPosPreviewQuery] = useState('');
+  const [posPreviewText, setPosPreviewText] = useState('');
+  const [posPreviewErr, setPosPreviewErr] = useState('');
+  const [posCaptureMsg, setPosCaptureMsg] = useState('');
+  const [posKnowledgeSections, setPosKnowledgeSections] = useState<Array<{ section: string; label: string; content: string }>>([]);
   const [panorama, setPanorama] = useState<Record<string, unknown> | null>(null);
+  // zx_20261121_1 M5：项目经验账（近90天规模/工具/坑/失败/服务/ROI）
+  const [experience, setExperience] = useState<ProjectExperience | null>(null);
+  const [expErr, setExpErr] = useState('');
+  const [expBusy, setExpBusy] = useState(false);
+  const [expOpen, setExpOpen] = useState(false);
+  const expInjectOn = boolSetting(settings['project.experience_inject']);
   // zx_20261110_1 B5：卡片级读取失败与「确实没有数据」分家（失败带因由 + 重试，不置空冒充无数据）。
   const [healthErr, setHealthErr] = useState('');
   const [panoErr, setPanoErr] = useState('');
@@ -208,6 +225,8 @@ export default function ProjectDetailPage() {
     void loadQuality();
     // zx_20260906 批3 (3c): 知识全景随 deliverable.* 等事件刷新（byType/最近产出物保鲜）
     void loadPanorama();
+    // zx_20261121_1 M5：经验账随项目事件刷新（规模/坑位保鲜）。
+    void loadExperience();
   }
   // zx_20260905 批5: 项目质量聚合加载（任务完成/事件刷新头部时同步刷新，保持均质/趋势保鲜）
   async function loadQuality() {
@@ -418,6 +437,51 @@ export default function ProjectDetailPage() {
     setMilestoneLoading(false);
   }
 
+  // zx_20261120_3 M8：项目「岗位」页签的只读取数（岗位看板 + 可迁移知识节）。
+  async function loadPositionsTab() {
+    if (!id) return;
+    try {
+      const r = await positionsApi.projectBoard(id);
+      setPosBoard(r.positions as typeof posBoard);
+      setPosBoardErr('');
+      if (!posPreviewId && r.positions[0]) setPosPreviewId(r.positions[0].id);
+    } catch (e) {
+      setPosBoardErr((e as Error).message);
+      setPosBoard([]);
+    }
+    try {
+      const kv = await knowledge.preview(id);
+      const all = [...kv.selected, ...kv.omitted] as Array<{ section: string; label: string; content: string }>;
+      setPosKnowledgeSections(all.filter((s) => ['recipes', 'criteria', 'domain'].includes(s.section)));
+    } catch { setPosKnowledgeSections([]); }
+  }
+
+  async function previewPositionInjection() {
+    if (!posPreviewId) { setPosPreviewErr('先选一个岗位'); return; }
+    try {
+      const r = await positionsApi.injectPreview(posPreviewId, posPreviewQuery);
+      setPosPreviewText(r.text);
+      setPosPreviewErr('');
+    } catch (e) {
+      setPosPreviewErr((e as Error).message);
+      setPosPreviewText('');
+    }
+  }
+
+  async function captureKnowledgeLine(section: string, line: string) {
+    if (!id) return;
+    const positionId = posPreviewId || posBoard[0]?.id || '';
+    if (!positionId) { setPosCaptureMsg('先启用并选择一个岗位，再沉淀。'); return; }
+    const content = line.replace(/^[-*\s]+/, '').trim();
+    if (!content) return;
+    try {
+      const r = await positionsApi.captureProjectKnowledge({ projectId: id, positionId, section, content });
+      setPosCaptureMsg(r.created ? '已沉淀为岗位候选经验（待人工采纳，不会自动注入）。' : '这条内容早已沉淀过（同一岗位同一内容只留一条）。');
+    } catch (e) {
+      setPosCaptureMsg(`沉淀失败：${(e as Error).message}`);
+    }
+  }
+
   async function loadTensions() {
     try {
       const d = await projects.tensions(id!) as unknown as { tensions: Record<string, Record<string, unknown>>; configs: Record<string, Record<string, unknown>> };
@@ -456,10 +520,11 @@ export default function ProjectDetailPage() {
     if (activeTab === 'milestones') loadMilestones();
     if (activeTab === 'tensions') loadTensions();
     if (activeTab === 'deliverables') loadProjectDeliverables();
+    if (activeTab === 'positions') void loadPositionsTab();
   }, [activeTab, memTypeFilter]);
 
   useEffect(() => {
-    if (id) { loadHealthViews(); loadPanorama(); loadMembers(); }
+    if (id) { loadHealthViews(); loadPanorama(); loadExperience(); loadMembers(); }
   }, [id]);
 
   async function loadMembers() {
@@ -532,6 +597,35 @@ export default function ProjectDetailPage() {
     setPanoBusy(false);
   }
 
+  /** zx_20261121_1 M5：项目经验账（每次现算；失败如实留因，不清空上一次）。 */
+  async function loadExperience() {
+    if (!id) return;
+    setExpBusy(true);
+    try { const r = await projects.experience(id); setExperience(r.experience); setExpErr(''); }
+    catch (e) { setExpErr(messageOf(e)); }
+    setExpBusy(false);
+  }
+
+  /** zx_20261121_1 M7：采纳预算（二次确认；只写项目级一个键）。 */
+  async function adoptExperienceBudget(suggested: number) {
+    if (!id) return;
+    const cur = ctx.budget?.max_tokens_per_task ? formatTokens(ctx.budget.max_tokens_per_task) : '未设置';
+    if (!confirm(`把本项目任务 Token 预算从 ${cur} 改为 ${formatTokens(suggested)}？\n依据：近 ${experience?.windowDays ?? 90} 天 p90×1.2（${experience?.scale[0]?.tasks ?? 0} 单样本）。只改项目级上限，不改任务级。`)) return;
+    try {
+      await projects.experienceAdoptBudget(id, suggested);
+      await load();
+      await loadExperience();
+    } catch (e) { fb.fail('「采纳预算」失败', e); }
+  }
+
+  /** zx_20261121_1 M7：开工时注入经验段的开关（缺省开；写设置后下一次装配生效）。 */
+  async function toggleExperienceInject() {
+    try {
+      await invoke('settings:set', 'project.experience_inject', expInjectOn ? '0' : '1');
+      await loadExperience();
+    } catch (e) { fb.fail('「经验注入」开关未保存', e); }
+  }
+
   async function handleStatus(status: string) {
     try { await projects.updateStatus(id!, status); load(); }
     catch (e) { fb.fail('「项目状态」未更改', e); }
@@ -601,6 +695,11 @@ export default function ProjectDetailPage() {
     else if (aid === 'edit_project') setEditing(true);
     else if (aid === 'view_deliverables') navigate(`/deliverables?projectId=${id}`);
   }
+
+  const expTopScale = experience?.scale[0] ?? null;
+  const expTopPitfall = experience?.pitfalls[0] ?? null;
+  const expSuggested = expTopScale?.tokensP90 != null ? Math.ceil((expTopScale.tokensP90 * 1.2) / 10_000) * 10_000 : null;
+  const expCurrent = ctx.budget?.max_tokens_per_task ?? null;
 
   return (
     <div className="space-y-6">
@@ -868,7 +967,7 @@ export default function ProjectDetailPage() {
 
       {/* Tab 切换 */}
       <div className="flex gap-2">
-        {[{k:'overview',l:'运行配置'},{k:'memories',l:'项目记忆'},{k:'milestones',l:'里程碑/阻塞'},{k:'deliverables',l:'本项目成果'},{k:'tensions',l:'矛盾张力'},{k:'packs',l:'领域包'}].map(tab=>(
+        {[{k:'overview',l:'运行配置'},{k:'memories',l:'项目记忆'},{k:'milestones',l:'里程碑/阻塞'},{k:'deliverables',l:'本项目成果'},{k:'tensions',l:'矛盾张力'},{k:'packs',l:'领域包'},{k:'positions',l:'岗位'}].map(tab=>(
           <button key={tab.k} onClick={()=>setActiveTab(tab.k as typeof activeTab)} className={`px-4 py-1.5 rounded-lg text-sm font-medium ${activeTab===tab.k?'bg-blue-600 text-white':'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>{tab.l}</button>
         ))}
       </div>
@@ -1021,6 +1120,91 @@ export default function ProjectDetailPage() {
           )}
 
           {/* 知识全景 */}
+          {/* zx_20261121_1 M5「数·见」：项目经验账（首行结论，细节折叠；不新增页签） */}
+          <div className="bg-white rounded-lg border p-4">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="font-semibold flex items-center gap-2"><Brain className="w-4 h-4 text-emerald-600"/>项目经验（近{experience?.windowDays ?? 90}天）</h3>
+              <div className="flex items-center gap-2">
+                <label className="text-[11px] text-gray-500 flex items-center gap-1" title="在任务开工时注入≤120 token的项目经验段；从既有知识预算内替换，不新增总量">
+                  <input type="checkbox" checked={expInjectOn} onChange={() => void toggleExperienceInject()} />开工时注入
+                </label>
+                <button type="button" onClick={() => void loadExperience()} className="p-1.5 hover:bg-gray-100 rounded" title="刷新经验账" disabled={expBusy}>
+                  <RefreshCw className={`w-3.5 h-3.5 ${expBusy ? 'animate-spin' : ''}`} />
+                </button>
+              </div>
+            </div>
+            {expErr && <div className="mb-2"><LoadFailure what="「项目经验」" reason={expErr} onRetry={() => void loadExperience()} busy={expBusy} /></div>}
+            {!experience && !expErr && <p className="text-xs text-gray-400">读取中…</p>}
+            {experience && (
+              <>
+                <p className="text-sm text-gray-800">
+                  {experience.enough ? (
+                    <>
+                      近{experience.windowDays}天已完成 <b>{formatCount(experience.evidence.completed)}</b> 单
+                      {expTopScale ? <>；{expTopScale.archetype === 'unknown' ? '未分类任务' : expTopScale.archetype} {formatCount(expTopScale.tasks)} 单，p50 {formatTokens(expTopScale.tokensP50)} / p90 {formatTokens(expTopScale.tokensP90)} token</> : '；规模证据不足'}
+                      {expTopPitfall ? <>；最贵：{PITFALL_LABEL[expTopPitfall.kind] ?? expTopPitfall.kind} <b>{formatCount(expTopPitfall.count)}</b> 次</> : '；暂无可执行坑位'}。
+                    </>
+                  ) : (
+                    <>证据不足（完成 {formatCount(experience.evidence.completed)} 单，需 {EXPERIENCE_MIN_COMPLETED} 单）；先跑几单再回来看。</>
+                  )}
+                </p>
+                <p className="text-[10px] text-gray-400 mt-1">相关，非因果 · {experience.windowDays} 天窗口 · 生成于 {formatDbTime(experience.generatedAt)}</p>
+                <div className="mt-2 flex items-center gap-2 flex-wrap">
+                  <button type="button" onClick={() => setExpOpen(!expOpen)} className="text-xs px-2 py-1 rounded bg-gray-100 hover:bg-gray-200">{expOpen ? '收起明细' : '展开明细'}</button>
+                  {expSuggested != null && (
+                    <button type="button" onClick={() => void adoptExperienceBudget(expSuggested)} className="text-xs px-2 py-1 rounded bg-emerald-50 text-emerald-700 hover:bg-emerald-100" disabled={!experience.enough}>
+                      采纳 p90×1.2 = {formatTokens(expSuggested)} 为项目预算
+                    </button>
+                  )}
+                  <span className="text-[11px] text-gray-500">当前项目预算：{expCurrent ? formatTokens(expCurrent) : '未设置（用原型默认）'}</span>
+                </div>
+                {expOpen && (
+                  <div className="mt-3 space-y-3 text-xs">
+                    {experience.scale.length > 0 && (
+                      <div>
+                        <p className="font-medium text-gray-700 mb-1">规模（有执行账的单）</p>
+                        <div className="overflow-x-auto"><table className="w-full text-left">
+                          <thead className="text-gray-400"><tr><th className="py-1 pr-3">形态</th><th className="py-1 pr-3">单数</th><th className="py-1 pr-3">p50 token</th><th className="py-1 pr-3">p90 token</th><th className="py-1 pr-3">p50 步</th><th className="py-1">覆盖</th></tr></thead>
+                          <tbody>{experience.scale.map((s) => <tr key={s.archetype} className="border-t border-gray-100"><td className="py-1 pr-3">{s.archetype}</td><td className="py-1 pr-3">{formatCount(s.tasks)}</td><td className="py-1 pr-3">{formatTokens(s.tokensP50)}</td><td className="py-1 pr-3">{formatTokens(s.tokensP90)}</td><td className="py-1 pr-3">{s.stepsP50 == null ? '未记录' : Math.round(s.stepsP50)}</td><td className="py-1">{Math.round(s.coverage * 100)}%</td></tr>)}</tbody>
+                        </table></div>
+                      </div>
+                    )}
+                    {experience.tools.length > 0 && (
+                      <div>
+                        <p className="font-medium text-gray-700 mb-1">工具可靠度（样本≥3）</p>
+                        <div className="flex flex-wrap gap-1.5">{experience.tools.slice(0, 6).map((t) => <span key={`${t.tool}:${t.archetype}`} className="px-1.5 py-0.5 rounded bg-gray-100 text-gray-600">{t.tool} {t.success}/{t.total}{t.rate != null ? `（${Math.round(t.rate * 100)}%）` : ''}</span>)}</div>
+                      </div>
+                    )}
+                    {experience.pitfalls.length > 0 && (
+                      <div>
+                        <p className="font-medium text-gray-700 mb-1">浪费坑（命令被拒）</p>
+                        <ul className="space-y-1">{experience.pitfalls.map((p) => <li key={p.kind} className="bg-amber-50 rounded px-2 py-1"><b>{PITFALL_LABEL[p.kind] ?? p.kind}</b> {formatCount(p.count)} 次{p.advice ? ` — ${p.advice}` : ''}{p.sample ? <span className="text-gray-400">（样例：{p.sample}）</span> : null}</li>)}</ul>
+                      </div>
+                    )}
+                    {experience.failures.length > 0 && (
+                      <div>
+                        <p className="font-medium text-gray-700 mb-1">失败因（同类≥2 次）</p>
+                        <ul className="space-y-1">{experience.failures.map((f) => <li key={`${f.phase}:${f.cause}`} className="bg-red-50 rounded px-2 py-1"><b>{formatCount(f.count)} 次</b> {f.cause}{f.taskIds.length > 0 ? <span className="text-gray-400">（{f.taskIds.map((tid) => <button key={tid} type="button" onClick={() => navigate(`/tasks/${tid}`)} className="underline ml-1">{tid.slice(0, 8)}</button>)}）</span> : null}</li>)}</ul>
+                      </div>
+                    )}
+                    {experience.services && experience.services.total > 0 && (
+                      <div>
+                        <p className="font-medium text-gray-700 mb-1">服务调用（MCP / A2A / 守护）</p>
+                        <div className="flex flex-wrap gap-1.5">{experience.services.byKind.map((k) => <span key={k.kind} className="px-1.5 py-0.5 rounded bg-gray-100 text-gray-600">{k.kind} {k.ok}/{k.calls}</span>)}</div>
+                      </div>
+                    )}
+                    {experience.injections.rows.length > 0 && (
+                      <div>
+                        <p className="font-medium text-gray-700 mb-1">上下文来源 ROI（相关，非因果；样本不足不解释）</p>
+                        <div className="flex flex-wrap gap-1.5">{experience.injections.rows.slice(0, 8).map((r) => <span key={r.source} className="px-1.5 py-0.5 rounded bg-gray-100 text-gray-600">{r.source} {r.injections} 次{r.successRate == null ? '（样本不足）' : `（成功率 ${Math.round(r.successRate * 100)}%）`}</span>)}</div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+
           {(panorama || panoErr) && (
             <div className="bg-white rounded-lg border p-4">
               <h3 className="font-semibold mb-3 flex items-center gap-2"><Brain className="w-4 h-4 text-indigo-500"/>知识全景</h3>
@@ -1344,12 +1528,75 @@ export default function ProjectDetailPage() {
         <DomainPackCard key={packTick} projectId={id!} onChanged={() => void loadBusinessStatus()} />
       )}
 
+      {/* zx_20261120_3 M8「传·见」：项目知识以项目为中心，岗位知识以岗位为中心；这里只做**人工**搬运。 */}
+      {activeTab === 'positions' && (
+        <div className="space-y-4">
+          <div className="bg-white rounded-lg border p-4">
+            <h3 className="font-semibold mb-1">岗位</h3>
+            <p className="text-xs text-gray-500 mb-3">项目知识以项目为中心；岗位知识以岗位为中心。这里只做人工搬运：把可迁移的配方/验收/术语沉淀成**岗位候选**（不自动采纳）。</p>
+            {posBoardErr && <p className="text-xs text-red-600 mb-2">岗位看板读取失败：{posBoardErr}</p>}
+            {posBoard.length === 0 ? (
+              <p className="text-sm text-gray-400 py-4 text-center">本项目还没有启用岗位——到「岗位」页启用并绑定本项目后，这里会出现岗位×任务账。</p>
+            ) : (
+              <div className="space-y-1.5">
+                {posBoard.map((p) => (
+                  <div key={p.id} className={`rounded border px-3 py-2 text-sm ${posPreviewId === p.id ? 'border-blue-400 bg-blue-50/40' : ''}`}>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <button onClick={() => setPosPreviewId(p.id)} className="font-medium hover:underline">{p.name}</button>
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded ${p.enabled ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-500'}`}>{p.enabled ? '启用' : '停用'}</span>
+                      <span className="text-[11px] text-gray-500">任务 {p.taskTotal}（完成 {p.taskCompleted} · 在办 {p.taskActive}）</span>
+                      {p.pendingLessons > 0 && <span className="text-[11px] text-amber-600">待审经验 {p.pendingLessons}</span>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="bg-white rounded-lg border p-4">
+            <h3 className="font-semibold mb-2">岗位注入预演</h3>
+            <div className="flex items-center gap-2 flex-wrap mb-2">
+              <select value={posPreviewId} onChange={(e) => setPosPreviewId(e.target.value)} className="text-xs border rounded px-2 py-1">
+                <option value="">选择岗位…</option>
+                {posBoard.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+              <input value={posPreviewQuery} onChange={(e) => setPosPreviewQuery(e.target.value)} placeholder="拟派任务的标题/描述（可空；空=按时间序）" className="text-xs border rounded px-2 py-1 flex-1 min-w-[240px]" />
+              <button onClick={() => void previewPositionInjection()} className="text-xs px-2 py-1 rounded bg-blue-600 text-white hover:bg-blue-700">预演</button>
+              <span className="text-[10px] text-gray-400">与执行期同一构造；上限 1200 字；不写注入账。</span>
+            </div>
+            {posPreviewErr && <p className="text-xs text-red-600">{posPreviewErr}</p>}
+            {posPreviewText && <pre className="text-xs whitespace-pre-wrap bg-gray-50 border rounded p-2">{posPreviewText}</pre>}
+          </div>
+
+          <div className="bg-white rounded-lg border p-4">
+            <h3 className="font-semibold mb-1">项目知识 → 岗位候选</h3>
+            <p className="text-xs text-gray-500 mb-2">只列可迁移三节（配方/验收/术语）。点「沉淀」只落**待审候选**，采纳后才注入；请先去掉项目专有路径/客户名/凭据。</p>
+            {posCaptureMsg && <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1 mb-2">{posCaptureMsg}</p>}
+            {posKnowledgeSections.length === 0 ? (
+              <p className="text-sm text-gray-400 py-3">尚未派生可迁移知识（或本册还没有事实源）。</p>
+            ) : posKnowledgeSections.map((s) => (
+              <div key={s.section} className="mb-3">
+                <h4 className="text-xs font-semibold text-gray-700 mb-1">{s.label}</h4>
+                <div className="space-y-1">
+                  {s.content.split('\n').filter((l) => l.trim()).map((line, i) => (
+                    <div key={`${s.section}-${i}`} className="flex items-start gap-2 text-xs">
+                      <span className="flex-1 text-gray-700 truncate" title={line}>{line}</span>
+                      <button onClick={() => void captureKnowledgeLine(s.section, line)} className="px-1.5 py-0.5 border rounded text-[10px] text-gray-600 hover:bg-gray-50 shrink-0">沉淀为岗位候选</button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {ctx.cron_run_command && <div className="bg-white rounded-lg border p-4"><h3 className="font-semibold mb-2 flex items-center gap-2"><Clock className="w-4 h-4"/>Cron 运行命令</h3><pre className="text-xs font-mono bg-gray-50 p-2 rounded overflow-x-auto">{ctx.cron_run_command}</pre></div>}
 
       {/* 编辑弹窗（含 budget/rhythm） */}
       {editing && (
         <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50" onClick={()=>setEditing(false)}>
-          <div className="bg-white rounded-xl shadow-lg p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto" onClick={e=>e.stopPropagation()}>
+          <div className="bg-white rounded-xl shadow-lg p-6 w-full max-w-4xl max-h-[90vh] overflow-y-auto" onClick={e=>e.stopPropagation()}>
             <h3 className="text-lg font-bold mb-4">编辑项目</h3>
             <div className="space-y-3">
               <div><label className="text-sm font-medium">名称</label><input value={form.name} onChange={e=>setForm({...form,name:e.target.value})} className="w-full px-3 py-2 border rounded-lg text-sm mt-1"/></div>

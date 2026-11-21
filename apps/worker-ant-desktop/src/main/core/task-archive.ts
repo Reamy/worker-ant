@@ -38,12 +38,14 @@
  * **为什么不发 IM**：归档是**人主动**的动作（GUI 点「放弃」/ 编排工具显式弃单），不是"出事了要喊人"；
  * 与 `pauseTask` 的"传 `note` 才告知"同向——此处连 `note` 都不收，"弃"本身即当事人自己的决定，无需回告。
  */
+import crypto from 'node:crypto';
 import { eventBus } from './event-bus.js';
 import { turnAccountPage, type TaskTerminalDb } from './task-terminal.js';
 import { abortTaskRun } from './task-run-registry.js';
 import {
   PAUSE_REASON_ACCEPTANCE_FAILED,
   PAUSE_REASON_ACCEPTANCE_UNJUDGED,
+  PAUSE_REASON_AWAITING_INPUT,
   recordedPauseReason,
 } from './pause-reason.js';
 
@@ -250,6 +252,17 @@ export function archiveTask(db: TaskTerminalDb, opts: ArchiveTaskOptions): Archi
   // 翻页：作废也须翻掉上一次 run 的判卷（与"凡终态必同形"同一条尺），否则 `project-analytics`
   //   仍按旧 `quality_score` 把已弃任务计入项目均质。
   const pageTurned = turnAccountPage(db, taskId);
+
+  // zx_20261119_1 M3「止」：归档一个"正在等用户答复"的任务时留痕——问题原文不能随归档一并消失。
+  //   真库标本 S2：父任务把提问中的子任务归档，用户之后再也找不到那三个待答口径。
+  try {
+    const ctx = JSON.parse(row?.context_json || '{}') as { awaiting_input?: { question?: unknown } };
+    const q = typeof ctx.awaiting_input?.question === 'string' ? ctx.awaiting_input.question.trim() : '';
+    if (q && recordedPauseReason(row?.context_json ?? null) === PAUSE_REASON_AWAITING_INPUT) {
+      db.prepare("INSERT INTO wa_task_conversations (id, task_id, role, content, token_count, created_at) VALUES (?, ?, 'system', ?, 0, datetime('now'))")
+        .run(crypto.randomUUID(), taskId, `[归档待答任务] 该任务原在等待答复，问题原文：${q.slice(0, 300)}——已被归档，不再等待。`);
+    }
+  } catch { /* 留痕 best-effort：账坏不阻断归档 */ }
 
   eventBus
     .emit('task.status_changed', {

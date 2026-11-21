@@ -453,7 +453,17 @@ export function previewTeamBody(kind: TeamItemKind, title: string, body: Record<
       ? body.lessons.map((l) => str(asRecord(l).content)).filter((c) => c !== '')
       : [];
     if (lessons.length > 0) out.sections.push({ label: `已采纳经验（${lessons.length} 条）`, content: lessons.join('\n') });
-    out.note = '导入后四段只补不覆盖；经验一律落为待审候选，采纳后才注入。';
+    // zx_20261120_3 M4：可调用技能随包共享；导入一律落 draft（预览如实说“待审批才可调用”）。
+    const pskills = Array.isArray(body.positionSkills) ? body.positionSkills : [];
+    if (pskills.length > 0) {
+      const lines = pskills.map((s) => {
+        const o = asRecord(s);
+        const desc = str(o.description);
+        return `${str(o.name)}${desc ? `：${desc}` : ''}`;
+      }).filter((l) => l.trim() !== '');
+      if (lines.length > 0) out.sections.push({ label: `可调用技能（${lines.length}）`, content: lines.join('\n') });
+    }
+    out.note = '导入后四段只补不覆盖；经验一律落为待审候选，技能一律落待审批草案；批准/采纳后才注入或可调用。';
     return out;
   }
   if (kind === 'project_profile') {

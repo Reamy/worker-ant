@@ -1,9 +1,9 @@
 import { useState, useEffect } from 'react';
-import { ansProxy, skills as skillsIpc } from '../lib/ipc';
+import { ansProxy, skills as skillsIpc, type LocalSkillRow } from '../lib/ipc';
 import { Wand2, RefreshCw, Plus, Trash2, Pencil, X, Check, Sparkles } from 'lucide-react';
 
 interface Skill { id: string; name: string; description?: string; category?: string; enabled?: number; status?: string; tags?: string; version?: number; config?: string; }
-interface SkillDraft { id: string; name: string; description: string; steps: string[]; }
+interface SkillDraft { id: string; name: string; description: string; steps: string[]; projectId?: string; projectName?: string; }
 
 export default function SkillsPage() {
   const [skills, setSkills] = useState<Skill[]>([]);
@@ -13,15 +13,23 @@ export default function SkillsPage() {
   const [editItem, setEditItem] = useState<Skill | null>(null);
   // 记忆衍生技能草稿
   const [drafts, setDrafts] = useState<SkillDraft[]>([]);
+  // zx_20261121_1 M3：本地技能（全局 + 项目），与 ANS 远端技能分开显示
+  const [localSkills, setLocalSkills] = useState<LocalSkillRow[]>([]);
   // DataTable 排序
   const [sortBy, setSortBy] = useState<'name' | 'status' | 'category'>('name');
   const [sortAsc, setSortAsc] = useState(true);
 
-  useEffect(() => { load(); loadDrafts(); }, []);
+  useEffect(() => { load(); loadDrafts(); loadLocal(); }, []);
   async function load() { setLoading(true); setError(''); try { const d = await ansProxy.get<Skill[]>('/api/v1/skills'); setSkills(d as Skill[]); } catch(e) { setError((e as Error).message); } setLoading(false); }
   async function loadDrafts() { try { const r = await skillsIpc.listDrafts(); setDrafts(r.drafts); } catch {} }
-  async function handleApprove(id: string) { try { await skillsIpc.approve(id); loadDrafts(); } catch {} }
-  async function handleReject(id: string) { try { await skillsIpc.reject(id); loadDrafts(); } catch {} }
+  async function loadLocal() { try { const r = await skillsIpc.list(); setLocalSkills(r.skills); } catch { setLocalSkills([]); } }
+  async function handleApprove(id: string) { try { await skillsIpc.approve(id); await loadDrafts(); await loadLocal(); } catch {} }
+  async function handleReject(id: string) { try { await skillsIpc.reject(id); await loadDrafts(); } catch {} }
+  async function handlePromote(s: LocalSkillRow) {
+    if (!confirm(`把「${s.name}」提升为全局技能？提升后所有项目都能看到/调用它，本项目不再独占。`)) return;
+    try { await skillsIpc.promote(s.id); await loadLocal(); }
+    catch (e) { alert(`提升失败：${(e as Error).message}`); }
+  }
   async function handleDelete(id: string) { if (!confirm('确定删除？')) return; try { await ansProxy.delete(`/api/v1/skills/${id}`); load(); } catch {} }
   async function handleToggle(skill: Skill) { try { await ansProxy.put(`/api/v1/skills/${skill.id}`, { enabled: !skill.enabled }); load(); } catch {} }
 
@@ -66,7 +74,7 @@ export default function SkillsPage() {
                 <div className="flex items-start justify-between">
                   <div className="min-w-0 flex-1">
                     <h4 className="font-medium text-sm">{d.name}</h4>
-                    <p className="text-xs text-gray-500 mt-0.5">{d.description}</p>
+                    <p className="text-xs text-gray-500 mt-0.5">{d.description}{d.projectName ? `（项目：${d.projectName}）` : ''}</p>
                     <ol className="mt-2 space-y-0.5">
                       {d.steps.map((s, i) => <li key={i} className="text-xs text-gray-600"><span className="text-gray-400">{i + 1}.</span> {s}</li>)}
                     </ol>
@@ -76,6 +84,36 @@ export default function SkillsPage() {
                     <button onClick={() => handleReject(d.id)} className="flex items-center gap-1 px-2.5 py-1.5 border border-gray-300 text-gray-600 rounded-lg text-xs hover:bg-gray-50"><X className="w-3.5 h-3.5" />拒绝</button>
                   </div>
                 </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {localSkills.length > 0 && (
+        <div className="mb-8">
+          <div className="flex items-center gap-2 mb-3">
+            <Wand2 className="w-4 h-4 text-cyan-600" />
+            <h3 className="text-sm font-semibold text-gray-700">本地技能（按项目归属）</h3>
+          </div>
+          <div className="space-y-2">
+            {localSkills.map(s => (
+              <div key={s.id} className="bg-white rounded-lg border p-3 flex items-center justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-medium text-sm">{s.name}</span>
+                    <span className={`text-[10px] px-1.5 py-0.5 rounded ${s.scope === 'project' ? 'bg-indigo-50 text-indigo-700' : 'bg-gray-100 text-gray-600'}`}>
+                      {s.scope === 'project' ? `项目：${s.project_name || '未知'}` : '全局'}
+                    </span>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500">{s.status || '—'}</span>
+                  </div>
+                  <p className="text-xs text-gray-400 truncate mt-0.5">{s.description || '—'}</p>
+                </div>
+                {s.scope === 'project' && s.status === 'approved' && (
+                  <button onClick={() => void handlePromote(s)} className="text-xs px-2 py-1 rounded bg-indigo-50 text-indigo-700 hover:bg-indigo-100 shrink-0">
+                    提升为全局
+                  </button>
+                )}
               </div>
             ))}
           </div>

@@ -22,10 +22,27 @@ import type { McpClientInstance, McpToolInfo } from './mcp-sdk-client.js';
 import type { A2AClientInstance } from './a2a-sdk-client.js';
 
 class RetryableError extends Error {
-  constructor(message: string) {
+  /** `Retry-After` 解析出的等待毫秒（429 才有）；缺省走指数退避。 */
+  readonly retryAfterMs?: number;
+  constructor(message: string, retryAfterMs?: number) {
     super(message);
     this.name = 'RetryableError';
+    this.retryAfterMs = retryAfterMs;
   }
+}
+
+/**
+ * zx_20261116_3 M1「限」：`Retry-After` → 毫秒。接受秒数与 HTTP date 两种合法形态；
+ * 认不出返回 undefined（调用方走指数退避）。上限 60s，防上游给出离谱值把执行体挂死。
+ */
+export function parseRetryAfterMs(header: string | null | undefined): number | undefined {
+  if (header == null) return undefined;
+  const raw = String(header).trim();
+  if (!raw) return undefined;
+  if (/^\d+$/.test(raw)) return Math.min(Number(raw) * 1000, 60_000);
+  const at = Date.parse(raw);
+  if (Number.isFinite(at)) return Math.min(Math.max(0, at - Date.now()), 60_000);
+  return undefined;
 }
 
 /**
@@ -323,7 +340,12 @@ export class AnsClient {
       });
 
       if (!response.ok) {
-        // 5xx服务端错误可重试，4xx客户端错误不重试
+        // zx_20261116_3 M1「限」：429 是**可重试**的速率限制（不是永久 4xx）。
+        //   旧实现把 429 与其余 4xx 一起当永久错误 ⇒ 317 次限流直接落成失败。
+        if (response.status === 429 && attempt < this.config.maxRetries) {
+          throw new RetryableError('Rate limited', parseRetryAfterMs(response.headers.get('retry-after')));
+        }
+        // 5xx服务端错误可重试，其余4xx客户端错误不重试
         if (response.status >= 500 && attempt < this.config.maxRetries) {
           throw new RetryableError(`Server error ${response.status}`);
         }
@@ -334,7 +356,9 @@ export class AnsClient {
       return response.json() as Promise<T>;
     } catch (err) {
       if (err instanceof RetryableError && attempt < this.config.maxRetries) {
-        const delay = this.config.retryDelayMs * Math.pow(2, attempt);
+        // 429 的 Retry-After 优先；单次等待封顶 5s + 抖动（不把执行体挂死，也不做 thundering herd）。
+        const base = err.retryAfterMs ?? this.config.retryDelayMs * Math.pow(2, attempt);
+        const delay = Math.min(base, 5000) + Math.floor(Math.random() * 250);
         await new Promise((resolve) => setTimeout(resolve, delay));
         return this.requestWithRetry<T>(path, init, attempt + 1);
       }

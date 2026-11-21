@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef, Fragment, type ReactElement } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { tasks, projects, admin, nodes, invoke, IpcError, newClientRequestId, positions as positionsApi, type DispatchReasonView } from '../lib/ipc';
+// zx_20261120_3 M2「职·见」：岗位来源词表（纯常量，渲染层可直引）。
+import { TASK_POSITION_SOURCE_LABEL } from '../../../src/main/core/positions.js';
 import { useSettings } from '../lib/settingsStore';
 import { useDeliverableDrawer } from '../lib/deliverableDrawer';
 import { ArrowLeft, Play, Pause, RotateCcw, Plus, RefreshCw, GitBranch, MessageSquare, TrendingUp, AlertTriangle, History, Brain, Edit, Check, Trash2, FileText, Target, X, ChevronDown, ChevronRight, Paperclip, Archive, Terminal, CopyPlus, Users } from 'lucide-react';
@@ -19,6 +21,7 @@ import { UNVERIFIED_REASON_LABEL, isUnjudgedReason, type AcceptanceCheckLike } f
 import { pauseReasonLabel, recordedPauseReason, recordedPauseNote } from '../../../src/main/core/pause-reason.js';
 // zx_20261113_2 M14：暂停横幅的标题/下一步按因由分型（验收未过要说未达条数并指向验收块）。
 import { pausedBannerHeadline, pausedBannerHint } from '../lib/pause-banner';
+import type { AutoResumeBannerView } from '../lib/pause-banner';
 // zx_20260914 M2-1(王阳明·知行合一): 正文「读得动」——本页预览块与列表页/抽屉共用同一渲染器
 import MarkdownSubset from '../lib/markdown-subset';
 // zx_20260913 M3-5/M3-4: 前置阻塞态判据与"序号→id"映射的**唯一真源**（renderer 是词表的第二个落点，故跨 root 引同一份代码）
@@ -33,7 +36,7 @@ import { isEngineDraftedTurn } from '../../../src/main/core/turn-authorship.js';
 import { parseAttachmentOutcomeViews, ATTACHMENT_STATUS_LABEL, type AttachmentOutcomeStatus } from '../../../src/main/core/attachment-outcome.js';
 // zx_20260930 M3-e: 「[等待用户输入] … [选项: A / B]」的**解析**跨 root 引真源——本页此前自带第二份
 //   split（只认 `,`/`|`），与 IM/门禁侧的六种分隔不是同一套 ⇒ 同一条消息两处读出不同的选项个数。
-import { OPTION_BLOCK_RE, parseOptions } from '../../../src/main/core/im/options.js';
+import { OPTION_BLOCK_RE, parseOptions, normalizeOptionItems } from '../../../src/main/core/im/options.js';
 // zx_20260930 M4-4: 任务状态词表**唯一真源**（本页此前手抄一份——investigating 只有本页有）
 // zx_20261107_1 B9: 状态章色调同源（`TASK_STATUS_TONE` 一处穷举，页面不再自带 12 键副本）
 import { TASK_STATUS_LABEL, statusText, taskStatusPill } from '../lib/status-view';
@@ -43,14 +46,14 @@ import { TASK_STATUS_LABEL, statusText, taskStatusPill } from '../lib/status-vie
 import { execBadge, execStateLine, ageMsOf } from '../lib/exec-view';
 // zx_20261111_3「显」：第一行的唯一真源在 main 纯模块（页面只说事实，不自己排优先级）。
 import NextActionBar from '../components/NextActionBar';
-import { nextActionForTask, type NextActionId } from '../../../src/main/core/next-action.js';
+import { nextActionForTask, resolveNextActionRoute, type NextActionId } from '../../../src/main/core/next-action.js';
 // zx_20261107_1 B9: 格式化单源——本页此前的 `formatToken`/`formatTime`/`formatDuration` 与看板/列表各写一份且已漂开
 import { formatTokens, formatTimeOrRaw, formatMoney } from '../lib/format';
 // zx_20261107_1 B9（庄子·庖丁解牛）：任务详情按关节抽成五个只负责"摆"的组件，页面保留全部判据与状态。
 import TaskHeader from '../components/task/TaskHeader';
 import TaskProgress from '../components/task/TaskProgress';
 import TaskArtifacts from '../components/task/TaskArtifacts';
-import TaskContextLedger, { type ContextLedgerView, type InjectionSummaryRow } from '../components/task/TaskContextLedger';
+import TaskContextLedger, { type ContextLedgerView, type InjectionSummaryRow, type RoiBudgetView } from '../components/task/TaskContextLedger';
 import TaskCost from '../components/task/TaskCost';
 import TaskLogs from '../components/task/TaskLogs';
 // zx_20260930 M4-2: 列表**批次大小**与"这一批之后还有没有下一页"的判据，与成果页/项目详情页**同一份**
@@ -95,7 +98,10 @@ interface SubagentResultView {
 interface TaskItem { id: string; project_id: string; title: string; description: string; status: string; priority: number; source: string; parent_task_id?: string; depends_on?: string; acceptance_criteria?: string;
   // 同一接口服务两处载荷：详情本体走 `task:get`（整行，带 context_json）；列表走 `task:list`
   //   （zx_20261028_2 M2 起只带摘录键 context_digest，不再整份 ctx）。读前置因由只用后者。
-  context_json?: string; context_digest?: string; aggregate_version?: number; created_at: string; updated_at: string; }
+  context_json?: string; context_digest?: string; aggregate_version?: number; created_at: string; updated_at: string;
+  // zx_20261120_2 M1「明」：`task:get` 投影的自动续跑判定（由 main 用 step-budget.ts 同一真源派生；
+  //   与列表行无此键无关——本页把详情回传的投影挂在这里，横幅只读本字段）。
+  autoResume?: AutoResumeBannerView | null; }
 interface ConvItem { id: string; role: string; content: string; tool_calls?: string; token_count?: number; created_at: string; }
 // zx_20260911_2 M4b(Q1 名实相符·展示补齐): task:get 以 SELECT * 取产出物行 ⇒ is_primary/acceptance_verified 本就在载荷中(字段可读而无人读)
 interface DelivItem { id: string; name: string; type: string; status: string; file_path?: string; created_at: string; is_primary?: number; acceptance_verified?: number;
@@ -129,6 +135,7 @@ const ATT_TONE: Record<AttachmentOutcomeStatus, string> = { inlined:'bg-green-10
 const ARCHETYPE_SOURCE_LABEL: Record<ArchetypeSource, string> = {
   keyword: '关键词命中', family: '相似度判定', fallback: '长度兜底',
   semantic: '语义识别', calibrated: '历史校准', node: '节点指定', manual: '手动指定',
+  capability: '能力升级',
 };
 // zx_20261106_1 M7: 子任务判据**来源**的人话（键域由 `AcceptanceSource` 强制，新增态编译期报错）。
 //   「派生」不是「模型给的」，更不是「人工许诺的」——族验收卡上须一眼看得出差别。
@@ -263,16 +270,18 @@ export default function TaskDetailPage() {
   const [contextLedger, setContextLedger] = useState<ContextLedgerView | null>(null);
   const [contextLedgerError, setContextLedgerError] = useState('');
   const [injectionSummary, setInjectionSummary] = useState<InjectionSummaryRow[]>([]);
+  const [roiBudget, setRoiBudget] = useState<RoiBudgetView | null>(null);
   // zx_20261115_3 M2：两处 `task:get` 读点同一次写入（刷新与首次加载不各写各的）。
   function applyClaimedArtifacts(d: { claimedArtifacts?: typeof claimedArtifacts; artifactsNote?: string }): void {
     setClaimedArtifacts(d.claimedArtifacts || []);
     setArtifactsNote(String(d.artifactsNote || ''));
   }
   // zx_20261115_3 M6：两处 `task:get` 读点同一次写入上下文账（缺键 = 未记录，错误单独带出）。
-  function applyContextLedger(d: { contextLedger?: ContextLedgerView | null; contextLedgerError?: string; injectionSummary?: InjectionSummaryRow[] }): void {
+  function applyContextLedger(d: { contextLedger?: ContextLedgerView | null; contextLedgerError?: string; injectionSummary?: InjectionSummaryRow[]; roiBudget?: RoiBudgetView | null }): void {
     setContextLedger(d.contextLedger ?? null);
     setContextLedgerError(String(d.contextLedgerError || ''));
     setInjectionSummary(Array.isArray(d.injectionSummary) ? d.injectionSummary : []);
+    setRoiBudget(d.roiBudget ?? null);
   }
   // zx_20260930 M4-2: 对话与成果两列表各自**真分页**（`task:get` 的 `convLimit/convOffset` 与
   //   `delivLimit/delivOffset`，另回 `conversationsTotal`/`deliverablesTotal`）。
@@ -289,7 +298,7 @@ export default function TaskDetailPage() {
   // zx_20261023_5 批一: 派单理由三行（读不到就整块不显示，不猜"能不能派"）。
   const [dispatchView, setDispatchView] = useState<DispatchReasonView | null>(null);
   // zx_20261112_2 B1：本次建单的派发结局（已派/未派/外派未成）；旧任务无此键 ⇒ null，不显示。
-  const [dispatchDecision, setDispatchDecision] = useState<{ attempted: boolean; ok: boolean; reason: string; label: string; nodeId?: string; at: string } | null>(null);
+  const [dispatchDecision, setDispatchDecision] = useState<{ attempted: boolean; ok: boolean; reason: string; label: string; nodeId?: string; mode?: 'readonly-remote'; repoUrl?: string; repoRef?: string; at: string } | null>(null);
   // zx_20261106_3 B5「见」: 本任务若已外派，远端进度快照（只在读回时抄，收口后不装活）。
   const [selfRemoteProgress, setSelfRemoteProgress] = useState<NodeRequestProgress | null>(null);
   // 「没读到」与「对端没上报」是两件事——前者须如实说"尚未读回"，不得混成"没有进度"。
@@ -299,8 +308,12 @@ export default function TaskDetailPage() {
   const [lastProgressAt, setLastProgressAt] = useState<string | null>(null);
   const [stuckMs, setStuckMs] = useState<number | null>(null);
   const [pendingJobAgeMs, setPendingJobAgeMs] = useState<number | null>(null);
+  // zx_20261117_1 M5「接」：已完成父任务下的后补子任务数（只读；>0 时头部提示"父结论未重算"）。
+  const [childrenAfterCompletion, setChildrenAfterCompletion] = useState(0);
   // zx_20261112_1 B2「任」: 指派岗位（main 读时派生 id/name/enabled）；未指派即为 null，头部写「未指派岗位」。
   const [positionView, setPositionView] = useState<{ id: string; name: string; enabled: boolean; missing?: boolean } | null>(null);
+  // zx_20261120_3 M2：来源（无岗位也有：none/legacy/remote）。
+  const [positionSource, setPositionSource] = useState<{ source: string; parentTaskId?: string } | null>(null);
   // zx_20261115_4 M1「岗」：补派/改派——本项目可用岗位候选 + 正在保存。
   //   此前只能建单时选一次，"当时没选"就永远补不上（真库 362 单只有 1 单带岗位）。
   const [posOptions, setPosOptions] = useState<Array<{ id: string; name: string }>>([]);
@@ -340,6 +353,9 @@ export default function TaskDetailPage() {
   const [similarTasks, setSimilarTasks] = useState<Array<Record<string, unknown>>>([]);
   const [showReply, setShowReply] = useState(false);
   const [replyText, setReplyText] = useState('');
+  // zx_20261118_2 M5「豁」：逐条验收豁免的页内裁定弹窗（理由必填；不自动收口）。
+  const [waiveTarget, setWaiveTarget] = useState<{ criteria: string[] } | null>(null);
+  const [waiveReason, setWaiveReason] = useState('');
   // zx_20260923 M7-c（G15）: 暂停横幅内在联附言（与模态框的 replyText **各管各的**，互不串）
   const [bannerReply, setBannerReply] = useState('');
   // zx_20260910_1 M4: 应答提交中——按钮禁用防连点重复提交（main 侧另有幂等判据兜底，此为界面侧第一道）
@@ -378,6 +394,8 @@ export default function TaskDetailPage() {
   const [showActionMenu, setShowActionMenu] = useState(false);
   const [collapsedChildren, setCollapsedChildren] = useState<Set<string>>(new Set());
   const [fileStream, setFileStream] = useState<Array<Record<string, unknown>>>([]);
+  // zx_20261118_1 「回」: 完成态回放的文件事件总数（> 显示条数时如实标「共 N 条」）
+  const [fileTotal, setFileTotal] = useState(0);
   const [stepStream, setStepStream] = useState<Array<Record<string, unknown>>>([]);
   const [liveStatus, setLiveStatus] = useState<Record<string, unknown> | null>(null);
   // zx_20260906 批4 (4b): 长任务心跳——长单步(≥30s)执行时 step_finished 未达，靠 task.heartbeat 更新活跃脉冲，界面不再"伪冻结"
@@ -477,6 +495,7 @@ export default function TaskDetailPage() {
   const activeTaskId = task?.id || id;
   useEffect(() => {
     setFileStream([]);
+    setFileTotal(0);
     setStepStream([]);
     setLiveStatus(null);
     setMemoryInjection([]);
@@ -611,16 +630,29 @@ export default function TaskDetailPage() {
     const st = task?.status;
     if (!task?.id) return;
     if (st === 'running' || st === 'executing' || st === 'pending' || st === 'planning' || st === 'preparing') return;
-    if (stepStream.length > 0) return; // 本会话已实时捕获，避免重复
+    // zx_20261118_1 修（审查 Important #1）：原 `if (stepStream.length > 0) return;` 把**文件回放**也挡掉了——
+    //   实时视图只收到"打开页面之后"的事件，若用户开着详情页看任务跑完，之前落盘的变更永远补不回来
+    //   （171 条只剩打开后的几条，甚至整块消失）。步骤/信号仍按"本会话已实时捕获则不重复"，
+    //   文件回放则**不受此门限制**：终态以事件日志的最近 200 条为准，实时清单仅作回放失败时的兜底。
+    const needSteps = stepStream.length === 0;
     let cancelled = false;
-    invoke<{ steps?: Array<Record<string, unknown>>; signals?: Array<{ type: string; signalType?: string; level?: string; message: string; occurred_at: string }> }>('events:taskReplay', task.id)
+    invoke<{ steps?: Array<Record<string, unknown>>; signals?: Array<{ type: string; signalType?: string; level?: string; message: string; occurred_at: string }>; files?: Array<Record<string, unknown>>; fileTotal?: number }>('events:taskReplay', task.id)
       .then((r) => {
         if (cancelled || !r) return;
-        if (Array.isArray(r.steps) && r.steps.length > 0) {
-          setStepStream(r.steps.map((s) => ({ ...s, ts: Date.now() })));
+        if (needSteps) {
+          if (Array.isArray(r.steps) && r.steps.length > 0) {
+            setStepStream(r.steps.map((s) => ({ ...s, ts: Date.now() })));
+          }
+          if (Array.isArray(r.signals) && r.signals.length > 0) {
+            setSignalStream(r.signals.map((s) => ({ type: s.type, signalType: s.signalType || '', level: s.level || 'info', message: s.message, ts: Date.now() })));
+          }
         }
-        if (Array.isArray(r.signals) && r.signals.length > 0) {
-          setSignalStream(r.signals.map((s) => ({ type: s.type, signalType: s.signalType || '', level: s.level || 'info', message: s.message, ts: Date.now() })));
+        // zx_20261118_1 「回」: 完成/失败/暂停后再进详情页——从事件日志回放文件变更。
+        //   终态取日志窗口（最近 200 条）为准：日志不可变且是超集；本会话实时清单更长时保留（回放失败兜底）。
+        const files = Array.isArray(r.files) ? r.files : [];
+        if (files.length > 0) {
+          setFileStream(prev => files.length >= prev.length ? files.map(f => ({ ...f, ts: Date.now() })) : prev);
+          setFileTotal(typeof r.fileTotal === 'number' ? Math.max(r.fileTotal, files.length) : files.length);
         }
       })
       .catch((e) => { if (!cancelled) reportLoad('步骤回放', e); });
@@ -832,6 +864,9 @@ export default function TaskDetailPage() {
     setLastProgressAt(d.lastProgressAt ?? null);
     setStuckMs(typeof d.stuckMs === 'number' ? d.stuckMs : null);
     setPendingJobAgeMs(typeof d.pendingJobAgeMs === 'number' ? d.pendingJobAgeMs : null);
+    // zx_20261117_1 M5「接」：非数 ⇒ 0（不编数；徽标只在 >0 时显示）。
+    const after = (d as { childrenCreatedAfterCompletion?: unknown }).childrenCreatedAfterCompletion;
+    setChildrenAfterCompletion(typeof after === 'number' ? after : 0);
   }
 
   async function loadProject() {
@@ -843,13 +878,13 @@ export default function TaskDetailPage() {
       // 先尝试以 taskId 加载
       // zx_20260930 M4-2: 显式取第 0 页（两个列表各一批）——刷新/切换=回到首页，
       //   不按"当前已加载多少"续取（那会让"刷新"变成一个语义不明的动作）。
-      const taskData = await tasks.get(id!, { convLimit: LIST_PAGE_SIZE, convOffset: 0, delivLimit: LIST_PAGE_SIZE, delivOffset: 0 }) as unknown as { task: TaskItem; conversations: ConvItem[]; conversationsTotal?: number; deliverables: DelivItem[]; deliverablesTotal?: number; retiredCount?: number; archivedSnapshot?: ArchivedSnapshotView | null; archiveReason?: string | null; archivedAt?: string | null; runtimeEvidence?: RuntimeEvidenceView[]; suggestedCriteria?: string[]; retrospective?: Array<{ content: string; created_at: string; structured?: { plan?: string; delta?: string; lesson?: string; action?: string; reusable?: boolean } }>; modelSelection?: ModelSelection | null; execState?: { state: string; reason: string } | null; lastProgressAt?: string | null; stuckMs?: number | null; pendingJobAgeMs?: number | null; position?: { id: string; name: string; enabled: boolean } | null; dispatchDecision?: { attempted: boolean; ok: boolean; reason: string; label: string; nodeId?: string; at: string } | null };
+      const taskData = await tasks.get(id!, { convLimit: LIST_PAGE_SIZE, convOffset: 0, delivLimit: LIST_PAGE_SIZE, delivOffset: 0 }) as unknown as { task: TaskItem; conversations: ConvItem[]; conversationsTotal?: number; deliverables: DelivItem[]; deliverablesTotal?: number; retiredCount?: number; archivedSnapshot?: ArchivedSnapshotView | null; archiveReason?: string | null; archivedAt?: string | null; runtimeEvidence?: RuntimeEvidenceView[]; suggestedCriteria?: string[]; retrospective?: Array<{ content: string; created_at: string; structured?: { plan?: string; delta?: string; lesson?: string; action?: string; reusable?: boolean } }>; modelSelection?: ModelSelection | null; execState?: { state: string; reason: string } | null; lastProgressAt?: string | null; stuckMs?: number | null; pendingJobAgeMs?: number | null; position?: { id: string; name: string; enabled: boolean } | null; positionSource?: { source: string; parentTaskId?: string } | null; dispatchDecision?: { attempted: boolean; ok: boolean; reason: string; label: string; nodeId?: string; mode?: 'readonly-remote'; repoUrl?: string; repoRef?: string; at: string } | null; autoResume?: AutoResumeBannerView | null };
       if (taskData.task) {
-        setTask(taskData.task);
+        setTask({ ...taskData.task, autoResume: taskData.autoResume ?? null });
         applyExecState(taskData);
         setModelSelection(taskData.modelSelection ?? null);
         setDispatchDecision(taskData.dispatchDecision ?? null);
-        setPositionView(taskData.position ?? null);
+        setPositionView(taskData.position ?? null); setPositionSource(taskData.positionSource ?? null);
         setArchivedSnap(taskData.archivedSnapshot ?? null);
         setArchiveReason(taskData.archiveReason ?? null);
         setArchivedAt(taskData.archivedAt ?? null);
@@ -910,8 +945,9 @@ export default function TaskDetailPage() {
    * 与 `reportAction` 同一提示位（同一计时器），只是文案承认这是读不到，而非动作没成。
    */
   const reportLoad = (what: string, e: unknown): void => {
-    const m = e instanceof Error ? e.message : String(e);
-    setActionMsg(`${what}加载失败${m ? ` · ${m}` : ''}`);
+    // zx_20261116_1 M6.5：非 Error / 空 message 也要给出可辨识的一格，不只留一句“加载失败”。
+    const m = (e instanceof Error ? e.message : String(e)).trim();
+    setActionMsg(`${what}加载失败 · ${m || '未知错误（已记录）'}`);
     if (actionTimerRef.current !== undefined) window.clearTimeout(actionTimerRef.current);
     actionTimerRef.current = window.setTimeout(() => setActionMsg(''), 6000);
   };
@@ -921,8 +957,8 @@ export default function TaskDetailPage() {
     setSelectedId(taskId);
     try {
       // zx_20260930 M4-2: 与 `loadProject` 同尺——切任务也是取第 0 页 + 服务端总数
-      const data = await tasks.get(taskId, { convLimit: LIST_PAGE_SIZE, convOffset: 0, delivLimit: LIST_PAGE_SIZE, delivOffset: 0 }) as unknown as { task: TaskItem; conversations: ConvItem[]; conversationsTotal?: number; deliverables: DelivItem[]; deliverablesTotal?: number; retiredCount?: number; archivedSnapshot?: ArchivedSnapshotView | null; archiveReason?: string | null; archivedAt?: string | null; runtimeEvidence?: RuntimeEvidenceView[]; suggestedCriteria?: string[]; modelSelection?: ModelSelection | null; execState?: { state: string; reason: string } | null; lastProgressAt?: string | null; stuckMs?: number | null; pendingJobAgeMs?: number | null; position?: { id: string; name: string; enabled: boolean } | null; dispatchDecision?: { attempted: boolean; ok: boolean; reason: string; label: string; nodeId?: string; at: string } | null };
-      setTask(data.task); setModelSelection(data.modelSelection ?? null); setDispatchDecision(data.dispatchDecision ?? null); setPositionView(data.position ?? null); setConvs(data.conversations||[]); setDelivs(data.deliverables||[]); setRetiredCount(Number(data.retiredCount)||0);
+      const data = await tasks.get(taskId, { convLimit: LIST_PAGE_SIZE, convOffset: 0, delivLimit: LIST_PAGE_SIZE, delivOffset: 0 }) as unknown as { task: TaskItem; conversations: ConvItem[]; conversationsTotal?: number; deliverables: DelivItem[]; deliverablesTotal?: number; retiredCount?: number; archivedSnapshot?: ArchivedSnapshotView | null; archiveReason?: string | null; archivedAt?: string | null; runtimeEvidence?: RuntimeEvidenceView[]; suggestedCriteria?: string[]; modelSelection?: ModelSelection | null; execState?: { state: string; reason: string } | null; lastProgressAt?: string | null; stuckMs?: number | null; pendingJobAgeMs?: number | null; position?: { id: string; name: string; enabled: boolean } | null; positionSource?: { source: string; parentTaskId?: string } | null; dispatchDecision?: { attempted: boolean; ok: boolean; reason: string; label: string; nodeId?: string; mode?: 'readonly-remote'; repoUrl?: string; repoRef?: string; at: string } | null; autoResume?: AutoResumeBannerView | null };
+      setTask({ ...data.task, autoResume: data.autoResume ?? null }); setModelSelection(data.modelSelection ?? null); setDispatchDecision(data.dispatchDecision ?? null); setPositionView(data.position ?? null); setPositionSource(data.positionSource ?? null); setConvs(data.conversations||[]); setDelivs(data.deliverables||[]); setRetiredCount(Number(data.retiredCount)||0);
       applyClaimedArtifacts(data as unknown as { claimedArtifacts?: typeof claimedArtifacts; artifactsNote?: string });
       applyContextLedger(data as unknown as Parameters<typeof applyContextLedger>[0]);
       applyExecState(data);
@@ -1032,6 +1068,21 @@ export default function TaskDetailPage() {
   }
   async function handleResume(taskId: string) { await submitPauseOp(() => tasks.resume(taskId)); }
   async function handleReply(taskId: string) { const text = replyText.trim(); if (!text) return; await submitPauseOp(async () => { await tasks.resume(taskId, text); setShowReply(false); setReplyText(''); }); }
+  // zx_20261118_2 M5「豁」：先写豁免账（`task:waiveAcceptance`），可选随后走**既有**收口路
+  //   `task:updateStatus('completed')`——不新造第二条完成路，也不把豁免写成"模型判过"。
+  async function handleWaiveAcceptance(taskId: string, criteria: string[], andComplete: boolean) {
+    const reason = waiveReason.trim();
+    if (!reason || criteria.length === 0) return;
+    if (!beginAction()) return;
+    try {
+      await tasks.waiveAcceptance(taskId, criteria, reason);
+      if (andComplete) await tasks.updateStatus(taskId, 'completed');
+      setWaiveTarget(null);
+      setWaiveReason('');
+      await loadProject();
+      if (taskId === selectedId) await selectTask(taskId);
+    } catch (e) { reportAction(e); } finally { endAction(); }
+  }
   // zx_20260923 M7-c（G15）: 横幅内联附言恢复——与上面 `handleReply` 调的是**同一个**恢复方法（同通道、同语义），
   //   不是第二份 resume 实现；后端 `project.ipc.ts` 的 `task:resume` 早已收 `reply`，故 main/IPC 零改动。
   async function handleResumeWithNote(taskId: string) { const text = bannerReply.trim(); if (!text) return; await submitPauseOp(async () => { await tasks.resume(taskId, text); setBannerReply(''); }); }
@@ -1124,6 +1175,13 @@ export default function TaskDetailPage() {
         if (actionTimerRef.current !== undefined) window.clearTimeout(actionTimerRef.current);
         actionTimerRef.current = window.setTimeout(() => setActionMsg(''), 8000);
       }
+      // zx_20261117_1 M5「接」：挂到已完成父任务下 ⇒ 如实提示"父结论不会重算"（不拦，只告知）。
+      const createdHint = created as { parentCompleted?: boolean; hint?: string } | undefined;
+      if (createdHint?.parentCompleted && createdHint.hint) {
+        setActionMsg(createdHint.hint);
+        if (actionTimerRef.current !== undefined) window.clearTimeout(actionTimerRef.current);
+        actionTimerRef.current = window.setTimeout(() => setActionMsg(''), 8000);
+      }
       setShowCreate(false); setNewTask({title:'',description:'',acceptance_criteria:'',planTaskId:''}); setCreateCtx({ mode: 'child' }); loadProject();
     } catch (e) { reportAction(e); } finally { setCreating(false); }
   }
@@ -1154,6 +1212,13 @@ export default function TaskDetailPage() {
   async function handlePreviewDeliv(d: DelivItem) { try { const r = await invoke<Record<string, unknown>>('deliverable:preview', d.id); const rd = r as unknown as Record<string, unknown>; const content = String(rd.content_snapshot || rd.content || ''); const filePath = rd.file_path as string | undefined; setDelivPreview({ name: d.name, type: d.type, content, filePath, fileExists: rd.file_exists === true, version: Number(rd.version) || undefined }); } catch (e) { reportAction(e); } }
 
   const ctx = (() => { try { return JSON.parse(task?.context_json||'{}'); } catch { return {}; } })();
+  // zx_20261119_2 M7「度」：工具拒绝与步数账（无账不显示——"没记过"不等于"是 0"）
+  const denialSummary = (ctx as { tool_denials?: { total?: number; byKind?: Record<string, number> } }).tool_denials || null;
+  const stepsLedger = (ctx as { steps_ledger?: { used?: number; estimate?: number; grants?: number } }).steps_ledger || null;
+  // zx_20261117_1 M1「案」：纯文本「留到后续批」的未落地登记——有才显示，点开看原文。
+  const deferredItems: string[] = Array.isArray((ctx as { verification_deferred_items?: unknown }).verification_deferred_items)
+    ? ((ctx as { verification_deferred_items?: unknown }).verification_deferred_items as unknown[]).filter((x): x is string => typeof x === 'string')
+    : [];
   // zx_20260904_4 T5 (2026-09-04): 上下文水位（T2 context_watermark）——running 实时带展示；优先 step 实时值、回退首部估算
   const ctxWm = (ctx as unknown as { context_watermark?: { waterPct?: number; approxTokens?: number } }).context_watermark;
   const liveWaterPct = liveStatus && typeof liveStatus.contextWaterPct === 'number' ? Number(liveStatus.contextWaterPct) : (ctxWm?.waterPct ?? null);
@@ -1196,7 +1261,7 @@ export default function TaskDetailPage() {
   type CompletionQualityView = {
     score?: number; feedback?: string; via?: string;
     // zx_20261104_1 M1/M2/M8: 达成凭据四态 + 被迫收尾标记（引擎 `buildCompletionAccount` 一处构造）。
-    goal_evidence?: 'acceptance_passed' | 'acceptance_failed' | 'score_only' | 'none';
+    goal_evidence?: 'acceptance_passed' | 'acceptance_passed_with_waivers' | 'acceptance_failed' | 'score_only' | 'none' | 'unjudged';
     premature?: boolean;
     // zx_20261106_1 M7: 引擎收口写的「目标是否真的达成」——收口卡片据此改口（完成 ≠ 达成）。
     goal_achieved?: boolean;
@@ -1337,7 +1402,17 @@ export default function TaskDetailPage() {
   //   下方那个块早在册（:891/:897/:939），缺的是**徽标旁这一句**：用户扫一眼头部就知道"这个完成不算数"。
   //   判据与 main 侧同尺：只有"已核验且确有未达项"才算（`verified !== false` 且 `failed` 非空）——
   //   `no_criteria`/引擎代拟（`verified:false`）**不**在此打标记（未核验 ≠ 未通过）。
-  const acceptanceFailed = !!acceptanceCheck && acceptanceCheck.verified !== false && (acceptanceCheck.failed ?? []).length > 0;
+  // zx_20261118_2 M5：用户逐条豁免的清单与理由（写口 `task:waiveAcceptance`，落 ctx.acceptance_waiver）。
+  //   「未达」计数只数**未被豁免**的条目；已豁免项单独显示，不并入红字。
+  const acceptanceWaivers = (() => {
+    const raw = (ctx as { acceptance_waiver?: { items?: Array<{ criterion?: string; reason?: string }> } }).acceptance_waiver;
+    return Array.isArray(raw?.items)
+      ? raw!.items!.filter((i): i is { criterion: string; reason?: string } => !!i && typeof i.criterion === 'string')
+      : [];
+  })();
+  const waiverByCriterion = new Map(acceptanceWaivers.map((w) => [String(w.criterion).trim(), w]));
+  const acceptanceWaivedCount = (acceptanceCheck?.failed ?? []).filter((f) => (f as { waived?: boolean }).waived === true).length;
+  const acceptanceFailed = !!acceptanceCheck && acceptanceCheck.verified !== false && (acceptanceCheck.failed ?? []).some((f) => (f as { waived?: boolean }).waived !== true);
   // zx_20260910_1 M1: 「等待输入」唯一呈现——真源为 ctxJson.awaiting_input（ask_user 与门禁两条暂停路径均持久化），
   //   DB 会话标记仅作旧任务兼容回落，且改取"最后一条"（此前 convs.find 取最旧，会把已回答过的旧问题顶在横幅上）
   const awaitStruct = (ctx as { awaiting_input?: { question?: string; options?: string[]; decision_type?: string } }).awaiting_input;
@@ -1350,6 +1425,15 @@ export default function TaskDetailPage() {
   // 空串 = 账上未记因由（M1 收口前的存量直写点）——此时**如实说"因未记录"**，不静默留白、不编一个原因。
   const pauseReasonCode = task?.status === 'paused' ? recordedPauseReason(task.context_json) : '';
   const pauseReasonText = pauseReasonLabel(pauseReasonCode);
+  // zx_20261116_2 M3「覆」：覆盖完成（验收未重判）要有一眼可见的痕——不把 completed 冒充“验收通过”。
+  const completionOverride = (() => {
+    if (task?.status !== 'completed') return null;
+    try {
+      const o = JSON.parse(task.context_json || '{}').completion_override as
+        { by?: string; reason?: string; previous_acceptance?: { passed_total?: number; criteria_total?: number } } | undefined;
+      return o && typeof o === 'object' ? o : null;
+    } catch { return null; }
+  })();
   // zx_20261028_1 M5：暂停附注（如停摆说明）。此前 `$.pause_note` 有写点、**零读点**——写下的处置指引无人看见。
   const pauseNote = task?.status === 'paused' ? recordedPauseNote(task.context_json) : '';
   // zx_20260930 M11-5: `stabilizing`（烹小鲜冷却暂态）的成因就在 `context_json.status_changes` 里——
@@ -1370,15 +1454,22 @@ export default function TaskDetailPage() {
   //   IM 里是两个选项、GUI 横幅里**是一个**（"A / B" 整串），点"通过"回传的文字两路对不上。
   //   先问"有没有选项块"再解析：`parseOptions` 把"整段即选项原文"当合法入参，直接喂整条 marker
   //   会把问题正文也切成选项——这里要的是"没有选项就是没有"。（块标记的真源亦只 options.ts 一处。）
-  const awaitOpt = awaitStruct?.options?.length
-    ? awaitStruct.options
-    : (OPTION_BLOCK_RE.test(awaitMarker) ? parseOptions(awaitMarker) : []);
+  // zx_20261118_2 M1（答）：存量账里「一条选项塞了多行」的形状（S6）在渲染前拆条——
+  //   解析真源仍是 `options.ts` 一处；这里只加一道 `normalizeOptionItems`，不另写 split。
+  const awaitOpt = normalizeOptionItems(
+    awaitStruct?.options?.length
+      ? awaitStruct.options
+      : (OPTION_BLOCK_RE.test(awaitMarker) ? parseOptions(awaitMarker) : []),
+  );
   const awaitType = awaitStruct?.decision_type || 'ask_user';
   // 审批类（路径/特权）必须走 task:respond——只有它写 wa_approvals 指纹（二次免询问），task:resume 不写
   const awaitIsApproval = awaitType === 'path_approval' || awaitType === 'privilege_approval';
   // zx_20260904_7 I3 (2026-09-04): 终态建议(确定性规则，读 ctxJson completion_quality/deliverable_unfulfilled)
   const tctxScore = (ctx as { completion_quality?: { score?: number } | { score?: number } }).completion_quality;
-  const lowQuality = task?.status === 'completed' && tctxScore && typeof tctxScore.score === 'number' ? tctxScore.score < 60 : false;
+  // zx_20261118_2 M5：用户豁免后收口（凭据 `acceptance_passed_with_waivers`）不再把低分当成
+  //   「存在未达交付」的返工建议——分值仍是引擎对工作质量的判断（不篡改），但终态已由用户裁定。
+  const acceptanceWaivedPass = completionQuality?.goal_evidence === 'acceptance_passed_with_waivers';
+  const lowQuality = task?.status === 'completed' && !acceptanceWaivedPass && tctxScore && typeof tctxScore.score === 'number' ? tctxScore.score < 60 : false;
   const hasUnfulfilled = !!(ctx as { deliverable_unfulfilled?: unknown }).deliverable_unfulfilled || lowQuality;
   const showSuggest = (task?.status === 'failed' || task?.status === 'completed') && !awaitingInput;
   const suggestText = task?.status === 'failed'
@@ -1438,6 +1529,8 @@ export default function TaskDetailPage() {
     (id) => taskNameOf(id),
     (id) => taskList.find((t) => t.id === id)?.context_digest,
   );
+  // zx_20261116_3 M5「拆」：暂停的前置给一个**可操作出口**（此前只能跳过去再自己找按钮）。
+  const pausedDep = depIds.find((id) => taskList.find((t) => t.id === id)?.status === 'paused');
   // zx_20261111_3「显」：第一行——只喂**已算好的事实**，优先级由 `core/next-action.ts` 一处定。
   //   `depState` 只在确有前置时才有意义（无前置 ⇒ `met`，免得"没有前置"被当成"还没满足"）。
   const taskNextAction = nextActionForTask({
@@ -1452,8 +1545,12 @@ export default function TaskDetailPage() {
   });
   function handleTaskNextAction(aid: NextActionId): void {
     if (!task) return;
-    if (aid === 'answer_task') setShowReply(true);
-    else if (aid === 'start_task') void handleResume(task.id);
+    // zx_20261116_1 M4「接」：按状态分流，不再把 pending 的「开始执行」接到 task:resume
+    //   （那条通道只接受 paused/failed/completed，pending 会被 INVALID_STATUS 拒）。
+    const route = resolveNextActionRoute(aid, task.status);
+    if (route === 'reply') setShowReply(true);
+    else if (route === 'start') void handleStatus(task.id, 'running');
+    else if (route === 'resume') void handleResume(task.id);
   }
   // zx_20261112_1 B4「诊」: 操作分层与子任务树——判据全在纯模块，页面只负责画与转调用。
   const actionLayout = task ? taskActionLayout(task.status) : null;
@@ -1689,10 +1786,19 @@ export default function TaskDetailPage() {
               <div className="bg-white rounded-lg border p-4">
                 {/* zx_20261111_3「显」：第一行——此刻是什么 / 凭什么 / 下一步点哪个 */}
                 <div className="mb-3"><NextActionBar action={taskNextAction} onAction={handleTaskNextAction} /></div>
-                {awaitingInput && <div className="p-2 mb-3 bg-amber-50 border border-amber-300 rounded-lg">
-                  <div className="flex items-center gap-2 flex-wrap"><span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse shrink-0"/><span className="text-sm font-medium text-amber-800">等待你的回复</span>{awaitType !== 'ask_user' && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-200/70 text-amber-800">{AWAIT_TYPE_LABEL[awaitType] || awaitType}</span>}</div>
-                  {awaitQ && <p className="mt-1 text-xs text-amber-900 whitespace-pre-wrap break-words">{awaitQ}</p>}
-                  {!awaitIsApproval && awaitOpt.length > 0 && <div className="mt-1.5 flex flex-wrap gap-1.5">{awaitOpt.map((o, i) => (<button key={i} type="button" onClick={() => { setReplyText(o); setShowReply(true); }} className="text-[11px] px-2 py-1 rounded-full bg-amber-200/70 text-amber-900 hover:bg-amber-300 transition-colors break-words max-w-full text-left">{o}</button>))}</div>}
+                {completionOverride && (
+                  <div className="mb-3 p-2 bg-indigo-50 border border-indigo-200 rounded-lg text-xs text-indigo-800">
+                    <span className="font-medium">覆盖完成</span>
+                    {completionOverride.reason ? `：${completionOverride.reason}` : '：未填覆盖原因'}
+                    <span className="text-indigo-500">
+                      （原验收 {completionOverride.previous_acceptance?.passed_total ?? 0}/{completionOverride.previous_acceptance?.criteria_total ?? 0}，未重判）
+                    </span>
+                  </div>
+                )}
+                {awaitingInput && <div className="p-3 mb-3 bg-amber-50 border border-amber-300 rounded-lg">
+                  <div className="flex items-start gap-2 flex-wrap"><span className="mt-1.5 w-2 h-2 rounded-full bg-amber-500 animate-pulse shrink-0"/><span className="text-sm font-medium text-amber-800 shrink-0">等待你的回复</span>{awaitType !== 'ask_user' && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-200/70 text-amber-800">{AWAIT_TYPE_LABEL[awaitType] || awaitType}</span>}</div>
+                  {awaitQ && <p className="mt-1.5 text-sm leading-relaxed text-amber-900 whitespace-pre-wrap break-words">{awaitQ}</p>}
+                  {!awaitIsApproval && awaitOpt.length > 0 && <ul className="mt-2 space-y-1.5">{awaitOpt.map((o, i) => (<li key={i}><button type="button" onClick={() => { setReplyText(o); setShowReply(true); }} className="w-full text-left text-xs px-2.5 py-1.5 rounded-md bg-amber-200/60 text-amber-900 hover:bg-amber-300 transition-colors whitespace-pre-wrap break-words">{o}</button></li>))}</ul>}
                   {awaitIsApproval && <div className="mt-2 flex gap-1.5">
                     <button type="button" onClick={() => handleDecision(task.id, 'allow')} disabled={actionLocked} className="text-xs px-2 py-1 bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed">允许</button>
                     <button type="button" onClick={() => handleDecision(task.id, 'deny')} disabled={actionLocked} className="text-xs px-2 py-1 bg-white border border-red-300 text-red-600 rounded hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed">拒绝</button>
@@ -1709,7 +1815,7 @@ export default function TaskDetailPage() {
                 {/* zx_20260915 P0-1(§10.3-5 renderer 是词表第二落点): 暂停横幅按 `pause_reason` **分型**——
                     先前只有一句话「执行已挂起，可恢复继续」，而「收口无产出证据」是**事实**判定（不是可
                     随手续跑的挂起），用户据此无从知道该补产出还是该点完成。 */}
-                {task.status==='paused' && !awaitingInput && <div className="p-2 mb-3 bg-orange-50 border border-orange-300 rounded-lg"><div className="flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-orange-500 animate-pulse"/><span className="text-sm text-orange-800 font-medium">{pausedBannerHeadline({ reason: pauseReasonCode, reasonLabel: pauseReasonText, failed: (acceptanceCheck?.failed ?? []).length, total: acceptanceCheck?.criteria_total ?? 0 })}</span><span className="text-xs text-orange-600">{pausedBannerHint(pauseReasonCode)}</span>{acceptanceFailed && <button type="button" onClick={() => document.getElementById('acceptance-check')?.scrollIntoView({ behavior: 'smooth', block: 'start' })} className="text-xs px-2 py-1 bg-white border border-orange-300 text-orange-700 rounded hover:bg-orange-100">查看验收块</button>}<button onClick={()=>handleResume(task.id)} disabled={actionLocked} className="ml-auto flex items-center gap-1 px-2 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"><RotateCcw className="w-3 h-3"/>恢复</button></div>
+                {task.status==='paused' && !awaitingInput && <div className="p-2 mb-3 bg-orange-50 border border-orange-300 rounded-lg"><div className="flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-orange-500 animate-pulse"/><span className="text-sm text-orange-800 font-medium">{pausedBannerHeadline({ reason: pauseReasonCode, reasonLabel: pauseReasonText, failed: (acceptanceCheck?.failed ?? []).length, total: acceptanceCheck?.criteria_total ?? 0, autoResume: task.autoResume ?? null })}</span><span className="text-xs text-orange-600">{pausedBannerHint(pauseReasonCode, task.autoResume ?? null)}</span>{acceptanceFailed && <button type="button" onClick={() => document.getElementById('acceptance-check')?.scrollIntoView({ behavior: 'smooth', block: 'start' })} className="text-xs px-2 py-1 bg-white border border-orange-300 text-orange-700 rounded hover:bg-orange-100">查看验收块</button>}<button onClick={()=>handleResume(task.id)} disabled={actionLocked} className="ml-auto flex items-center gap-1 px-2 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"><RotateCcw className="w-3 h-3"/>{task.autoResume?.due ? '立即恢复（接管）' : '恢复'}</button></div>
                   {/* zx_20260923 M7-c（G15）: 横幅内联附言——承 G15 口径订正，「附言」此前只在动作栏那处模态框可达，
                       本批补的是**横幅里这一处缺口**。走的是既有的那个恢复方法，后端零改动。 */}
                   {/* zx_20261028_1 M5「停」：暂停附注（停摆说明含逐子停因与三条处置）——有才显示，原样换行。 */}
@@ -1717,7 +1823,7 @@ export default function TaskDetailPage() {
                   <div className="flex items-center gap-2 mt-2"><input value={bannerReply} onChange={e=>setBannerReply(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')handleResumeWithNote(task.id);}} className="flex-1 px-2 py-1 border border-orange-200 rounded text-xs bg-white" placeholder="附言（可选）：告诉它恢复后要注意什么，随本次恢复注入执行"/><button onClick={()=>handleResumeWithNote(task.id)} disabled={!bannerReply.trim()||actionLocked} className="shrink-0 px-2 py-1 bg-teal-600 text-white rounded text-xs hover:bg-teal-700 disabled:opacity-50 disabled:cursor-not-allowed">附言并恢复</button></div></div>}
                 <div className="flex items-start justify-between mb-3">
                   <div>
-                    <div className="flex items-center gap-2 mb-1 flex-wrap"><h3 className="font-semibold text-lg">{task.title}</h3><button type="button" onClick={(e) => { e.stopPropagation(); navigate(`/activity?obj=${task.id}`); }} title="该任务活动时间线" className="shrink-0 p-0.5 text-gray-400 hover:text-blue-500"><History className="w-4 h-4" /></button>{positionView ? (positionView.missing ? <span title={`原指派岗位 ${positionView.id} 已被删除——执行时不注入岗位知识与经验`} className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full border border-red-200 bg-red-50 text-red-600">岗位：已删除</span> : <span title={positionView.enabled ? `指派岗位：${positionView.name}` : '岗位已停用——执行时不注入岗位知识与经验，重新启用后恢复'} className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded-full border ${positionView.enabled ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-gray-300 bg-gray-50 text-gray-500'}`}>岗位：{positionView.name}{positionView.enabled ? '' : '（已停用）'}</span>) : <span title="该任务未指派岗位——执行时不注入岗位知识与经验" className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full border border-dashed border-gray-300 bg-white text-gray-400">未指派岗位</span>}{ownMs[0]?<button type="button" onClick={(e)=>{e.stopPropagation();navigate(`/tasks/${String(ownMs[0].plan_task_id)}`);}} className="text-[10px] px-1.5 py-0.5 rounded bg-teal-50 text-teal-700 hover:bg-teal-100 shrink-0" title={`所属方案里程碑 ${ownMs[0].milestone}：${ownMs[0].status}`}>方案 {ownMs[0].milestone}: {ownMs[0].status==='done'?'已落地':ownMs[0].status==='doing'?'进行中':'待实施'}</button>:null}<span className={`text-xs px-2 py-0.5 rounded-full ${taskStatusPill(task.status)}`}>{statusText(TASK_STATUS_LABEL, task.status)}</span>{execBadgeView && <span title={`执行态由引擎按「状态词 + 是否有真执行体 + 排队作业」派生${execState?.reason ? `：${execState.reason}` : ''}`} className={`cursor-help text-[10px] px-1.5 py-0.5 rounded-full border font-medium ${execBadgeView.tone}`}>{execBadgeView.label}</span>}{execLine && <span className="text-[11px] text-gray-500">{execLine}</span>}{execState?.state === 'ghost' && <button type="button" disabled={submitting || actionCooldown} onClick={() => void handleReleaseAndRequeue(task.id)} title="状态写着在跑、实则无执行体——先真断再放回待执行队列" className="text-[10px] px-1.5 py-0.5 rounded border border-red-300 bg-white text-red-600 hover:bg-red-50 disabled:opacity-50">释放并重排</button>}{acceptanceFailed && <span title={`账上验收有 ${(acceptanceCheck!.failed ?? []).length} 条判据未达成（共 ${acceptanceCheck!.criteria_total ?? 0} 条）——「已完成」不等于「已验收」，详见下方验收块`} className="cursor-help text-[10px] px-1.5 py-0.5 rounded-full border border-red-200 bg-red-50 text-red-600 font-medium">✗ 验收 {(acceptanceCheck!.failed ?? []).length} 条未达</span>}{archetypeLabel&&<span className="text-xs px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600 cursor-help" title={[`形态：${archetypeLabel}`, archetypeSourceLabel&&`来源：${archetypeSourceLabel}`, archetypeReason&&`依据：${archetypeReason}`].filter(Boolean).join('\n')}>形态：{archetypeLabel}{archetypeSourceLabel?` · ${archetypeSourceLabel}`:''}</span>}{archetypeSource === 'fallback' && (task.status === 'paused' || task.status === 'failed') && <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700">形态由长度兜底判定，可能偏窄<button type="button" onClick={() => setShowContext(true)} className="ml-1 underline text-blue-600">切换任务形态</button><span className="text-amber-500/80">（仅影响后续运行，不改历史账）</span></span>}{taskEstimate?.basedOn ? <span title={`基于 ${taskEstimate.basedOn} 个相似历史任务预估`} className="text-xs px-1.5 py-0.5 rounded-full bg-cyan-50 text-cyan-600">预估 {formatTokens(taskEstimate.tokens)} / {taskEstimate.steps}步</span> : null}{PRIORITY_LABEL[task.priority] && <span className="text-xs text-orange-500 font-medium">{PRIORITY_LABEL[task.priority]}</span>}{completionQuality&&<span title={(snapshotActive ? '归档时快照 · ' : '') + (completionQuality.feedback||'')} className={`cursor-help text-xs px-1.5 py-0.5 rounded-full font-medium ${(completionQuality.score||0)>=80?'bg-green-100 text-green-700':(completionQuality.score||0)>=60?'bg-yellow-100 text-yellow-700':(completionQuality.score||0)>=40?'bg-orange-100 text-orange-700':'bg-red-100 text-red-600'}`}>★{completionQuality.score}分</span>}{autoCompletedNoOutput && <span title="该任务被直接标记完成但未产出真实成果（update_task_status 工具），未经 finalize 成果门禁——请人工复核" className="cursor-help text-[10px] px-1.5 py-0.5 rounded-full border border-red-200 bg-red-50 text-red-600 font-medium">⚠ 未达成果门禁</span>}{budgetUsage!=null&&<span className={`text-xs px-1.5 py-0.5 rounded-full ${budgetUsage>=0.95?'bg-red-100 text-red-700':budgetUsage>=0.7?'bg-yellow-100 text-yellow-700':'bg-blue-100 text-blue-700'}`}>{Math.round(budgetUsage*100)}%预算</span>}{costEstimate?.cost!=null&&<span title={`本次执行成本估算（¥）${costEstimate.cost>0?'':'· 所选模型单价为 0/未计费'}${costEstimate.model?` · 模型 ${costEstimate.model}`:''}`} className="text-xs text-gray-500">💰{costEstimate.cost>0?formatMoney(costEstimate.cost,{digits:4}):`${formatMoney(0,{digits:0})}${costEstimate.model?`(${costEstimate.model})`:''}`}</span>}</div>
+                    <div className="flex items-center gap-2 mb-1 flex-wrap"><h3 className="font-semibold text-lg">{task.title}</h3><button type="button" onClick={(e) => { e.stopPropagation(); navigate(`/activity?obj=${task.id}`); }} title="该任务活动时间线" className="shrink-0 p-0.5 text-gray-400 hover:text-blue-500"><History className="w-4 h-4" /></button>{ctx.verification_fix ? (<button type="button" onClick={(e) => { e.stopPropagation(); const src = String(ctx.verification_fix_of || ''); if (src) navigate(`/tasks/${src}`); }} title={ctx.verification_fix_of_title ? `引擎验收发现问题后自动立项的修复任务——修复自：${String(ctx.verification_fix_of_title)}（点击跳到来源任务）` : '引擎验收发现问题后自动立项的修复任务（来源任务标题未记录）'} className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full border border-cyan-200 bg-cyan-50 text-cyan-700 hover:bg-cyan-100">修复自：{ctx.verification_fix_of_title ? `${String(ctx.verification_fix_of_title).slice(0, 18)}${String(ctx.verification_fix_of_title).length > 18 ? '…' : ''}` : String(ctx.verification_fix_of || '').slice(0, 8)}</button>) : null}{positionView ? (positionView.missing ? <span title={`原指派岗位 ${positionView.id} 已被删除——执行时不注入岗位知识与经验`} className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full border border-red-200 bg-red-50 text-red-600">岗位：已删除</span> : <span title={positionView.enabled ? `指派岗位：${positionView.name}` : '岗位已停用——执行时不注入岗位知识与经验，重新启用后恢复'} className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded-full border ${positionView.enabled ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-gray-300 bg-gray-50 text-gray-500'}`}>岗位：{positionView.name}{positionView.enabled ? '' : '（已停用）'}</span>) : <span title="该任务未指派岗位——执行时不注入岗位知识与经验" className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full border border-dashed border-gray-300 bg-white text-gray-400">未指派岗位</span>}{ownMs[0]?<button type="button" onClick={(e)=>{e.stopPropagation();navigate(`/tasks/${String(ownMs[0].plan_task_id)}`);}} className="text-[10px] px-1.5 py-0.5 rounded bg-teal-50 text-teal-700 hover:bg-teal-100 shrink-0" title={`所属方案里程碑 ${ownMs[0].milestone}：${ownMs[0].status}`}>方案 {ownMs[0].milestone}: {ownMs[0].status==='done'?'已落地':ownMs[0].status==='doing'?'进行中':'待实施'}</button>:null}<span className={`text-xs px-2 py-0.5 rounded-full ${taskStatusPill(task.status)}`}>{statusText(TASK_STATUS_LABEL, task.status)}</span>{execBadgeView && <span title={`执行态由引擎按「状态词 + 是否有真执行体 + 排队作业」派生${execState?.reason ? `：${execState.reason}` : ''}`} className={`cursor-help text-[10px] px-1.5 py-0.5 rounded-full border font-medium ${execBadgeView.tone}`}>{execBadgeView.label}</span>}{execLine && <span className="text-[11px] text-gray-500">{execLine}</span>}{execState?.state === 'ghost' && <button type="button" disabled={submitting || actionCooldown} onClick={() => void handleReleaseAndRequeue(task.id)} title="状态写着在跑、实则无执行体——先真断再放回待执行队列" className="text-[10px] px-1.5 py-0.5 rounded border border-red-300 bg-white text-red-600 hover:bg-red-50 disabled:opacity-50">释放并重排</button>}{acceptanceFailed && <span title={`账上验收有 ${(acceptanceCheck!.failed ?? []).filter(f => (f as { waived?: boolean }).waived !== true).length} 条判据未达成（共 ${acceptanceCheck!.criteria_total ?? 0} 条）——「已完成」不等于「已验收」，详见下方验收块`} className="cursor-help text-[10px] px-1.5 py-0.5 rounded-full border border-red-200 bg-red-50 text-red-600 font-medium">✗ 验收 {(acceptanceCheck!.failed ?? []).filter(f => (f as { waived?: boolean }).waived !== true).length} 条未达</span>}{acceptanceWaivedCount > 0 && <span title={`用户已逐条豁免 ${acceptanceWaivedCount} 条未达验收（理由见下方验收块）`} className="cursor-help text-[10px] px-1.5 py-0.5 rounded-full border border-amber-200 bg-amber-50 text-amber-700 font-medium">⚑ 豁免 {acceptanceWaivedCount} 条</span>}{archetypeLabel&&<span className="text-xs px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600 cursor-help" title={[`形态：${archetypeLabel}`, archetypeSourceLabel&&`来源：${archetypeSourceLabel}`, archetypeReason&&`依据：${archetypeReason}`].filter(Boolean).join('\n')}>形态：{archetypeLabel}{archetypeSourceLabel?` · ${archetypeSourceLabel}`:''}</span>}{deferredItems.length>0&&<span title={deferredItems.map((s,i)=>`${i+1}. ${s}`).join('\n')} className="cursor-help text-[10px] px-1.5 py-0.5 rounded-full border border-amber-200 bg-amber-50 text-amber-700 font-medium">未落地 {deferredItems.length} 条</span>}{childrenAfterCompletion>0&&<span title={`父任务已完成；这 ${childrenAfterCompletion} 个子任务在父任务完成之后才创建——父的验收结论不会因此重算`} className="cursor-help text-[10px] px-1.5 py-0.5 rounded-full border border-slate-300 bg-slate-50 text-slate-600 font-medium">后补子任务 {childrenAfterCompletion} 个 · 父结论未重算</span>}{archetypeSource === 'fallback' && (task.status === 'paused' || task.status === 'failed') && <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700">形态由长度兜底判定，可能偏窄<button type="button" onClick={() => setShowContext(true)} className="ml-1 underline text-blue-600">切换任务形态</button><span className="text-amber-500/80">（仅影响后续运行，不改历史账）</span></span>}{taskEstimate?.basedOn ? <span title={`基于 ${taskEstimate.basedOn} 个相似历史任务预估`} className="text-xs px-1.5 py-0.5 rounded-full bg-cyan-50 text-cyan-600">预估 {formatTokens(taskEstimate.tokens)} / {taskEstimate.steps}步</span> : null}{PRIORITY_LABEL[task.priority] && <span className="text-xs text-orange-500 font-medium">{PRIORITY_LABEL[task.priority]}</span>}{completionQuality&&<span title={(snapshotActive ? '归档时快照 · ' : '') + (completionQuality.feedback||'') + (completionVia === 'finalize_task' ? ' · 自评：未跑引擎六维评估' : '')} className={`cursor-help text-xs px-1.5 py-0.5 rounded-full font-medium ${(completionQuality.score||0)>=80?'bg-green-100 text-green-700':(completionQuality.score||0)>=60?'bg-yellow-100 text-yellow-700':(completionQuality.score||0)>=40?'bg-orange-100 text-orange-700':'bg-red-100 text-red-600'}`}>★{completionQuality.score}分{completionVia === 'finalize_task' ? '（自评）' : ''}</span>}{denialSummary && Number(denialSummary.total) > 0 && <span title={`本轮工具被拒 ${denialSummary.total} 次：${Object.entries(denialSummary.byKind || {}).map(([k, n]) => `${k} ${n}`).join(' / ')}`} className="cursor-help text-[10px] px-1.5 py-0.5 rounded-full border border-orange-200 bg-orange-50 text-orange-700">工具拒绝 {denialSummary.total} 次</span>}{stepsLedger && <span title={`本轮步数 ${stepsLedger.used}${stepsLedger.estimate ? `（估算 ${stepsLedger.estimate}）` : ''}${stepsLedger.grants ? `，续额 ${stepsLedger.grants} 次` : ''}`} className="cursor-help text-[10px] px-1.5 py-0.5 rounded-full border border-slate-200 bg-slate-50 text-slate-600">步数 {stepsLedger.used}{stepsLedger.estimate ? `/${stepsLedger.estimate}` : ''}</span>}{autoCompletedNoOutput && <span title="该任务被直接标记完成但未产出真实成果（update_task_status 工具），未经 finalize 成果门禁——请人工复核" className="cursor-help text-[10px] px-1.5 py-0.5 rounded-full border border-red-200 bg-red-50 text-red-600 font-medium">⚠ 未达成果门禁</span>}{budgetUsage!=null&&<span className={`text-xs px-1.5 py-0.5 rounded-full ${budgetUsage>=0.95?'bg-red-100 text-red-700':budgetUsage>=0.7?'bg-yellow-100 text-yellow-700':'bg-blue-100 text-blue-700'}`}>{Math.round(budgetUsage*100)}%预算</span>}{costEstimate?.cost!=null&&<span title={`本次执行成本估算（¥）${costEstimate.cost>0?'':'· 所选模型单价为 0/未计费'}${costEstimate.model?` · 模型 ${costEstimate.model}`:''}`} className="text-xs text-gray-500">💰{costEstimate.cost>0?formatMoney(costEstimate.cost,{digits:4}):`${formatMoney(0,{digits:0})}${costEstimate.model?`(${costEstimate.model})`:''}`}</span>}</div>
                     {/* zx_20261105_1 M9: 归档不是黑洞——理由与时刻在头部副标题如实可见；
                         没有理由就写「未填写理由」，不编造一句看起来像理由的话。 */}
                     {task.status === 'archived' && (
@@ -1835,7 +1941,9 @@ export default function TaskDetailPage() {
                     <span className="font-medium text-gray-600">派发结局</span>
                     {dispatchDecision.ok ? (
                       <span className="px-1.5 py-0.5 rounded-full font-medium bg-emerald-50 text-emerald-700">
-                        已外派给 {dispatchDecision.nodeId ? (remoteNameOf(dispatchDecision.nodeId) || dispatchDecision.nodeId.slice(0, 8)) : '（未记目标）'}
+                        {dispatchDecision.mode === 'readonly-remote'
+                          ? `已派给 ${dispatchDecision.nodeId ? (remoteNameOf(dispatchDecision.nodeId) || dispatchDecision.nodeId.slice(0, 8)) : '（未记目标）'} 做只读分析${dispatchDecision.repoUrl ? `（${dispatchDecision.repoUrl}${dispatchDecision.repoRef ? ` @ ${dispatchDecision.repoRef.slice(0, 8)}` : ''}）` : ''}`
+                          : `已外派给 ${dispatchDecision.nodeId ? (remoteNameOf(dispatchDecision.nodeId) || dispatchDecision.nodeId.slice(0, 8)) : '（未记目标）'}`}
                       </span>
                     ) : (
                       <span className={`px-1.5 py-0.5 rounded-full font-medium ${dispatchDecision.attempted ? 'bg-amber-50 text-amber-700' : 'bg-gray-100 text-gray-600'}`}>
@@ -1955,15 +2063,18 @@ export default function TaskDetailPage() {
                     // zx_20261106_1 M2：凭据句不得与账上结论相反。`score_only` 只说明"没有验收背书"，
                     //   达没达成以账上 `goal_achieved` 为准——否则同一张卡一边印「未达目标」一边印「达成」。
                     const label = ev === 'acceptance_passed' ? '已验收达成'
+                      : ev === 'acceptance_passed_with_waivers' ? '已验收达成（含人工豁免）'
                       : ev === 'acceptance_failed' ? '验收未通过'
                       : ev === 'score_only' ? (completionQuality?.goal_achieved === false
                         ? (completionQuality?.premature === true ? '未达成（被迫收尾，仅凭分数推断，未验收）' : '未达成（仅按质量分推断，未验收）')
                         : '达成（仅按质量分推断，未验收）')
+                      : ev === 'unjudged' ? '验收未判成（待重判）'
                       : ev === 'none' ? '未判定'
                       : null;
                     if (!label) return null;
-                    const cls = ev === 'acceptance_passed' ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                    const cls = (ev === 'acceptance_passed' || ev === 'acceptance_passed_with_waivers') ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
                       : ev === 'acceptance_failed' ? 'bg-red-50 text-red-700 border-red-200'
+                      : ev === 'unjudged' ? 'bg-orange-50 text-orange-700 border-orange-200'
                       : ev === 'score_only' ? 'bg-amber-50 text-amber-700 border-amber-200'
                       : 'bg-gray-50 text-gray-600 border-gray-200';
                     return (
@@ -2088,7 +2199,7 @@ export default function TaskDetailPage() {
                       //   详情页就看不见，只见到一句含糊的"未核验"。本仓既有纪律：**renderer 是词表的第二个落点**。
                       //   成因**点名**（查同一份 `ACCEPTANCE_REASON_LABEL`），落款仍带"尝试于"（它是尝试时刻，不是结论时刻）。
                       : `(${ACCEPTANCE_REASON_LABEL[acceptanceCheck.reason ?? ''] ?? '未核验'}${acceptanceCheck.checked_at ? ` · 尝试于 ${formatTimeOrRaw(acceptanceCheck.checked_at)}` : ''})`}</span>
-                    : <span className="text-xs text-gray-400 font-normal">({(acceptanceCheck.passed ?? []).length} 通过 · {(acceptanceCheck.failed ?? []).length} 未达{acceptanceCheck.checked_at ? ` · ${formatTimeOrRaw(acceptanceCheck.checked_at)}` : ''})</span>}</h4>
+                    : <span className="text-xs text-gray-400 font-normal">({(acceptanceCheck.passed ?? []).length} 通过 · {(acceptanceCheck.failed ?? []).filter(f => (f as { waived?: boolean }).waived !== true).length} 未达{acceptanceWaivedCount > 0 ? ` · ${acceptanceWaivedCount} 已豁免` : ''}{acceptanceCheck.checked_at ? ` · ${formatTimeOrRaw(acceptanceCheck.checked_at)}` : ''})</span>}</h4>
                   {acceptanceCheck.verified === false ? (
                     // zx_20260915 P0-2(d): 三态之一「无标准」单列——它不是"核对失败"（重跑也不会变），
                     // 给出的话术也必须不同：该补的是标准，不是重跑。另三种成因仍走下面那句。
@@ -2173,15 +2284,25 @@ export default function TaskDetailPage() {
                           </div>
                         );
                       })}
-                      {(acceptanceCheck.failed ?? []).map((f, i) => (
-                        <div key={`af${i}`} className="border-l-2 border-red-200 bg-red-50/50 pl-3 py-1">
-                          <p className="text-xs text-red-700"><span className="font-medium">✗ {f.criterion}</span></p>
-                          {f.reason && <p className="text-xs text-gray-500 mt-0.5">原因：{f.reason}</p>}
-                          {(f.evidence_refs?.length ?? 0) > 0
-                            ? <p className="text-xs text-gray-500 mt-0.5">引用：{(f.evidence_refs ?? []).join('、')}</p>
-                            : Array.isArray(acceptanceCheck.items) ? <p className="text-xs text-gray-400 mt-0.5">引用：无引用记录</p> : null}
-                        </div>
-                      ))}
+                      {(acceptanceCheck.failed ?? []).map((f, i) => {
+                        const waiveOn = (f as { waived?: boolean }).waived === true;
+                        const wv = waiverByCriterion.get(String(f.criterion ?? '').trim());
+                        return (
+                          <div key={`af${i}`} className={waiveOn ? 'border-l-2 border-amber-300 bg-amber-50/50 pl-3 py-1' : 'border-l-2 border-red-200 bg-red-50/50 pl-3 py-1'}>
+                            <div className="flex items-start gap-2">
+                              <p className={`text-xs ${waiveOn ? 'text-amber-800' : 'text-red-700'}`}><span className="font-medium">{waiveOn ? '⚑ 已豁免' : '✗'} {f.criterion}</span></p>
+                              {!waiveOn && (
+                                <button type="button" onClick={() => { setWaiveTarget({ criteria: [String(f.criterion ?? '')] }); setWaiveReason(''); }} disabled={actionLocked} className="ml-auto shrink-0 text-[10px] px-1.5 py-0.5 rounded border border-amber-300 bg-white text-amber-700 hover:bg-amber-50 disabled:opacity-50 disabled:cursor-not-allowed">豁免此条</button>
+                              )}
+                            </div>
+                            {f.reason && <p className="text-xs text-gray-500 mt-0.5">原因：{f.reason}</p>}
+                            {waiveOn && <p className="text-xs text-amber-800 mt-0.5">豁免理由：{wv?.reason || '（理由未随归档快照保留）'}</p>}
+                            {(f.evidence_refs?.length ?? 0) > 0
+                              ? <p className="text-xs text-gray-500 mt-0.5">引用：{(f.evidence_refs ?? []).join('、')}</p>
+                              : Array.isArray(acceptanceCheck.items) ? <p className="text-xs text-gray-400 mt-0.5">引用：无引用记录</p> : null}
+                          </div>
+                        );
+                      })}
                     </div>
                   )}
                 </div>
@@ -2484,8 +2605,8 @@ export default function TaskDetailPage() {
                   zx_20260924 §2c UI-1: **本块已上移**至「本次附件」之上、「产出物」之前，并改为默认折叠
                   （见 `memBlock`）。此处不再就地渲染——同一块只保留**一个**落点。 */}
 
-              {/* 实时文件变更（Phase 1） */}
-              {fileStream.length>0 && <div className="bg-white rounded-lg border p-4"><h4 className="font-medium mb-2 text-sm flex items-center gap-1"><FileText className="w-4 h-4 text-blue-500"/>实时文件变更 ({fileStream.length})</h4><div className="space-y-2 max-h-80 overflow-y-auto">{fileStream.map((f,i)=>(<FileChangeItem key={i} f={f}/>))}</div></div>}
+              {/* 文件变更（Phase 1 实时流；zx_20261118_1 「回」：终态由事件日志回放，不新增存储） */}
+              {fileStream.length>0 && <div className="bg-white rounded-lg border p-4"><h4 className="font-medium mb-2 text-sm flex items-center gap-1"><FileText className="w-4 h-4 text-blue-500"/>{executingNow ? '实时文件变更' : '文件变更'} ({Math.max(fileStream.length, fileTotal)})</h4>{fileTotal>fileStream.length && <div className="text-[10px] text-gray-400 mb-1">共 {fileTotal} 条，显示最近 {fileStream.length} 条</div>}<div className="space-y-2 max-h-80 overflow-y-auto">{fileStream.map((f,i)=>(<FileChangeItem key={i} f={f}/>))}</div></div>}
 
               {/* 任务预算 + 上下文（zx_20261107_1 B9：摆法与编辑表单见 `TaskCost`，数字与判据仍在本页） */}
               <TaskCost
@@ -2529,6 +2650,9 @@ export default function TaskDetailPage() {
                         {depIds.map((did) => (
                           <button key={did} type="button" onClick={() => navigate(`/tasks/${did}`)} title={`跳转前置任务：${taskNameOf(did)}`} className="text-xs text-blue-600 hover:text-blue-800 hover:underline">{taskNameOf(did)}</button>
                         ))}
+                        {pausedDep && (
+                          <button type="button" onClick={() => void handleResume(pausedDep)} title="恢复暂停的前置任务，使其继续推进" className="text-[10px] px-1.5 py-0.5 rounded border border-blue-300 text-blue-700 hover:bg-blue-50">恢复前置</button>
+                        )}
                         <button type="button" disabled={depSaving} onClick={() => saveDeps(depIds.filter((x) => x !== depIds[0]))} title="移除第一个前置（逐条移除）" className="text-[10px] text-gray-400 hover:text-red-600 disabled:opacity-50">移除首个</button>
                         <span className="text-xs text-gray-600 basis-full">{depInfo.text}</span>
                       </div>
@@ -2579,6 +2703,13 @@ export default function TaskDetailPage() {
                           {posOptions.length === 0 && <span className="text-xs text-gray-400">（本项目没有已启用的岗位——可到「岗位」页启用并绑定本项目）</span>}
                           {!positionView && posOptions.length > 0 && !posSaving && <span className="text-xs text-gray-400">不指派也能干活，但这单不会沉淀岗位经验</span>}
                         </>
+                      )}
+                      {/* zx_20261120_3 M2：来源如实上屏（旧任务=未记录，不回溯猜；跨机=对端岗位）。 */}
+                      {positionSource && (
+                        <span className="text-[11px] text-gray-400" title="岗位来源：显式/继承父任务/项目默认/例行/跨机/未记录">
+                          来源：{TASK_POSITION_SOURCE_LABEL[positionSource.source as keyof typeof TASK_POSITION_SOURCE_LABEL] ?? positionSource.source}
+                          {positionSource.source === 'parent' && positionSource.parentTaskId ? `（${positionSource.parentTaskId.slice(0, 8)}）` : ''}
+                        </span>
                       )}
                     </div>
                   </div>
@@ -2633,7 +2764,7 @@ export default function TaskDetailPage() {
               />
 
               {/* zx_20261115_3 M6「简」：上下文与成本——七源分账 + 注入摘要（只读派生；三态分家） */}
-              <TaskContextLedger ledger={contextLedger} error={contextLedgerError} injections={injectionSummary} />
+              <TaskContextLedger ledger={contextLedger} error={contextLedgerError} injections={injectionSummary} roiBudget={roiBudget} />
 
               {/* 事件时间线（zx_20260924 §2c UI-2: **默认折叠**——用户 2026-09-24 点名；由头同 M3/UI-1，
                   折叠头报**条数**（折叠态下连有几条都看不见就不叫"默认折叠"，叫"默认消失"）。列表体逐字未动。） */}
@@ -2736,6 +2867,29 @@ export default function TaskDetailPage() {
             <h3 className="text-lg font-bold mb-4">回复任务</h3>
             <div className="space-y-3"><div><label className="block text-sm font-medium mb-1">回复内容</label><textarea value={replyText} onChange={e=>setReplyText(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" rows={3} placeholder="输入回复内容后点击恢复即可继续任务" /></div></div>
             <div className="flex justify-end gap-2 mt-6"><button onClick={()=>setShowReply(false)} className="px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">取消</button><button onClick={()=>handleReply(task!.id)} disabled={!replyText.trim() || actionLocked} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">回复并恢复</button></div>
+          </div>
+        </div>
+      )}
+
+      {/* zx_20261118_2 M5「豁」：逐条验收豁免——理由是必填（豁免是"人担了这条"，必须留痕）。
+          写口只到 `task:waiveAcceptance`；「豁免并收口」随后走既有 `task:updateStatus('completed')`。 */}
+      {waiveTarget && task && (
+        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50" onClick={() => setWaiveTarget(null)}>
+          <div className="bg-white rounded-xl shadow-lg p-6 w-full max-w-lg" onClick={e => e.stopPropagation()}>
+            <h3 className="text-lg font-bold mb-2">豁免验收项</h3>
+            <p className="text-xs text-gray-500 mb-3">将逐条豁免以下未达项。豁免不改「模型是否判过」，只记「用户裁定接受」；理由必填。</p>
+            <ul className="space-y-1 mb-3">
+              {waiveTarget.criteria.map((c, i) => (
+                <li key={i} className="text-xs bg-amber-50 border border-amber-200 rounded px-2 py-1 text-amber-900 break-words">{c}</li>
+              ))}
+            </ul>
+            <label className="block text-sm font-medium mb-1">豁免理由 *</label>
+            <textarea value={waiveReason} onChange={e => setWaiveReason(e.target.value)} rows={3} placeholder="为什么这条判据在当前环境下不可能满足 / 为什么可以接受（会写入任务账与活动时间线）" className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500" />
+            <div className="flex justify-end gap-2 mt-5">
+              <button onClick={() => setWaiveTarget(null)} className="px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">取消</button>
+              <button onClick={() => void handleWaiveAcceptance(task.id, waiveTarget.criteria, false)} disabled={!waiveReason.trim() || actionLocked} className="px-4 py-2 border border-amber-300 text-amber-700 rounded-lg text-sm hover:bg-amber-50 disabled:opacity-50 disabled:cursor-not-allowed">仅豁免</button>
+              <button onClick={() => void handleWaiveAcceptance(task.id, waiveTarget.criteria, true)} disabled={!waiveReason.trim() || actionLocked} className="px-4 py-2 bg-amber-600 text-white rounded-lg text-sm hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed">豁免并收口</button>
+            </div>
           </div>
         </div>
       )}

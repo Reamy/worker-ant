@@ -53,13 +53,13 @@
 
 ### 方式一：安装包（macOS / Windows / Linux）
 
-从 [GitHub Releases v0.7.0](https://github.com/Reamy/worker-ant/releases/tag/v0.7.0) 下载对应平台的安装包，校验值（SHA-256）见 Release 页面：
+从 [GitHub Releases v0.8.0](https://github.com/Reamy/worker-ant/releases/tag/v0.8.0) 下载对应平台的安装包，校验值（SHA-256）见 Release 页面：
 
-- **macOS 13+（Apple Silicon）**：`worker-ant-0.7.0-mac-arm64.dmg`（或 `.zip`），已完成 Developer ID 签名与 Apple 公证，双击挂载、把「工蚁」拖进「应用程序」即可。
-- **Windows 10/11（x64）**：`worker-ant-0.7.0-win-x64.exe`，**未做代码签名**；SmartScreen 可能提示「未知发布者」，点「更多信息 → 仍要运行」即可。
-- **Linux（x86_64）**：`worker-ant-0.7.0-linux-x86_64.AppImage` 或 `.deb`，**未签名**；AppImage 需先 `chmod +x`。
+- **macOS 13+（Apple Silicon）**：`worker-ant-0.8.0-mac-arm64.dmg`（或 `.zip`），已完成 Developer ID 签名与 Apple 公证，双击挂载、把「工蚁」拖进「应用程序」即可。
+- **Windows 10/11（x64）**：`worker-ant-0.8.0-win-x64.exe`，**未做代码签名**；SmartScreen 可能提示「未知发布者」，点「更多信息 → 仍要运行」即可。
+- **Linux（x86_64）**：`worker-ant-0.8.0-linux-x86_64.AppImage` 或 `.deb`，**未签名**；AppImage 需先 `chmod +x`。
 
-**v0.2.0 安装包存在首次启动即崩的缺陷，请勿再使用。** v0.7.0 新增：岗位从「四段文本」长成能约束执行的**能力卡**（工具白名单 / MCP / 沙箱档 / 参与派单），经验按任务相关性注入并计复用次数；任务建好后可**补派 / 改派**岗位（已完成任务不改写历史归属）；IM 听得懂 `项目#名称`，缺岗位时问一次、之后沿用；回执只回显你的原话；首启收成**三步**；产出物「归属 ∪ 贡献」两本账、任务详情有上下文与成本账；中继任务树有界、执行约束随树继承；岗位知识成为团队库第六类资产（Team 全队汇齐，导入必待审）。自动更新尚未启用，已装旧版的用户请手动下载覆盖安装。
+**v0.2.0 安装包存在首次启动即崩的缺陷，请勿再使用。** v0.8.0 新增：**项目经验有主、有数、可用**——项目技能只在本项目生效（可显式提升为全局），项目详情一页给出规模 p50/p90、工具可靠度、浪费坑、失败因与服务/注入 ROI；开工时用 ≤120 token 把最贵的坑注入上下文；**外部 AI 终端授权有边界**（设备范围 / 频率 / 是否允许联动）；**设备联动规则**（状态/属性/每日时刻 → 设备动作，带冷却、试运行、留痕）；另有岗位例行、跨机只读代码、按效上下文预算、运维一页看清。v0.7.0 起已有：岗位能力卡与补派/改派、`项目#名称`、首启三步、产出物两本账、中继树有界、岗位知识进团队库。自动更新尚未启用，已装旧版的用户请手动下载覆盖安装。
 
 - 系统要求：**macOS 13+ / Apple Silicon（arm64）**、**Windows 10/11（x64）**、**Linux（x86_64）**。Intel Mac 版本暂未提供。
 - 首次启动会进入**安装向导**：**三步**跑出第一个成果——「接通 AI 资源」（模型连接与 ANS 自检同屏）→「选 / 建项目」→「跑出第一个成果」。
@@ -142,7 +142,7 @@ cd apps/worker-ant-desktop && bash run.sh
 | **Team（团队授权包）**  | ¥599/月 · ¥5990/年（每包，≤20 节点） | 20 个本机账号、最多 20 台协同节点；设备发现与控制、AI 终端意图接入、审计视图与 CSV 导出、团队共享库、项目画像共享                              |
 | **企业私有化**          | 定制（规划中，暂不提供）             | 内网部署 + SLA                                                                                                                                 |
 
-> **购买**：[面包多店铺](https://mbd.pub/o/author-bW2ZlHFtZg==/work)——Pro 月付 / 年付 / 早鸟终身；团队授权包月付 / 年付。企业版暂不售卖。团队包为人工开通（收齐 ≤20 台机器指纹后签发，须带到期日）。macOS 安装包已完成 **Developer ID 签名**（Team XRZNWLDU86）**并经 Apple 公证**（notarytool `Accepted`，票据已装订；包内应用 `spctl` 为 `accepted / Notarized Developer ID`）。**已发布**：[下载 v0.7.0](https://github.com/Reamy/worker-ant/releases/tag/v0.7.0)——macOS、Windows、Linux 三个平台的安装包均在该 Release，校验值（SHA-256）见页面。Windows 与 Linux 版未做代码签名，首次运行可能被系统提示；Intel Mac 版本暂未提供。桌面端自带 14 天团队版试用。
+> **购买**：[面包多店铺](https://mbd.pub/o/author-bW2ZlHFtZg==/work)——Pro 月付 / 年付 / 早鸟终身；团队授权包月付 / 年付。企业版暂不售卖。团队包为人工开通（收齐 ≤20 台机器指纹后签发，须带到期日）。macOS 安装包已完成 **Developer ID 签名**（Team XRZNWLDU86）**并经 Apple 公证**（notarytool `Accepted`，票据已装订；包内应用 `spctl` 为 `accepted / Notarized Developer ID`）。**已发布**：[下载 v0.8.0](https://github.com/Reamy/worker-ant/releases/tag/v0.8.0)——macOS、Windows、Linux 三个平台的安装包均在该 Release，校验值（SHA-256）见页面。Windows 与 Linux 版未做代码签名，首次运行可能被系统提示；Intel Mac 版本暂未提供。桌面端自带 14 天团队版试用。
 >
 > 上表的能力**当前都在桌面端可兑现**（档位闸与引擎同仓，可自行核对）。各档另有八维容量上限（设备登记 / 外部终端 / A2A 服务 / 每项目知识卡 / 团队共享记忆 / IM 渠道 / 任务模板 / 设备云账号）：社区 5 / 1 / 1 / 8 / 200 / 2 / 5 / 0（需专业版）、Pro 30 / 3 / 3 / 24 / 2000 / 5 / 30 / 2、Team 200 / 20 / 10 / 60 / 不限 / 不限 / 不限 / 不限——**只拦新增，已有记录不受影响**。云端协作服务尚未发布，发布时会在本表更新——不以未交付的能力作卖点。**本仓库（桌面端 + 引擎）始终开源**。
 

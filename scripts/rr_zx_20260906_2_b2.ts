@@ -55,7 +55,10 @@ const fnStart = acceptSrc.indexOf('async function checkAcceptanceCriteria');
 const fnBody = acceptSrc.slice(fnStart);
 ok(fnBody.includes('recordAcceptanceOutcome(db, taskId, decided)'), '验收证据经 recordAcceptanceOutcome 落库(四出口共用一笔)');
 ok(/^\s{2}const payload = recordAcceptanceOutcome\(db, taskId, decided\);/m.test(fnBody), '落库调用无条件(不再只有"通过"那一支落库 ⇒ 台账恒 0 的病根已除)');
-ok(acc.includes('const failed = checks.filter((c) => c.passed === false);'), '先算 failed 再定夺(通过/拒收同一处判定)');
+// zx_20261118_2 M5「豁」：判据前移到"未豁免的未达项"——豁免项不阻断，未豁免的拒收仍走同一处判定。
+//   断言钉的是**更强的新真源**（不是放宽：任何漏掉 `waived !== true` 的写法都会被这条抓住）。
+ok(acc.includes('const failed = checks.filter((c) => c.passed === false && c.waived !== true);'),
+  '先算 failed 再定夺（豁免项不阻断；未豁免的拒收仍走同一处判定）');
 ok(acc.includes('error: `验收标准未达成（${failed.length} 项），请补齐后再 finalize：'), '拒收错误串保留(拒收亦落库，错误串原样)');
 ok(fnBody.includes('const block = decided.outcome.ran && !decided.outcome.passed ? decided.outcome.block : null;'), '门禁语义不变：只有真拒收才返回拦截串(未跑/通过一律不拦)');
 ok(acc.includes("UPDATE wa_tasks SET context_json = ? WHERE id = ?"), '落库为 UPDATE context_json(零 schema 变更)');

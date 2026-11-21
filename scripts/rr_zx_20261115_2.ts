@@ -34,6 +34,8 @@ import {
   INHERITED_CONSTRAINT_KEYS,
 } from '../apps/worker-ant-desktop/src/main/core/task-accounting.js';
 import { planSubtasksFromTemplate as planSubtasksFromTemplateReal } from '../apps/worker-ant-desktop/src/main/core/task-decompose.js';
+// zx_20261120_3 M1：子任务继承岗位改为“父岗位有效才继承”——夹具需按生产建岗位表并绑定（不再盲继承裸 id）。
+import { POSITIONS_DDL } from '../apps/worker-ant-desktop/src/main/core/positions.js';
 import {
   PAUSE_REASON_RELAY_TREE_EXPIRED,
   pauseReasonLabel,
@@ -78,6 +80,7 @@ type AnyDb = import('better-sqlite3').Database;
 function fixture(): AnyDb {
   const d = new DatabaseSync(':memory:') as unknown as AnyDb;
   d.exec(SCHEMA);
+  d.exec(POSITIONS_DDL);
   d.prepare("INSERT INTO wa_projects (id, name) VALUES ('P-1', '测试项目')").run();
   return d;
 }
@@ -192,6 +195,12 @@ function sectionC(): void {
   console.log('\n【C】真跑 planSubtasksFromTemplate：继承与三道界');
   {
     const db = fixture();
+    // 生产同形：岗位存在且在本项目启用，父任务才可能带岗位（否则派生判“失效不继承”）。
+    db.prepare(
+      `INSERT INTO wa_positions (id, name, category, description, skills_json, rules_json, knowledge_json, enabled, builtin, version)
+       VALUES ('pos-1', '测试岗', 'tech', '', '[]', '[]', '[]', 1, 0, 1)`,
+    ).run();
+    db.prepare("INSERT INTO wa_project_positions (project_id, position_id, enabled) VALUES ('P-1', 'pos-1', 1)").run();
     insertTask(db, 'T-root', { context: { [RELAY_TREE_KEY]: LIVE_TREE }, positionId: 'pos-1' });
     const r = planSubtasksFromTemplateReal(db, { parentTaskId: 'T-root', projectId: 'P-1', template: TEMPLATE, depth: 0, source: 'auto-decompose' });
     eq(r.created, 3, 'C1 未超限 ⇒ 三条全建');

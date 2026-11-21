@@ -412,6 +412,19 @@ export interface NodeDispatchPolicy {
 }
 
 /** 提交请求体（`POST /api/v1/nodes/requests`）——类目级，凭请求方自己的 key 提交。 */
+/**
+ * zx_20261120_1 M4：跨机只读分析的**仓库绑定**（派单载荷 `payload.repo`）。
+ * 只描述"去哪儿拿、拿哪个提交"；凭据由对端本机自备，**不经载荷传递**。
+ */
+export interface NodeRepoBinding {
+  /** `https://` / `http://` / `ssh://` / `git@host:path` 形状。 */
+  url: string;
+  /** 分支名或提交 sha（≤200 字符，禁空白/控制字符）。 */
+  ref: string;
+  /** 可选子目录（相对仓根，不得逃逸）。 */
+  subdir?: string;
+}
+
 export interface NodeRequestSubmit {
   category: string;
   payload?: Record<string, unknown>;

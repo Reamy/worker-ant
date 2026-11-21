@@ -145,6 +145,8 @@ export default function DashboardPage() {
   const SEVERITY_CLS: Record<string, string> = { high: 'bg-red-100 text-red-700', medium: 'bg-amber-100 text-amber-700', low: 'bg-gray-100 text-gray-600' };
   // 架构不变量修复的瞬时反馈文案（成功后行转绿 + 此提示）
   const [diagMsg, setDiagMsg] = useState<string | null>(null);
+  // zx_20261119_1 M1「迹」：完成事件回填的勾选集（用户裁定：先列清单、人工勾选再回填）。
+  const [auditPicks, setAuditPicks] = useState<string[]>([]);
   // A1 (2026-09-03_1): 调度/队列状态
   const [scheduler, setScheduler] = useState<{ counts: Record<string, number>; running: Array<Record<string, unknown>>; scheduled: Array<Record<string, unknown>>; recent: Array<Record<string, unknown>> }>({ counts: {}, running: [], scheduled: [], recent: [] });
   // A1 (2026-09-04_2): 运维看板保鲜度（无常标记；事件驱动自动刷新，此处仅上报刷新时刻）
@@ -188,6 +190,21 @@ export default function DashboardPage() {
     try {
       const r = await admin.repairInvariant(name);
       setDiagMsg(`✓ ${r.detail}`);
+      await loadAll();
+    } catch (e) {
+      setDiagMsg(`✗ 修复失败：${(e as Error).message}`);
+    }
+    window.setTimeout(() => setDiagMsg(null), 6000);
+  }, [loadAll]);
+
+  // zx_20261119_1 M1「迹」：只回填勾选的完成事件（空选集即不动；后端也不退化成全量）。
+  const handleRepairSelected = useCallback(async (name: string, guidance: string, ids: string[]) => {
+    if (ids.length === 0) { setDiagMsg('未勾选任何任务，未回填'); window.setTimeout(() => setDiagMsg(null), 4000); return; }
+    if (!window.confirm(`回填所选 ${ids.length} 条完成事件？\n\n${guidance}\n\n回填只补事件、不改任务状态与验收账。确认执行？`)) return;
+    try {
+      const r = await admin.repairInvariant(name, ids);
+      setDiagMsg(`✓ ${r.detail}`);
+      setAuditPicks([]);
       await loadAll();
     } catch (e) {
       setDiagMsg(`✗ 修复失败：${(e as Error).message}`);
@@ -636,19 +653,52 @@ export default function DashboardPage() {
                     <div className="flex-1 text-sm">
                       <span className="font-medium">{inv.name as string}</span>
                       <span className="text-xs text-gray-500 ml-2">{inv.description as string}</span>
-                      {!inv.passed && (inv.violations as Array<{detail:string}>|undefined)?.length ? (
-                        <div className="text-xs text-red-600 mt-1">{(inv.violations as Array<{detail:string}>).map((v: {detail:string}) => v.detail).join('; ')}</div>
+                      {!inv.passed && (inv.violations as Array<{detail:string;refId?:string}>|undefined)?.length ? (
+                        inv.name === 'task-completion-audit' ? (
+                          // zx_20261119_1 M1「迹」：逐条勾选（refId = 完整任务 id；detail 已带「旧式完成 / 无任何事件」分类）。
+                          <div className="text-xs text-red-600 mt-1 space-y-1">
+                            {(inv.violations as Array<{detail:string;refId?:string}>).map((v) => {
+                              const rid = v.refId || '';
+                              const checked = !!rid && auditPicks.includes(rid);
+                              return (
+                                <label key={rid || v.detail} className="flex items-start gap-1.5 cursor-pointer">
+                                  <input type="checkbox" className="mt-0.5" checked={checked} disabled={!rid}
+                                    onChange={() => setAuditPicks((prev) => checked ? prev.filter((x) => x !== rid) : [...prev, rid])} />
+                                  <span>{v.detail}</span>
+                                </label>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <div className="text-xs text-red-600 mt-1">{(inv.violations as Array<{detail:string}>).map((v: {detail:string}) => v.detail).join('; ')}</div>
+                        )
                       ) : null}
                       {!inv.passed && (inv.remediation as Record<string,unknown>|undefined) ? (
                         <div className="text-xs text-gray-600 mt-1">💡 {String((inv.remediation as Record<string,unknown>).guidance ?? '')}</div>
                       ) : null}
                     </div>
                     {!inv.passed && (inv.remediation as Record<string,unknown>|undefined)?.autoFixable ? (
-                      <button
-                        type="button"
-                        className="shrink-0 text-xs px-2 py-1 rounded border border-blue-200 bg-blue-50 text-blue-600 hover:bg-blue-100 whitespace-nowrap"
-                        onClick={() => handleRepairInvariant(inv.name as string, String((inv.remediation as Record<string,unknown>).guidance ?? ''))}
-                      >修复</button>
+                      inv.name === 'task-completion-audit' ? (
+                        <div className="shrink-0 flex flex-col gap-1">
+                          <button
+                            type="button"
+                            className="text-xs px-2 py-1 rounded border border-gray-200 bg-white text-gray-600 hover:bg-gray-50 whitespace-nowrap"
+                            onClick={() => setAuditPicks(((inv.violations as Array<{refId?:string}>) || []).map((v) => v.refId || '').filter(Boolean))}
+                          >全选</button>
+                          <button
+                            type="button"
+                            className="text-xs px-2 py-1 rounded border border-blue-200 bg-blue-50 text-blue-600 hover:bg-blue-100 whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed"
+                            disabled={auditPicks.length === 0}
+                            onClick={() => handleRepairSelected(inv.name as string, String((inv.remediation as Record<string,unknown>).guidance ?? ''), auditPicks)}
+                          >修复所选（{auditPicks.length}）</button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          className="shrink-0 text-xs px-2 py-1 rounded border border-blue-200 bg-blue-50 text-blue-600 hover:bg-blue-100 whitespace-nowrap"
+                          onClick={() => handleRepairInvariant(inv.name as string, String((inv.remediation as Record<string,unknown>).guidance ?? ''))}
+                        >修复</button>
+                      )
                     ) : null}
                   </div>
                 ))}

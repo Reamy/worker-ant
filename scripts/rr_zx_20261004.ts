@@ -1040,8 +1040,10 @@ async function main(): Promise<void> {
     //   ④ 最终收窄仍读 `archetype`。四条同钉，比原先"字面量 pinned ?? f()"更强。
     crit('M12', /const pinnedDec = resolvePinnedArchetype\(task\.context_json\)/.test(ae)
       && /pinnedDec \?\? classifyArchetypeDetailed\(/.test(ae)
-      && /const calibrated = calibrateArchetype\(/.test(ae)
-      && /pinnedDec\?\.archetype \?\? calibrated/.test(ae)
+      && /calibrateArchetype\(/.test(ae)
+      // zx_20261116_3 M2：能力升级（`capabilityPinned`）也参与"不被历史校准推翻"；pinnedDec 仍最高优先。
+      && /pinnedDec\?\.archetype \?\?/.test(ae)
+      && /capabilityPinned/.test(ae)
       && /narrowToolFace\(archetype, tools/.test(ae),
       `M12-E' **接线三处**：\`pinnedDec\` 同时挡住 \`classifyArchetypeDetailed\` 与 \`calibrateArchetype\`，最终 \`narrowToolFace(archetype,…)\` 真收窄——`
       + `只读一处则声明会在求值点被悄悄推翻（与没声明无异）。`);
@@ -1055,7 +1057,8 @@ async function main(): Promise<void> {
 
     // 接线：index.ts 起消费者（与心跳同拍）+ runner 只写 node_archetype（有读者）。
     const idx = strip(MAIN_INDEX_SRC);
-    crit('M12', /startNodeRequestWorker\(\{/.test(idx) && /makeAnsRequestIo\(db\)/.test(idx) && /makeRelayRunner\(\{ db \}\)/.test(idx)
+    // zx_20261120_1 M5：runner 多接 `dataDir`（远程只读工作区根）；消费者接线本身不变。
+    crit('M12', /startNodeRequestWorker\(\{/.test(idx) && /makeAnsRequestIo\(db\)/.test(idx) && /makeRelayRunner\(\{\s*db(?:\s*,\s*dataDir)?\s*\}\)/.test(idx)
       && /void _nodeRequestWorker\?\.poll\(\)/.test(idx),
       `M12-F **消费者接线**：\`index.ts\` 以 \`makeAnsRequestIo(db)\`+\`makeRelayRunner({db})\` 起消费者，心跳 \`onTick\` 里 \`poll()\`——`
       + `与心跳同拍，不另开一条时钟。`);

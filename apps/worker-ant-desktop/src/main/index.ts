@@ -11,6 +11,7 @@ import { initAuthIpc } from './ipc/auth.ipc.js';
 import { initProjectIpc, stopAllRuntimeProcesses } from './ipc/project.ipc.js';
 // zx_20261112_1 B1「岗」: 岗位管理出口（判据全在 core/positions.ts）。
 import { initPositionsIpc } from './ipc/positions.ipc.js';
+import { initOpsIpc } from './ipc/ops.ipc.js';
 import { initImIpc, stopAllImAdapters } from './ipc/im.ipc.js';
 import { initAdminIpc, initSkillIpc, initMemoryIpc } from './ipc/admin.ipc.js';
 import { initLicenseIpc } from './ipc/license.ipc.js';
@@ -51,7 +52,10 @@ import { createLogger } from './core/logger.js';
 import { createExternalCapabilityPort } from './core/external-calls.js';
 // zx_20261018_2 批六「见新」：门态/门内调用**发生即上屏**（瞬态事件；面板轮询降为兜底）。
 import { emitExternalCallRecorded, emitExternalStatusChanged } from './core/refresh-events.js';
-import { listDevices, listRooms, resolveDeviceByName, type AnsDevice, type DeviceControlOutcome } from './core/device-registry.js';
+import { getDevice, listDevices, listRooms, resolveDeviceByName, type AnsDevice, type DeviceControlOutcome } from './core/device-registry.js';
+// zx_20261121_2 M2：门内授权边界（范围/频率/联动）的唯一读口与缺省。
+import { readTerminalGrant } from './core/external-terminals.js';
+import { defaultGrant } from './core/external-grant.js';
 // zx_20261101_1 M2「授」: 发现即问——新设备的 IM 询问由小模块去抖聚合，判据（Team 闸）仍取一处真源。
 import { createDeviceAuthPusher } from './core/im/device-auth-push.js';
 // zx_20261101_1 M3「授」: 跨机问答的 IM 文案与 M1 的受理端同源（`approval-inbox.ts` 一处出）。
@@ -74,11 +78,18 @@ import type { TeamGate } from './core/team-gate.js';
 // zx_20261012：仅类型引用「为何未入网」枚举（真源在 `node-heartbeat.ts`），打包期擦除。
 import type { NodeEnrollmentReason } from './core/node-heartbeat.js';
 import { eventBus } from './core/event-bus.js';
-import { boolSetting, readBoolSetting, normalizeBooleanSettingValues } from './core/settings-bool.js';
+// zx_20261121_2 M5：联动规则运行留痕（失败不影响执行；`recordAudit` 永不抛）。
+import { recordAudit } from './core/audit-log.js';
+import { boolSetting, readBoolSetting, readBoolSettingDefaultOff, normalizeBooleanSettingValues } from './core/settings-bool.js';
 import { EventStore } from './core/event-store.js';
 import { registerProjectors } from './core/event-projectors.js';
 import { TaskScheduler } from './core/task-scheduler.js';
 import { setJobEnqueuer, enqueueJob } from './core/job-enqueuer.js';
+// zx_20261120_1 M2: 岗位例行触发与终态回填（零 electron；此处只做启动接线与事件旁路）。
+import { runRoutine, backfillRoutineRunForTask } from './core/routine-runner.js';
+import { getRoutine } from './core/position-routines.js';
+// zx_20261120_3 M1「职·全」：项目级 cron 建单也走同一派生（项目默认岗位）。
+import { deriveTaskPosition, positionContextFields } from './core/positions.js';
 import { registerAiTaskHandlers } from './core/jobs/ai-task.js';
 import { registerAllJobs } from './core/jobs/index.js';
 import { MemoryManager } from './core/memory-manager.js';
@@ -144,6 +155,8 @@ let _scheduler: TaskScheduler | null = null;
 let _nodeHeartbeat: { stop(): void } | null = null;
 // zx_20261106_1 M6: dev 重构建护栏句柄（仅 dev 起；退出时停）。
 let _devRebuildWatch: { stop(): void } | null = null;
+// zx_20261121_2 M5：设备联动运行时的停止句柄（未起为 null）。
+let _stopDeviceAutomation: (() => void) | null = null;
 // zx_20261004 M12: 中转队列消费者（**不自起时钟**——由心跳 `onTick` 每跳驱动一轮，见下面的接线）。
 let _nodeRequestWorker: { poll(): Promise<number> } | null = null;
 
@@ -194,6 +207,9 @@ async function stopCore(): Promise<void> {
   //   两条都挂在这里，与门牌/适配层同一生命周期；未起/已停均为幂等空操作。
   try { const { stopDeviceLiveSubscriptions } = await import('./ipc/devices.ipc.js'); stopDeviceLiveSubscriptions(); } catch { /* 未起/已停 */ }
   try { const { stopDeviceDiscovery } = await import('./core/device-discovery.js'); stopDeviceDiscovery(); } catch { /* 未起/已停 */ }
+  // zx_20261121_2 M5：退出口上收**设备联动**（事件订阅 + 时间轮；未起即空操作）。
+  try { _stopDeviceAutomation?.(); } catch { /* 已停/无效 */ }
+  _stopDeviceAutomation = null;
   // zx_20261023_5 批四：退出口上收**局域网 AI 终端浏览**（与设备发现同一生命周期；未起即空操作）。
   try { const { stopTerminalBrowse } = await import('./core/lan-terminals.js'); stopTerminalBrowse(); } catch { /* 未起/已停 */ }
   await stopAllImAdapters();
@@ -319,6 +335,8 @@ app.whenReady().then(async () => {
   initProjectIpc(db, dataDir, () => memory);
   // zx_20261112_1 B1「岗」: 岗位列表/详情/增改启停删/项目绑定/经验确认。
   initPositionsIpc(db);
+  // zx_20261120_1 M9：运维概览（只读；八块读数 + 原因，不编 0）。
+  initOpsIpc(db, { dataDir });
   // zx_20260930 M5: 传 `memory` 的惰性取用（与上一行 `initProjectIpc` 同形）——本行执行时它尚未构造。
   initImIpc(db, dataDir, () => memory);
   // zx_20260930 M14-3: 真健康自检的三个外部世界——心跳文件路径、调度器活体（**惰性取用**：
@@ -361,6 +379,46 @@ app.whenReady().then(async () => {
   // zx_20261004 M9/M10: 设备面板 IPC（devices:list / discover / stop / authorize / control）。
   //   ⚠ 只注册**出口**，不起发现——起发现是用户显式动作（面板按钮），见 devices.ipc.ts 头注释。
   initDevicesIpc(db, getAnsClientForSide);
+  // zx_20261121_2 M5：设备联动运行时——Team `device_control` + 开关 `device.automation_on`（缺省开）。
+  //   设备事件由 `device.status_changed` 驱动；时间规则由 60s 时间轮；不补跑错过的时刻。
+  try {
+    const locked = teamFeatureRefusal(db, 'device_control');
+    if (locked) {
+      console.log('[工蚁] 设备联动未启动：', locked);
+    } else if (!readBoolSetting(db, 'device.automation_on')) {
+      console.log('[工蚁] 设备联动已由设置关闭');
+    } else {
+      const { startDeviceAutomation } = await import('./core/device-automation.js');
+      const h = startDeviceAutomation({
+        db: db as never,
+        control: async ({ deviceId, action, args, ruleId }) => {
+          const outcome = await runDeviceControl(db!, {
+            deviceId, action, args,
+            actor: { kind: 'rule', ref: ruleId },
+          }, defaultDeviceControl);
+          return {
+            ok: outcome.ok,
+            denied: 'denied' in outcome,
+            ...('reason' in outcome ? { reason: String(outcome.reason) } : {}),
+            ...('result' in outcome ? { result: String(outcome.result) } : {}),
+          };
+        },
+        onRun: (r) => {
+          try {
+            recordAudit(db!, {
+              actorKind: 'system',
+              action: 'device.rule_run',
+              targetType: 'device_rule',
+              targetId: r.ruleId,
+              detail: { name: r.name, result: r.result, reason: r.reason ?? '', deviceId: r.deviceId ?? '', action: r.action ?? '' },
+            });
+          } catch { /* 审计写失败不改变运行结局 */ }
+        },
+      });
+      _stopDeviceAutomation = h.stop;
+      console.log('[工蚁] 设备联动规则运行时已启动');
+    }
+  } catch (e) { console.warn('[工蚁] 设备联动启动失败:', (e as Error).message); }
   // zx_20261104_3 M3: 授权台只读出口（`approval:inbox`）——与 IM「授权待办」同一份 `buildApprovalInbox`。
   initApprovalIpc(db);
   // zx_20261014_4 批三（管子·度量衡 / 道德经·善闭无关楗而不可开 / 罗尔斯·无知之幕）: 「门」的
@@ -382,6 +440,16 @@ app.whenReady().then(async () => {
     const identity = ensureNodeIdentity(db!);
     const capability = createExternalCapabilityPort(db!, {
       listDevices: () => listDevices(db!),
+      // zx_20261121_2 M2：门内三把尺——终端 grant 读口 + 按 id/名解析设备（与 controlDevice 同一解析尺）。
+      getGrant: (terminalId) => readTerminalGrant(db!, terminalId) ?? defaultGrant(),
+      resolveDevice: ({ deviceId, name }) => {
+        const id = String(deviceId ?? '').trim();
+        if (id) return getDevice(db!, id);
+        const key = String(name ?? '').trim();
+        if (!key) return null;
+        const r = resolveDeviceByName(db!, key);
+        return r.ok ? r.device : null;
+      },
       // zx_20261018_1 批三: `/capabilities.rooms` 的唯一真源——台账里非空房间的去重集合（不另数一遍）。
       listRooms: () => listRooms(db!),
       // zx_20261018_1 批五: 意图 → 计划（**零设备动作**，只读台账；规则表在 `core/home-intent.ts`）。
@@ -413,7 +481,7 @@ app.whenReady().then(async () => {
           requester_node_id: null,
           answer: null,
         } as unknown as import('@worker-ant/shared-types').AnsNodeRequest;
-        const res = await makeRelayRunner({ db: db! })(req, face.tools, face.archetype ?? 'conversation');
+        const res = await makeRelayRunner({ db: db!, dataDir })(req, face.tools, face.archetype ?? 'conversation');
         const r = res.result;
         const taskId = typeof r.taskId === 'string' ? r.taskId : '';
         const taskStatus = typeof r.taskStatus === 'string' ? r.taskStatus : '';
@@ -629,6 +697,12 @@ app.whenReady().then(async () => {
       initSkillIpc(db, memory);
       initMemoryIpc(db, memory);
       try { await memory.loadSkillsFromDb(); } catch (e) { console.warn('[工蚁] 已批准技能加载跳过:', (e as Error).message); }
+      // zx_20261120_3 M4：已批准的**岗位技能**按岗位注册（未批准不注册、不注入）。
+      try {
+        const { loadApprovedPositionSkills } = await import('./core/position-skills.js');
+        const n = loadApprovedPositionSkills(db);
+        if (n > 0) console.log(`[工蚁] 已加载 ${n} 条岗位技能（按岗位可见/可调用）`);
+      } catch (e) { console.warn('[工蚁] 岗位技能加载跳过:', (e as Error).message); }
     }
   } catch (e) { console.warn('[工蚁] ANS/Memory初始化跳过:', (e as Error).message); }
 
@@ -678,6 +752,14 @@ app.whenReady().then(async () => {
   const pushImCompletion = async (taskId: string, _projectId: string, message: string): Promise<void> => {
     if (!db) { log.warn({ taskId: taskId.slice(0, 8) }, '完成/进度 IM 通知跳过：数据库未就绪'); return; }
     try {
+      // zx_20261120_1 M3：例行任务完成默认不推 IM（只失败推）；跳过也留一行 `skipped` 意图账，不静默。
+      //   失败走 `task-terminal` 的带因 IM，不经过本函数，故不受此开关影响。
+      const row = db.prepare("SELECT project_id, json_extract(context_json, '$.source') AS src FROM wa_tasks WHERE id = ?")
+        .get(taskId) as { project_id?: string; src?: string } | undefined;
+      if (row?.src === 'routine' && !readBoolSettingDefaultOff(db, 'routine.notify_on_success')) {
+        recordNotifyIntent(db, { projectId: String(row.project_id ?? _projectId ?? ''), taskId, kind: 'notification', outcome: 'skipped', detail: 'routine_no_success_push' });
+        return;
+      }
       await pushImNotify(db, taskId, message);
     } catch (err) {
       // zx_20261106_1 M1: 不阻断，但不静默——按天日志留一行（正文不入日志）。
@@ -891,7 +973,7 @@ app.whenReady().then(async () => {
       _nodeRequestWorker = startNodeRequestWorker({
         nodeId: ensureNodeIdentity(db).id,
         io: requestIo,
-        runner: makeRelayRunner({ db }),
+        runner: makeRelayRunner({ db, dataDir }),
         onEvent: (e) => {
           // ⚠ **不再手抄白名单**（M10 修）：整对象透传（唯剔 `type` 作落库键）——见 `nodeRequestEventToLog`。
           //   白名单会漏新增字段（M9 的 `requestPayload` 就漏了⇒B 端台账缺"派来的是什么"）。
@@ -1155,9 +1237,17 @@ app.whenReady().then(async () => {
     const tmpl = ctxJson.cron_create_task as { title?: string; description?: string; priority?: number } | undefined;
     if (tmpl?.title) {
       const taskId = crypto.randomUUID();
+      // zx_20261120_3 M1：cron 建单按项目默认岗位（恰好一个启用岗位时；否则 none）。
+      const derivedPosition = deriveTaskPosition(db, {
+        projectId,
+        allowProjectDefault: readBoolSetting(db, 'position.default_from_project'),
+      });
       db.prepare(
-        "INSERT INTO wa_tasks (id, project_id, title, description, priority, status, source, context_json) VALUES (?, ?, ?, ?, ?, 'pending', 'cron', ?)"
-      ).run(taskId, projectId, tmpl.title, tmpl.description || '', tmpl.priority ?? 0, JSON.stringify({ source: 'cron', cron_triggered: true }));
+        "INSERT INTO wa_tasks (id, project_id, title, description, priority, status, source, context_json, position_id) VALUES (?, ?, ?, ?, ?, 'pending', 'cron', ?, ?)"
+      ).run(taskId, projectId, tmpl.title, tmpl.description || '', tmpl.priority ?? 0, JSON.stringify({
+        source: 'cron', cron_triggered: true,
+        ...positionContextFields(derivedPosition),
+      }), derivedPosition.positionId);
       enqueueJob(db, 'ai-task', { taskId, projectId, source: 'cron' });
       console.log(`[Cron] 定时触发: 项目=${projectId.slice(0, 8)} 任务=${taskId.slice(0, 8)}`);
       return;
@@ -1202,6 +1292,30 @@ app.whenReady().then(async () => {
     setCronRegistrar(registerProjectCron);
   } catch {}
 
+  // zx_20261120_1 M2: 岗位例行——启动注册 + 变更重注册（与项目 cron 同一形态、各自一本账）。
+  //   只按「例行定义是否启用」注册；项目/岗位/绑定状态在每次触发时**现读**（停用即跳过并留痕），
+  //   故停用再启用无需重注册，定义本身变更才需要。
+  const registerRoutineJob = (routineId: string) => {
+    if (!db) return;
+    const routine = getRoutine(db, routineId);
+    if (!routine || Number(routine.enabled) !== 1) { scheduler.unregisterRoutineJob(routineId); return; }
+    scheduler.registerRoutineJob(routineId, routine.cron, routine.timezone || 'Asia/Shanghai', async () => {
+      if (!db) return;
+      const r = runRoutine(db, routineId, {
+        trigger: 'schedule',
+        enqueue: (taskId, projectId) => { enqueueJob(db!, 'ai-task', { taskId, projectId, source: 'routine' }); },
+      });
+      if (!r.ok) console.log(`[Routine] 未跑：${routineId.slice(0, 8)} reason=${r.reason}`);
+    });
+  };
+  try {
+    const ids = db.prepare('SELECT id FROM wa_position_routines WHERE enabled = 1').all() as Array<{ id: string }>;
+    for (const row of ids) registerRoutineJob(row.id);
+    console.log(`[Routine] 已注册 ${ids.length} 条岗位例行`);
+    const { setRoutineRegistrar } = await import('./ipc/positions.ipc.js');
+    setRoutineRegistrar(registerRoutineJob);
+  } catch (e) { console.warn('[Routine] 启动注册跳过:', (e as Error).message); }
+
   // 任务完成 IM 通知已移至 ai-task.ts 的 F2 逻辑（智能内容 + 遍历所有渠道），此处不再重复推送
 
   // Phase 2.1: 事件总线 → 渲染进程实时推送（任务状态变更）
@@ -1223,7 +1337,22 @@ app.whenReady().then(async () => {
   eventBus.on('task.completed', async (e) => { forwardToRenderer('task.completed', e.data as Record<string, unknown>); });
   eventBus.on('task.failed', async (e) => { forwardToRenderer('task.failed', e.data as Record<string, unknown>); });
   eventBus.on('task.status_changed', async (e) => { forwardToRenderer('task.status_changed', e.data as Record<string, unknown>); });
+  // zx_20261120_1 M2: 例行运行账随任务终态回填（一处旁路，覆盖完成/失败/归档三条出口）。
+  const backfillRoutineByTask = (data: Record<string, unknown>) => {
+    if (!db) return;
+    const taskId = String(data.taskId ?? data.task_id ?? '');
+    if (!taskId) return;
+    try {
+      const st = (db.prepare('SELECT status FROM wa_tasks WHERE id = ?').get(taskId) as { status?: string } | undefined)?.status ?? '';
+      if (st === 'completed' || st === 'failed' || st === 'archived') backfillRoutineRunForTask(db, taskId, st);
+    } catch { /* 回填失败不阻断事件转发 */ }
+  };
+  eventBus.on('task.completed', async (e) => backfillRoutineByTask(e.data as Record<string, unknown>));
+  eventBus.on('task.failed', async (e) => backfillRoutineByTask(e.data as Record<string, unknown>));
+  eventBus.on('task.status_changed', async (e) => backfillRoutineByTask(e.data as Record<string, unknown>));
   eventBus.on('task.awaiting_input', async (e) => { forwardToRenderer('task.awaiting_input', e.data as Record<string, unknown>); });
+  // zx_20261118_2 M5：逐条豁免也要实时可见（活动时间线/详情页同源）。
+  eventBus.on('task.acceptance_waived', async (e) => { forwardToRenderer('task.acceptance_waived', e.data as Record<string, unknown>); });
   // Phase A (2026-08-28): 逐步执行流 + 记忆注入可视化实时推送
   eventBus.on('task.step_finished', async (e) => { forwardToRenderer('task.step_finished', e.data as Record<string, unknown>); });
   // D1 (2026-09-02): token 级流式——瞬态事件转发（不持久化，见 emitTransient）

@@ -954,7 +954,10 @@ CREATE TABLE wa_external_terminals (
   approved_at TEXT,
   revoked_at TEXT,
   delivered_at TEXT,
-  grant_expires_at TEXT
+  grant_expires_at TEXT,
+    scope_json TEXT NOT NULL DEFAULT '{}',
+    rate_json TEXT NOT NULL DEFAULT '{}',
+    linkage_allowed INTEGER NOT NULL DEFAULT 1
 );
 `;
 function mkTerminalDb(): TerminalDb {
@@ -1909,9 +1912,10 @@ function groupH(): void {
       'H-8g 卡上可见画像与"过期且不自动覆盖"的如实提示');
 
     const mc = strip(MEMORY_CONTEXT_SRC);
-    // zx_20261023_5 批二：知识卡也占同一份 400-token 预算 ⇒ 钉**双扣**形状（比旧单扣更强）。
-    ok(/Math\.max\(0, KNOWLEDGE_INJECT_MAX_TOKENS - profileTokens - cardTokens\)/.test(mc),
-      'H-8h ★知识书预算从画像与知识卡实际 token 里扣（总预算不增）');
+    // zx_20261023_5 批二：知识卡也占同一份 400-token 预算 ⇒ 钉**双扣**形状；
+    // zx_20261121_1 M6：项目经验段亦从同一份预算内先扣 ⇒ 钉**三扣**形状（比旧双扣更强）。
+    ok(/Math\.max\(0, KNOWLEDGE_INJECT_MAX_TOKENS - profileTokens - cardTokens - experienceTokens\)/.test(mc),
+      'H-8h ★知识书预算从画像/知识卡/经验段实际 token 里扣（总预算不增）');
     ok(/renderProjectProfile\(stored\.profile, PROFILE_INJECT_MAX_TOKENS\)/.test(mc)
       && /profileRefId\(stored\.profile\)/.test(mc),
       'H-8i 注入段与逐段留账都调画像模块（不另写渲染/ref_id）');
@@ -2076,6 +2080,9 @@ function groupI(): void {
     l.maxTaskTemplates === 0 ? '不限任务模板' : `任务模板 ${l.maxTaskTemplates} 套`,
     // zx_20261101_2 M6「衡」: 设备云账号（第八维；与 `tier-usage.ts` 同一句形状）。
     l.maxCloudAccounts === 0 ? '不限设备云账号' : `设备云账号 ${l.maxCloudAccounts} 个`,
+    // zx_20261120_3 M7：自建岗位 / 岗位例行（第九、十维；同一句形状）。
+    l.maxCustomPositions === 0 ? '不限自建岗位' : `自建岗位 ${l.maxCustomPositions} 个`,
+    l.maxPositionRoutines === 0 ? '不限岗位例行' : `岗位例行 ${l.maxPositionRoutines} 套`,
   ];
   const quotaShapes = LICENSE_TIERS.flatMap((t) => quotaOf(TIER_LIMITS[t]));
   const QUOTA_DIMS = quotaOf(TIER_LIMITS.community).length;

@@ -15,7 +15,7 @@
  *   派发本身是**对等**的：本机也须已入网（有身份才有读回凭据），失败一律如实上屏。
  */
 import { useEffect, useState } from 'react';
-import { nodes as nodesApi, external as externalApi, type NodesClusterPayload, type ClusterNode } from '../lib/ipc';
+import { invoke, nodes as nodesApi, external as externalApi, type NodesClusterPayload, type ClusterNode, type TerminalGrant } from '../lib/ipc';
 import { useLiveQuery } from '../lib/useLiveQuery';
 // zx_20261018_2 批六「见新」：门态/留痕以事件驱动为主，轮询只作兜底——节拍一处真源。
 import { ACTIVE_POLL_MS, FALLBACK_POLL_MS } from '../lib/refresh';
@@ -896,6 +896,119 @@ function GrantExpiry({ at }: { at: string | null }) {
   );
 }
 
+type GrantDevice = { id: string; name: string; room: string; kind_class: string; authorized: boolean; controllable: boolean };
+
+function grantSummary(g: TerminalGrant): string {
+  const scope = g.scope.mode === 'all'
+    ? '全部已授权设备'
+    : `已选 ${g.scope.devices.length} 台设备${g.scope.rooms.length ? ` / ${g.scope.rooms.length} 个房间` : ''}${g.scope.kinds.length ? ` / ${g.scope.kinds.join('、')}` : ''}`;
+  const rate = [
+    g.rate.perMinute ? `${g.rate.perMinute}/分` : '',
+    g.rate.perHour ? `${g.rate.perHour}/时` : '',
+    g.rate.perDay ? `${g.rate.perDay}/天` : '',
+  ].filter(Boolean).join(' · ') || '不限频';
+  return `范围：${scope}；频率：${rate}；联动：${g.linkageAllowed ? '允许' : '不允许'}`;
+}
+
+/** zx_20261121_2 M3：授权边界编辑器（全部/按设备/按房间/按品类 + 频率 + 联动）。 */
+function TerminalGrantSection({ terminalId, grant, devices, onSaved }: {
+  terminalId: string;
+  grant: TerminalGrant;
+  devices: GrantDevice[];
+  onSaved: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const [mode, setMode] = useState<'all' | 'selected'>(grant.scope.mode);
+  const [devIds, setDevIds] = useState<string[]>(grant.scope.devices);
+  const [rooms, setRooms] = useState(grant.scope.rooms.join('，'));
+  const [kinds, setKinds] = useState(grant.scope.kinds.join('，'));
+  const [perMinute, setPerMinute] = useState(String(grant.rate.perMinute ?? ''));
+  const [perHour, setPerHour] = useState(String(grant.rate.perHour ?? ''));
+  const [perDay, setPerDay] = useState(String(grant.rate.perDay ?? ''));
+  const [linkage, setLinkage] = useState(grant.linkageAllowed);
+
+  async function save(): Promise<void> {
+    setBusy(true); setErr('');
+    try {
+      const next: TerminalGrant = {
+        scope: {
+          mode,
+          devices: mode === 'selected' ? devIds : [],
+          rooms: mode === 'selected' ? rooms.split(/[，,]/).map(s => s.trim()).filter(Boolean) : [],
+          kinds: mode === 'selected' ? kinds.split(/[，,]/).map(s => s.trim()).filter(Boolean) : [],
+        },
+        rate: {
+          ...(perMinute.trim() ? { perMinute: Number(perMinute) } : {}),
+          ...(perHour.trim() ? { perHour: Number(perHour) } : {}),
+          ...(perDay.trim() ? { perDay: Number(perDay) } : {}),
+        },
+        linkageAllowed: linkage,
+      };
+      await externalApi.grantUpdate(terminalId, next);
+      setOpen(false);
+      onSaved();
+    } catch (e) { setErr((e as Error)?.message || String(e)); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <div className="mt-1">
+      <div className="flex items-center gap-2 flex-wrap text-[10px] text-gray-500">
+        <span>{grantSummary(grant)}</span>
+        <button type="button" onClick={() => setOpen(v => !v)} className="text-blue-600 hover:underline">{open ? '收起边界' : '改授权边界'}</button>
+      </div>
+      {open && (
+        <div className="mt-1.5 rounded border border-gray-200 bg-gray-50 p-2 space-y-1.5">
+          <div className="flex items-center gap-3 text-[11px]">
+            <label className="inline-flex items-center gap-1"><input type="radio" checked={mode === 'all'} onChange={() => setMode('all')} />全部已授权设备</label>
+            <label className="inline-flex items-center gap-1"><input type="radio" checked={mode === 'selected'} onChange={() => setMode('selected')} />按范围选择</label>
+          </div>
+          {mode === 'selected' && (
+            <>
+              <div className="max-h-28 overflow-y-auto rounded border border-gray-200 bg-white p-1.5 space-y-0.5">
+                {devices.length === 0 && <p className="text-[10px] text-gray-400">台账暂无设备（发现并授权后可选）。</p>}
+                {devices.map(d => (
+                  <label key={d.id} className="flex items-center gap-1.5 text-[11px] text-gray-700">
+                    <input type="checkbox" checked={devIds.includes(d.id)} onChange={e => setDevIds(prev => e.target.checked ? [...prev, d.id] : prev.filter(x => x !== d.id))} />
+                    {d.name}{d.room ? `（${d.room}）` : ''} <span className="text-gray-400">{d.kind_class}</span>
+                    {!d.authorized && <span className="text-amber-600">未授权</span>}
+                  </label>
+                ))}
+              </div>
+              <div className="flex items-center gap-2 text-[11px]">
+                <label className="text-gray-500 shrink-0">房间</label>
+                <input value={rooms} onChange={e => setRooms(e.target.value)} placeholder="客厅，卧室（逗号分隔）" className="flex-1 border rounded px-1.5 py-0.5 text-[11px]" />
+              </div>
+              <div className="flex items-center gap-2 text-[11px]">
+                <label className="text-gray-500 shrink-0">品类</label>
+                <input value={kinds} onChange={e => setKinds(e.target.value)} placeholder="light，cover（逗号分隔）" className="flex-1 border rounded px-1.5 py-0.5 text-[11px]" />
+              </div>
+            </>
+          )}
+          <div className="flex items-center gap-2 flex-wrap text-[11px]">
+            <label className="text-gray-500">频率</label>
+            <input value={perMinute} onChange={e => setPerMinute(e.target.value)} placeholder="每分钟" className="w-16 border rounded px-1.5 py-0.5 text-[11px]" />
+            <input value={perHour} onChange={e => setPerHour(e.target.value)} placeholder="每小时" className="w-16 border rounded px-1.5 py-0.5 text-[11px]" />
+            <input value={perDay} onChange={e => setPerDay(e.target.value)} placeholder="每天" className="w-16 border rounded px-1.5 py-0.5 text-[11px]" />
+            <span className="text-gray-400">空/0 = 不限</span>
+          </div>
+          <label className="inline-flex items-center gap-1 text-[11px] text-gray-700">
+            <input type="checkbox" checked={linkage} onChange={e => setLinkage(e.target.checked)} />
+            允许联动（多步/多设备意图）
+          </label>
+          {err && <p className="text-[10px] text-red-600">{err}</p>}
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={() => void save()} disabled={busy} className="text-[11px] px-2.5 py-0.5 bg-emerald-600 text-white rounded hover:bg-emerald-700 disabled:opacity-50">{busy ? '保存中…' : '保存边界'}</button>
+            <button type="button" onClick={() => setOpen(false)} disabled={busy} className="text-[11px] px-2.5 py-0.5 border rounded text-gray-600 hover:bg-white">取消</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DoorCard() {
   // zx_20261018_2 批六：main 侧在开关/新待批/批准/拒绝/吊销后发 `external.status_changed`，
   //   每次门内调用落账后发 `external.call_recorded`——三块数据各自订阅即刷，不再等 5s 轮询。
@@ -1243,6 +1356,7 @@ function DoorCard() {
                 <span>批准 {formatDbTime(t.approved_at) || '—'}</span>
                 <GrantExpiry at={t.grant_expires_at} />
               </div>
+              <TerminalGrantSection terminalId={t.id} grant={t.grant} devices={list.data?.devices ?? []} onSaved={reloadAll} />
             </div>
           ))}</div>}
       </div>
@@ -1433,6 +1547,21 @@ export default function PeersPage() {
   // zx_20261112_2 B1：外派策略三态切换（off / default / always）的本地忙碌与失败提示。
   const [autoBusy, setAutoBusy] = useState(false);
   const [autoErr, setAutoErr] = useState('');
+  // zx_20261120_1 M5：跨机只读代码分析（缺省开；只对「研究类 + 项目有 origin」生效）。
+  const [remoteReadonly, setRemoteReadonly] = useState(true);
+  useEffect(() => {
+    void invoke<{ data?: Record<string, string> }>('settings:getAll')
+      .then((res) => {
+        const v = res?.data?.['node.remote_readonly_code'];
+        setRemoteReadonly(v === undefined || v === null ? true : !(v === 'false' || v === '0'));
+      })
+      .catch(() => { /* 读不到按缺省（开） */ });
+  }, []);
+  const toggleRemoteReadonly = async (next: boolean): Promise<void> => {
+    setRemoteReadonly(next); setAutoErr('');
+    try { await invoke('settings:set', 'node.remote_readonly_code', next ? '1' : '0'); }
+    catch (e) { setRemoteReadonly(!next); setAutoErr(`开关保存失败：${(e as Error)?.message || String(e)}`); }
+  };
   const changeAutoMode = async (mode: 'off' | 'default' | 'always'): Promise<void> => {
     setAutoBusy(true); setAutoErr('');
     try {
@@ -1602,6 +1731,12 @@ export default function PeersPage() {
               {autoBusy && <span className="text-[10px] opacity-70">写入中…</span>}
             </div>
             {autoErr && <div className="mt-1 text-red-600">{autoErr}</div>}
+            <label className="mt-1.5 flex items-start gap-1.5 text-[11px]">
+              <input type="checkbox" className="mt-0.5" checked={remoteReadonly} onChange={(e) => void toggleRemoteReadonly(e.target.checked)} />
+              <span>
+                跨机只读代码分析（缺省开）：研究类任务且项目有 git origin 时，对端 clone 后**只读**分析并回结论；写文件/执行命令会被拒绝。
+              </span>
+            </label>
             <div className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-0.5 text-[11px]">
               {requisites.map((r) => (
                 <div key={r.label} className="flex items-start gap-1">

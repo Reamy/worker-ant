@@ -21,7 +21,7 @@
  * 本文件只依赖 `@worker-ant/ans-client`（不引 electron / better-sqlite3 / node:*），
  * 故可被受控回归**直引跑真实现**（同 `memory-lifecycle.ts` 范式）。
  */
-import { createHmacSignature } from '@worker-ant/ans-client';
+import { createHmacSignature, parseRetryAfterMs } from '@worker-ant/ans-client';
 // zx_20261005 M21: ANS 默认地址**单一真源**（改端口只改 shared-types 一处，不再各写各的 localhost:3001）。
 import { ANS_DEFAULT_BASE_URL } from '@worker-ant/shared-types';
 
@@ -191,7 +191,7 @@ export interface AnsRequestOpts {
   body?: unknown;
   /** 默认 5000ms。 */
   timeoutMs?: number;
-  /** 失败后**再试**的次数（默认 `1` ⇒ 最多两次尝试）。仅对**传输失败/5xx**重试；4xx 是契约/身份问题，重试无益。 */
+  /** 失败后**再试**的次数（默认 `1` ⇒ 最多两次尝试）。对**传输失败/5xx/429**重试；其余 4xx 是契约/身份问题，重试无益。 */
   retries?: number;
   /**
    * 传输实现注入（默认全局 `fetch`）。**只给受控回归用**：rr 据此在同一份生产代码上
@@ -244,6 +244,12 @@ export async function ansSignedRequest(
       });
       lastStatus = resp.status;
       lastDetail = '';
+      // zx_20261116_3 M1「限」：429 可重试；按 Retry-After 退避，单次封顶 5s + 抖动。
+      if (resp.status === 429 && i < retries) {
+        const wait = Math.min(parseRetryAfterMs(resp.headers.get('retry-after')) ?? 1000, 5000);
+        await new Promise((r) => setTimeout(r, wait + Math.floor(Math.random() * 250)));
+        continue;
+      }
       if (resp.status >= 500 && i < retries) continue;
       return { ok: resp.ok, status: resp.status, response: resp, attempts };
     } catch (e) {

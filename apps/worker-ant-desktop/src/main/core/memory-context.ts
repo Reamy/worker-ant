@@ -37,6 +37,10 @@ import { renderProjectProfile, profileRefId, PROFILE_INJECT_MAX_TOKENS } from '.
 //   选卡、人话名、上限同出 `core/knowledge-cards.ts`（与蒸馏同处，免得分家）。
 //   **总预算不增**：画像 200 + 卡 ≤150 + 知识册余量，合计仍 ≤ 400。
 import { selectKnowledgeCardsForInject, KNOWLEDGE_CARD_KIND_LABEL, CARD_INJECT_MAX_TOKENS, type KnowledgeCard } from './knowledge-cards.js';
+// zx_20261121_1 M6「用·注」: 「项目经验」段——从项目真实执行账里派生的≤120 token 提醒；
+//   **总预算不增**：经验段先扣，知识册预算 = 400 − 画像 − 卡 − 经验。
+import { renderExperienceBrief, experienceRefId } from './project-experience.js';
+import { EXPERIENCE_INJECT_MAX_TOKENS, EXPERIENCE_SECTION_TITLE } from './project-experience-labels.js';
 import { estimateTokensFromChars } from './token-estimate.js';
 // zx_20260930 M7-e: 工作记忆的**焦点择要**（池 → 焦点 7±2）与分词器同出 `core/memory-select.js`
 //   （零依赖纯模块）。此前本模块按 `getWorkingMemory` 的**原序**铺开，没有任何"这条比那条更该进"的尺；
@@ -65,6 +69,8 @@ export const MEM_SECTION_PRIORITY: Record<string, MemSectionPriority> = {
   // zx_20261023_5 批二: 蒸馏卡是"这个项目最容易踩的坑/最该守的验收"，与本项目事实同级；
   //   排在 `项目域知识` 之前——卡的粒度更细，先给最用得上的那几句。
   项目知识卡: 'mid',
+  // zx_20261121_1 M6：经验段是本项目**最贵的坑**（可执行提醒），与本项目事实同级。
+  项目经验: 'mid',
   // zx_20261018_3 批一（管子·度量衡）: `项目域知识` 由 'low' 升为 'mid'——它是**本项目的事实**
   //   （实体/约定/坑），不是跨项目泛化背景；预算仍由 `selectMemorySections` 整段取舍，不越界。
   项目域知识: 'mid',
@@ -168,7 +174,7 @@ export function memoryConfTag(memory: MemoryManager, m: MemoryEntry, taskText?: 
 //   而 `budgetChars` 必须必填——若给它默认值就得在这里再写一个 6000，那是**第二处预算真源**
 //   （旧断言明禁"另立阈值"）；若做成可选又留下"忘了传预算"的静默口子。故改为"全必填、可传 undefined"，
 //   漏传预算即**编译错**（比运行时默认值更强）。调用方多为脚本，多写几个 `undefined` 是无害的代价。
-export function buildMemoryContext(memory: MemoryManager, projectId: string, taskId: string | undefined, principalContradiction: string | undefined, taskGoal: { goal: string; success_criteria: string; investigate: string[] } | null | undefined, excludeIds: ReadonlySet<string> | undefined, budgetChars: number): { context: string; accessedIds: string[]; meta: { sections: number; kept: number; omitted: number; chars: number }; segmentChars: Array<{ name: string; chars: number; kept: boolean }>; profileText: string; profileInjections: Array<{ ref_id: string; chars: number }>; cardText: string; cardInjections: Array<{ ref_id: string; chars: number }>; knowledgeText: string; knowledgeInjections: Array<{ ref_id: string; chars: number }>; domainPackText: string; domainPackInjections: Array<{ ref_id: string; chars: number }> } {
+export function buildMemoryContext(memory: MemoryManager, projectId: string, taskId: string | undefined, principalContradiction: string | undefined, taskGoal: { goal: string; success_criteria: string; investigate: string[] } | null | undefined, excludeIds: ReadonlySet<string> | undefined, budgetChars: number): { context: string; accessedIds: string[]; meta: { sections: number; kept: number; omitted: number; chars: number }; segmentChars: Array<{ name: string; chars: number; kept: boolean }>; profileText: string; profileInjections: Array<{ ref_id: string; chars: number }>; cardText: string; cardInjections: Array<{ ref_id: string; chars: number }>; knowledgeText: string; knowledgeInjections: Array<{ ref_id: string; chars: number }>; domainPackText: string; domainPackInjections: Array<{ ref_id: string; chars: number }>; experienceText: string; experienceInjections: Array<{ ref_id: string; chars: number }> } {
   const parts: MemSection[] = [];
   // zx_20260911_5 M4-1: 每段带名带级，供 selectMemorySections 按值整段取舍
   // zx_20260912 M4(王阳明·知行合一 · 夏克特·错误归因): 段还须带**自己的记忆 id**——取舍之后才谈得上"谁真被用过"。
@@ -247,8 +253,31 @@ export function buildMemoryContext(memory: MemoryManager, projectId: string, tas
     }
   } catch (err) { recordMemoryFailure(MEM_FAIL.contextSection, err, { section: '项目知识卡' }); }
 
-  // 知识书余量：画像 + 知识卡真正入文的 token 先扣（未入文则各自全额）。
-  const knowledgeTokenBudget = Math.max(0, KNOWLEDGE_INJECT_MAX_TOKENS - profileTokens - cardTokens);
+  // 0a2. 项目经验（zx_20261121_1 M6）——从本项目真实执行账派生的≤120 token 提醒。
+  //   开关 `project.experience_inject`（缺省开）；证据不足 ⇒ 空段；整段被裁 ⇒ 零注入行。
+  //   ⚠ 防御式探方法：旧 rr 桩没有经验方法 ⇒ 视为无经验，不记失败（桩缺方法不是生产故障）。
+  let experienceText = '';
+  const experienceInjections: Array<{ ref_id: string; chars: number }> = [];
+  let experienceTokens = 0;
+  try {
+    const enabled = typeof memory.isProjectExperienceInjectEnabled === 'function' ? memory.isProjectExperienceInjectEnabled() : true;
+    if (enabled && typeof memory.getProjectExperienceBrief === 'function') {
+      const brief = memory.getProjectExperienceBrief(projectId);
+      if (brief) {
+        // 预留段标题约 5 token；正文渲染器自身按 maxTokens 整行取舍。
+        const rendered = renderExperienceBrief(brief, Math.max(1, EXPERIENCE_INJECT_MAX_TOKENS - 5));
+        if (rendered.text) {
+          experienceText = `## ${EXPERIENCE_SECTION_TITLE}\n${rendered.text}`;
+          experienceTokens = estimateTokensFromChars(experienceText.length);
+          experienceInjections.push({ ref_id: experienceRefId(brief), chars: experienceText.length });
+          add('项目经验', experienceText);
+        }
+      }
+    }
+  } catch (err) { recordMemoryFailure(MEM_FAIL.contextSection, err, { section: '项目经验' }); }
+
+  // 知识书余量：画像 + 知识卡 + 经验段真正入文的 token 先扣（未入文则各自全额）。
+  const knowledgeTokenBudget = Math.max(0, KNOWLEDGE_INJECT_MAX_TOKENS - profileTokens - cardTokens - experienceTokens);
 
   // 0. 项目域知识（维特根斯坦·不要想，要看：知识不从"综合"里来，从**已发生的事实**里来。
   //    zx_20261014_4 批五——以**零 LLM 事实册**（批四 `deriveProjectKnowledge` 落库者）**取代**
@@ -529,7 +558,7 @@ export function buildMemoryContext(memory: MemoryManager, projectId: string, tas
   try {
     const acceptanceFails = appendFresh(notExcluded(memory.retrieveByType('acceptance_failure', projectId, 3)));
     if (acceptanceFails.length > 0) {
-      add('验收失败预警', '## 验收失败预警\n以下是本项目历史任务的验收失败模式（finalize 前请重点核对，避免重复踩坑）：\n' + acceptanceFails.map((m, i) => `${i + 1}. ${m.content.slice(0, 300)}`).join('\n'), acceptanceFails.map(m => m.id));
+      add('验收失败预警', '## 验收失败预警\n以下是本项目历史任务的验收失败模式（finalize 前请重点核对，避免重复踩坑）；标 [已解除] 的条目只作历史，不代表当前状态：\n' + acceptanceFails.map((m, i) => `${i + 1}. ${m.content.slice(0, 300)}`).join('\n'), acceptanceFails.map(m => m.id));
     }
   } catch (err) { recordMemoryFailure(MEM_FAIL.contextSection, err, { section: '验收失败预警' }); }
 
@@ -568,7 +597,7 @@ export function buildMemoryContext(memory: MemoryManager, projectId: string, tas
     } catch (err) { recordMemoryFailure(MEM_FAIL.contextSection, err, { section: '记忆检索提示' }); }
   }
 
-  if (parts.length === 0) return { context: '', accessedIds: [], meta: { sections: 0, kept: 0, omitted: 0, chars: 0 }, segmentChars: [], profileText: '', profileInjections: [], cardText: '', cardInjections: [], knowledgeText: '', knowledgeInjections: [], domainPackText: '', domainPackInjections: [] };
+  if (parts.length === 0) return { context: '', accessedIds: [], meta: { sections: 0, kept: 0, omitted: 0, chars: 0 }, segmentChars: [], profileText: '', profileInjections: [], cardText: '', cardInjections: [], knowledgeText: '', knowledgeInjections: [], domainPackText: '', domainPackInjections: [], experienceText: '', experienceInjections: [] };
 
   // zx_20260911_5 M4-1/M4-4（道德经·知止 + 管子·度量衡）: 按**值**整段取舍，预算内留高优先级；
   // 越界整段省略并**如实标注**省略了几段、分别是哪些（旧实现整块交给 truncateCtx 按位掐尾，无任何交代）。
@@ -633,6 +662,9 @@ export function buildMemoryContext(memory: MemoryManager, projectId: string, tas
   // 领域包同理：整段被预算省略 ⇒ 零行（"这段没进过上下文"不记成注入）。
   const domainPackPart = parts.find((p) => p.name === '领域包');
   const domainPackKept = domainPackPart ? keptSet.has(domainPackPart) : false;
+  // 经验段同理：整段被预算省略 ⇒ 零行（"这段没进过上下文"不记成注入）。
+  const experiencePart = parts.find((p) => p.name === '项目经验');
+  const experienceKept = experiencePart ? keptSet.has(experiencePart) : false;
   return {
     context: `<memory-context>
 [以下是本项目的相关记忆，请参考这些经验来完成当前任务]
@@ -649,7 +681,17 @@ ${kept.map(s => s.text).join('\n\n')}${omittedNote}
     knowledgeInjections: knowledgeKept ? knowledgeInjections : [],
     domainPackText: domainPackKept ? domainPackText : '',
     domainPackInjections: domainPackKept ? domainPackInjections : [],
+    experienceText: experienceKept ? experienceText : '',
+    experienceInjections: experienceKept ? experienceInjections : [],
   };
+}
+
+/**
+ * 注入账的**同一把尺**：段真留在上下文里才记账；整段被裁 ⇒ 零行。
+ * （zx_20261121_1 M6 把画像/卡/领域包/经验四处重复的三元表达式收成一处。）
+ */
+export function keptSectionInjections<T>(text: string, injections: T[], trimmedText: string): T[] {
+  return text && trimmedText.includes(text) ? injections : [];
 }
 
 /** `memory-context` 块的包裹骨架（与上方 `buildMemoryContext` 的渲染**逐字同源**）。 */

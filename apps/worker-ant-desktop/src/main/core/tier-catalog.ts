@@ -177,6 +177,9 @@ export const BENEFIT_COVERAGE: Record<LicenseTier, BenefitCoverageEntry[]> = {
     //   句式与 `PRICING` 同引 `capacityBenefit`（改文案只改一处，登记不会腐化）。
     { benefit: capacityBenefit('IM 渠道', TIER_LIMITS.pro.maxIMChannels, '个'), target: { kind: 'quota', field: 'maxIMChannels', rule: 'positive' } },
     { benefit: capacityBenefit('任务模板', TIER_LIMITS.pro.maxTaskTemplates, '套'), target: { kind: 'quota', field: 'maxTaskTemplates', rule: 'positive' } },
+    // zx_20261120_3 M7：岗位容量两维（自建岗位 / 岗位例行）。
+    { benefit: capacityBenefit('自建岗位', TIER_LIMITS.pro.maxCustomPositions, '个'), target: { kind: 'quota', field: 'maxCustomPositions', rule: 'positive' } },
+    { benefit: capacityBenefit('岗位例行', TIER_LIMITS.pro.maxPositionRoutines, '套'), target: { kind: 'quota', field: 'maxPositionRoutines', rule: 'positive' } },
     // zx_20261029_2 M6：安装动作口有真闸；「浏览不限」是同一句里的边界说明，不另登记一条。
     { benefit: '市场插件安装（浏览不限）', target: { kind: 'capability', keys: ['plugin_install'] } },
     // zx_20261108_1 B6：真闸在 `deliverable:exportCsv`；单件打开/定位不挂闸（同一句边界说明）。
@@ -197,7 +200,10 @@ export const BENEFIT_COVERAGE: Record<LicenseTier, BenefitCoverageEntry[]> = {
     { benefit: '跨机成果回执核对（产出清单对得上）', target: { kind: 'capability', keys: ['multi_node'] } },
     // zx_20261115_4 M7「墙」：岗位知识成为**团队资产**（四段 + 已采纳经验；导入一律落待审候选）。
     //   与 Pro 的 `position_transfer`（文件带走）形成阶梯：Pro = 你能带走自己的；Team = 全队自动汇齐。
-    { benefit: '岗位知识团队共享（四段 + 已采纳经验；导入落待审）', target: { kind: 'capability', keys: ['team_library'] } },
+    { benefit: '岗位知识团队共享（四段 + 已采纳经验 + 可调用技能；导入落待审）', target: { kind: 'capability', keys: ['team_library'] } },
+    // zx_20261120_3 M7：团队档自建岗位/岗位例行不限（与 `PRICING.team.benefits` 同序）。
+    { benefit: capacityBenefit('自建岗位', TIER_LIMITS.team.maxCustomPositions, '个'), target: { kind: 'quota', field: 'maxCustomPositions', rule: 'unlimited' } },
+    { benefit: capacityBenefit('岗位例行', TIER_LIMITS.team.maxPositionRoutines, '套'), target: { kind: 'quota', field: 'maxPositionRoutines', rule: 'unlimited' } },
     // zx_20261029_2 M6：发现已归 Pro；本档只兑现「控制（含意图执行）」。
     { benefit: '设备控制（含意图执行）', target: { kind: 'capability', keys: ['device_control'] } },
     // zx_20261104_3 M4「联」：离家场景执行同样过 `device_control`（K-6 逐设备闸仍在动作出口）。

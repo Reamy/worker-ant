@@ -365,8 +365,12 @@ function sectionG(): void {
   eq(defaultPositionForProject(db, 'P-9'), null, 'G6 项目无绑定 ⇒ null');
 
   const ipc = readSrc(`${A}/src/main/ipc/project.ipc.ts`);
-  ok(/position_explicit !== true/.test(ipc) && /defaultPositionForProject\(db,\s*projectId\)/.test(ipc),
-    'G7 task:create：显式选择优先，未显式才用默认');
+  // zx_20261120_3 M1：默认岗位判据从内联两段重定向到**唯一派生** `deriveTaskPosition`——
+  //   钉更强的形状：显式“不指派”优先（explicitNone）+ 默认只在开关开时（allowProjectDefault）。
+  ok(/explicitNone:\s*position_explicit === true/.test(ipc)
+    && /allowProjectDefault:\s*readBoolSetting\(db,\s*'position\.default_from_project'\)/.test(ipc)
+    && /deriveTaskPosition\(db,\s*\{/.test(ipc),
+    'G7 task:create：显式选择优先，未显式才走唯一派生（含默认开关）');
   ok(/task\.position_defaulted = positionDefaulted/.test(ipc), 'G8 默认指派如实回执（界面可显示"已按默认，可改"）');
   const posIpc = readSrc(`${A}/src/main/ipc/positions.ipc.ts`);
   ok(/defaultId:\s*defaultPositionForProject\(db,\s*projectId\)\?\.id/.test(posIpc),

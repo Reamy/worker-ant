@@ -637,10 +637,12 @@ async function main(): Promise<void> {
     //   文案三分支（全完成 / 分列 stopDetail / 兜底）同源一处。断言随载体钉更强形状。
     // zx_20261106_1 M4 再钉更强：`completed` 也不等于「达成」——完成账上 `premature`/`goal_achieved=false`
     //   的子同样必须让 allDone 为假，并在文案里点名「N 个未达目标」。三路排除 + 三段分列同源一处。
-    ok(/const allDone = pausedKids === 0 && archivedKids === 0 && incompleteKids === 0 && kids\.every\(\(k\) => k\.status === 'completed'\)/.test(d1Src)
-      && /const stopDetail = \[\s*incompleteKids > 0 \? ` \$\{incompleteKids\} 个未达目标` : '',\s*pausedKids > 0 \? `暂停 \$\{pausedKids\} 个` : '',\s*archivedKids > 0 \? `归档 \$\{archivedKids\} 个` : '',\s*\]\.filter\(Boolean\)\.join\('、'\)/.test(d1Src)
+    // zx_20261116_2 M3：覆盖完成（completed + completion_override）同样是「完成但未验收」——
+    //   allDone 必须再排除 overrideKids，stopDetail 必须点名。断言随载体钉更强形状（不是放宽）。
+    ok(/const allDone = pausedKids === 0 && archivedKids === 0 && incompleteKids === 0 && overrideKids === 0\s*&& kids\.every\(\(k\) => k\.status === 'completed'\)/.test(d1Src)
+      && /const stopDetail = \[[\s\S]{0,500}?incompleteKids > 0[\s\S]{0,200}?overrideKids > 0[\s\S]{0,200}?pausedKids > 0[\s\S]{0,200}?archivedKids > 0[\s\S]{0,200}?\]\.filter\(Boolean\)\.join\('、'\)/.test(d1Src)
       && /allDone\s*\?\s*'所有子任务已完成，恢复父任务'\s*:\s*stopDetail/.test(d1Src),
-      'C-8a ★暂停≠完成、归档≠完成、终态≠达成：只有「无暂停/归档/未达目标子且全 completed」才说"已完成"，否则如实分列');
+      'C-8a ★暂停≠完成、归档≠完成、终态≠达成、覆盖≠验收通过：只有「无暂停/归档/未达目标/覆盖完成子且全 completed」才说"已完成"，否则如实分列');
     {
       const d = new DatabaseSync(':memory:');
       d.exec(SCHEMA);
@@ -1070,7 +1072,10 @@ CREATE TABLE wa_external_terminals (
   approved_at TEXT,
   revoked_at TEXT,
   delivered_at TEXT,
-  grant_expires_at TEXT
+  grant_expires_at TEXT,
+    scope_json TEXT NOT NULL DEFAULT '{}',
+    rate_json TEXT NOT NULL DEFAULT '{}',
+    linkage_allowed INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE wa_audit_events (
   id TEXT PRIMARY KEY, actor_kind TEXT NOT NULL DEFAULT '', actor_ref TEXT NOT NULL DEFAULT '',

@@ -1411,8 +1411,11 @@ function groupDc(): void {
   //   病根不变量（词表须落 `lib/` 一处、不散在页面里）**未放松**——该表已从 `PeersPage.tsx` 就地移入
   //   `lib/node-view.ts`（其头注释本就自称与 deliverable-view/status-view 同形），故定义点由两处→三处，
   //   三者皆在 `lib/`，逐一具名（非"任意新文件放行"）。
-  eq(defs.map((f) => f.replace(`${A}/renderer/src/`, '')).sort(), ['lib/deliverable-view.ts', 'lib/node-view.ts', 'lib/status-view.ts'].sort(),
-    'D-c-2 ★词表定义点恰三处且皆在 `lib/`：任务/项目域 `status-view.ts` + 成果域 `deliverable-view.ts` + 协同域 `node-view.ts`（三域刻意不合并，页面里零处）');
+  // zx_20261120_1 M3：岗位例行域新增 `ROUTINE_RUN_STATUS_LABEL`——同样落在 `lib/routine-view.ts` 一处，
+  //   页面只引用不定义（D-c-2 的"页面里零处"不变量未放松）。
+  eq(defs.map((f) => f.replace(`${A}/renderer/src/`, '')).sort(),
+    ['lib/deliverable-view.ts', 'lib/node-view.ts', 'lib/routine-view.ts', 'lib/status-view.ts'].sort(),
+    'D-c-2 ★词表定义点恰四处且皆在 `lib/`：任务/项目、成果、协同、岗位例行（各域刻意不合并，页面里零处）');
 
   const sv = RD(P_STATUSVIEW);
   ok(sv.includes('investigating') && sv.includes('调查中'),
@@ -3403,6 +3406,8 @@ function groupIa(): void {
     //   （判据前提被本轮设计合法改变，非放宽。）
     `${A}/src/main/core/entitlement-client.ts`,
     `${A}/src/main/ipc/license.ipc.ts`,
+    // zx_20261120_1 M9：运维概览要显示 ANS 地址并做 2s 有界探活 ⇒ 现取身份（只读，不签请求）。
+    `${A}/src/main/ipc/ops.ipc.ts`,
   ].sort(),
     'I-a-16 ★★身份解析（DB→env→缺省）的消费面**恰这些生产落点 + 真源**'
     + '（`skill-registry`/`task-decompose` 收 `creds` 形参而不自己解析——所以不在此列表，这是刻意的；'
@@ -3548,18 +3553,18 @@ function groupIe(): void {
   const blk = enclosingTry(es, "'/api/v1/billing/records'");
   ok(blk.length > 60 && blk.endsWith('}'),
     'I-e-0 ★切片自证：记账那一层 `try` 块非空且以 `}` 收口（否则下面几条是空转假绿）', `${blk.length} 字符`);
-  ok(/ac\.post\?\.\('\/api\/v1\/billing\/records'/.test(blk),
-    'I-e-1 记账仍走 `AnsClient.post?.(...)`（**签名路**，路径一字未换——本轮的改动只在失败的分支）');
+  // zx_20261116_3 M1：记账从“每步直发 + 空 catch”改为**队列（BillingReporter）**；
+  //   签名路与失败留痕仍在，只是落点从 exec-step 的内联 catch 移到 billing-reporter 的 flush。
+  ok(/enqueueBilling\(/ .test(blk) && /ac\.post\.bind\(ac\)/.test(blk),
+    'I-e-1 记账仍走 `AnsClient.post`（**签名路**，路径一字未换），只是改为入队');
   eq(/createLogger\('exec-step'\)/.test(es), true,
     'I-e-2 `exec-step` 有本模块 logger（`createLogger(\'exec-step\')`）——否则失败无处留痕');
-  ok(/logger\.warn\(\{\s*error:[\s\S]{0,120}?'\[exec-step\] ANS 记账上报失败'/.test(blk),
+  const br = RD(`${A}/src/main/core/billing-reporter.ts`);
+  ok(/logger\.warn\([\s\S]{0,400}?计费上报失败/.test(br) && /error:/.test(br) && /model:/.test(br) && /tokens:/.test(br),
     'I-e-3 ★失败经 `logger.warn` 留痕，且带**具体原因**（`error` 消息）与定位字段（model/tokens）——不是只说"失败了"');
-  // ★ 反证的**正确形状**：切出 `.catch(` 后面那个**处理器括号块**本身，断言它**非空且真留痕**。
-  //   为什么不写成"全块搜 `.catch(() => {})` 零命中"：本块**就有一行把旧写法写进注释**的订正说明，
-  //   负面子串断言会被那句注释自己命中而**判红**（本仓记过这个坑：改完实现须回头改注释，
-  //   而"负面子串断言被订正注释自己判红"是它必然会踩到的一面）。切处理器括号则与注释无关。
-  const cIdx = es.indexOf('.catch(', es.indexOf("'/api/v1/billing/records'"));
-  const handler = cIdx < 0 ? '' : blockAfter(es, es.indexOf('{', cIdx));
+  // ★ 反证的**正确形状**：切出 `catch (err)` 后面那个**处理器括号块**本身，断言它**非空且真留痕**。
+  const cIdx = br.indexOf('catch (err)');
+  const handler = cIdx < 0 ? '' : blockAfter(br, br.indexOf('{', cIdx));
   ok(handler.length > 20 && /logger\.warn\(/.test(handler),
     'I-e-4 ★★记账失败的 `catch` 处理器**非空且真留痕**——旧写法就是同一个 `.catch(() => {})`：'
     + '一旦退回空处理器，本条即转红（判据咬的是**处理器括号**，与注释无关）', handler.replace(/\s+/g, ' ').slice(0, 80));

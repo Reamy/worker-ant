@@ -592,11 +592,16 @@ function main(): void {
       && globs.every((g) => /^\*\/\[0-9\](?:\[0-9\])?_(?:verify|probe|tmp)\*$/.test(g)),
       'B ★ 形状 GLOB 仍被禁止：留下的 GLOB 只许是「已宣告标记 `_verify/_probe/_tmp` + 1–2 位数字前缀」恰 6 条', globs.join(' / '));
     const clauses = [...ruler.matchAll(/NOT LIKE|NOT GLOB/g)].map((m) => m[0]);
-    ok(clauses.length === 9
-      && clauses.filter((c) => c === 'NOT LIKE').length === 3
+    // zx_20261119_1 M5「名」：新增 2 条**已宣告**前缀（`tools/probe-*` / `tools/probe_*`）——
+    //   与 3 条 `_verify/_probe/_tmp` 同性质（显式目录+前缀，不是按文件名长相推断）。
+    //   断言随之改钉为 5+6，并补一条正面断言：新增的两条必须**逐字**是 tools 前缀。
+    ok(clauses.length === 11
+      && clauses.filter((c) => c === 'NOT LIKE').length === 5
       && clauses.filter((c) => c === 'NOT GLOB').length === 6,
-      'B ★ 判据恰 **3 条 NOT LIKE + 6 条数字前缀 NOT GLOB**——"被宣告的标记"仍是唯一事实源',
+      'B ★ 判据恰 **5 条 NOT LIKE（3 宣告标记 + 2 tools 前缀）+ 6 条数字前缀 NOT GLOB**——"被宣告的标记"仍是唯一事实源',
       clauses.join(' / '));
+    ok(/NOT LIKE '%\/tools\/probe-%'/.test(ruler) && /NOT LIKE '%\/tools\/probe\\_%' ESCAPE '\\'/.test(ruler),
+      'B ★ tools 下的 `probe-*` / `probe_*` 是新增的**已宣告**前缀（非按文件名长相推断）');
     ok(!/NOT GLOB '\*test_/.test(dlcSrc) && !/NOT GLOB '[^']*\?/.test(dlcSrc),
       'B ★ 全模块**代码**内再无"按文件名长相"的探针判据（去注释后扫描：无 `test_` 变体、无通配 `?`）');
     // 旧判据的**原形**（= 本轮改动前 `deliverable-lifecycle.ts` 里那一行，逐字）——保留在本脚本里**只作反证**，
@@ -838,8 +843,9 @@ function main(): void {
       //   `not_checked` 是两回事。**分数断言一字未改**（不压降这条性质没变，变的只是它的名字与归属），
       //   并补一条正面断言把"它是哪一态"钉死——否则标签写着 A、代码做的是 B，正是本仓反复记过的那类病。
       const sUnknown = scoreOf(makeDb({ acceptance_check: { checked_at: '2026-09-16 01:00:00', verified: false, reason: 'error' } }));
-      ok(sUnknown.score === sNone.score && acceptanceVerdictOf({ checked_at: '2026-09-16 01:00:00', verified: false, reason: 'error' }) === 'unjudged',
-        'D-3 第四态：`unjudged`（有题未判成 `verified:false/reason:error`）**不压分**——"没判成"与"没达成"是两回事',
+      // zx_20261116_3 M3 用户裁定：有题未判成 ⇒ 封 60（不再“不压分”）。
+      ok(sUnknown.score <= 60 && acceptanceVerdictOf({ checked_at: '2026-09-16 01:00:00', verified: false, reason: 'error' }) === 'unjudged',
+        'D-3 第四态：`unjudged`（有题未判成 `verified:false/reason:error`）封 60——用户 2026-11-16 裁定',
         `${sUnknown.score} 分`);
 
       // ── D-4 标本 `3b6e2263`（§1.2-④）只读回放 ─────────────────────────────

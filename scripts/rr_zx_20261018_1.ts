@@ -252,7 +252,10 @@ const TERMINAL_DDL = `CREATE TABLE wa_external_terminals (
     approved_at TEXT,
     revoked_at TEXT,
     delivered_at TEXT,
-    grant_expires_at TEXT
+    grant_expires_at TEXT,
+    scope_json TEXT NOT NULL DEFAULT '{}',
+    rate_json TEXT NOT NULL DEFAULT '{}',
+    linkage_allowed INTEGER NOT NULL DEFAULT 1
   )`;
 
 /** 门内夹具库：设置 + 外部调用账 + 终端表 + 意图计划账 + 设备动作账（均按生产同形建成）。 */
@@ -997,8 +1000,9 @@ async function main(): Promise<void> {
     // 接线：真派发那一跳用的就是它（zx_20261023_5 批一：改为带上游摘要的二元调用；
     //   zx_20261112_1 B5：第三参带上岗位摘要——钉更强形状，不放宽）。
     const src = CODE(`${A}/src/main/core/collab-dispatch.ts`);
-    ok(/payload:\s*\{\s*\.\.\.buildDispatchPayload\(task,\s*upstream,\s*position\)\s*\}/.test(src),
-      'R-6f ★★真派发那一跳：`payload: { ...buildDispatchPayload(task, upstream, position) }`（三参含岗位摘要，读去注释后的代码）');
+    // zx_20261120_1 M5：第四参可选（只读分析的仓库绑定）；前三位与岗位摘要仍在。
+    ok(/payload:\s*\{\s*\.\.\.buildDispatchPayload\(task,\s*upstream,\s*position(?:,\s*readonlyRepo)?\)\s*\}/.test(src),
+      'R-6f ★★真派发那一跳：`buildDispatchPayload(task, upstream, position[, readonlyRepo])`（读去注释后的代码）');
     ok(/const\s+upstream\s*=\s*collectUpstreamSummaries\(db,\s*task\.id\)/.test(src),
       'R-6f2 ★上游摘要由该任务真实的上游派生（取自同一函数体，不是占位空数组）');
     ok(/const\s+position\s*=\s*dispatchPositionOfTask\(db,\s*task\.id\)/.test(src),

@@ -20,6 +20,7 @@ import type Database from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
 import { eventBus } from './event-bus.js';
+import { resolveTaskWorkingDir } from './exec-task-dir.js';
 import {
   resolveTaskMilestoneLink,
   resolveProjectConcurrencyLimit,
@@ -73,7 +74,7 @@ export interface ClaimRejected {
    * zx_20261018_3 批四「度」补 `machine_concurrency_full`：整机占位已满（与"本项目满"是两把尺）。
    *   处置同 `concurrency_full`——任务本身仍有效，须退避重排队，不得当失败收掉。
    */
-  reason: 'cas_conflict' | 'concurrency_full' | 'machine_concurrency_full' | 'remote_assigned' | 'remote_offered';
+  reason: 'cas_conflict' | 'concurrency_full' | 'machine_concurrency_full' | 'remote_assigned' | 'remote_offered' | 'remote_workspace_missing';
 }
 
 export type ClaimResult = ClaimSuccess | ClaimRejected;
@@ -112,9 +113,14 @@ export function claimTaskForExecution(
 
   const projectId = task.project_id as string;
   const project = db.prepare('SELECT * FROM wa_projects WHERE id = ?').get(projectId) as Record<string, unknown> | undefined;
-  const workingDir = (project?.working_dir as string) || path.join(dataDir, 'projects', projectId);
+  // zx_20261120_1 M4：工作目录一处解析（远程只读任务用它自己的 clone 工作区；本地任务逐字不变）。
+  const resolvedDir = resolveTaskWorkingDir(db, taskId);
+  if (resolvedDir.source === 'none' && resolvedDir.reason === 'remote_workspace_missing') {
+    return { claimed: false, content: '远端只读工作区已不存在（可能已被清理）——本机不抢，需重新派发', reason: 'remote_workspace_missing' };
+  }
+  const workingDir = resolvedDir.dir || (project?.working_dir as string) || path.join(dataDir, 'projects', projectId);
 
-  // 确保工作目录存在
+  // 确保工作目录存在（远程工作区已存在才走远程；缺失时上面已拦，不在此凭空建）
   if (!fs.existsSync(workingDir)) fs.mkdirSync(workingDir, { recursive: true });
 
   // CAS 抢占

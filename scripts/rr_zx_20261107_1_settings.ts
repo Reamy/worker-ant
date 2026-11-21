@@ -137,8 +137,13 @@ function sectionC(): void {
   ok(toggleAdvSrc.includes("on ? 'true' : 'false'")
     && src.includes("await invoke('settings:set', key, value)"),
     'C7 高级写口落 true/false 字面（与消费端 `boolSetting` 同口径；经统一写口 `saveSetting`）');
-  ok(src.includes('for (const k of ADVANCED_BOOL_KEYS) adv[k] = boolSetting(all[k]);'),
-    'C8 高级读口逐键过同一把 `boolSetting` 尺');
+  // zx_20261120_1 M7：高级区新增**缺省关**键（`context.roi_budget`）——读口必须与引擎同尺：
+  //   缺省关键走 `parseTriState`，其余仍走 `boolSetting`；两条判据都在，缺一即红。
+  ok(src.includes('for (const k of ADVANCED_BOOL_KEYS)')
+    && src.includes('ADVANCED_DEFAULT_OFF_KEYS')
+    && src.includes("parseTriState(all[k]) === 'true'")
+    && src.includes('boolSetting(all[k])'),
+    'C8 高级读口按缺省分两把同源尺（缺省开 `boolSetting` / 缺省关 `parseTriState`）');
   ok(src.includes('高级设置') && src.includes('ADVANCED_BOOL_KEYS.length'),
     'C9 高级区上屏且条数由名单派生（不写死"26 项"）');
   ok(src.includes('<details className="mt-1">') && src.includes('展开高级开关'),

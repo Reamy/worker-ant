@@ -1,6 +1,8 @@
 import { ipcMain, BrowserWindow } from 'electron';
 import type Database from 'better-sqlite3';
 import crypto from 'node:crypto';
+// zx_20261118_1 「回」：完成态回看文件变更的**唯一取数面**（只读事件日志，不新增存储）。
+import { collectFileChangeEvents } from '../core/file-change-log.js';
 import { runAllInvariants, repairInvariant } from '../core/architectural-invariants.js';
 import { getToolFrequencyStats, getFailureClusters } from '../core/observability.js';
 import { eventBus } from '../core/event-bus.js';
@@ -41,6 +43,9 @@ import { ansSignedRequest, resolveAnsCreds } from '../core/ans-signed-request.js
 import { isSecretMaskValue, isSecretSettingKey, redactedSettingValue, SECRET_SETTING_KEYS } from '../core/secret-settings.js';
 // zx_20261023_5 批三: 密钥键的写口改走**加密落库**（`enc:v1:`）；后端不可用即拒，绝不退回明文。
 import { writeSecret } from '../core/device-secrets.js';
+// zx_20261121_1 M3「属·见」：项目技能提升为全局（显式动作；冲突即拒）。
+import { promoteProjectSkillToGlobal } from '../core/project-skills.js';
+import { recordAudit } from '../core/audit-log.js';
 // zx_20261104_3 M5「联」: 渠道配置写入闸——归属哪档就在哪档写，清空永远允许。
 import { channelSettingRefusal, channelSettingTier } from '../core/device-channel.js';
 import { resolveProGate } from '../core/pro-gate.js';
@@ -384,7 +389,10 @@ export function initAdminIpc(db: Database.Database, healthDeps: AdminHealthDeps 
           });
         }
       }
-      return { data: { steps, signals } };
+      // zx_20261118_1 「回」：同一次回放带上文件变更（与实时转发的 `{ type, ...payload }` 同形），
+      //   完成/失败/暂停后再进详情页也能逐条看改动；取数面收在 core（本层只转发）。
+      const fc = collectFileChangeEvents(db, taskId);
+      return { data: { steps, signals, files: fc.items, fileTotal: fc.total } };
     } catch (err) { return { error: { code: 'INTERNAL', message: (err as Error).message } }; }
   });
 
@@ -562,7 +570,7 @@ export function initAdminIpc(db: Database.Database, healthDeps: AdminHealthDeps 
 
   // A1/A2/A3 (2026-09-03_2): 活动/事件中心——分页/筛选/人性化摘要/对象名（数据源 wa_event_log）
   const EVENT_LABEL: Record<string, string> = {
-    'task.completed': '任务完成', 'task.failed': '任务失败', 'task.awaiting_input': '任务等待输入', 'task.status_changed': '任务状态变更',
+    'task.completed': '任务完成', 'task.failed': '任务失败', 'task.awaiting_input': '任务等待输入', 'task.acceptance_waived': '验收豁免', 'task.status_changed': '任务状态变更',
     'task.step_finished': '任务步骤', 'task.step_streaming': '流式(瞬态)', 'task.memory_injected': '记忆注入', 'task.goal_identified': '目标已识别',
     'task.goal_deviation': '目标偏离', 'task.execution_signal': '执行信号', 'task.estimated': '任务预估',
     'project.status_changed': '项目状态变更', 'deliverable.registered': '交付物注册', 'deliverable.status_changed': '交付物状态变更', 'file.created': '文件创建', 'file.updated': '文件更新', 'file.edited': '文件编辑',
@@ -596,6 +604,10 @@ export function initAdminIpc(db: Database.Database, healthDeps: AdminHealthDeps 
         const st = r.event_type;
         if (st === 'task.step_finished') text = `第 ${String(p.step ?? '')} 步${p.duration_ms != null ? ` · ${Number(p.duration_ms)}ms` : ''}${p.toolOk === false ? ' · 工具出错' : ''}`;
         else if (st === 'task.awaiting_input') text = String(p.question || '等待你回复/决策').slice(0, 160);
+        else if (st === 'task.acceptance_waived') {
+          const crit = Array.isArray(p.criteria) ? p.criteria.map((c) => String(c).slice(0, 40)).join('；') : '';
+          text = `豁免 ${Array.isArray(p.criteria) ? p.criteria.length : 0} 条：${crit}${p.reason ? `（理由：${String(p.reason).slice(0, 80)}）` : ''}`;
+        }
         else if (st === 'task.goal_identified') text = String(p.goal || '').slice(0, 160);
         else if (st === 'task.goal_deviation' || st === 'task.execution_signal') text = String(p.message || p.reason || '');
         else if (st === 'task.status_changed') text = `状态 → ${String(p.new_status ?? p.status ?? '')}`;
@@ -824,9 +836,11 @@ export function initAdminIpc(db: Database.Database, healthDeps: AdminHealthDeps 
   });
 
   // 架构不变量单项自动修复（仅 autoFixable 项；幂等、单事务；修复后前端重拉 diagnostics）
-  ipcMain.handle('admin:repairInvariant', async (_event, payload: { name: string }) => {
+  // zx_20261119_1 M1「迹」：`ids` 让"先列清单、人工勾选再回填"成为可能（空数组＝一条都不修，不退化成全量）。
+  ipcMain.handle('admin:repairInvariant', async (_event, payload: { name: string; ids?: string[] }) => {
     try {
-      const res = repairInvariant(db, payload?.name ?? '');
+      const ids = Array.isArray(payload?.ids) ? payload!.ids!.map(String) : undefined;
+      const res = repairInvariant(db, payload?.name ?? '', ids ? { ids } : undefined);
       return { data: res };
     } catch (err) { return { error: { code: 'INTERNAL', message: (err as Error).message } }; }
   });
@@ -921,10 +935,34 @@ export function initSkillIpc(db: Database.Database, memory: MemoryManager): void
 
   ipcMain.handle('skills:list', async () => {
     try {
-      const rows = db.prepare(
-        "SELECT id, name, description, category, status, created_at FROM wa_skills WHERE status != 'draft' ORDER BY created_at DESC LIMIT 100",
+      // zx_20261121_1 M3：全局 + 项目两张表并列，scope/project 字段如实上屏。
+      const globals = db.prepare(
+        "SELECT id, name, description, category, status, created_at, '' AS project_id, '' AS project_name, 'global' AS scope FROM wa_skills WHERE status != 'draft' AND (project_id IS NULL OR TRIM(project_id) = '') ORDER BY created_at DESC LIMIT 100",
       ).all() as Array<Record<string, unknown>>;
-      return { data: { skills: rows } };
+      const projects = db.prepare(
+        "SELECT s.id, s.name, s.description, s.category, s.status, s.created_at, s.project_id, COALESCE(p.name,'') AS project_name, 'project' AS scope FROM wa_project_skills s LEFT JOIN wa_projects p ON p.id = s.project_id WHERE s.status != 'draft' ORDER BY s.created_at DESC LIMIT 200",
+      ).all() as Array<Record<string, unknown>>;
+      return { data: { skills: [...projects, ...globals] } };
+    } catch (err) { return { error: { code: 'INTERNAL', message: (err as Error).message } }; }
+  });
+
+  ipcMain.handle('skills:promote', async (_event, { id }: { id: string }) => {
+    try {
+      const before = db.prepare('SELECT project_id FROM wa_project_skills WHERE id = ?').get(id) as { project_id?: string } | undefined;
+      const r = promoteProjectSkillToGlobal(db as never, id);
+      if (!r.ok) {
+        return { error: { code: r.code === 'DUPLICATE' ? 'CONFLICT' : r.code, message: r.message } };
+      }
+      try {
+        recordAudit(db, {
+          actorKind: 'local',
+          action: 'skill.promote_global',
+          targetType: 'skill',
+          targetId: r.skill.id,
+          detail: { name: r.skill.name, fromProject: before?.project_id ?? '' },
+        });
+      } catch { /* 审计写失败不改变提升结局 */ }
+      return { data: { skill: r.skill } };
     } catch (err) { return { error: { code: 'INTERNAL', message: (err as Error).message } }; }
   });
 
@@ -960,7 +998,10 @@ export function initMemoryIpc(db: Database.Database, memory: MemoryManager): voi
         } catch { /* 单条计算失败跳过 */ }
       }
       const avgConfidence = confidenceN > 0 ? Math.round((confidenceSum / confidenceN) * 100) : 0;
-      const draftCount = (db.prepare("SELECT COUNT(*) as c FROM wa_skills WHERE status = 'draft'").get() as { c: number }).c;
+      // zx_20261121_1 M2：草案已迁到 wa_project_skills；两表之和才是“待审批”的真数。
+      const draftCount =
+        (db.prepare("SELECT COUNT(*) as c FROM wa_skills WHERE status = 'draft'").get() as { c: number }).c +
+        (db.prepare("SELECT COUNT(*) as c FROM wa_project_skills WHERE status = 'draft'").get() as { c: number }).c;
       const tripleCount = (db.prepare('SELECT COUNT(*) as c FROM wa_knowledge_triples').get() as { c: number }).c;
 
       return { data: {

@@ -214,8 +214,11 @@ function sectionA(): void {
 
   // zx_20261109_1 B6：判卷整块搬至 `exec-acceptance.ts` ⇒ A37/A38 随实现走。
   const accept = readCode(`${A}/src/main/core/exec-acceptance.ts`);
-  ok(accept.includes("evidenceIndex = new Set(bundle.runtimeEvidence.map(evidenceIdOf))") && accept.includes('enforceEvidenceBoundChecks(parsed, evidenceIndex)'),
-    'A37 判卷先解析、再按本任务证据强制降级');
+  // zx_20261117_1 M3「证」：绑定入口新增命令索引（本任务 + 直接子任务），按更强新真源重定向（禁放宽）。
+  ok(accept.includes("evidenceIndex = new Set(bundle.runtimeEvidence.map(evidenceIdOf))")
+    && accept.includes('enforceEvidenceBoundChecks(parsed, evidenceIndex, commandIndex)')
+    && accept.includes('bundle.childRuntimeEvidence'),
+    'A37 判卷先解析、再按本任务/直接子任务证据强制降级');
   ok(accept.includes('每条判据须附 evidence_refs') && accept.includes('run:<id>'), 'A38 判卷提示词要求引用运行证据');
   const ev = readCode(`${A}/src/main/core/exec-evidence.ts`);
   ok(ev.includes('listRuntimeEvidence(db, taskId)') && ev.includes('renderRuntimeEvidence(bundle.runtimeEvidence)'),

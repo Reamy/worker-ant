@@ -168,7 +168,10 @@ console.log('A1·agent 判定介入暂停 → pauseTask(note) → markPauseNeede
   //   计数改 16，标签照例逐种分开说。
   // zx_20261113_2 M4：收口段新增「用户侧动作请求」暂停口（`exec-finalize.ts`，awaiting_input）⇒ 16→17。
   //   按新真源逐成员补入枚举，不是放宽为">=16"。
-  ok(pauseCalls === 17, 'agent-executor 17 个暂停分支均经 pauseTask 带 note(即告知创建人)：6 个介入暂停(硬暂停级别2/无进展/产出多次未落盘/内容不充分/过早结束 + 补③ finalize partial 悬置) + 2 个等待子任务(finalize 收口闸/run_close 闸) + 1 个无产出证据(run_close，P0-1) + 1 个失败子未处置(blockFailedChildrenCompletion，P0-3c) + 1 个验收未通过(run_close 收口，zx_20260916_1 M1/A1) + 1 个验收未判成(run_close 收口，zx_20260923_1 M2) + 1 个 SDK 重试用尽(run 内，zx_20260923 M1-a/T1) + 1 个到顶且本轮无产出(run 收口，zx_20261104_1 M2) + 1 个执行中预算策略触发(exec-step，zx_20261108_1 B5) + 1 个有改动但未登记产出物(score<20 且步数达阈，zx_20261110_2 B6) + 1 个收口用户侧动作(exec-finalize，zx_20261113_2 M4，awaiting_input)', `出现 ${pauseCalls} 处(期望17)`);
+  // zx_20261116_1 M5：外层 catch 新增「瞬时限流」暂停口（ANS 429 ⇒ `ai_sdk_unavailable`）⇒ 17→18。
+  //   这是**第 10 种**：既非任务内容判据、也非等子/介入，而是"外部时序故障"（与 SDK 重试用尽同族但不同物——
+  //   那条是连续失败两次后停，这条是首次 429 即停并允许用户恢复重试）。逐成员补入枚举，不放宽为">=17"。
+  ok(pauseCalls === 18, 'agent-executor 18 个暂停分支均经 pauseTask 带 note(即告知创建人)：6 个介入暂停(硬暂停级别2/无进展/产出多次未落盘/内容不充分/过早结束 + 补③ finalize partial 悬置) + 2 个等待子任务(finalize 收口闸/run_close 闸) + 1 个无产出证据(run_close，P0-1) + 1 个失败子未处置(blockFailedChildrenCompletion，P0-3c) + 1 个验收未通过(run_close 收口，zx_20260916_1 M1/A1) + 1 个验收未判成(run_close 收口，zx_20260923_1 M2) + 1 个 SDK 重试用尽(run 内，zx_20260923 M1-a/T1) + 1 个到顶且本轮无产出(run 收口，zx_20261104_1 M2) + 1 个执行中预算策略触发(exec-step，zx_20261108_1 B5) + 1 个有改动但未登记产出物(score<20 且步数达阈，zx_20261110_2 B6) + 1 个收口用户侧动作(exec-finalize，zx_20261113_2 M4，awaiting_input) + 1 个瞬时限流暂停(run 外层 catch，zx_20261116_1 M5，ai_sdk_unavailable)', `出现 ${pauseCalls} 处(期望18)`);
   ok(exe.includes('疑似工具循环') && exe.includes('疑似空转') && exe.includes('产出文件多次未落盘') && exe.includes('充分性校验') && exe.includes('分未达交付标准'),
     'agent-executor 各分支理由文字正确(工具循环/空转/未落盘/不充分/过早结束质量)');
   // 补③(§十三): finalize partial 悬置分支(置 paused + paused_partial)须通知创建人

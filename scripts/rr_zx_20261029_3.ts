@@ -208,8 +208,10 @@ async function sectionA(): Promise<void> {
     'A-17 根任务 + 前置=报告任务（不与父并发，不占子任务槽）');
 
   const cf = readCode(`${MAIN}/tools/control-finalize.ts`);
-  ok(/if \(issues\.length > 0\) \{[\s\S]{0,6000}?createVerificationFixTask\(/.test(cf),
-    'A-18 零可修件 ⇒ 不建任务（立项只在 issues>0 分支内）');
+  // zx_20261117_1 M1「案」：立项入口扩到「字形 issues 或纯文本 deferred」——按更强新真源重定向：
+  //   零可修件且零未落地项时仍不建任务；`createVerificationFixTask` 只在非规划分支内。
+  ok(/if \(issues\.length > 0 \|\| deferred\.items\.length > 0\) \{[\s\S]{0,8000}?createVerificationFixTask\(/.test(cf),
+    'A-18 零可修件/零未落地项 ⇒ 不建任务（立项只在 issues>0 或 deferred>0 分支内）');
   ok(cf.includes('fixCtx.verification_manual_items = manualItems'), 'A-19 待人项落 ctx（界面/后续轮次可查账）');
   ok(/\[INFO\] 其中 \$\{manualItems\.length\} 条需人工执行/.test(cf), 'A-20 待人项以 [INFO] 明列"不自动立项"');
 }
@@ -420,9 +422,9 @@ async function sectionD(): Promise<void> {
   eq(Object.keys(digest).sort(), [
     'assigned_at', 'assigned_node_id', 'assigned_request_id', 'awaiting_input', 'bottleneck_score',
     'budget_max_tokens', 'completion_quality', 'completion_summary', 'dynamic_priority', 'pause_reason',
-    'pending_approval', 'reason', 'remote_attempts', 'remote_category', 'remote_result_at', 'strategy_source',
-    'tokens_used', 'verification_fix', 'verification_fix_of',
-  ], 'D-3 摘录恰 19 键（逐项枚举，不用总数冒充；zx_20261106_3 增远端进度与改派账七键）');
+    'pending_approval', 'reason', 'remote_attempts', 'remote_category', 'remote_result_at', 'steps_ledger', 'strategy_source',
+    'tokens_used', 'tool_denials', 'verification_fix', 'verification_fix_of', 'verification_fix_of_title',
+  ], 'D-3 摘录恰 22 键（逐项枚举，不用总数冒充；zx_20261106_3 增远端进度与改派账七键；zx_20261119_2 增修复来源标题与工具拒绝/步数账）');
   eq([digest.verification_fix, digest.verification_fix_of], [1, 'task-origin'],
     'D-4 自动派生两键随摘录过 IPC（布尔收为 1，渲染层按真值判）');
 

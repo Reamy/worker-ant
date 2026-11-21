@@ -24,6 +24,8 @@ import { goalDeviationCapReached } from './task-accounting.js';
 // zx_20261115_3 M1：产出清单改读「归属 ∪ 贡献」两本账（与任务详情/补登记同一实现）。
 import { listTaskArtifacts } from './task-artifacts.js';
 import type { GoalEvidence } from './acceptance-check.js';
+// zx_20261119_2 M7「度」：完成账带出工具拒绝计数与步数（只读，不改评分）。
+import { summarizeToolDenials, readStepsLedger, summarizeCommandFailures, type CommandFailureSummary } from './tool-denials.js';
 
 /** 只需 prepare().get()/.all() 的最小库接口（同 settings-bool 范式：可脱 better-sqlite3 跑真实现） */
 export interface TaskOutcomeDb {
@@ -50,6 +52,12 @@ export interface TaskOutcome {
     goal_evidence?: GoalEvidence;
     /** zx_20261104_1 M1：被迫收尾（步数/预算触顶）标记 */
     premature?: true;
+    /** zx_20261119_2 M7：本轮工具拒绝计数（无拒绝则不带该键——"没这笔账"≠"账上是 0"） */
+    tool_denials?: { total: number; byKind: Record<string, number>; calls: number; ok: number };
+    /** zx_20261119_2 M7：步数账（used / estimate / 续额次数；无执行指标则不带） */
+    steps?: { used: number; estimate: number; grants: number };
+    /** zx_20261120_2 M5「实」：本轮真实命令失败（测试/构建/类型检查；无失败则不带——不编 0） */
+    command_failures?: CommandFailureSummary;
   } | null;
   /** 本任务交付物分类计数（实查 `wa_deliverables`） */
   deliverables: DeliverableCounts;
@@ -83,6 +91,28 @@ export function countDeliverables(db: TaskOutcomeDb, taskId: string): Deliverabl
 }
 
 /**
+ * 完成事件是否已落库（zx_20261119_1 M1「迹」）——收口后的**自检**判据，只读一条走索引的查询。
+ *
+ * 为什么需要它：真库标本 `91dfe739` 置 `completed`、验收 4/4 在账，但事件流里零 `task.completed`，
+ * 而账上既无持久化错误也无任何说明。此后每次收口都问一次"这一笔到底落没落"，缺则留痕，
+ * 让"完成无迹"从"事后才发现"变成"当场可见"。
+ *
+ * ⚠ 只认 `task.completed`，不认 `task.status_changed` 顶替——后者是旧式完成的形态，
+ * 不满足 `notification-core` / `task-followup` 等按完成事件消费的读点。
+ */
+export function hasCompletionEvent(db: TaskOutcomeDb, taskId: string): boolean {
+  try {
+    const row = db
+      .prepare("SELECT 1 AS ok FROM wa_event_log WHERE event_type = 'task.completed' AND aggregate_id = ? ORDER BY id DESC LIMIT 1")
+      .get(taskId) as { ok?: number } | undefined;
+    return !!row;
+  } catch {
+    // 读不出事件表时**不谎报为已落库**：按"未见"处理，由调用方如实留痕。
+    return false;
+  }
+}
+
+/**
  * 组装终态事件要带的「果」。两处 `task.completed` 出口与两处
  * `status_changed{completed}` 出口**共用本函数**——同一构造器出的同一形状。
  *
@@ -91,11 +121,13 @@ export function countDeliverables(db: TaskOutcomeDb, taskId: string): Deliverabl
  */
 export function buildTaskOutcome(db: TaskOutcomeDb, taskId: string, runMutations?: number): TaskOutcome {
   let quality: TaskOutcome['quality'] = null;
+  let ctxObj: Record<string, unknown> = {};
   try {
     const row = db.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get(taskId) as { context_json?: string | null } | undefined;
     const ctx = JSON.parse(row?.context_json || '{}') as {
       completion_quality?: { score?: number; via?: string; goal_achieved?: boolean; goal_evidence?: GoalEvidence; premature?: boolean };
     };
+    ctxObj = ctx as Record<string, unknown>;
     const q = ctx.completion_quality;
     if (q && typeof q === 'object') {
       quality = {
@@ -108,6 +140,22 @@ export function buildTaskOutcome(db: TaskOutcomeDb, taskId: string, runMutations
     }
   } catch {
     /* 载荷坏 JSON ⇒ quality 保持 null（如实"没这笔账"） */
+  }
+  // zx_20261119_2 M7：把「工具拒绝」与「步数」带进完成事件——只在有账时带（不编 0）。
+  if (quality) {
+    try {
+      const denials = summarizeToolDenials(db, taskId);
+      if (denials.total > 0) quality.tool_denials = denials;
+    } catch { /* 计数失败不阻断完成账 */ }
+    try {
+      const steps = readStepsLedger(ctxObj);
+      if (steps) quality.steps = steps;
+    } catch { /* 同上 */ }
+    // zx_20261120_2 M5「实」：真实命令失败（ok=0 且无 deny_reason、形态属测试/构建）——只在有账时带。
+    try {
+      const cmdFailures = summarizeCommandFailures(db, taskId);
+      if (cmdFailures.total > 0) quality.command_failures = cmdFailures;
+    } catch { /* 同上 */ }
   }
   const outcome: TaskOutcome = { quality, deliverables: countDeliverables(db, taskId) };
   if (typeof runMutations === 'number') outcome.run_mutations = runMutations;
@@ -138,8 +186,13 @@ export function goalAchievedOf(
 ): boolean {
   if (goalDefined && goalDeviationCapReached(deviationRestarts)) return false;
   if (premature) return false;
-  if (evidence === 'acceptance_passed') return true;
+  // zx_20261118_2 M5：用户逐条豁免后"全部满足"也算达成——凭据名仍是独立的
+  //   `acceptance_passed_with_waivers`，不与"全过"混名（UI/父任务据此显示豁免数）。
+  if (evidence === 'acceptance_passed' || evidence === 'acceptance_passed_with_waivers') return true;
   if (evidence === 'acceptance_failed') return false;
+  // zx_20261116_3 M3「判」：有题未判成 ⇒ **不宣告达成**（用户 2026-11-16 裁定）。
+  // 真标本 `9895078f`：验收 error、0/0，却被 95 分带上 goal=true。
+  if (evidence === 'unjudged') return false;
   return score >= GOAL_ACHIEVED_MIN_SCORE;
 }
 

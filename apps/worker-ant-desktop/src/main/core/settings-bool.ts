@@ -60,6 +60,14 @@ export function parseTriState(value: string | undefined | null): TriState {
 export const BOOL_SETTING_KEYS: readonly string[] = [
   // zx_20261115_4 M2「岗」：项目绑了 ≥2 个启用岗位时，IM 建单缺岗位先问一次（缺省开）。
   'position.ask_when_multiple',
+  // zx_20261120_1 M5：跨机只读代码分析（缺省开；只对「研究类 + 项目有 origin」生效）。
+  'node.remote_readonly_code',
+  // zx_20261120_1 M7：上下文按效预算（**缺省关**，读口 `readBoolSettingDefaultOff`；进白名单只为设置页可点）。
+  'context.roi_budget',
+  // zx_20261121_1 M6：项目经验段开工注入（**缺省即开**；≤120 token，从既有 400 预算内替换）。
+  'project.experience_inject',
+  // zx_20261121_2 M5：设备联动规则运行时（**缺省即开**；Team 档 + `device_control` 闸）。
+  'device.automation_on',
   'deliverable.show_acceptance',
   'deliverable.acceptance_on_close',
   'deliverable.probe_disposition',
@@ -149,6 +157,11 @@ export const BOOL_SETTING_KEYS: readonly string[] = [
   //   （旧实现只看整串首 token ⇒ `cd /x && sudo …` 被判成"非 sudo"）；
   //   关 ⇒ 逐字回"分隔符一律拒"的旧行为（一键回退，非删代码）。
   'engine.shell_multi_segment',
+  // zx_20261119_2 M6「序」：**同仓构建锁**（**缺省即开**）。
+  //   开 ⇒ 全仓构建/清理（mvn clean|test|…、gradle clean|build、npm/pnpm/yarn build、tsc -b、
+  //   rm -rf target|dist|node_modules）在执行前认领仓内 `.git/wa-build.lock`，有主即拒；
+  //   关 ⇒ 逐字回旧行为（不互斥）。只拦"会翻锅"的命令，日常只读与单文件编译不触发。
+  'engine.repo_build_lock',
   // zx_20261029_3 M3（道德经·功成身退）：**退出时带走本进程登记过的后台进程组**（**缺省即开**）。
   //   开 ⇒ `stopCore()` 在关库前 SIGTERM→2s→SIGKILL 带走账上仍活的组（shell 秒退、孙进程常驻那类）；
   //   关 ⇒ 一个进程都不碰（让常驻服务在桌面退出后继续跑的用户用这个口）。

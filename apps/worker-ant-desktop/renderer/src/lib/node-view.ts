@@ -476,6 +476,8 @@ export function remoteReceiptOf(result: Record<string, unknown> | null | undefin
     verdict,
     missing: Array.isArray(o.missing) ? o.missing.filter((x): x is string => typeof x === 'string') : [],
     outputCount: typeof o.outputCount === 'number' && Number.isFinite(o.outputCount) ? o.outputCount : null,
+    summaryChars: typeof o.summaryChars === 'number' && Number.isFinite(o.summaryChars) ? o.summaryChars : null,
+    readonly: o.readonly === true,
     checkedAt: typeof o.checkedAt === 'string' ? o.checkedAt : '',
   };
 }

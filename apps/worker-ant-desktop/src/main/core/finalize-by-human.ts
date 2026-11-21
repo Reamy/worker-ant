@@ -106,9 +106,12 @@ export function finalizeTaskByHuman(
       // zx_20261104_1 M1：账上有凭据/被迫收尾标记 ⇒ 原样保留（人工裁的是终态，不是判卷结论）；
       //   老账没有 ⇒ 从落库验收载荷派生（`goalEvidenceOf` 一处真源），绝不凭分数臆造"验过"。
       const evidence = existing.goal_evidence === 'acceptance_passed'
+        // zx_20261118_2 M5：用户豁免后的"满足"是独立凭据态，人工收口时原样保留。
+        || existing.goal_evidence === 'acceptance_passed_with_waivers'
         || existing.goal_evidence === 'acceptance_failed'
         || existing.goal_evidence === 'score_only'
         || existing.goal_evidence === 'none'
+        || existing.goal_evidence === 'unjudged'
         ? existing.goal_evidence
         : goalEvidenceOf(ctx.acceptance_check as Parameters<typeof goalEvidenceOf>[0]);
       const premature = existing.premature === true;

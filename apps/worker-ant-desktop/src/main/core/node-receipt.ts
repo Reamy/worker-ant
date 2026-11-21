@@ -19,10 +19,14 @@ export type ReceiptVerdict = 'verified' | 'self-reported' | 'failed';
 /** 回执核对结果（落 `result_json.receipt`；界面按 `verdict` 取三档措辞）。 */
 export interface RemoteReceipt {
   verdict: ReceiptVerdict;
-  /** 缺了哪几项（`taskId` / `terminal` / `outputs` / `event`）；`failed` 时亦列明。 */
+  /** 缺了哪几项（`taskId` / `terminal` / `outputs` / `summary` / `event`）；`failed` 时亦列明。 */
   missing: string[];
-  /** 对端自报的产出条数；无清单 ⇒ `null`（不把"没报"伪造成 0 项）。 */
+  /** 对端自报的产出条数；无清单 ⇒ `null`（不把"没报"伪造成 0 项）。只读分析记 1（结论即产出）。 */
   outputCount: number | null;
+  /** 只读分析的结论字数；非只读 ⇒ `null`。 */
+  summaryChars: number | null;
+  /** 本次是否为跨机只读分析回执。 */
+  readonly: boolean;
   checkedAt: string;
 }
 
@@ -44,13 +48,30 @@ export function verifyRemoteReceipt(input: {
   const terminal = typeof r.taskStatus === 'string' ? r.taskStatus : '';
   const outputs = Array.isArray(r.outputs) ? r.outputs : null;
   const outputCount = outputs ? outputs.length : null;
+  const readonly = r.readonly === true;
+  const summary = readonly && typeof r.summary === 'string' ? r.summary.trim() : '';
 
   const missing: string[] = [];
   if (!remoteTaskId || remoteTaskId !== input.localTaskId) missing.push('taskId');
   if (terminal !== LEGAL_DONE_TERMINAL) missing.push('terminal');
   // 身份/终态不自洽 ⇒ 不进入"缺项"档：这不是"回执不全"，是"回执说的不是这单/不是完成"。
   if (missing.length > 0) {
-    return { verdict: 'failed', missing, outputCount, checkedAt: input.checkedAt };
+    return { verdict: 'failed', missing, outputCount, summaryChars: summary.length || null, readonly, checkedAt: input.checkedAt };
+  }
+
+  // zx_20261120_1 M5：只读分析的"产出"就是结论——不必有文件清单；结论至少 20 字才认。
+  //   普通任务的旧尺**一行不改**（仍要求 outputs 非空）。
+  if (readonly) {
+    if (summary.length < 20) missing.push('summary');
+    if (!input.hasLocalEvent) missing.push('event');
+    return {
+      verdict: missing.length === 0 ? 'verified' : 'self-reported',
+      missing,
+      outputCount: summary.length >= 20 ? 1 : null,
+      summaryChars: summary.length || null,
+      readonly: true,
+      checkedAt: input.checkedAt,
+    };
   }
 
   if (!outputs || outputs.length === 0) missing.push('outputs');
@@ -59,6 +80,8 @@ export function verifyRemoteReceipt(input: {
     verdict: missing.length === 0 ? 'verified' : 'self-reported',
     missing,
     outputCount,
+    summaryChars: null,
+    readonly: false,
     checkedAt: input.checkedAt,
   };
 }
@@ -68,13 +91,18 @@ const RECEIPT_MISSING_LABEL: Record<string, string> = {
   taskId: '任务号不符',
   terminal: '终态非法',
   outputs: '无产出清单',
+  summary: '无分析结论',
   event: '本机台账无痕',
 };
 
 /** 回执核对结论 → 一句人话（会话留痕与面板同一套词，不各说各的）。 */
 export function receiptNote(r: RemoteReceipt): string {
   const missing = r.missing.map((m) => RECEIPT_MISSING_LABEL[m] ?? m).join('、');
-  if (r.verdict === 'verified') return `回执核对通过（${r.outputCount ?? 0} 项产物）`;
+  if (r.verdict === 'verified') {
+    return r.readonly
+      ? `只读分析回执（结论 ${r.summaryChars ?? 0} 字）`
+      : `回执核对通过（${r.outputCount ?? 0} 项产物）`;
+  }
   if (r.verdict === 'self-reported') return `对方自报完成，回执不全（缺：${missing}）`;
   return `回执核对失败（${missing}），不记完成`;
 }

@@ -26,6 +26,8 @@ import { buildPauseNotice, recordedPauseReason } from './pause-reason.js';
 import { parseDepIds } from './dep-graph.js';
 import { MAX_CHILD_BREADTH, countActiveChildren } from './task-accounting.js';
 import type { GoalEvidence } from './acceptance-check.js';
+// zx_20261118_2 M7「标」：质量分来路（收口自评 vs 引擎）的唯一真源，通知与 renderer 同引。
+import { qualityLabel } from './quality-label.js';
 // zx_20261110_1 B6: 推送正文净化与"做了什么"要点抽取（与完成摘要同一份纯函数）。
 import { plainTextSnippet, extractKeyPoints } from './im-reply.js';
 // 产出物计数的**同一把尺**：范围谓词仍从成果生命周期模块取，不在这里另写一份"非退休/非探针"。
@@ -166,6 +168,16 @@ function qualityScoreOf(ctxJson: string | null): number | null {
   }
 }
 
+/** 完成账里的分数来路（`completion_quality.via`）；无账/坏 JSON/非串 ⇒ null（不猜）。 */
+function qualityViaOf(ctxJson: string | null): string | null {
+  try {
+    const via = (JSON.parse(ctxJson || '{}') as { completion_quality?: { via?: unknown } }).completion_quality?.via;
+    return typeof via === 'string' ? via : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * 本任务产出物件数；读不到（老库无表/列）返回 null——**少说**胜过编一个 0。
  * 范围与列表/交付单同源（`deliverableScopeSql`），不在这里另写"非退休/非探针"。
@@ -201,7 +213,7 @@ export interface CompletionTruth {
   via: string | null;
 }
 
-const GOAL_EVIDENCES: readonly GoalEvidence[] = ['acceptance_passed', 'acceptance_failed', 'score_only', 'none'];
+const GOAL_EVIDENCES: readonly GoalEvidence[] = ['acceptance_passed', 'acceptance_passed_with_waivers', 'acceptance_failed', 'score_only', 'none', 'unjudged'];
 
 /**
  * 从 `context_json` 读完成账的真值（**不重算、不猜**）。
@@ -332,6 +344,7 @@ export function buildTaskNotice(
         const why = [
           truth.premature ? '（步数/预算触顶，被迫结束）' : '',
           truth.evidence === 'acceptance_failed' ? '；验收未通过' : '',
+          truth.evidence === 'unjudged' ? '；验收未判成（待重判）' : '',
         ].join('');
         const produced = detail ? plainTextSnippet(detail, 220) : '';
         body = [
@@ -342,8 +355,11 @@ export function buildTaskNotice(
         ].join('\n');
       } else {
         const score = done ? qualityScoreOf(ctxJson) : null;
+        const via = done ? qualityViaOf(ctxJson) : null;
         const points = extractKeyPoints(detail, 3);
-        const lines = [`任务「${name}」${word}${score !== null ? `（质量 ${score}/100）` : ''}。`];
+        // zx_20261118_2 M7：`finalize_task` 的分是收口方自评——通知里必须写「自评」，
+        // 不能与引擎六维分同形（旧文案恒为「质量 N/100」）。
+        const lines = [`任务「${name}」${word}${score !== null ? `（${qualityLabel(score, via)}）` : ''}。`];
         if (points.length) {
           lines.push('做了什么：');
           for (const p of points) lines.push(`- ${p}`);

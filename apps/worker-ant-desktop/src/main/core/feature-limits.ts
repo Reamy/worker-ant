@@ -62,6 +62,13 @@ export interface TierLimits {
    *   故本字段在社区档的 `0` 不会被单独当成"不限"消费。团队档 `0` 才是真不限。
    */
   maxCloudAccounts: number;
+  /**
+   * zx_20261120_3 M7「传·档」: 自建岗位数上限（只数 `builtin=0`；内置 13 岗不占额度）；**0 = 不限**。
+   * 只拦**新增**——已有岗位一条不删、不影响运行（与既有容量闸同一把尺）。
+   */
+  maxCustomPositions: number;
+  /** 岗位例行数上限（`wa_position_routines` 全量；停用仍占位）；**0 = 不限**。只拦新增。 */
+  maxPositionRoutines: number;
 }
 
 /**
@@ -73,16 +80,19 @@ export const TIER_LIMITS: Record<LicenseTier, TierLimits> = {
     maxProjectConcurrency: 3, maxProjects: 1, maxMembers: 1, maxNodes: 1,
     maxDevices: 5, maxExternalTerminals: 1, maxA2AServers: 1, maxKnowledgeCardsPerProject: 8, maxTeamLibraryMemories: 200,
     maxIMChannels: 2, maxTaskTemplates: 5, maxCloudAccounts: 0,
+    maxCustomPositions: 5, maxPositionRoutines: 2,
   },
   pro: {
     maxProjectConcurrency: 8, maxProjects: 0, maxMembers: 1, maxNodes: 1,
     maxDevices: 30, maxExternalTerminals: 3, maxA2AServers: 3, maxKnowledgeCardsPerProject: 24, maxTeamLibraryMemories: 2000,
     maxIMChannels: 5, maxTaskTemplates: 30, maxCloudAccounts: 2,
+    maxCustomPositions: 20, maxPositionRoutines: 20,
   },
   team: {
     maxProjectConcurrency: 16, maxProjects: 0, maxMembers: 20, maxNodes: 20,
     maxDevices: 200, maxExternalTerminals: 20, maxA2AServers: 10, maxKnowledgeCardsPerProject: 60, maxTeamLibraryMemories: 0,
     maxIMChannels: 0, maxTaskTemplates: 0, maxCloudAccounts: 0,
+    maxCustomPositions: 0, maxPositionRoutines: 0,
   },
 };
 

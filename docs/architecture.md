@@ -1,6 +1,6 @@
 # 工蚁系统架构文档
 
-> **现行形态（2026-10-24）**：只有一个应用形态 —— **Electron 桌面端**（整个引擎运行在 main 进程内）+ **ANS**（AI 资源中心，默认 `:27183`）。
+> **现行形态（2026-11-21，v0.8.0）**：只有一个应用形态 —— **Electron 桌面端**（整个引擎运行在 main 进程内）+ **ANS**（AI 资源中心，默认 `:27183`）。
 > 2026-08-08 之前的「浏览器三服务（:9410 Web / :9411 Server / :3001 ANS）」已归档到 `apps/_archive/`，**勿改勿跑**，本文不再描述。
 > 以源码为准。
 
@@ -41,6 +41,17 @@
   preload 暴露受控 IPC。打包版把 ANS 运行时放在 `Resources/ans-server/`，以 `ELECTRON_RUN_AS_NODE=1` 代起。
 - **ANS**：`apps/ans-server`，唯一常驻 HTTP 服务，默认 `:27183`。桌面端经 `packages/ans-client`（HMAC）调用。
 - **共享包**：`packages/shared-types`（跨端类型）。
+
+### v0.8.0 新增模块（按职责）
+
+| 模块                                                          | 职责                                                                                                   |
+| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `core/project-skills.ts` / `skill-registry.ts`                | 项目技能独立表（`(project_id,name)` 唯一）、项目作用域注册、显式提升为全局；解析顺序岗位 > 项目 > 全局 |
+| `core/project-experience.ts` / `project-experience-labels.ts` | 零 LLM 项目经验账：规模 p50/p90、工具可靠度、浪费坑、失败因、服务/ROI；≤120 token 注入段               |
+| `core/external-grant.ts`                                      | 外部终端授权边界纯判据：设备范围（设备/房间/品类）、滚动频率、是否允许联动                             |
+| `core/external-calls.ts`                                      | 门内执行点：`/capabilities` 范围过滤、`/invoke`/`/intent` 范围+频率+联动复核                           |
+| `core/device-automation.ts`                                   | 设备联动规则：状态/属性/每日时刻触发，冷却/试运行/运行账；动作仍走 `runDeviceControl`                  |
+| `core/remote-workspace.ts` / `core/ops-overview.ts`           | 跨机只读分析工作区（有界/可清理）；运维一页（只读，读不到写原因）                                      |
 
 ## 技术栈
 

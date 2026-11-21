@@ -12,6 +12,7 @@ import { isOnboardingSkipped } from './lib/onboardingSkip';
 
 // 代码分割：页面组件懒加载，减少首屏 JS 体积
 const DashboardPage = lazy(() => import('./pages/DashboardPage'));
+const OpsPage = lazy(() => import('./pages/OpsPage'));
 const ActivityPage = lazy(() => import('./pages/ActivityPage'));
 const ProjectsPage = lazy(() => import('./pages/ProjectsPage'));
 const TaskDetailPage = lazy(() => import('./pages/TaskDetailPage'));
@@ -189,6 +190,7 @@ export default function App() {
         <Routes>
           <Route path="/login" element={<LoginPage />} />
           <Route path="/" element={<ProtectedRoute><DashboardPage /></ProtectedRoute>} />
+          <Route path="/ops" element={<ProtectedRoute><OpsPage /></ProtectedRoute>} />
           <Route path="/activity" element={<ProtectedRoute><ActivityPage /></ProtectedRoute>} />
           <Route path="/projects" element={<ProtectedRoute><ProjectsPage /></ProtectedRoute>} />
           <Route path="/tasks" element={<ProtectedRoute><TasksPage /></ProtectedRoute>} />

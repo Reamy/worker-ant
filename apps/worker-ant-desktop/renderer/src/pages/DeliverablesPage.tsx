@@ -175,6 +175,25 @@ export default function DeliverablesPage() {
     } catch { showToast(ACCEPT_REASON_TEXT.error!, 'error'); }
   };
 
+  // zx_20261119_1 M5「名」：退休成果——理由用**页内输入框**（原生 prompt 会挂起渲染进程，与归档页同一纪律）。
+  const [retireTarget, setRetireTarget] = useState<Deliverable | null>(null);
+  const [retireReason, setRetireReason] = useState('');
+  const [retireBusy, setRetireBusy] = useState(false);
+  const confirmRetire = async () => {
+    if (!retireTarget) return;
+    const why = retireReason.trim();
+    if (!why) { showToast('退休须填写理由', 'error'); return; }
+    setRetireBusy(true);
+    try {
+      const r = await deliverables.retire(retireTarget.id, why);
+      showToast(r?.changed ? '已退休（可在「显示已退休」中查看）' : '该成果此前已退休', 'success');
+      setRetireTarget(null);
+      setRetireReason('');
+      load();
+    } catch (e) { showToast((e as Error).message || '退休失败', 'error'); }
+    finally { setRetireBusy(false); }
+  };
+
   // 唯一项目列表
   // zx_20260930 M4-2: 名录由服务端 `facets` 派生（此前由 `allItems` = 无参全表派生）。
   //   E15（选定项目后下拉自坍缩）依旧被排除：名录**既不受本页筛选影响、也不受分页影响**——
@@ -784,6 +803,12 @@ export default function DeliverablesPage() {
                               标为已验收
                             </button>
                           )}
+                          {!isRetired && (
+                            <button onClick={(e) => { e.stopPropagation(); setRetireTarget(d); setRetireReason(''); }} title="退休：临时件/探针不再计入成果（须写理由，会留痕）"
+                              className="opacity-0 group-hover:opacity-100 text-[10px] px-1.5 py-0.5 rounded border border-gray-300 text-gray-500 hover:bg-gray-50">
+                              退休
+                            </button>
+                          )}
                           {acc && (
                             <span title={`产出任务验收 ${accP}/${accT} 项通过${acc.checked_at ? ' · 核验于 ' + formatDbTime(acc.checked_at) : ''}`}
                               className={`text-[9px] px-1.5 py-0.5 rounded-full font-medium shrink-0 ${accAllPass ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
@@ -994,6 +1019,27 @@ export default function DeliverablesPage() {
               <button onClick={() => setShowCreate(false)} disabled={cBusy} className="px-3 py-1.5 border rounded-lg text-sm hover:bg-gray-50 disabled:opacity-40">取消</button>
               <button onClick={submitCreate} disabled={cBusy} className="px-4 py-1.5 rounded-lg text-sm bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50">
                 {cBusy ? '创建中…' : '创建'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* zx_20261119_1 M5「名」：退休理由页内输入（替代 window.prompt，与归档页同一纪律）。 */}
+      {retireTarget && (
+        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50" onClick={() => !retireBusy && setRetireTarget(null)}>
+          <div className="bg-white rounded-xl shadow-lg p-6 w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-bold mb-2">退休成果</h3>
+            <p className="text-sm text-gray-600 mb-3 break-all">{retireTarget.name}</p>
+            <p className="text-xs text-gray-500 mb-3">退休后默认不在主列表（可在「显示已退休」中查看），并摘掉 ★；操作留痕。</p>
+            <label className="block text-sm font-medium mb-1">理由（必填）</label>
+            <textarea value={retireReason} onChange={(e) => setRetireReason(e.target.value)} rows={3} autoFocus
+              className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y"
+              placeholder="如：一次性探针脚本，不是交付成果" />
+            <div className="flex justify-end gap-2 mt-4">
+              <button onClick={() => setRetireTarget(null)} disabled={retireBusy} className="px-3 py-1.5 border rounded-lg text-sm hover:bg-gray-50 disabled:opacity-40">取消</button>
+              <button onClick={() => void confirmRetire()} disabled={retireBusy || !retireReason.trim()} className="px-4 py-1.5 rounded-lg text-sm bg-gray-700 text-white hover:bg-gray-800 disabled:opacity-50">
+                {retireBusy ? '处理中…' : '确认退休'}
               </button>
             </div>
           </div>

@@ -4,6 +4,9 @@
  */
 import { createLogger } from './logger.js';
 import { toolRegistry, type ToolCategory } from './tool-registry.js';
+// zx_20261117_1 M1「案」：方案样板剥离下沉为纯函数模块，`verification-issues.ts` 与 rr 共用同一份实现。
+import { stripPlanBoilerplate } from './plan-text.js';
+export { stripPlanBoilerplate };
 
 const logger = createLogger('archetype');
 
@@ -303,6 +306,9 @@ const ARCHETYPE_KEYWORD_RULES: Array<{ pattern: RegExp; archetype: TaskArchetype
   //   ⇒ 100k 预算/10 步/工具面无 write ⇒ 只能派子，而子又拿不到 `edit_file`（D2）。
   //   本规则只认「动作 + 功能/开关类产物」**同句共现**；`增加一份报告`/`支持一下这个问题` 不命中。
   { pattern: /(增加|新增|添加|启用|禁用|移除|删除|支持|开放|提供|实现|开发|改造|接入).{0,12}(功能|开关|入口|按钮|菜单|权限|字段|选项|设置项|接口|API|端点|页面|模块|组件)/, archetype: 'code', reason: '动作+功能/开关类产物=编码实现' },
+  // zx_20261116_3 M2「名」：**对齐/联调/接入**前端或契面也是写代码。
+  //   真标本：T14「三端前端状态对齐」曾命中 `评估/对比` 的 research 规则 ⇒ 20 步上限、工具面无 shell。
+  { pattern: /(对齐|联调|接入|打通|落地|接上|补上|迁移|升级).{0,24}(端点|页面|类型|契面|状态|接口|字段|三端|前端|后端|组件|路由|服务)/, archetype: 'code', reason: '动作+前端/契面产物=编码实现' },
   // zx_20261031_1 M2（名当副实，器当称事）：**从 git 提交记录聚合出事实**的题面判 analysis。
   //   真标本：「把这周本仓库的 git 提交整理成一份周报，按模块分组，写到 docs/weekly-report.md。」
   //   ——旧链里 `git`/`周报` 都不在词表，落到长度兜底的 `.md` ⇒ document（按设计无 shell）⇒
@@ -336,8 +342,15 @@ const ARCHETYPE_KEYWORD_RULES: Array<{ pattern: RegExp; archetype: TaskArchetype
   { pattern: /(改|修).*(bug|缺陷|错误|问题|代码)/i, archetype: 'code', reason: '修复问题' },
   // 数据分析类
   { pattern: /(统计|数据|趋势|chart|图表|可视化|metrics|指标|日志.*分析|log.*analys)/i, archetype: 'analysis', reason: '包含数据分析关键词' },
+  // zx_20261116_3 M2「名」：支付/退款/提现域的实施题面（六态/回调/幂等/对账/额度…）是编码实现。
+  //   放在 research/analysis 之后、宽泛文档规则之前：真标本 T12「提现六态 + 审核闸门 + transfer 打款 + 代付回调」
+  //   曾被家族相似性判 document；而「分析退款数据」已先命中上面的 analysis，不会被本规则抢走。
+  { pattern: /(六态|状态机|回调|幂等|验签|下单|查单|退款|提现|支付|对账|额度|打款|代付|审核闸门)/, archetype: 'code', reason: '支付/退款/提现场景=编码实现' },
   // 兜底宽泛模式
-  { pattern: /(文档|报告|方案|计划|README|总结)/, archetype: 'document', reason: '文档/报告/方案关键词' },
+  // zx_20261116_3 M2「名」：**「方案」/「计划」不再单独构成文档意图**。
+  //   它们最常见于「按方案实施」「方案单元 T12」这类**引用**；真正写文档已在上面
+  //   「撰写/编写/生成 + 方案/计划」共现规则里判过。去掉这两个裸词，避免实施任务被判 document。
+  { pattern: /(文档|报告|README|总结)/, archetype: 'document', reason: '文档/报告/总结关键词' },
   { pattern: /(安装|配置|部署|搭建|初始化|setup|install|config)/i, archetype: 'configuration', reason: '配置关键词' },
   // 对话类（最后兜底）
   { pattern: /^(你好|hi|hello|谢谢|帮助|help|什么是|怎么|如何|what|how)/i, archetype: 'conversation', reason: '对话交互' },
@@ -381,7 +394,7 @@ function familyResemblanceScore(text: string, representative: string): number {
 
 /** 形态判定的来源（zx_20261030_2 M1）：写进任务账，GUI 据此说「为什么判成这个」。
  *  `node`/`manual` 由执行器侧的 `resolvePinnedArchetype` 给出；`semantic`/`calibrated` 是自动判定之后的两次修正。 */
-export type ArchetypeSource = 'keyword' | 'family' | 'fallback' | 'semantic' | 'calibrated' | 'node' | 'manual';
+export type ArchetypeSource = 'keyword' | 'family' | 'fallback' | 'semantic' | 'calibrated' | 'node' | 'manual' | 'capability';
 
 export interface ArchetypeDecision {
   archetype: TaskArchetype;
@@ -408,6 +421,11 @@ export interface CapabilityNeeds {
 const SHELL_SIGNAL_RE = /mvn|gradle|npm|pnpm|yarn|\bmake\b|cmake|javac|\bjava\b|python|\bnode\b|docker|\bgit\b|curl|mysql|psql|sql|执行|运行|启动|重启|编译|构建|打包|部署|迁移|建表|脚本|端口|进程|测试/i;
 const WRITE_SIGNAL_RE = /修改|实现|修复|新增|删除|重构|提交|写入|落库|保存|生成文件|产出/;
 const NETWORK_SIGNAL_RE = /http|https|接口|请求|抓取|下载|上传|同步/i;
+
+/**
+ * zx_20261117_1 M1「案」：`stripPlanBoilerplate` 已下沉到 `plan-text.ts`（零运行期依赖），
+ * 由本模块 re-export，既有调用方（`classifyArchetypeKeywordDetailed`、rr）逐字不变。
+ */
 
 export function capabilityNeedsOf(text: string): CapabilityNeeds {
   const t = String(text ?? '');
@@ -463,19 +481,33 @@ const ADVISORY_PHRASING_RE = /如何|怎么|怎样|能否|是否|能不能|可�
 
 /** 关键词快速分类（零延迟） */
 export function classifyArchetypeKeywordDetailed(text: string): { archetype: TaskArchetype; reason: string } | null {
+  const raw = String(text ?? '');
+  const t = stripPlanBoilerplate(raw);
   // zx_20261104_1 M3: 可观察缺陷 ⇒ 修复（置于文档/研究规则之前：题面说的是"哪里不对"，不是"写份报告"）
-  if (OBSERVABLE_DEFECT_RE.test(text) && !ADVISORY_PHRASING_RE.test(text)) {
+  if (OBSERVABLE_DEFECT_RE.test(t) && !ADVISORY_PHRASING_RE.test(t)) {
     return { archetype: 'code', reason: '可观察缺陷+界面/数据=修复' };
+  }
+  // zx_20261116_3 M2「名」：**先认文档意图**——「撰写/编写/写/生成/制定/拟定/设计/产出/输出 + 方案/计划/报告」
+  //   是写文档，不能被下面的「实施方案」执行规则误吞（负标本「撰写一份实施方案」）。
+  // 但**题面已经有明确编码动作**（如“写代码 + 附证据文档”）时，证据文档是附带物，不把整题判成 document。
+  const hasCodeAction = /(写代码|实现|新增|添加|开发|改造|接入|修复|重构|补全|编写).{0,24}(端点|接口|API|控制器|页面|路由|组件|模块|服务|函数|脚本|引擎|代码)/.test(t);
+  if (!hasCodeAction && /(撰写|编写|写|生成|制定|拟定|设计|产出|输出).{0,8}(方案|计划|报告|文档|总结|README)/.test(t)) {
+    return { archetype: 'document', reason: '明确文档生成意图' };
+  }
+  // zx_20261116_3 M2「名」：**实施/落地方案**是执行，不是写文档。
+  //   真标本：主任务「按计划分步实施方案…」曾因「方案」二字被判 document，工具面因此没有 shell。
+  if (/(实施|落地|执行|推进).{0,12}(方案|计划|排期)/.test(raw)) {
+    return { archetype: 'code', reason: '实施/落地方案=编码执行' };
   }
   // zx_20260904_3 D3 (2026-09-04): 规划/调研 + 产出文档意图 → research（在 code 规则前判定，
   // 避免"优化规划"等含"实现…功能"的描述被 code 误吞——先走查再落方案文档而非写代码）
-  if (/(功能优化规划|优化方案|排期方案|升级方案|优化规划|实施规划|改进方案|方案设计|调研方案|调研报告|完成情况核实|复核报告)/.test(text)
-    && /(写入|写到|产出|生成|落盘|写出|保存到|交付|提交)/.test(text)
-    && /(\.md|\.MD|文档|报告|方案文件)/.test(text)) {
+  if (/(功能优化规划|优化方案|排期方案|升级方案|优化规划|实施规划|改进方案|方案设计|调研方案|调研报告|完成情况核实|复核报告)/.test(t)
+    && /(写入|写到|产出|生成|落盘|写出|保存到|交付|提交)/.test(t)
+    && /(\.md|\.MD|文档|报告|方案文件)/.test(t)) {
     return { archetype: 'research', reason: '规划/调研+产出文档' };
   }
   for (const rule of ARCHETYPE_KEYWORD_RULES) {
-    if (rule.pattern.test(text)) return { archetype: rule.archetype, reason: rule.reason };
+    if (rule.pattern.test(t)) return { archetype: rule.archetype, reason: rule.reason };
   }
   return null;
 }
@@ -495,21 +527,41 @@ export function classifyByFamilyResemblance(text: string): Array<{ archetype: Ta
   return scores;
 }
 
+/**
+ * zx_20261116_3 M2「名」：**能力升级**——题面明确要跑命令/编译，而判出的形态工具面无 `shell`
+ * ⇒ 升 `code`（`source='capability'`）。手动/节点指定不推翻（它们是意志，不是猜测）。
+ *
+ * 真标本 `e32ed84f`：`research` 档 `maxSteps=20`、工具面无 shell，题面却要复跑 4 条命令 ⇒ 0/4。
+ */
+function maybeCapabilityUpgrade(d: ArchetypeDecision, text: string): ArchetypeDecision {
+  if (d.source === 'manual' || d.source === 'node' || d.source === 'capability') return d;
+  const needs = capabilityNeedsOf(text);
+  if (needs.shell && !ARCHETYPE_TOOL_CATEGORIES[d.archetype].includes('shell')) {
+    return { archetype: 'code', source: 'capability', reason: `题面需要运行/编译能力，由 ${d.archetype} 升级为 code` };
+  }
+  return d;
+}
+
 /** 任务类型分类（关键词 → 家族相似性 → 长度兜底），带来源与理由。 */
 export function classifyArchetypeDetailed(text: string): ArchetypeDecision {
   const kw = classifyArchetypeKeywordDetailed(text);
   if (kw) {
-    logger.info({ archetype: kw.archetype, text: text.slice(0, 60) }, '任务类型(关键词)');
-    return { archetype: kw.archetype, source: 'keyword', reason: kw.reason };
+    const d = maybeCapabilityUpgrade({ archetype: kw.archetype, source: 'keyword', reason: kw.reason }, text);
+    logger.info({ archetype: d.archetype, source: d.source, text: text.slice(0, 60) }, '任务类型(关键词/能力升级)');
+    return d;
   }
   const family = classifyByFamilyResemblance(text);
   const best = family[0]!;
   if (best.score >= 0.05) {
-    logger.info({ archetype: best.archetype, score: best.score.toFixed(3), text: text.slice(0, 60) }, '任务类型(家族相似性)');
-    return { archetype: best.archetype, source: 'family', reason: `与「${best.archetype}」家族相似度 ${best.score.toFixed(3)}` };
+    const d = maybeCapabilityUpgrade(
+      { archetype: best.archetype, source: 'family', reason: `与「${best.archetype}」家族相似度 ${best.score.toFixed(3)}` },
+      text,
+    );
+    logger.info({ archetype: d.archetype, source: d.source, score: best.score.toFixed(3), text: text.slice(0, 60) }, '任务类型(家族相似性/能力升级)');
+    return d;
   }
-  const fb = fallbackArchetypeDetailed(text);
-  logger.info({ archetype: fb.archetype, text: text.slice(0, 60) }, '任务类型(长度兜底)');
+  const fb = maybeCapabilityUpgrade(fallbackArchetypeDetailed(text), text);
+  logger.info({ archetype: fb.archetype, source: fb.source, text: text.slice(0, 60) }, '任务类型(长度兜底/能力升级)');
   return fb;
 }
 

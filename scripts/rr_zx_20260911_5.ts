@@ -564,7 +564,9 @@ async function m4(): Promise<void> {
         cardText: '', cardInjections: [],
         knowledgeText: '', knowledgeInjections: [],
         domainPackText: '', domainPackInjections: [],
-      }, '无记忆可注入时零态如实（不伪造空壳；逐段账/画像账/知识卡账/知识账/领域包账均为空）');
+        // zx_20261121_1 M6：再添 `experienceText` / `experienceInjections`（项目经验段与其逐版账）。
+        experienceText: '', experienceInjections: [],
+      }, '无记忆可注入时零态如实（不伪造空壳；逐段账/画像账/知识卡账/知识账/领域包账/经验账均为空）');
     }
   }
 

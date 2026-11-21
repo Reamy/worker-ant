@@ -21,7 +21,7 @@ export interface SkillContext {
 export interface SkillDefinition {
   name: string;
   description: string;
-  category: 'review' | 'security' | 'utility' | 'custom' | 'agent' | 'ans';
+  category: 'review' | 'security' | 'utility' | 'custom' | 'agent' | 'ans' | 'position';
   /** 提示词型技能：markdown 指令内容 */
   content?: string;
   /** 代码执行型技能 */
@@ -29,6 +29,193 @@ export interface SkillDefinition {
 }
 
 const skills = new Map<string, SkillDefinition>();
+
+/**
+ * zx_20261120_3 M4「积·技」：**按岗位**的技能注册表（与全局表分开）。
+ * 只有任务所指岗位能看到/调用；同名时岗位优先（更具体）。
+ */
+const positionSkills = new Map<string, Map<string, SkillDefinition>>();
+
+export function registerPositionSkill(positionId: string, skill: SkillDefinition): void {
+  const pid = String(positionId ?? '').trim();
+  if (!pid || !skill?.name) return;
+  const m = positionSkills.get(pid) ?? new Map<string, SkillDefinition>();
+  m.set(skill.name, skill);
+  positionSkills.set(pid, m);
+}
+
+export function unregisterPositionSkill(positionId: string, name: string): void {
+  const m = positionSkills.get(String(positionId ?? '').trim());
+  if (m) m.delete(name);
+}
+
+export function listPositionSkills(positionId: string): SkillDefinition[] {
+  const m = positionSkills.get(String(positionId ?? '').trim());
+  return m ? [...m.values()] : [];
+}
+
+/** 供工具/回归读一条岗位技能的注册体（内容/执行体）；不存在 ⇒ undefined。 */
+export function getPositionSkillDefinition(positionId: string, name: string): SkillDefinition | undefined {
+  return positionSkills.get(String(positionId ?? '').trim())?.get(name);
+}
+
+/** 当前任务的技能清单：全局 + 该岗位；同名岗位优先（只显示一条）。 */
+export function listSkillsForPosition(positionId: string): Array<{ name: string; description: string; category: string; executable: boolean }> {
+  const base = listSkills();
+  const pos = listPositionSkills(positionId);
+  if (pos.length === 0) return base;
+  const posNames = new Set(pos.map((s) => s.name));
+  return [
+    ...pos.map((s) => ({
+      name: s.name,
+      description: s.description,
+      category: 'position',
+      executable: Boolean(s.execute || s.content),
+    })),
+    ...base.filter((s) => !posNames.has(s.name)),
+  ];
+}
+
+// ==================== zx_20261121_1 M2「属·册」：项目作用域 ====================
+
+/**
+ * **按项目**的技能注册表（与全局表、岗位表分开）。
+ *
+ * 病根：`loadSkillsFromDb()` 把 12 个带 project_id 的 approved 技能注册进全局表 ⇒
+ *   怡寿里的技能出现在 A股任务眼前。项目经验必须“有主”。
+ *
+ * 解析优先级：**岗位 > 项目 > 全局**。同名只取更具体的那一个。
+ */
+const projectSkills = new Map<string, Map<string, SkillDefinition>>();
+
+export type SkillScope = 'position' | 'project' | 'global';
+
+export function registerProjectSkill(projectId: string, skill: SkillDefinition): void {
+  const pid = String(projectId ?? '').trim();
+  if (!pid || !skill?.name) return;
+  const m = projectSkills.get(pid) ?? new Map<string, SkillDefinition>();
+  m.set(skill.name, skill);
+  projectSkills.set(pid, m);
+}
+
+export function unregisterProjectSkill(projectId: string, name: string): void {
+  const m = projectSkills.get(String(projectId ?? '').trim());
+  if (m) m.delete(name);
+}
+
+export function listProjectSkills(projectId: string): SkillDefinition[] {
+  const m = projectSkills.get(String(projectId ?? '').trim());
+  return m ? [...m.values()] : [];
+}
+
+/** 供工具/回归读一条项目技能的注册体。 */
+export function getProjectSkillDefinition(projectId: string, name: string): SkillDefinition | undefined {
+  return projectSkills.get(String(projectId ?? '').trim())?.get(name);
+}
+
+/** 启动重载前清空项目表（避免旧注册残留）。全局/岗位表不在此动。 */
+export function clearProjectSkills(): void {
+  projectSkills.clear();
+}
+
+/**
+ * 当前任务的技能清单：岗位 > 项目 > 全局；同名只出现一次，`scope` 如实标注来源。
+ * 未指派岗位/未传项目 ⇒ 退化为全局（与旧行为一致）。
+ */
+export function listSkillsForTask(
+  projectId: string | undefined,
+  positionId: string | undefined,
+): Array<{ name: string; description: string; category: string; executable: boolean; scope: SkillScope }> {
+  const out = new Map<string, { name: string; description: string; category: string; executable: boolean; scope: SkillScope }>();
+  for (const s of listSkills()) {
+    out.set(s.name, { ...s, scope: 'global' });
+  }
+  for (const s of listProjectSkills(projectId ?? '')) {
+    out.set(s.name, {
+      name: s.name,
+      description: s.description,
+      category: s.category,
+      executable: Boolean(s.execute || s.content),
+      scope: 'project',
+    });
+  }
+  for (const s of listPositionSkills(positionId ?? '')) {
+    out.set(s.name, {
+      name: s.name,
+      description: s.description,
+      category: 'position',
+      executable: Boolean(s.execute || s.content),
+      scope: 'position',
+    });
+  }
+  return [...out.values()];
+}
+
+/** 执行一条已解析的技能定义（与 `executeSkill` 同一套错误语义）。 */
+async function runSkillDefinition(name: string, skill: SkillDefinition, input: string, ctx: SkillContext): Promise<string> {
+  try {
+    if (skill.execute) return await skill.execute(input, ctx);
+    if (skill.content) {
+      return JSON.stringify({
+        skill: name,
+        type: 'prompt',
+        description: skill.description,
+        instructions: skill.content.slice(0, 4000),
+      });
+    }
+    return JSON.stringify({
+      error: skill.category === 'ans'
+        ? `技能 ${name} 来自 ANS 服务端，本进程无本地执行体（本轮仅供检索/选用参考，不能在桌面端直接执行）`
+        : `技能 ${name} 无执行体`,
+      skill: name,
+      category: skill.category,
+      executable: false,
+    });
+  } catch (e) {
+    return JSON.stringify({ error: `技能执行失败: ${(e as Error).message}` });
+  }
+}
+
+/** `skill` 工具的项目版：岗位 > 项目 > 全局；返回实际命中的作用域。 */
+export async function executeSkillForTask(
+  projectId: string | undefined,
+  positionId: string | undefined,
+  name: string,
+  input: string,
+  ctx: SkillContext = {},
+): Promise<{ result: string; scope: SkillScope | 'none' }> {
+  const pos = positionId ? getPositionSkillDefinition(positionId, name) : undefined;
+  if (pos) return { result: await runSkillDefinition(name, pos, input, ctx), scope: 'position' };
+  const proj = projectId ? getProjectSkillDefinition(projectId, name) : undefined;
+  if (proj) return { result: await runSkillDefinition(name, proj, input, ctx), scope: 'project' };
+  const global = skills.get(name);
+  if (global) return { result: await runSkillDefinition(name, global, input, ctx), scope: 'global' };
+  return {
+    result: JSON.stringify({ error: `未知技能: ${name}。可用: ${[...skills.keys()].join(', ')}` }),
+    scope: 'none',
+  };
+}
+
+/** 执行岗位技能；没有该岗位技能 ⇒ `null`（调用方回落全局）。 */
+export async function executePositionSkill(
+  positionId: string,
+  name: string,
+  input: string,
+  ctx: SkillContext = {},
+): Promise<string | null> {
+  const skill = positionSkills.get(String(positionId ?? '').trim())?.get(name);
+  if (!skill) return null;
+  if (skill.execute) return await skill.execute(input, ctx);
+  if (skill.content) {
+    return JSON.stringify({
+      skill: name,
+      type: 'prompt',
+      description: skill.description,
+      instructions: skill.content.slice(0, 4000),
+    });
+  }
+  return JSON.stringify({ error: `岗位技能 ${name} 无执行体`, skill: name });
+}
 
 /** 跟踪从 ANS 同步的技能名（用于刷新时清理） */
 const _ansSkills = new Set<string>();
@@ -248,30 +435,5 @@ export function skillLoadState(): {
 export async function executeSkill(name: string, input: string, ctx: SkillContext = {}): Promise<string> {
   const skill = skills.get(name);
   if (!skill) return JSON.stringify({ error: `未知技能: ${name}。可用: ${[...skills.keys()].join(', ')}` });
-  try {
-    if (skill.execute) {
-      return await skill.execute(input, ctx);
-    }
-    if (skill.content) {
-      // 提示词型技能：返回指令内容（供 Agent 参考执行）
-      return JSON.stringify({
-        skill: name,
-        type: 'prompt',
-        description: skill.description,
-        instructions: skill.content.slice(0, 4000),
-      });
-    }
-    // 名实对齐（zx_20260929 M1）：**ANS 插件技能**在本进程里只有「名字 + 说明」，没有执行体。
-    // 此前一律回「无执行体」，看不出它其实来自 ANS、本轮只供检索；现按来源如实说清。
-    return JSON.stringify({
-      error: skill.category === 'ans'
-        ? `技能 ${name} 来自 ANS 服务端，本进程无本地执行体（本轮仅供检索/选用参考，不能在桌面端直接执行）`
-        : `技能 ${name} 无执行体`,
-      skill: name,
-      category: skill.category,
-      executable: false,
-    });
-  } catch (e) {
-    return JSON.stringify({ error: `技能执行失败: ${(e as Error).message}` });
-  }
+  return runSkillDefinition(name, skill, input, ctx);
 }

@@ -11,7 +11,7 @@ import type { EventStore } from './event-store.js';
 
 const logger = createLogger('event-bus');
 
-export type EventType = 'task.completed' | 'task.failed' | 'task.remote_redispatched' | 'task.status_changed' | 'task.awaiting_input' | 'task.answer_recorded' | 'task.step_finished' | 'task.step_streaming' | 'task.memory_injected' | 'task.goal_identified' | 'task.goal_reused' | 'task.goal_deviation' | 'task.execution_signal' | 'task.estimated' | 'task.heartbeat'
+export type EventType = 'task.completed' | 'task.failed' | 'task.remote_redispatched' | 'task.status_changed' | 'task.awaiting_input' | 'task.answer_recorded' | 'task.acceptance_waived' | 'task.step_finished' | 'task.step_streaming' | 'task.memory_injected' | 'task.goal_identified' | 'task.goal_reused' | 'task.goal_deviation' | 'task.execution_signal' | 'task.estimated' | 'task.heartbeat'
   // zx_20261110_2 B1/B2/B7：**中止四笔账**与"用户释放"——发（sent）与观测（observed）**分开记**，
   //   并与调度侧的键释放/重排同表可查。设计见 `core/exec-watchdog.ts`。
   | 'run.abort_sent' | 'run.abort_observed' | 'run.orphaned' | 'run.watchdog_fired'
@@ -51,6 +51,9 @@ const EVENT_AGGREGATE_MAP: Record<string, { aggregate_type: string; idField: str
   // zx_20260915 P0-5(a): 答有痕——提问有事件（上方）、答复此前无事件，故"用户已确认"无法从事件溯源自证。
   //   两张表都要有：只加 union 不加本映射 ⇒ emit() 走 `无聚合映射，跳过持久化`，事件**一行都不落库**（静默）。
   'task.answer_recorded': { aggregate_type: 'task', idField: 'taskId' },
+  // zx_20261118_2 M5：用户逐条豁免验收——与提问/答复同属"用户裁定"史实，必须落库可溯。
+  //   ⚠ 只加 union 不加本映射 ⇒ emit() 走「无聚合映射，跳过持久化」，事件一行都不落库（静默）。
+  'task.acceptance_waived': { aggregate_type: 'task', idField: 'taskId' },
   'task.step_finished': { aggregate_type: 'task', idField: 'taskId' },
   'task.memory_injected': { aggregate_type: 'task', idField: 'taskId' },
   'task.goal_identified': { aggregate_type: 'task', idField: 'taskId' },

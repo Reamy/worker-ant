@@ -12,12 +12,15 @@ import { persistTurnMessage } from './pause-settlement.js';
 import { writeMilestoneDone, backfillBoardRemainderToSelf, selfCompleteBan, buildChildContext, resolveAncestorSchemeRef, classifyChildCompletion, childCompletionCheckLabel, milestoneBoardOwner, goalDeviationCapReached, milestoneSubjectVerdict, MAX_TASK_DEPTH, childBreadthRefusal, collectSubtreeIds, taskTreeIds } from './task-accounting.js';
 import { validateReadonlyBashCommand, sanitizeLoneSurrogates, searchPathForPattern, paginateReadFile, shellRejectPayload, shellRejectPayloadForChar, buildToolConstraintBrief } from './tool-guards.js';
 import { setDeliverableStatus, promoteTaskFileDeliverables, autoAssignPrimary, selectProbeDeliverables, disposeProbeDeliverables, readAcceptanceCheck, docNotProbe, findDeliverableByPath } from './deliverable-lifecycle.js';
+// zx_20261116_2 M1「属」：run_close 的 document 类封顶也要把“共享成果”算作有产出物。
+import { taskDeliverableCounts } from './deliverable-attribution.js';
 // zx_20261115_3 M1「归」：finalize_task 出口同样按写作账补登记（与 run_close 出口同一实现）。
 import { registerClaimedArtifacts } from './task-artifacts.js';
 import { parseDepIds } from './dep-graph.js';
 // zx_20260917 M5-1: 「链上至多一个在跑」的唯一真源（`create_task` 与 `task-scheduler` 共用，不抄第二份）
 import { childDispatchHint } from './task-chain.js';
 import { readBoolSetting } from './settings-bool.js';
+import { computeRoiBudget } from './context-roi.js';
 import { auxModelRequest, buildModelRequest, deriveModelCapabilities, readMaxCostPer1k, taskHasMedia, taskBodyChars, attachmentsNeedVision } from './model-request.js';
 // zx_20260929 M9: `PAUSE_REASON_TOOL_LOOP`/`PAUSE_REASON_NO_PROGRESS` 只被步回调用 ⇒ 随之外移，真源仍在 `pause-reason.ts`。
 import { PAUSE_REASON_CHILDREN_INCOMPLETE, PAUSE_REASON_CHILDREN_FAILED, PAUSE_REASON_NO_OUTPUT, PAUSE_REASON_ACCEPTANCE_FAILED, PAUSE_REASON_USER_INTERRUPT, PAUSE_REASON_AWAITING_INPUT, PAUSE_REASON_POLICY_PAUSED, PAUSE_REASON_AI_PROVIDER_FAILED, PAUSE_REASON_AI_SDK_UNAVAILABLE, PAUSE_REASON_OUTPUT_MISSING, PAUSE_REASON_AGENT_PAUSED, PAUSE_REASON_OUTPUT_INSUFFICIENT_BUT_CHANGED } from './pause-reason.js';
@@ -39,6 +42,7 @@ import { isTerminalStatus } from './task-jobs.js';
 import { runStartRefusal } from './stop-signals.js';
 import { failedChildren, childNames } from './children-gate.js';
 import { buildTaskOutcome, buildCompletionAccount, goalAchievedOf, markGoalNotAchieved } from './task-outcome.js';
+import { emitCompletionEvent, verifyCompletionEvent } from './completion-emit.js';
 import { enqueueJob } from './job-enqueuer.js';
 import { truncateHistoryTail, planSystemContextCompaction, estimateContentTokens, contentChars } from './context-compaction.js';
 // zx_20261110_2 B5：压缩的**运行段**（取数→分段问模型→合并→落边界）已抽到独立模块（R-75a 行数额度）；
@@ -77,17 +81,16 @@ import { proFeatureRefusal } from './pro-gate.js';
 //   住独立模块（零 electron 静态依赖、生成走动态 import）⇒ rr 注入桩可直跑真实现。
 import { makeImageDescriber } from './image-describe.js';
 import { toAcceptanceSummary, acceptanceVerdictOf, goalEvidenceOf, capScoreByAcceptanceVerdict } from './acceptance-check.js';
-import { newRunId, claimCompletedEmit } from './run-trace.js';
+import { newRunId } from './run-trace.js';
 import { markCompletedRun } from './postlude.js';
 import { writeSubagentResult } from './subagent-result.js';
-import { formatOptions, formatAwaitingInputMessage } from './im/options.js';
+import { formatOptions, formatAwaitingInputMessage, normalizeOptionItems } from './im/options.js';
 import type { MemoryManager, MemoryEntry } from './memory-manager.js';
-import { buildMemoryContext, memoryConfTag, dropMemorySections } from './memory-context.js';
+import { buildMemoryContext, memoryConfTag, dropMemorySections, keptSectionInjections } from './memory-context.js';
 import { createLogger } from './logger.js';
-import { describeExecutionError } from './exec-error.js';
+import { describeExecutionError, isRateLimitedError } from './exec-error.js';
 // zx_20261018_1 批七「账」：七源分账 / 上下文预算 / `execution_metrics` 唯一写口。
 import { ledgerFromChars, withSourceChars, type TokenLedger, type TokenChars } from './token-ledger.js';
-import { applyContextBudget } from './context-budget.js';
 import { writeExecutionMetrics, type TokenBreakdownRecord } from './exec-metrics.js';
 import { KNOWLEDGE_INJECT_MAX_TOKENS } from './project-knowledge.js';
 // zx_20261101_2 M5: 记忆预算随窗口与任务体量走的**唯一实现**。
@@ -96,8 +99,9 @@ import { memoryBudgetCharsFor, MEMORY_BUDGET_DEFAULT_CHARS } from './memory-budg
 import { estimateTokensFromChars, TOKEN_CHARS_PER_UNIT } from './token-estimate.js';
 import { jsonSchema, NoSuchToolError, type CoreMessage, type ImagePart, type TextPart } from 'ai';
 import { toolRegistry, ExploreQuotaLedger } from './tool-registry.js';
+import { hydrateExploreLedger, createExploreLedgerPersistingStepHandler, writeExploreLedger } from './quota-ledger.js';
 // zx_20261023_3 批二（越界即拒）：变更类工具清单与调用时判据的**唯一真源**。
-import { WORLD_MUTATING_TOOLS, mutationGateVerdict } from './tools/mutation-gate.js';
+import { WORLD_MUTATING_TOOLS, mutationGateVerdict, readonlyDenyToolsOf } from './tools/mutation-gate.js';
 import type { ToolDeps } from './tools/deps.js';
 import { readonlyTools } from './tools/readonly.js';
 import { mediaTools } from './tools/media.js';
@@ -112,9 +116,13 @@ import { getSubagentType } from './subagent-registry.js';
 import { getLearnedStrategy, naturalStrategySelection, adjustProjectStrategy, recordStrategyOutcome, getToolUsageHint, getProjectThresholds, type ExecutionMetrics } from './feedback-engine.js';
 import { auditWorldConsistency, generateFactSnapshot, scanWorkingDirOnce, type WorkingDirScan } from './world-snapshot.js';
 import { CommandWriteQueue, type CommandWriteWindow } from './command-write-queue.js';
+// zx_20261116_3 M1「限」：收口前强制 flush 一次计费队列（best-effort，不阻断主流程）。
+import { flushBilling } from './billing-reporter.js';
+// zx_20261116_3 M3「判」：run 起点基线（只读判据扣除历史未跟踪文件）。
+import { captureRunStartBaseline, writeRunStartBaseline } from './run-baseline.js';
 // zx_20261109_1 B3：内容充分性旁路 LLM 的 run 级熔断器（类型只在编译期，运行时不新增边）。
 import type { SufficiencyBreaker } from './output-validator.js';
-import { resolveMaxSteps, stepsCapReached, buildStepCapNote, budgetCapReached, grantStepBudgetOnCapHit, stepCapContinuationOf, buildStepContinuationNote } from './step-budget.js';
+import { resolveMaxSteps, stepsCapReached, buildStepCapNote, budgetCapReached, recordStepCapHit, buildStepContinuationNote } from './step-budget.js';
 import { resumeLedgerTotal } from './resume-ledger.js';
 import { computeDiff } from './file-diff.js';
 // zx_20261021_4 批一: 产出路径解析与拆解器同取一份（`output-paths.ts` 零依赖）。
@@ -504,8 +512,11 @@ export function ensureDocDeliverable(
   return { id, created: true, ownerTaskId: o.taskId };
 }
 
-/** 一条 shell 命令最多补登记几个文件（**显示/落库**上限，非取数上限；超出时如实记日志） */
-export const SHELL_WRITTEN_REGISTER_LIMIT = 20;
+/**
+ * 一条 shell 命令最多补登记几个文件（**每批**上限，非取数上限）。
+ * zx_20261116_3 M6：20 → 200/批；单次窗口硬上限 1000（防病态构建写爆库），超出如实记日志。
+ */
+export const SHELL_WRITTEN_REGISTER_LIMIT = 200;
 
 /**
  * zx_20261109_1 B2：把一个 run 内**合并后**的命令窗口盘点一次，并把窗口内写出的文件补登记为 `doc` 产出物。
@@ -539,6 +550,8 @@ export async function flushTaskCommandWrites(
     //   探针仍由 `promoteTaskFileDeliverables` 的 `docNotProbe` 过滤，不拿探针充成果。
     const st = (db.prepare('SELECT status FROM wa_tasks WHERE id = ?').get(taskId) as { status?: string } | undefined)?.status;
     if (st === 'completed') promoteTaskFileDeliverables(db, taskId, 'post_command_flush');
+    // zx_20261116_3 M1「限」：收口前把计费/质量账队列冲一次（失败留在队列，进程退出前尽力而为）。
+    try { await flushBilling(); } catch { /* 记账失败不阻断收口 */ }
   } catch { /* 盘点/登记失败不阻断收口主流程 */ }
 }
 
@@ -930,32 +943,36 @@ export function buildTools(
       decisionType,
     );
     if (pauseRefusal) return pauseRefusal;
+    // zx_20261118_2 M1（答）：选项落库前先按换行拆条——真库 S6 的 `['A…\nB…\nC…\nD…']`
+    //   在 GUI 的 <button> 里会把 \n 折叠成空格，四个候选连成一行。拆条只在这里做一次，
+    //   落库/事件/IM/回执四处共用同一份 `normalized`（不各写一份）。
+    const normalized = normalizeOptionItems(options ?? []);
     // zx_20260917 M1（顺序是判据的一部分）: 三步次序为 **先落账 → 再置停（含发 status_changed）→ 后发 awaiting_input**。
     //   原序是「先置停、后落账」，置停那一步如今由 `pauseTask` 连状态事件一起发——若仍照原序，
     //   两个事件的到达次序会翻成「已暂停 → 横幅」，GUI 先见空状态的暂停卡片、后见问题横幅。
     //   新序下两事件各时刻读库都自洽（status_changed 发出时账已在库），仍守"先落库、后发事件"。
-    const sysMsg = options && options.length > 0
-      ? formatAwaitingInputMessage(question, options)
+    const sysMsg = normalized.length > 0
+      ? formatAwaitingInputMessage(question, normalized)
       : `[等待用户输入] ${question}`;
     db.prepare(
       "INSERT INTO wa_task_conversations (id, task_id, role, content, token_count, created_at) VALUES (?, ?, 'system', ?, 0, datetime('now'))"
     ).run(crypto.randomUUID(), taskId, sysMsg);
     // zx_20260915 P0-5(d): 先落库、后发事件，事件的 asked_at 取 persistAwaitingInput 的返回值（同源，不自造）
-    const askedAt = persistAwaitingInput(db, taskId, { question, options: options ?? [], decision_type: decisionType });
+    const askedAt = persistAwaitingInput(db, taskId, { question, options: normalized, decision_type: decisionType });
     // zx_20260904_5 收尾发现(2026-09-04): 持久化等待输入内容到 ctxJson——桌面"等待你的回复"横幅需展示真实问题/选项
     // zx_20260910_1 M2: 抽为 persistAwaitingInput，与门禁路径共用（两条暂停路径的真源必须同形，横幅才只认一处）
     pauseTask(db, { taskId, reason: PAUSE_REASON_AWAITING_INPUT });
-    eventBus.emit('task.awaiting_input', { taskId, task_id: taskId, projectId, question, decision_type: decisionType, options: options ?? [], context, asked_at: askedAt }).catch(() => {});
+    eventBus.emit('task.awaiting_input', { taskId, task_id: taskId, projectId, question, decision_type: decisionType, options: normalized, context, asked_at: askedAt }).catch(() => {});
     if (ctx.sendImAskUser) {
       try {
         const ctxJson = JSON.parse((db.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get(taskId) as { context_json: string } | undefined)?.context_json || '{}');
         if (ctxJson.channel && ctxJson.externalUser) {
-          const msg = `[待回复] ${question}${options && options.length ? `\n选项: ${formatOptions(options)}` : ''}`;
-          ctx.sendImAskUser({ channel: ctxJson.channel, toUser: ctxJson.externalUser, question: msg, taskId, options: options ?? undefined }).catch(() => {});
+          const msg = `[待回复] ${question}${normalized.length > 0 ? `\n选项: ${formatOptions(normalized)}` : ''}`;
+          ctx.sendImAskUser({ channel: ctxJson.channel, toUser: ctxJson.externalUser, question: msg, taskId, options: normalized.length > 0 ? normalized : undefined }).catch(() => {});
         }
       } catch { /* IM 通知失败不阻断暂停 */ }
     }
-    return JSON.stringify({ status: 'paused', message: '已暂停等待用户决策', decision_type: decisionType, question, options: options ?? [] });
+    return JSON.stringify({ status: 'paused', message: '已暂停等待用户决策', decision_type: decisionType, question, options: normalized });
   };
 
   // 软边界文件写入审批：工作目录外普通路径经用户批准后放行，并持久化批准目录（后续同目录免询问）
@@ -1164,7 +1181,18 @@ export function estimateTaskBudget(
     return { status: 'no_samples', basedOn: 0, tokens: 0, steps: 0 };
   }
   const estTokens = Math.round(weightedTokens / weightSum);
-  const estSteps = Math.round(weightedSteps / weightSum);
+  let estSteps = Math.round(weightedSteps / weightSum);
+  // zx_20261116_3 M5「拆」：步数估算下限——编译/测试类且判据 ≥5 条时，历史均值常低估
+  //   （真标本 T06：估 41 步、实跑 62 步，中途被迫收尾再续跑）。只抬新估，不回写旧账。
+  try {
+    const row = db.prepare('SELECT title, description, acceptance_criteria FROM wa_tasks WHERE id = ?').get(o.taskId) as
+      | { title?: string; description?: string; acceptance_criteria?: string }
+      | undefined;
+    const text = `${row?.title ?? ''} ${row?.description ?? ''} ${row?.acceptance_criteria ?? ''}`;
+    const criteriaCount = String(row?.acceptance_criteria ?? '').split(/\n|；|;/).map((s) => s.trim()).filter(Boolean).length;
+    const needsShell = /mvn|gradle|npm|pnpm|\bnode\b|\bgit\b|\btest\b|compile|编译|构建|测试/i.test(text);
+    if (needsShell && criteriaCount >= 5) estSteps = Math.max(estSteps, 50);
+  } catch { /* 读不到任务文本就不抬，不编 */ }
   writeTrace({ tokens: estTokens, steps: estSteps, basedOn: validCount });
   return { status: 'estimated', basedOn: validCount, tokens: estTokens, steps: estSteps };
 }
@@ -1199,6 +1227,11 @@ export async function executeTask(
   //   同一 run 内两个收口出口互斥（`claimCompletedEmit`），不把续跑伪造成"只发过一条"。
   ctx.runId = newRunId();
   ctx.completedRuns = [];
+  // zx_20261116_3 M3「判」：记下 run 起点已有的未跟踪/已修改文件，验收判“只读”时据此扣除。
+  try {
+    const baseline = captureRunStartBaseline(workingDir, ctx.runId);
+    if (baseline) writeRunStartBaseline(ctx.db, taskId, baseline);
+  } catch { /* 基线失败不阻断执行 */ }
   // zx_20261109_1 B2：本 run 的命令窗口队列（工具层只入队；收口前统一盘点一次）。
   //   在 `try` 之前建——`finally` 的兜底 flush 要用同一个实例。
   const commandWriteQueue = new CommandWriteQueue();
@@ -1264,9 +1297,12 @@ export async function executeTask(
       } catch { /* 语义识别失败回退词袋 */ }
     }
     // Phase C: 分类模糊时用历史成功率校准（家族相似→实践论）
-    const calibrated = calibrateArchetype(db, projectId, `${title} ${description}`, rawArchetype);
-    const archetype = pinnedDec?.archetype ?? calibrated;
-    if (!pinnedDec && calibrated !== rawArchetype) {
+    // zx_20261116_3 M2「名」：能力升级（`source='capability'`）是**基于题面能力需求**的硬判，
+    //   与手动/节点指定同属"不该被历史校准推翻"的一类；否则 e32ed84f 又会被校准回 research。
+    const capabilityPinned = decision.source === 'capability';
+    const calibrated = capabilityPinned ? rawArchetype : calibrateArchetype(db, projectId, `${title} ${description}`, rawArchetype);
+    const archetype = pinnedDec?.archetype ?? (capabilityPinned ? rawArchetype : calibrated);
+    if (!pinnedDec && !capabilityPinned && calibrated !== rawArchetype) {
       decision = { archetype: calibrated, source: 'calibrated', reason: '按历史成功率校准' };
     }
     // zx_20261105_1 M5: 能力需求与形态不一致时**留痕**。只记日志，**不改工具面**——
@@ -1410,6 +1446,8 @@ export async function executeTask(
     // zx_20261023_5 批二: 蒸馏卡段与逐卡注入行（同上；裁剪判定亦要用它）。
     let memoryCardText = '';
     let memoryCardInjections: Array<{ ref_id: string; chars: number }> = [];
+    // zx_20261121_1 M6: 项目经验段与注入行（同上；裁剪判定亦要用它）。
+    let memoryExperienceText = '', memoryExperienceInjections: Array<{ ref_id: string; chars: number }> = [];
     let memoryAccessedIds: string[] = [];
     if (ctx.memory) {
       try {
@@ -1463,6 +1501,7 @@ export async function executeTask(
         memoryKnowledgeInjections = built.knowledgeInjections;
         memoryDomainPackText = built.domainPackText;
         memoryDomainPackInjections = built.domainPackInjections;
+        memoryExperienceText = built.experienceText; memoryExperienceInjections = built.experienceInjections;
         memoryAccessedIds = [...built.accessedIds];
         memoryCtxSegmentChars = built.segmentChars.filter(s => s.kept).map(s => `${s.name}:${s.chars}`).join('|');
         // Phase A (2026-08-28 zx_1): 任务目标显性化——持久化目标/主要矛盾到 context_json + 透出到界面（立志可见，刷新仍可见）
@@ -1584,6 +1623,7 @@ export async function executeTask(
     let subagentSystemPrompt = subagentCtxJson.systemPrompt as string | undefined;
     let subagentAllowTools = subagentCtxJson.allowTools as string[] | undefined;
     let subagentDenyTools = subagentCtxJson.denyTools as string[] | undefined;
+    const readonlyDenyTools = readonlyDenyToolsOf(subagentCtxJson as Record<string, unknown>);
     const subagentTypeName = typeof subagentCtxJson.subagentType === 'string' ? subagentCtxJson.subagentType : '';
     if (subagentTypeName) {
       const liveCfg = getSubagentType(subagentTypeName);
@@ -1764,7 +1804,7 @@ export async function executeTask(
     const baseFace = narrowToolFace(archetype, tools as unknown as Record<string, unknown>,
       subagentAllowTools ? { allowTools: subagentAllowTools } : undefined);
     // zx_20261030_2 M2（「器」）：allow/deny 在这里一次算定（纯函数），删 key 与说明书共用同一结果。
-    const scope = applySubagentToolScope(baseFace, { allowTools: subagentAllowTools, denyTools: subagentDenyTools });
+    const scope = applySubagentToolScope(baseFace, { allowTools: subagentAllowTools, denyTools: [...(subagentDenyTools ?? []), ...readonlyDenyTools] });
     // zx_20261115_1 M1「职」：岗位工具白名单最后一道**交集**（岗位没设 ⇒ 空数组 ⇒ 与今日逐字节一致）。
     //   次序在子代理 allow/deny 之后：deny 已先赢，岗位再收一刀只会更窄，不会把 deny 掉的救回来。
     const toolFace = restrictToolFaceByPosition(
@@ -1801,7 +1841,7 @@ export async function executeTask(
         history: estimateTokensFromChars(CTX_HISTORY_TAIL_MAX_CHARS),
         system: estimateTokensFromChars(CTX_PROJECT_MAX_CHARS),
       };
-      const budget = applyContextBudget({ chars: preTrimChars, budgetTokens, capsTokens });
+      const { budget } = computeRoiBudget(db, { taskId, projectId, chars: preTrimChars, budgetTokens, capsTokens });
 
       // 裁知识：整节移除（`knowledgeText` 是记忆块里的一整段），实裁字符如实记。
       let knowledgeRemoved = 0;
@@ -1874,21 +1914,17 @@ export async function executeTask(
           // zx_20261021_3 批一: 领域包同理——只有**真留在上下文里**的包才记账。
           //   裁剪后回读记忆块：整段被 `dropMemorySections` 丢掉 ⇒ 零行（不写"注入过"的空账）。
           const memTextAfterTrim = memoryMsgIndex >= 0 ? String(messages[memoryMsgIndex]!.content ?? '') : '';
-          const domainPackRows = memoryDomainPackText && !memTextAfterTrim.includes(memoryDomainPackText)
-            ? []
-            : memoryDomainPackInjections;
+          const domainPackRows = keptSectionInjections(memoryDomainPackText, memoryDomainPackInjections, memTextAfterTrim);
           // zx_20261022_3 批八: 画像同理——裁剪后回读，整段被丢 ⇒ 零行。
-          const profileRows = memoryProfileText && !memTextAfterTrim.includes(memoryProfileText)
-            ? []
-            : memoryProfileInjections;
+          const profileRows = keptSectionInjections(memoryProfileText, memoryProfileInjections, memTextAfterTrim);
           // zx_20261023_5 批二: 蒸馏卡同理——逐卡一行，整段被裁掉 ⇒ 零行。
-          const cardRows = memoryCardText && !memTextAfterTrim.includes(memoryCardText)
-            ? []
-            : memoryCardInjections;
+          const cardRows = keptSectionInjections(memoryCardText, memoryCardInjections, memTextAfterTrim);
           // zx_20261113_1 B3「用」: 岗位同理——块真在 messages 里才记账；被裁 ⇒ 零行。
           const positionStillIn = positionText !== ''
             && messages.some((m) => typeof m.content === 'string' && m.content === positionText);
           const positionRows = positionStillIn ? positionInjections : [];
+          // zx_20261121_1 M6: 经验段同理——整段被裁 ⇒ 零行。
+          const experienceRows = keptSectionInjections(memoryExperienceText, memoryExperienceInjections, memTextAfterTrim);
           ctx.memory.recordContextInjections(taskId, {
             knowledge: knowledgeRows,
             memoryIds,
@@ -1896,6 +1932,7 @@ export async function executeTask(
             profiles: profileRows,
             cards: cardRows,
             positions: positionRows.map((p) => ({ ref_id: p.refId, chars: p.chars })),
+            experiences: experienceRows,
           });
           // 任务详情复水用：条目级快照（按 refId 去重、cap 20，读改写保兄弟键）。
           if (positionRows.length > 0) {
@@ -2127,8 +2164,13 @@ export async function executeTask(
       // zx_20261111_3 「显」——五页第一行说清（纯函数唯一真源）/ IM 回执自证 + 10 分钟撤销。**只改这一处**。
       // zx_20261112_1 「任·答·诊·衡」——岗位在册可派活 / 跨机认岗 / IM 有问必答 / 任务可诊断 / 档位一把尺。
       // zx_20261112_3 「名」——入站 mDNS 广播改用节点自持主机名，不再借用系统 LocalHostName。**只改这一处**。
+      // zx_20261117_1 「案·账·证·忆·接」——未落地要见 / 异常要账 / 判据要证 / 旧警要收 / 后补要接。**只改这一处**。
+      // zx_20261118_1 「回」——任务完成态回看文件变更（从事件日志回放，不新增存储）。**只改这一处**。
+      // zx_20261118_2 「明」——待答信息可读 + 六项账目名实。**只改这一处**。
+      // zx_20261119_1 「循」——完成留迹 + 模板块循意 + 父子不重工 + 工具不撞墙。**只改这一处**。
+      // zx_20261119_2 「核」——派生修复有名有据 + 开局改动跨仓有账 + 父收口机检 + 子仓路径可认 + 工具少空转 + 同仓构建有序。**只改这一处**。
       const prefixFp = fingerprintMessages(messages, stablePrefixEnd);
-      const feats ={ requirementCard: true, contextWatermark: true, historySummaryOnly: true, readListOnResume: true, goalRestartCap: true, build: 'zx_20261115_4',
+      const feats ={ requirementCard: true, contextWatermark: true, historySummaryOnly: true, readListOnResume: true, goalRestartCap: true, build: 'zx_20261121_2',
         archetype_source: decision.source,
         ctx_prefix_hash: prefixFp.hash, ctx_prefix_chars: prefixFp.chars, ctx_prefix_end: prefixFp.end };
       // zx_20260916_1 M5 (#6): 读**恢复账总数**（用户介入 + 系统自动），不再单读 `resume_count`——
@@ -2161,6 +2203,11 @@ export async function executeTask(
     // 如实告知（正向·开工即知）: 本档可用哪些工具。本档零收窄时只说一句"未收窄"（无"档外"可告知）。
     //   ⚠ zx_20261030_2 M2：这句话**必须**在 allow/deny 两刀之后生成——它描述的是模型**手上真正拿到的那把**。
     messages.push({ role: 'system', content: buildToolFaceBrief(archetype, adaptiveStrategy.label, toolFace.kept, toolFace.removed.length, toolFace.removed) });
+    // zx_20261117_1 M6「名/费」：单命令任务的轻量收口——有 shell 就自己跑，不派生只做复跑的子任务。
+    //   标本 05：H2 测试任务 145 步 / 65 万 tokens、派生 6 个验证子任务；00:52 自己跑一次只用了 6 步。
+    if (toolFace.kept.includes('execute_command') || toolFace.kept.includes('bash')) {
+      messages.push({ role: 'system', content: '[执行纪律] 若验收只需执行一条命令即可证明，直接执行并在拿到结果后 finalize；不要派生只做复跑的子任务。' });
+    }
 
     // zx_20261023_3 批二（令下即止 / 越界即拒）：给变更类工具的 `execute` 包一层**调用时**状态闸。
     //   装配时只包壳、不读库；壳里每次调用当场读库 ⇒ 同一 run 内前一步被暂停，后一步即进不来。
@@ -2173,7 +2220,7 @@ export async function executeTask(
       const originalExecute = gateTool.execute.bind(gateTool);
       gateTool.execute = async (...a: unknown[]) => {
         const nowStatus = (db.prepare('SELECT status FROM wa_tasks WHERE id = ?').get(taskId) as { status?: string } | undefined)?.status;
-        const verdict = mutationGateVerdict(nowStatus, name);
+        const verdict = mutationGateVerdict(nowStatus, name, readonlyDenyTools);
         if (!verdict.ok) {
           logger.warn({ taskId: taskId.slice(0, 8), tool: name, status: nowStatus, reason: verdict.reason }, '变更类工具调用被拒绝（任务已暂停/结束）');
           return JSON.stringify({ error: verdict.message, refused: verdict.reason, tool: name });
@@ -2258,8 +2305,10 @@ export async function executeTask(
     // 本账不兼作统计（原 `toolCallCounts` 兼两用，D2 删除后其"全量"那份将零读点，故不保留）。
     // zx_20260916_3 M5（O-H · D4）：由"每工具一本 Map"改为**按 `quotaKey` 一本账**——`bash` 与
     //   `execute_command` 共用 `shell_explore` 这一本（此前各 12/20，合计 32 次探索额度、实测翻倍）。
-    //   ⚠ 账是**本 run 内存态**：跨恢复/重启重置。D4 归一并未改变这一点，如实登记，不谎称已解决。
+    //   zx_20261120_2 M3：账已随 `context_json.shell_explore` 持久化，跨恢复续算（见下）。
     const quotaLedger = new ExploreQuotaLedger();
+    // zx_20261120_2 M3「衡」：探索配额跨恢复一本账（实现见 quota-ledger.ts）。
+    hydrateExploreLedger(db, taskId, quotaLedger);
     // zx_20260909 #7a: 探索命令运行级累计（只计 bash 只读探测/py_compile 类；跑测试/git 提交不触发硬停，避免误伤收尾）
     // zx_20260916_1 M2: **刻意不与上面那本配额账合并**——D3 的判据是 `isExplorationCall`（其 execute_command 分支
     //   只认 py_compile/--version，答的是"循环检测可否豁免"），与本轮的配额尺答的不是同一个问题；
@@ -2504,6 +2553,8 @@ export async function executeTask(
         return { content: `任务未起跑（${preStartRefusal}）`, steps: 0 };
       }
 
+      // zx_20261120_2 M3「衡」：每步结算后按需把探索账写回 `$.shell_explore`（实现见 quota-ledger.ts）。
+      const stepHandlerWithQuotaPersist = createExploreLedgerPersistingStepHandler(createStepHandler(stepScope), quotaLedger, db, taskId);
       const result = await streamText({
         model: provider.chat(modelName),
         messages,
@@ -2515,7 +2566,7 @@ export async function executeTask(
         abortSignal: controller.signal,
         // zx_20261110_2 B1：每步完成 ⇒ 看门狗"还在动"。推送点挂在 `stepScope.onStepTick`
         //   （见 `exec-step.ts` 的处理函数首行），此处仍是最初那一句接线——步逻辑的落点只有一个。
-        onStepFinish: createStepHandler(stepScope),
+        onStepFinish: stepHandlerWithQuotaPersist,
       });
 
       // D2 (2026-09-02): 消费 fullStream 驱动多步循环 + 捕获 text-delta 逐 token 实时推送。
@@ -2633,9 +2684,7 @@ export async function executeTask(
           //   不在此另算一份；无账则 undefined（"没这笔账"≠"账上是未通过"）。
           // zx_20260915 P0-3 A′(成功必带果): 与 run_close 出口**同一构造器**——`quality`/`deliverables`/`run_mutations`
           //   一律取落库载荷（本路 `qualityScore` 局部量此刻尚未声明，取内存值会两处口径不同，见 task-outcome.ts 头注释）。
-          if (claimCompletedEmit(ctx)) {
-            eventBus.emit('task.completed', { taskId, task_id: taskId, projectId, run_id: ctx.runId, ...buildTaskOutcome(db, taskId, fileMutationCount), acceptance: toAcceptanceSummary(readAcceptanceCheck(db, taskId)) }).catch(() => {});
-          }
+          emitCompletionEvent({ db, ctx, taskId, projectId, fileMutationCount, acceptance: toAcceptanceSummary(readAcceptanceCheck(db, taskId)), tag: 'finalize_task' });
           // zx_20261115_3 M1「归」：先按写作账补登记（有界、非探针、归属不夺），再提升成果——
           //   顺序与 run_close 出口同一条约束（新建行是 draft，须紧接提升；否则永久草稿）。
           try {
@@ -2646,6 +2695,8 @@ export async function executeTask(
             }
           } catch { /* 补登记 best-effort，不阻断收口 */ }
           promoteTaskFileDeliverables(db, taskId, 'finalize_task');
+          // zx_20261119_1 M1「迹」：收口自检——完成事件到底落没落库。
+          verifyCompletionEvent({ db, ctx, taskId, tag: 'finalize_task' });
           // zx_20261016_3 M32（「完成出口同一把尺」· 实测照出的**第二处两出口不同尺**）:
           //   finalize_task **工具路**此前**不进策略闭环**——全仓 `adjustProjectStrategy` 只有 run_close
           //   一处调用（`exec-finalize.ts`），于是"经工具收口的任务"与"撞步数上限走 run_close 收口的任务"
@@ -2935,6 +2986,7 @@ export async function executeTask(
     }
     ctxJson.cost_estimate = ce;
     ctxJson.last_model = modelName;
+    writeExploreLedger(ctxJson, quotaLedger.snapshot());
     db.prepare('UPDATE wa_tasks SET context_json = ? WHERE id = ?').run(JSON.stringify(ctxJson), taskId);
     // 星星之火：执行指标（供成功模式识别）——zx_20261018_1 批七起经唯一写口合并写。
     writeExecutionMetrics(db, taskId, {
@@ -2960,17 +3012,11 @@ export async function executeTask(
     //   本次上限记进 `step_budget_bonus`，下一轮 `resolveMaxSteps` 叠加；次数有界（3），到顶后如实说"不再加"。
     //   未撞顶则清掉旧撞顶账——上一轮的续额事实不属于本轮，留着会让后续暂停说明引用不存在的许诺。
     if (stepsCapReached(maxSteps, stepCount)) {
-      const grant = grantStepBudgetOnCapHit(ctxJson, maxSteps);
-      ctxJson.step_cap_hit = {
-        count: grant.grants,
-        steps: stepCount,
-        max_steps: maxSteps,
-        resume_bonus: grant.granted ? grant.grantedSteps : null,
-        at: new Date().toISOString(),
-      };
-      const continuation = stepCapContinuationOf(ctxJson);
+      // zx_20261120_2 M4「度」：续额按基础上限发放并落账（实现见 step-budget.recordStepCapHit）。
+      const { continuation } = recordStepCapHit(ctxJson, { maxSteps, stepCount, stepBudgetBonus });
       // 撞顶账须当场落库：`ctxJson` 在 2581 已写过一次，此后 exec-close 会另读一份 ctx 落账，
       //   不在这里写回则续额只活在本次内存里——恢复后原样再撞（正是本轮要修的病）。
+      writeExploreLedger(ctxJson, quotaLedger.snapshot());
       try { db.prepare('UPDATE wa_tasks SET context_json = ? WHERE id = ?').run(JSON.stringify(ctxJson), taskId); } catch { /* 落库失败不阻断收口 */ }
       finalContent = `${finalContent ? `${finalContent}\n\n` : ''}${buildStepCapNote(maxSteps, String((ctxJson.task_goal as { goal?: string } | undefined)?.goal || ''))}${continuation ? `\n\n${buildStepContinuationNote(continuation)}` : ''}`;
     } else if (ctxJson.step_cap_hit) {
@@ -3138,6 +3184,19 @@ export async function executeTask(
   } catch (err) {
     // zx_20261028_1 M4：失败文案说人话（`fetch failed` ⇒ "先去启动 ANS"）；原文仍以子串在场。
     const errorMsg = describeExecutionError(err);
+    // zx_20261116_1 M5「溯」：瞬时限流（ANS 429）不是任务内容失败——落 paused(ai_sdk_unavailable)，
+    //   不 markTaskFailed、不发 task.failed、不 throw。真事故：一次 429 把子任务打成 failed，进而
+    //   把父任务升级为 children_failed（后者已由 M1 切断；这里切断前半段）。
+    if (isRateLimitedError(err)) {
+      pauseTask(db, { taskId, reason: PAUSE_REASON_AI_SDK_UNAVAILABLE, note: `模型端点限流：${errorMsg}` });
+      db.prepare(
+        "INSERT INTO wa_task_conversations (id, task_id, role, content, token_count, created_at) VALUES (?, ?, 'system', ?, 0, datetime('now'))"
+      ).run(crypto.randomUUID(), taskId, `[限流暂停] ${errorMsg}。任务已暂停；稍后点「恢复」即可重试（恢复后重新获得一次机会）。`);
+      console.warn(`[Agent] 任务因限流暂停: ${title.slice(0, 50)}`, errorMsg);
+      // 外层 catch 在 `stepCount` 的块作用域之外（它在主 try 内声明）——此处按“未完成一次运行”记 0；
+      // 任务已 paused，恢复后是新 run，不把这次被限流截断的步数冒充成一次完整执行。
+      return { content: '', steps: 0, sdkFailed: true, sdkExhausted: true };
+    }
     console.error(`[Agent] 任务失败: ${title.slice(0, 50)}`, errorMsg);
     db.prepare(
       "INSERT INTO wa_task_conversations (id, task_id, role, content, token_count, created_at) VALUES (?, ?, 'system', ?, 0, datetime('now'))"
@@ -3698,16 +3757,14 @@ export function completionCapFloors(
   //   「未核验 ≠ 未通过」（A4）：若把未核验也算未通过，`no_criteria`/`no_user_criteria` 的规划类任务
   //   会被**整类**压到 45 分，那是另一种失实。
   const accVerdict = acceptanceVerdictOf(readAcceptanceCheck(db, taskId));
-  if (accVerdict === 'failed') {
+  if (accVerdict === 'failed' || accVerdict === 'unjudged') {
     cap = capScoreByAcceptanceVerdict(cap, accVerdict);
-    // 与上两条不同：**追加**而非"仅当无备注时填"——验收未通过是独立事实，
+    // 与上两条不同：**追加**而非"仅当无备注时填"——验收未过/未判成是独立事实，
     // 不得因前面已有一条压降说明（如"无真实产出证据"）就被吞掉（两因并存时读者须两因都看见）。
-    typeNote += ' [验收未通过，评分压降<60]';
-  } else if (accVerdict === 'unjudged') {
-    // zx_20260923_1 M2: 「有题未判成」**不压分**（承 A4「没判成 ≠ 没达成」），但**必须点名**——
-    //   否则同屏又是"90 分 excellent"与"验收未判成、任务已停"两种口径并存而无人解释
-    //   （承 zx_20260916 M1(A1)「低分的成因须如实点名」的同一精神：此处分不低，成因照样须在场）。
-    typeNote += ' [验收未判成，未压分]';
+    // zx_20261116_3 M3「判」：有题未判成也封 60（用户裁定），并点名"待重判"。
+    typeNote += accVerdict === 'failed'
+      ? ' [验收未通过，评分压降<60]'
+      : ' [验收未判成，评分压降<60，待重判]';
   }
   const registerNote = missingRegistrations.length > 0 ? ` [注册缺失: ${missingRegistrations.join(', ')}]` : '';
   return { cap, typeNote, registerNote };
@@ -3757,8 +3814,10 @@ export function assessCompletionQuality(
     if (deliverableSize > 800) score += 10; // 产出物有实质内容
     else if (deliverableSize > 0) score += 5;
 
-    if (stepCount <= 5) score += 10; // 高效
-    else if (stepCount <= 15) score += 5;
+    // zx_20261116_3 M3「判」：0 步是“未测量”，不是“高效”——不再给步骤效率分。
+    //   真标本 `9895078f`：`update_task_status` 用 0 步重算，旧公式照给 +10，未执行反而拿高效分。
+    if (stepCount > 0 && stepCount <= 5) score += 10;
+    else if (stepCount > 5 && stepCount <= 15) score += 5;
 
     if (budgetTokens > 0 && tokensUsed < budgetTokens * 0.5) score += 10;
     else if (budgetTokens > 0 && tokensUsed < budgetTokens) score += 5;
@@ -3770,7 +3829,11 @@ export function assessCompletionQuality(
     //   `completionCapFloors` 一处真源——各完成出口同尺；本函数只保留上面的"六维打分"。封顶值与两段注记
     //   的取值、次序**逐字同旧**（纯重构：搬位置、不搬判据）。
     let scoreFinal = Math.min(95, score);
-    const caps = completionCapFloors(db, { taskId, workingDir, archetype, hasDeliverables: delivs.c > 0, runArtifacts });
+    const caps = completionCapFloors(db, {
+      taskId, workingDir, archetype,
+      hasDeliverables: (() => { const c = taskDeliverableCounts(db, taskId); return c.own + c.shared > 0 || delivs.c > 0; })(),
+      runArtifacts,
+    });
     scoreFinal = Math.min(scoreFinal, caps.cap);
     const typeNote = caps.typeNote;
     const level = scoreFinal >= 80 ? 'excellent' : scoreFinal >= 60 ? 'good' : scoreFinal >= 40 ? 'acceptable' : 'partial';

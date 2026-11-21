@@ -16,6 +16,8 @@
  * 本模块只依赖 `better-sqlite3` 类型，不引 electron／不引 ai，供受控回归跑真实现。
  */
 import type Database from 'better-sqlite3';
+// zx_20261118_2 M5「豁」：用户逐条豁免的纯判据（零依赖）。引擎只读、只套用；写口在 GUI。
+import { applyAcceptanceWaivers, type AcceptanceWaiverItem } from './acceptance-waiver.js';
 
 /** 单条验收标准的 LLM 原始结论 */
 export interface AcceptanceCheckItem {
@@ -30,6 +32,12 @@ export interface AcceptanceCheckItem {
   evidence_refs?: string[];
   /** 由 `enforceEvidenceBoundChecks` 落下：这条是"缺运行证据"被降级的，不是模型自判未过 */
   evidence_missing?: boolean;
+  /**
+   * zx_20261118_2 M5：用户已对这**一条未达项**作出豁免裁定。
+   * ⚠ 只加标记、**不改 `passed`**——豁免是"人担了这条"，不是"模型判它过了"；
+   * 账上仍留 `passed:false` 供复盘，`waived_total` 单独计数。
+   */
+  waived?: boolean;
 }
 
 /**
@@ -66,6 +74,8 @@ export interface AcceptanceCheckItemView {
   passed: boolean;
   reason?: string;
   evidence_refs?: string[];
+  /** zx_20261118_2 M5：用户已豁免这一条（`passed` 仍为 false，不伪造通过） */
+  waived?: boolean;
 }
 
 /** 落 `ctxJson.acceptance_check` 的载荷。`verified` 是下游唯一的"算不算验过"判据 */
@@ -75,7 +85,12 @@ export interface AcceptanceCheckPayload {
   criteria_total: number;
   passed_total: number;
   passed: string[];
-  failed: Array<{ criterion: string; reason: string; evidence_refs?: string[] }>;
+  failed: Array<{ criterion: string; reason: string; evidence_refs?: string[]; waived?: boolean }>;
+  /**
+   * zx_20261118_2 M5：用户已豁免的未达项数（>0 才出现；旧载荷无此键）。
+   * `passed_total` 仍是**模型判过**的条数，不把豁免并进去——豁免与通过是两本账。
+   */
+  waived_total?: number;
   /** zx_20261109_1 B5：逐条明细（含证据引用）。旧载荷没有此键 ⇒ 读点须容忍缺席。 */
   items?: AcceptanceCheckItemView[];
   /**
@@ -257,11 +272,12 @@ function toCheckItemView(c: AcceptanceCheckItem): AcceptanceCheckItemView {
     passed: c.passed !== false,
     ...(reason ? { reason } : {}),
     ...(refs.length > 0 ? { evidence_refs: refs } : {}),
+    ...(c.waived ? { waived: true } : {}),
   };
 }
 
 /** 拒收项 → `failed[]` 条目（保留证据引用；zx_20261109_1 B5）。 */
-function toFailedEntry(c: AcceptanceCheckItem): { criterion: string; reason: string; evidence_refs?: string[] } {
+function toFailedEntry(c: AcceptanceCheckItem): { criterion: string; reason: string; evidence_refs?: string[]; waived?: boolean } {
   const refs = Array.isArray(c.evidence_refs)
     ? c.evidence_refs.map((r) => String(r ?? '').trim()).filter(Boolean)
     : [];
@@ -269,11 +285,12 @@ function toFailedEntry(c: AcceptanceCheckItem): { criterion: string; reason: str
     criterion: String(c.criterion ?? '').trim() || '未命名',
     reason: String(c.reason ?? '').trim() || '未说明',
     ...(refs.length > 0 ? { evidence_refs: refs } : {}),
+    ...(c.waived ? { waived: true } : {}),
   };
 }
 
 export function buildAcceptanceCheckPayload(
-  checks: Array<{ criterion?: string; passed?: boolean; reason?: string; evidence_refs?: string[]; evidence_missing?: boolean }>,
+  checks: Array<{ criterion?: string; passed?: boolean; reason?: string; evidence_refs?: string[]; evidence_missing?: boolean; waived?: boolean }>,
   checkedAt: string = new Date().toISOString(),
   criteriaOrder?: string[] | null,
   /** zx_20261110_2 B6：判据路径的**非 own** 解析结果（跨任务/快照）——真核验载荷也带这笔账。 */
@@ -284,6 +301,9 @@ export function buildAcceptanceCheckPayload(
   const items = aligned.checks.map(toCheckItemView);
   const failedAll = aligned.checks.filter((c) => c.passed === false);
   const failed = failedAll.map(toFailedEntry);
+  // zx_20261118_2 M5：豁免是**用户裁定**，与模型判过（passed_total）分开记；
+  //   failed[] 条目保留 `waived:true`，UI 据此把「✗ 未达」与「⚑ 已豁免」分列。
+  const waivedTotal = aligned.checks.filter((c) => c.waived === true).length;
   // zx_20261110_2 B6：**非 own** 的判据路径解析账（跨任务/快照）与结论同载——结论之外，
   //   还要答得出"这条题指向的文件到底是哪一个、凭什么认定它就是这个"。
   const resolvedEvidence = (extra?.criteriaPathResolved ?? [])
@@ -309,6 +329,7 @@ export function buildAcceptanceCheckPayload(
       items,
       criteria_echo_missing: aligned.echoMissing,
       ...(evidenceMissing > 0 ? { evidence_missing: evidenceMissing } : {}),
+      ...(waivedTotal > 0 ? { waived_total: waivedTotal } : {}),
       ...(resolvedEvidence.length > 0 ? { criteria_path_resolved: resolvedEvidence } : {}),
     };
   }
@@ -326,6 +347,7 @@ export function buildAcceptanceCheckPayload(
     failed,
     items,
     ...(evidenceMissing > 0 ? { evidence_missing: evidenceMissing } : {}),
+    ...(waivedTotal > 0 ? { waived_total: waivedTotal } : {}),
     ...(resolvedEvidence.length > 0 ? { criteria_path_resolved: resolvedEvidence } : {}),
   };
 }
@@ -404,6 +426,11 @@ export interface ProposeCriteriaInput {
    * `wa_projects.working_dir`。缺省 ⇒ 相对字面量不解析（如实记"无法核实"，不按 cwd 猜）。
    */
   resolveRelative?: (p: string) => string;
+  /**
+   * zx_20261119_2 M4：项目工作目录找不到时的**子仓候选**（有界，调用方注入）。
+   * 只在 `resolveRelative` 的结果不存在时才试；不注入则行为逐字不变。
+   */
+  resolveRelativeCandidates?: (p: string) => Array<{ path: string; label?: string }>;
 }
 
 /** 代拟的产物：判据文本 + 逐条自核结论（形状与 `AcceptanceCheckPayload.proposed*` 一致）。 */
@@ -566,13 +593,24 @@ export function proposeAcceptanceCriteria(input: ProposeCriteriaInput): Proposed
     //   （工程级查重把行留在别的任务名下）时**恒不可达**（真库标本 `c731c640`）。
     //   仍不直接 `fs.existsSync(字面量)`——那按进程 cwd 解析，既有注释已证伪；基准由调用方注入。
     const resolved = hit ? hit.fp : (input.resolveRelative ? input.resolveRelative(p) : '');
-    const exists = resolved && probe ? probe(resolved) : false;
+    // zx_20261119_2 M4：主路径不存在时才试子仓候选；未注入候选 ⇒ tried=0，文案与旧行为逐字一致。
+    let finalResolved = resolved;
+    let subRepoLabel = '';
+    let tried = 0;
+    if (probe && !(resolved && probe(resolved)) && input.resolveRelativeCandidates) {
+      const cands = input.resolveRelativeCandidates(p);
+      tried = cands.length;
+      const found = cands.find((c) => c.path !== resolved && probe(c.path));
+      if (found) { finalResolved = found.path; subRepoLabel = String(found.label ?? ''); }
+    }
+    const exists = finalResolved && probe ? probe(finalResolved) : false;
     push(`产出写入指定路径：${p}`, '任务文本中显式写出的路径字面量', exists,
       !probe ? '未能核实（未注入路径探针）'
-        : exists ? undefined
+        : exists ? (subRepoLabel ? `位于子仓 ${subRepoLabel}` : undefined)
           : hit ? `文件不在路径上：${hit.fp}`
-            : resolved ? `在册产出物中没有落在该路径上的文件，且项目工作目录下不存在该路径：${resolved}`
-              : '在册产出物中没有落在该路径上的文件（未注入工作目录基准，相对路径无法解析）');
+            : finalResolved ? `在册产出物中没有落在该路径上的文件，且项目工作目录下不存在该路径：${finalResolved}${tried > 0 ? `（另查 ${tried} 个子仓候选未命中）` : ''}`
+              : tried > 0 ? `在册产出物中没有落在该路径上的文件；已查 ${tried} 个子仓候选未命中`
+                : '在册产出物中没有落在该路径上的文件（未注入工作目录基准，相对路径无法解析）');
   }
 
   // ③ zx_20261105_1 M7：两条证据规则都无产出时，才采用文本候选作**进一步提示**。
@@ -711,9 +749,38 @@ export function parseAcceptanceChecks(text: string): AcceptanceCheckItem[] | nul
 const RUNTIME_ACTION_RE = /运行|执行|启动|重启|编译|构建|打包|部署|迁移|建表|导入|导出|调用|请求|查询|测试/;
 const RUNTIME_RESULT_RE = /退出码|不报错|无报错|有值|显示|返回|端口|接口|数据库|落库|字段|页面|日志/;
 
+/**
+ * zx_20261117_1 M3「证」：**结果类**判据——必须由"真的跑出这个结果"的执行证据支撑。
+ *
+ * 与上面的粗尺分开：`criterionNeedsRuntime` 仍决定"要不要证据"；本词表决定"要不要**执行类**证据"。
+ * 真标本（标本 04）：判据 3「H2 测试**全绿**」被 `grep -c "@Test"` 的 run 绑定——grep 只证明"有测试类"，
+ * 不证明"跑过且全绿"。只对下列结果词收紧，避免把「测试使用 H2」这类静态判据也逼着重跑。
+ */
+const RUNTIME_EXEC_RESULT_RE = /全绿|全部通过|退出码|BUILD SUCCESS|构建成功|编译通过|测试通过|运行通过/;
+
+/** 执行类命令前缀——纯 `grep|cat|ls|find|sed|awk` 不算"跑过"。 */
+const EXEC_COMMAND_RE = /^(?:cd\s+[^&]+&&\s*)?(mvn|gradle|npm|pnpm|yarn|node|npx|python3?|bash|sh|java|go|cargo|make)\b/i;
+
 export function criterionNeedsRuntime(text: string | null | undefined): boolean {
   const s = String(text ?? '');
   return RUNTIME_ACTION_RE.test(s) || RUNTIME_RESULT_RE.test(s);
+}
+
+/** 该判据是否要求"执行结果"（而不只是"存在/配置"）。 */
+export function criterionNeedsExecutionResult(text: string | null | undefined): boolean {
+  return RUNTIME_EXEC_RESULT_RE.test(String(text ?? ''));
+}
+
+/** 该命令是否是执行类（编译/测试/运行），而非只读查看。 */
+export function isExecutionCommand(command: string | null | undefined): boolean {
+  return EXEC_COMMAND_RE.test(String(command ?? '').trim());
+}
+
+/** 运行证据的命令索引（id 形如 `run:<uuid>`）——M3 用于区分"执行 run"与"grep run"。 */
+export interface EvidenceCommandIndex {
+  own?: ReadonlyMap<string, { tool: string; command: string }>;
+  /** zx_20261117_1 M3：直接子任务的执行 run（带归属，供父任务引用） */
+  tree?: ReadonlyMap<string, { tool: string; command: string }>;
 }
 
 /** 强制降级时追加的固定文案（判据与文案一处真源）。 */
@@ -731,11 +798,26 @@ export const RUNTIME_EVIDENCE_REQUIRED_REASON = '未提供运行证据（需附 
 export function enforceEvidenceBoundChecks(
   checks: AcceptanceCheckItem[],
   evidenceIndex: ReadonlySet<string>,
+  commandIndex?: EvidenceCommandIndex,
 ): AcceptanceCheckItem[] {
   return checks.map((c) => {
     if (c.passed !== true || !criterionNeedsRuntime(c.criterion)) return c;
     const refs = Array.isArray(c.evidence_refs) ? c.evidence_refs : [];
-    const bound = refs.some((r) => typeof r === 'string' && evidenceIndex.has(r.trim()));
+    const resultNeeded = criterionNeedsExecutionResult(c.criterion);
+    const bound = resultNeeded
+      ? refs.some((r) => {
+          if (typeof r !== 'string') return false;
+          const id = r.trim();
+          if (!id.startsWith('run:')) return false;
+          // 未传命令索引（旧调用方/旧 rr）⇒ 保持旧口径：任意本任务 run 都算（不把旧断言弄红）。
+          if (!commandIndex) return evidenceIndex.has(id);
+          const own = commandIndex.own?.get(id);
+          if (own && isExecutionCommand(own.command)) return true;
+          // zx_20261117_1 M3：父任务可引用**直接子任务**的执行 run（证据串已带归属标签）。
+          const tree = commandIndex.tree?.get(id);
+          return !!tree && isExecutionCommand(tree.command);
+        })
+      : refs.some((r) => typeof r === 'string' && evidenceIndex.has(r.trim()));
     if (bound) return c;
     const reason = String(c.reason ?? '').trim();
     return {
@@ -760,6 +842,12 @@ export function decideAcceptanceOutcome(input: {
   checks?: AcceptanceCheckItem[] | null;
   /** zx_20261109_1 B5：输入判据的有序行（`splitCriteriaLines`）——用于回填与回显缺失判定。 */
   criteriaOrder?: string[] | null;
+  /**
+   * zx_20261118_2 M5：用户已写下的逐条豁免。只对 `passed:false` 的条目生效；
+   * 被豁免者仍留在 `failed[]`（带 `waived:true`），但**不再拼进拒收 block**。
+   * 引擎侧只读账上已有豁免——agent 无法在 finalize_task 里自造。
+   */
+  waivers?: readonly AcceptanceWaiverItem[] | null;
 }): { outcome: AcceptanceOutcome; checks: AcceptanceCheckItem[]; criteriaOrder?: string[] } {
   if (input.kind === 'no_model') return { outcome: { ran: false, reason: 'no_model' }, checks: [] };
   if (input.kind === 'exception') return { outcome: { ran: false, reason: 'error' }, checks: [] };
@@ -770,13 +858,18 @@ export function decideAcceptanceOutcome(input: {
     ? input.criteriaOrder.map((s) => String(s ?? '').trim()).filter(Boolean)
     : [];
   const aligned = order.length > 0 ? alignChecksToCriteria(parsed, order) : null;
-  const checks = aligned ? aligned.checks : parsed;
+  // zx_20261118_2 M5：先套用户豁免，再判收口——豁免不改 `passed`，只打 `waived` 标记。
+  const checks0 = aligned ? aligned.checks : parsed;
+  const checks = input.waivers && input.waivers.length > 0
+    ? applyAcceptanceWaivers(checks0, input.waivers).checks
+    : checks0;
   const withOrder = order.length > 0 ? { criteriaOrder: order } : {};
   if (aligned && aligned.echoMissing > 0) {
     // 条数对不上 / 文本补不齐 ⇒ 这轮**不算判成**（unjudged），绝不冒名全过。
     return { outcome: { ran: false, reason: 'criteria_echo_missing' }, checks, ...withOrder };
   }
-  const failed = checks.filter((c) => c.passed === false);
+  // 已豁免的未达项不再阻断收口；未豁免的仍照旧拒收。
+  const failed = checks.filter((c) => c.passed === false && c.waived !== true);
   if (failed.length === 0) return { outcome: { ran: true, passed: true }, checks, ...withOrder };
   const block = JSON.stringify({
     error: `验收标准未达成（${failed.length} 项），请补齐后再 finalize：\n${failed.map((f) => `- ${f.criterion}: ${f.reason || '未说明'}`).join('\n')}`,
@@ -874,6 +967,8 @@ export interface AcceptanceSummary {
   criteria_path_resolved?: Array<{ ref: string; resolved_as: string; resolved_from: string }>;
   /** zx_20261109_1 B5：`criteria_echo_missing` 时带出的缺失条数（供事件/暂停文案回查） */
   criteria_echo_missing?: number;
+  /** zx_20261118_2 M5：用户已豁免的未达项数（>0 才出现） */
+  waived_total?: number;
 }
 
 /**
@@ -902,6 +997,7 @@ export function toAcceptanceSummary(ac: AcceptanceCheckLike | undefined): Accept
     verified,
     criteria_total: Number(ac.criteria_total) || 0,
     passed_total: Number(ac.passed_total) || 0,
+    ...(Number(ac.waived_total) > 0 ? { waived_total: Number(ac.waived_total) } : {}),
     reason: verified ? undefined : reason,
     ...(!verified && reason === 'criteria_path_missing' && missing.length > 0 ? { criteria_path_missing: missing } : {}),
     ...(!verified && reason === 'criteria_path_missing' && ambiguous.length > 0 ? { ambiguous_paths: ambiguous } : {}),
@@ -926,7 +1022,9 @@ export interface AcceptanceCheckLike {
   criteria_total?: number;
   passed_total?: number;
   passed?: string[];
-  failed?: Array<{ criterion: string; reason: string; evidence_refs?: string[] }>;
+  failed?: Array<{ criterion: string; reason: string; evidence_refs?: string[]; waived?: boolean }>;
+  /** zx_20261118_2 M5：用户已豁免的未达项数（旧载荷无此键 ⇒ 0） */
+  waived_total?: number;
   /** zx_20261109_1 B5：逐条明细（旧载荷无此键） */
   items?: AcceptanceCheckItemView[];
   reason?: AcceptanceUnverifiedReason;
@@ -1006,6 +1104,12 @@ export function isUnjudgedReason(reason: AcceptanceUnverifiedReason | undefined 
 
 /** 验收未通过时完成分的压降上限（<60，与 `agent-executor.ts` 的 D1「未达交付」同尺）。 */
 export const ACCEPTANCE_FAILED_SCORE_CAP = 45;
+/**
+ * zx_20261116_3 M3「判」：**有判据但未判成**（`unjudged`）的完成分上限。
+ * 用户裁定：未判成不是“没达成”，但也不能拿 95 分冒充达成；封 60、`goal_achieved=false`，
+ * 待重判通过后才可恢复。真标本 `9895078f`：0/0 error → 95 分、goal=true。
+ */
+export const ACCEPTANCE_UNJUDGED_SCORE_CAP = 60;
 
 /**
  * zx_20260916 M1（维特根斯坦「意义即用法」/ 道德经·七十一章「知不知，上」）：
@@ -1037,7 +1141,10 @@ export function acceptanceVerdictOf(ac: unknown): AcceptanceVerdict {
   if (!isAcceptanceVerified(ac)) return isUnjudgedReason((ac as AcceptanceCheckLike | undefined)?.reason) ? 'unjudged' : 'not_checked';
   const total = Number(ac.criteria_total) || 0;
   const passed = Number(ac.passed_total) || 0;
-  return passed < total ? 'failed' : 'passed';
+  // zx_20261118_2 M5：豁免项也算"已满足"，但它是用户裁定而非模型判过——
+  //   明细仍由 `waived_total` 单独可见（verdict 只答"能不能收口"）。
+  const waived = Number(ac.waived_total) || 0;
+  return passed + waived < total ? 'failed' : 'passed';
 }
 
 /**
@@ -1054,7 +1161,7 @@ export function acceptanceVerdictOf(ac: unknown): AcceptanceVerdict {
  * ⚠ `verified:true` 且 `0/0` 落 `score_only`（不是 `acceptance_passed`）：没有题目就没有凭据，
  *   不能拿"空数组全过"冒充"已验收达成"。
  */
-export type GoalEvidence = 'acceptance_passed' | 'acceptance_failed' | 'score_only' | 'none';
+export type GoalEvidence = 'acceptance_passed' | 'acceptance_passed_with_waivers' | 'acceptance_failed' | 'score_only' | 'none' | 'unjudged';
 
 export function goalEvidenceOf(ac: AcceptanceCheckLike | undefined | null): GoalEvidence {
   if (!ac || typeof ac !== 'object') return 'none';
@@ -1062,8 +1169,17 @@ export function goalEvidenceOf(ac: AcceptanceCheckLike | undefined | null): Goal
   if (isAcceptanceVerified(ac)) {
     const total = Number(ac.criteria_total) || 0;
     const passed = Number(ac.passed_total) || 0;
-    if (total > 0) return passed >= total ? 'acceptance_passed' : 'acceptance_failed';
+    // zx_20261118_2 M5：用户豁免的未达项计入"可背书"——但凭据名必须与"全过"分开，
+    //   否则完成账上的 `acceptance_passed` 会掩盖"N 条是人担的"这一事实。
+    const waived = Number(ac.waived_total) || 0;
+    if (total > 0) {
+      if (passed >= total) return 'acceptance_passed';
+      if (passed + waived >= total) return 'acceptance_passed_with_waivers';
+      return 'acceptance_failed';
+    }
   }
+  // zx_20261116_3 M3「判」：有题未判成是一个**独立的凭据态**，不再混进 `score_only`。
+  if (isUnjudgedReason(ac.reason)) return 'unjudged';
   return 'score_only';
 }
 
@@ -1073,5 +1189,8 @@ export function goalEvidenceOf(ac: AcceptanceCheckLike | undefined | null): Goal
  * 不各写一个 `Math.min(…, 45)`（同判据两处手抄即分叉之源）。
  */
 export function capScoreByAcceptanceVerdict(score: number, verdict: AcceptanceVerdict): number {
-  return verdict === 'failed' ? Math.min(score, ACCEPTANCE_FAILED_SCORE_CAP) : score;
+  if (verdict === 'failed') return Math.min(score, ACCEPTANCE_FAILED_SCORE_CAP);
+  // zx_20261116_3 M3「判」：有题未判成同样封 60（用户 2026-11-16 裁定）。
+  if (verdict === 'unjudged') return Math.min(score, ACCEPTANCE_UNJUDGED_SCORE_CAP);
+  return score;
 }

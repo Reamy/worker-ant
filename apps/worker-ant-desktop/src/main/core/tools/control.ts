@@ -10,6 +10,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { PAUSE_REASON_CHILDREN_INCOMPLETE, PAUSE_REASON_CHILDREN_FAILED, PAUSE_REASON_NO_OUTPUT, PAUSE_REASON_ACCEPTANCE_FAILED, PAUSE_REASON_USER_INTERRUPT, PAUSE_REASON_AWAITING_INPUT, PAUSE_REASON_PENDING_CONFIRMATION, PAUSE_REASON_POLICY_PAUSED, PAUSE_REASON_AI_PROVIDER_FAILED, PAUSE_REASON_OUTPUT_MISSING, PAUSE_REASON_OUTPUT_INSUFFICIENT, PAUSE_REASON_TOOL_LOOP, PAUSE_REASON_NO_PROGRESS, PAUSE_REASON_AGENT_PAUSED } from '../pause-reason.js';
 import { buildTaskOutcome, buildCompletionAccount, goalAchievedOf, syncGoalAchievedFromAccount, markGoalNotAchieved } from '../task-outcome.js';
+// zx_20261116_2 M5「迹」：update_task_status 完成路径也要记“这一 run 完成了”（岗位经验候选/后置账身份）。
+import { markCompletedRun } from '../postlude.js';
 import { childDispatchHint, chainBlockReason } from '../task-chain.js';
 import { decideAcceptanceOutcome, recordAcceptanceOutcome, recordProposedCheck, proposeAcceptanceCriteria, toAcceptanceSummary, acceptanceVerdictOf, capScoreByAcceptanceVerdict, goalEvidenceOf, suggestCriteriaFromText, PROPOSED_ACCEPTANCE_KEY, type AcceptanceOutcome, type AcceptanceCheckPayload, type AcceptanceSummary, type AcceptanceVerdict, type ProposedCriteria } from '../acceptance-check.js';
 // zx_20261105_1 M7：候选判据登记走 `context_json` 唯一合并写口（不抹附件/目标/方案等兄弟键）。
@@ -36,6 +38,8 @@ import { noInteractionAskRefusal } from '../no-interaction.js';
 // zx_20261011_1 M4（双向澄清）: 中继任务（派来的活）的提问器——先问上游（有界等待），答不到才退回 M11 自决。
 import { answerOf, getRequestAsker, requestIdOf } from '../node-clarify.js';
 import { resolveTaskMilestoneLink, writeMilestoneDone, revertMilestoneDoneForTask, selfCompleteBan, buildChildContext, resolveAncestorSchemeRef, goalDeviationCapReached, MAX_CHILD_BREADTH, MAX_TASK_DEPTH, childBreadthRefusal, collectAncestorIds, collectSubtreeIds } from '../task-accounting.js';
+// zx_20261120_3 M1「职·全」：create_task 也走同一派生（父岗位有效性校验 + 来源落库）。
+import { deriveTaskPosition, positionContextFields } from '../positions.js';
 import { relayTreeRefusal } from '../relay-tree.js';
 import { truncationNote } from '../shell-exec.js';
 import { makeAnsDecomposeDeps, autoDecomposeForTask, loadDecompositionPatterns, recordInferredDeps, withAcceptanceSource, acceptanceSourcesNotice } from '../task-decompose.js';
@@ -43,6 +47,8 @@ import { makeAnsDecomposeDeps, autoDecomposeForTask, loadDecompositionPatterns, 
 import { parseDepIds } from '../dep-graph.js';
 
 import { setDeliverableStatus, promoteTaskFileDeliverables, autoAssignPrimary, readAcceptanceCheck, docNotProbe } from '../deliverable-lifecycle.js';
+// zx_20261116_2 M2「证」：完成/覆盖时写下本任务的贡献声明（供验收取证按归属判卷）。
+import { recordContribution } from '../deliverable-attribution.js';
 
 /**
  * zx_20261012_2 批四（拆解随本相）: 计划嵌套上限——**计划模式的层数**，与 `MAX_TASK_DEPTH`
@@ -204,7 +210,8 @@ export function controlTools(deps: ToolDeps) {
         // 深度限制：子任务深度=父任务深度+1
         const parentRow = db.prepare('SELECT context_json, position_id FROM wa_tasks WHERE id = ?').get(taskId) as { context_json?: string | null; position_id?: string | null } | undefined;
         const parentCtx = JSON.parse(parentRow?.context_json || '{}') as Record<string, unknown>;
-        const parentPositionId = typeof parentRow?.position_id === 'string' ? parentRow.position_id : '';
+        // zx_20261120_3 M1：与 spawn_subagent/辩论/蚁群同一派生（父岗位停用/未绑定 ⇒ none）。
+        const derivedPosition = deriveTaskPosition(db, { projectId, parentTaskId: taskId });
         const childDepth = (parentCtx.depth as number || 0) + 1;
         if (childDepth > MAX_TASK_DEPTH) return JSON.stringify({ error: `已达最大嵌套深度(${MAX_TASK_DEPTH}层)，请直接完成而非创建子任务。当前深度=${childDepth - 1}` });
         // zx_20261115_2 M1：中继派单的任务树另有相对深度/总任务数/总时窗三道界（与全局 MAX_TASK_DEPTH 两把尺）。
@@ -248,7 +255,10 @@ export function controlTools(deps: ToolDeps) {
         const acceptanceText = (args.acceptance_criteria || '').trim();
         db.prepare(
           "INSERT INTO wa_tasks (id, project_id, title, description, status, priority, parent_task_id, depends_on, source, acceptance_criteria, context_json, position_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'agent', ?, ?, ?)"
-        ).run(id, projectId, args.title, args.description, status, args.priority ?? 0, taskId, args.depends_on || '', acceptanceText, JSON.stringify(withAcceptanceSource(buildChildContext(parentCtx, childDepth), acceptanceText ? 'model' : 'missing')), parentPositionId);
+        ).run(id, projectId, args.title, args.description, status, args.priority ?? 0, taskId, args.depends_on || '', acceptanceText, JSON.stringify({
+          ...withAcceptanceSource(buildChildContext(parentCtx, childDepth), acceptanceText ? 'model' : 'missing'),
+          ...positionContextFields(derivedPosition),
+        }), derivedPosition.positionId);
         // zx_20261105_1 M7（王阳明·知行合一 / 道德经·知不知）: 无用户判据时登记**文本有据**的候选，
         //   供人在任务详情「采用」。候选不是许诺——不写 `acceptance_criteria`、不改判卷语义。
         const suggestedCriteria = (args.acceptance_criteria || '').trim()
@@ -291,18 +301,20 @@ export function controlTools(deps: ToolDeps) {
           //   的 `reason` 只落 `$.pause_note`（**不**发通知），`failed` 一路只进事件（**也**不发通知）。
           //   维特根斯坦：说成它真做的样子。现 `failed` 一路真进 IM（经 `markTaskFailed`）。
           reason: { type: 'string', description: '可选：置 failed 的失败原因（会如实进事件、会话消息与 IM 通知）；置 paused 时作为暂停附注留痕（进事件与 $.pause_note，不据此发通知）' },
+          // zx_20261116_2 M3：目标任务的验收有失败项时，置 completed 必须给覆盖原因——不让“覆盖完成”无名无姓。
+          overrideReason: { type: 'string', description: '可选：目标任务的验收有失败项时，置 completed 必须填写覆盖原因（会落 completion_override 并发 [覆盖完成] 系统行）' },
         },
         required: ['targetTaskId', 'status'],
       }),
-      execute: async (args: { targetTaskId: string; status: string; reason?: string }) => {
+      execute: async (args: { targetTaskId: string; status: string; reason?: string; overrideReason?: string }) => {
         // zx_20260910_2 M1: 自完成禁令——完成的唯一合法出口是 finalize_task（过三道门禁且会正常运行收口）。
         // 此前允许 targetTaskId === 当前任务，AI 用它绕过门禁自我宣告完成：不留事件(不变量违规) +
         // run 收口随即翻回 paused ⇒ 界面闪现「已完成」又变执行中（现象1 死因）。
         const ban = selfCompleteBan(taskId, args.targetTaskId, args.status);
         if (ban) return JSON.stringify({ error: ban });
         // 目标不存在此前静默"成功"（UPDATE 命中 0 行也返回 status）——补存在性校验，并取目标任务自己的 project_id
-        const trow = db.prepare('SELECT project_id, status, parent_task_id, quality_score FROM wa_tasks WHERE id = ?').get(args.targetTaskId) as
-          | { project_id: string | null; status: string; parent_task_id: string | null; quality_score: number | null }
+        const trow = db.prepare('SELECT project_id, status, parent_task_id, quality_score, context_json FROM wa_tasks WHERE id = ?').get(args.targetTaskId) as
+          | { project_id: string | null; status: string; parent_task_id: string | null; quality_score: number | null; context_json?: string | null }
           | undefined;
         if (!trow) return JSON.stringify({ error: '任务不存在' });
         // zx_20261027_1 M3（道德经·知止不殆，但须是**可纠正的止**）：终态守卫原样保留，另开两个**窄口**——
@@ -330,6 +342,55 @@ export function controlTools(deps: ToolDeps) {
             taskId: args.targetTaskId,
             currentStatus: trow.status,
           });
+        }
+        // zx_20261116_2 M3「覆」：目标任务的验收账有失败项时，置 completed 必须带 overrideReason，
+        //   并落 `completion_override`（谁/为什么/原验收快照）+ 系统行。不改 acceptance_check 本身——
+        //   覆盖是“人/父任务决定接受”，不是“重判通过”。同值幂等且已有 override 时可不重复给因。
+        let tctx0: Record<string, unknown> = {};
+        try { tctx0 = JSON.parse(trow.context_json || '{}'); } catch { /* 坏 JSON 按无验收账论 */ }
+        const ac0 = tctx0.acceptance_check as { verified?: unknown; passed_total?: unknown; criteria_total?: unknown; failed?: unknown } | undefined;
+        const acFailedCount = ac0 && ac0.verified === true && Number(ac0.passed_total ?? 0) < Number(ac0.criteria_total ?? 0)
+          ? Math.max(Number(Array.isArray(ac0.failed) ? ac0.failed.length : 0), Number(ac0.criteria_total ?? 0) - Number(ac0.passed_total ?? 0))
+          : 0;
+        const overrideReason = String(args.overrideReason || '').trim();
+        const existingOverride = !!tctx0.completion_override;
+        if (args.status === 'completed' && acFailedCount > 0 && !overrideReason && !existingOverride) {
+          return JSON.stringify({
+            error: `目标任务的验收有 ${acFailedCount} 条未通过；置 completed 属于“覆盖完成”，必须填写 overrideReason（谁/为什么接受）——不改验收账，只留覆盖痕。`,
+            code: 'override_reason_required',
+            taskId: args.targetTaskId,
+            acceptance: { passed_total: ac0?.passed_total ?? 0, criteria_total: ac0?.criteria_total ?? 0 },
+          });
+        }
+        if (args.status === 'completed' && acFailedCount > 0 && overrideReason) {
+          const snapshot = {
+            passed_total: Number(ac0?.passed_total ?? 0),
+            criteria_total: Number(ac0?.criteria_total ?? 0),
+            failed: Array.isArray(ac0?.failed) ? ac0!.failed : [],
+          };
+          try {
+            db.prepare(
+              "UPDATE wa_tasks SET context_json = json_set(COALESCE(context_json, '{}'), '$.completion_override', json(?)) WHERE id = ?",
+            ).run(JSON.stringify({ by: taskId, reason: overrideReason, at: new Date().toISOString(), previous_acceptance: snapshot }), args.targetTaskId);
+            db.prepare("INSERT INTO wa_task_conversations (id, task_id, role, content, token_count, created_at) VALUES (?, ?, 'system', ?, 0, datetime('now'))")
+              .run(crypto.randomUUID(), args.targetTaskId, `[覆盖完成] 任务 ${taskId} 将本任务置为完成，但验收仍有 ${acFailedCount} 条未通过（${snapshot.passed_total}/${snapshot.criteria_total}）——验收未重判。原因：${overrideReason}`);
+            // zx_20261116_3 M4「证」：覆盖链也记进**父任务**（调用方），父账/验收证据可见。
+            const pRow = db.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get(taskId) as { context_json?: string } | undefined;
+            const pctx = JSON.parse(pRow?.context_json || '{}') as { children_override?: unknown };
+            const arr = Array.isArray(pctx.children_override)
+              ? (pctx.children_override as Array<Record<string, unknown>>)
+              : [];
+            arr.push({
+              taskId: args.targetTaskId,
+              reason: overrideReason,
+              at: new Date().toISOString(),
+              passed: snapshot.passed_total,
+              total: snapshot.criteria_total,
+            });
+            db.prepare(
+              "UPDATE wa_tasks SET context_json = json_set(COALESCE(context_json, '{}'), '$.children_override', json(?)) WHERE id = ?",
+            ).run(JSON.stringify(arr.slice(-20)), taskId);
+          } catch { /* 留痕 best-effort，不阻断状态转移 */ }
         }
         let enqueued = false;
         if (args.status === 'paused') {
@@ -399,6 +460,9 @@ export function controlTools(deps: ToolDeps) {
         }
         // zx_20260904_6 D1 (2026-09-04): 标记 completed 时若无质量分 → 补审计分（防 M1/M2 类"完成但不可审计"）
         if (args.status === 'completed') {
+          // zx_20261116_2 M2「证」：先把贡献声明写下（files 来自 wa_task_files，summary 取本次 reason），
+          //   再算质量/后续复核；覆盖完成时这段 reason 也是“为什么覆盖”的第一证据（M3 会强制它）。
+          recordContribution(db, args.targetTaskId, args.reason || '', 'update_task_status');
           // zx_20260909 Z2(空性·如实 / 维特根斯坦·可判定): 自标 completed 亦把该任务 draft doc promote 为 completed——
           // 此前此路直写绕 finalize 且不 promote(仅 finalize/run_close promote), 致"完成态与产出 draft 不一致"; 复用之防完成态与产出一致(仍保留绕门既有设计, 只补 promote 一致)
           try { promoteTaskFileDeliverables(db, args.targetTaskId, 'update_task_status'); } catch { /* promote 失败不阻断 */ }
@@ -434,7 +498,8 @@ export function controlTools(deps: ToolDeps) {
                 evidence: utEvidence,
               });
               tctx.goal_achieved = utGoalAchieved;
-              syncQualityColumn(db, args.targetTaskId);
+              // zx_20261116_3 M3「判」：列同步必须排在 `context_json` 落库**之后**——
+              //   真标本 `9895078f` 列 90 / 账 95，正是因为在 UPDATE 之前读到了旧账。
             }
             // zx_20260906 批2(终核补强): 完成真实性诚实标记——置 completed 但无真实产出证据 → 透出"未经成果门禁"（不硬拦，保留编排逃生通道）。
             // 仅在质量源为 update_task_status 工具自身审计时打标/改写 via；已有 finalize 成果门审计(via 非本工具)的不覆盖不标（防把真实收口伪标成无产出）
@@ -477,6 +542,8 @@ export function controlTools(deps: ToolDeps) {
             //   键表复用 `finalize-by-human.ts` 的 `STALE_PAUSE_KEYS` 一处真源，不另抄键名。
             for (const k of STALE_PAUSE_KEYS) delete tctx[k];
             db.prepare('UPDATE wa_tasks SET context_json = ? WHERE id = ?').run(JSON.stringify(tctx), args.targetTaskId);
+            // zx_20261116_3 M3「判」：落库之后再同步列，保证 `quality_score` 与账上 `completion_quality.score` 同值。
+            syncQualityColumn(db, args.targetTaskId);
           } catch { /* 审计分写入失败不阻断 */ }
           // zx_20260910_2 M1: 经本工具完成亦须落地方案里程碑——此前只有 finalize_task 做这一步，
           // 于是被"完成"的子任务永远不写 implemented_by_task_id，方案板上对应 M{n} 恒 pending（现象3 后半）。
@@ -488,6 +555,9 @@ export function controlTools(deps: ToolDeps) {
           // zx_20260911_2 M4-G2(罗尔斯·同一规则): 经本工具"完成"亦须自动置 ★——此前只有 finalize 做这一步，
           // 于是此处完成的任务交付单★段恒空(第二出口无 primary)。判据/实现与 finalize 共用 autoAssignPrimary。
           autoAssignPrimary(db, args.targetTaskId);
+          // zx_20261116_2 M5「迹」：与 exec-finalize / finalize_task 两出口同一处记“这一 run 完成了”——
+          //   岗位经验候选/后置账身份（`last_completed_run_id`）此前在这条完成路整段缺失。
+          try { markCompletedRun(db, args.targetTaskId, null); } catch { /* 后置账身份写不成不阻断状态转移 */ }
         }
         // zx_20260910_2 M1: 记账必留痕——此前直写 status 不发事件，被本工具"完成"的任务在事件溯源里不存在，
         // 不变量 task-completion-audit 报违规（本次实库 5 例），完成态与事件流不一致。
@@ -500,6 +570,17 @@ export function controlTools(deps: ToolDeps) {
         // zx_20261012_2 批二: `archived` 同理——事件已由 `archiveTask` 发出（带 `reason`），此处不再补发。
         if (args.status !== 'paused' && args.status !== 'archived') {
           eventBus.emit('task.status_changed', { taskId: args.targetTaskId, task_id: args.targetTaskId, newStatus: args.status, new_status: args.status, projectId: trow.project_id, ...(args.status === 'failed' ? { error: args.reason || '' } : {}), ...(args.status === 'completed' ? buildTaskOutcome(db, args.targetTaskId) : {}) }).catch(() => {});
+        }
+        // zx_20261116_2 M5「迹」：completed 补发同形状 `task.completed`——渲染层/审计不变量/未来消费者
+        //   不必只靠 status_changed 兜底；通知核已有 8s 去重，不会双弹。
+        if (args.status === 'completed') {
+          eventBus.emit('task.completed', {
+            taskId: args.targetTaskId,
+            task_id: args.targetTaskId,
+            projectId: trow.project_id,
+            ...buildTaskOutcome(db, args.targetTaskId),
+            acceptance: readAcceptanceCheck(db, args.targetTaskId) ?? undefined,
+          }).catch(() => {});
         }
         // zx_20261022_2 批一: 置 running 的回话须如实带"是否真入了队"——`enqueued:false` 表示已有在途作业
         //   （幂等重入，不重复排队），不是"没开跑"；两者对模型是可区分的事实。

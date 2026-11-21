@@ -129,8 +129,11 @@ function groupB(): void {
   ok(/export function buildPreludePrompt/.test(pure) && /from '\.\/memory-prelude\.js'/.test(src)
     && /const prompt = buildPreludePrompt\(/.test(src) && !/export function buildPreludePrompt/.test(src),
     'B-10 接线：提示词构造**恰一份**在 `memory-prelude.ts`，`runTaskPrelude` 引它（管理器内不再留第二份实现）');
-  ok(/SELECT name, description, working_dir FROM wa_projects WHERE id = \?/.test(src),
-    'B-11 接线：项目上下文从真表读取（非硬编码）');
+  // zx_20261120_1 M4：项目上下文组装随工作目录解析移入 `exec-task-dir.ts`；管理器只调一处。
+  const taskDir = CODE(`${A}/src/main/core/exec-task-dir.ts`);
+  ok(/SELECT name, description, working_dir FROM wa_projects WHERE id = \?/.test(taskDir)
+    && /preludeProjectContext\(this\.db, taskId, projectId\)/.test(src),
+    'B-11 接线：项目上下文从真表读取（非硬编码；组装在 `exec-task-dir.ts`，管理器一处调用）');
 }
 
 // ───────────────────────── C 验收证据择文（批三）─────────────────────────
@@ -216,9 +219,13 @@ function groupD(): void {
   const ae = CODE(`${A}/src/main/core/agent-executor.ts`);
   ok(/resolveMaxSteps\(baseMaxSteps, sizeMultiplier, estSteps, stepBudgetBonus\)/.test(ae),
     'D-19 接线：上限公式叠加上下文里的续额');
-  ok(/const grant = grantStepBudgetOnCapHit\(ctxJson, maxSteps\)/.test(ae)
-    && /ctxJson\.step_cap_hit = \{/.test(ae),
-    'D-20 接线：撞顶当刻发续额并落账');
+  // zx_20261120_2 M4「度」：续额改按**基础上限**发放（不再按已含续额的 maxSteps 复利），
+  //   落账口抽到 `step-budget.recordStepCapHit`；按新真源重钉：执行体调用点 + 纯函数内的基础值三件同钉。
+  const sb = CODE(`${A}/src/main/core/step-budget.ts`);
+  ok(/recordStepCapHit\(ctxJson, \{/.test(ae)
+    && /grantStepBudgetOnCapHit\(ctxJson, baseForGrant\)/.test(sb)
+    && /base_max_steps/.test(sb),
+    'D-20 接线：撞顶当刻按基础上限发续额并落账');
   ok(/step_cap_hit[\s\S]{0,400}?UPDATE wa_tasks SET context_json/.test(ae),
     'D-21 撞顶账当场落库（否则恢复后原样再撞）');
   const close = CODE(`${A}/src/main/core/exec-close.ts`);

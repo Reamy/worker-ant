@@ -67,7 +67,7 @@ CREATE TABLE wa_projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, description T
   created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));
 CREATE TABLE wa_tasks (id TEXT PRIMARY KEY, project_id TEXT DEFAULT 'p', parent_task_id TEXT DEFAULT '',
   title TEXT DEFAULT '', description TEXT DEFAULT '', status TEXT DEFAULT 'pending', priority INTEGER DEFAULT 0,
-  context_json TEXT DEFAULT '{}', depends_on TEXT DEFAULT '', source TEXT DEFAULT 'test',
+  context_json TEXT DEFAULT '{}', depends_on TEXT DEFAULT '', source TEXT DEFAULT 'test', position_id TEXT DEFAULT '',
   acceptance_criteria TEXT DEFAULT '', quality_score REAL, aggregate_version INTEGER DEFAULT 0,
   created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));
 CREATE TABLE wa_deliverables (id TEXT PRIMARY KEY, project_id TEXT, task_id TEXT, type TEXT NOT NULL,
@@ -475,13 +475,29 @@ async function main(): Promise<void> {
       'E-8 ★run_close 收尾段先查库内终态（第二道网：abort 没赶上也不覆写）');
 
     const cfSrc = CODE(`${A}/src/main/core/tools/control-finalize.ts`);
-    ok(cfSrc.includes('extractVerificationIssues(contents)'), 'E-9 ★检查 7 的抽取走 `verification-issues.ts` 一处真源');
-    ok(cfSrc.includes('createVerificationFixTask({ db, taskId, projectId, issues })'), 'E-9b ★立项走同一模块的唯一入口');
+    // zx_20261117_1 M1「案」：报告段落变量改名 reportContents（报告类）并新增 planContents（方案类）——
+    //   按更强新真源重定向：字形抽取仍走 `verification-issues.ts`，纯文本未落地项也走同一模块。
+    // zx_20261119_2 M1：延迟项抽取增第二参（兄弟标题，用于判"交接"）——按符号重钉，仍走同一模块一处真源。
+    ok(cfSrc.includes('extractVerificationIssues(reportContents)') && /extractDeferredItems\(planContents(?:,|\))/.test(cfSrc),
+      'E-9 ★检查 7 的抽取走 `verification-issues.ts` 一处真源（字形 + 纯文本）');
+    // zx_20261116_1 M6：立项入口不变，但必须把“同父在途兄弟”一并当前置（更强的新真源）。
+    // zx_20261119_2 M1：同一入口另传来源标题（GUI 显示「修复自 X」）。
+    ok(/createVerificationFixTask\(\{[\s\S]*?extraDependsOn: inFlightSiblingIds\(db, taskId\)/.test(cfSrc)
+      && /createVerificationFixTask\(\{[\s\S]*?reportTitle: planTitle/.test(cfSrc),
+      'E-9b ★立项走同一模块的唯一入口，并串同父在途兄弟（另传来源标题）');
     ok(!cfSrc.includes('enqueueJob'), 'E-9c ★检查 7 不再 enqueueJob（不立即开跑 ⇒ 不与父并发）');
 
     const viSrc = CODE(`${A}/src/main/core/verification-issues.ts`);
     const viImports = [...viSrc.matchAll(/^import .* from '([^']+)'/gm)].map((m) => m[1]);
-    eq(viImports, ['node:crypto'], 'E-10 ★抽取/立项模块零运行期依赖（仅 node:crypto ⇒ rr 可直接喂真报告片段）');
+    // zx_20261117_1 M1「案」：`stripPlanBoilerplate` 下沉到本地纯函数模块 `plan-text.ts`（零 import）——
+    //   按更强新真源重定向：允许 `./plan-text.js`，并额外钉死它自身零 import（仍是"rr 可直喂"）。
+    // zx_20261120_3 M1：修复任务继承来源岗位 ⇒ 多引本地纯模块 `./positions.js`（零 electron/零网络）。
+    eq(viImports, ['node:crypto', './plan-text.js', './positions.js'], 'E-10 ★抽取/立项模块零运行期依赖（仅 node:crypto + 本地纯函数模块）');
+    const posSrc = CODE(`${A}/src/main/core/positions.ts`);
+    ok(!/from 'electron'|from 'node:fs'|from 'node:net'|ans-client|ans-signed-request/.test(posSrc),
+      'E-10c ★positions.ts 自身无 electron/网络依赖（新增的本地依赖仍是纯模块）');
+    const planTextSrc = CODE(`${A}/src/main/core/plan-text.ts`);
+    eq([...planTextSrc.matchAll(/^import .* from '/gm)].length, 0, 'E-10b ★plan-text.ts 零 import（剥离函数是纯函数）');
 
     // 检查 7 整段按符号切片（从幂等键读取到方案里程碑读取之间）
     const i7 = cfSrc.indexOf('const fixCtx = JSON.parse(');

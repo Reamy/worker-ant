@@ -32,6 +32,8 @@ import { resolveLicenseTier } from './license.js';
 import { capacityRefusal, countApprovedTerminals } from './tier-capacity.js';
 // zx_20261106_3 B7：双模协商（意图优先、指令兜底）的判据**只此一份**（零依赖纯函数，不与本模块成环）。
 import { negotiateTerminalMode, type TerminalNegotiation } from './terminal-negotiation.js';
+// zx_20261121_2 M1「授·界」：授权边界（设备范围/频率/联动）的读写与缺省。
+import { defaultGrant, parseGrant, type TerminalGrant } from './external-grant.js';
 
 /** 只用到的库接口——使本模块可脱 better-sqlite3，在受控回归里跑真逻辑（同 `settings-bool.ts` 范式）。 */
 export interface TerminalDb {
@@ -58,6 +60,10 @@ export interface TerminalRow {
    *   批准**不再等于永久**——默认 90 天（`GRANT_TTL_DAYS_DEFAULT`），到期即 `grant_expired` 403，须重新批准。
    */
   grant_expires_at: string | null;
+  /** zx_20261121_2 M1：授权边界（设备范围/频率/联动）——老库缺列按缺省兜底。 */
+  scope_json?: string | null;
+  rate_json?: string | null;
+  linkage_allowed?: number | null;
   last_remote_addr: string | null;
   last_seen_at: string | null;
   /**
@@ -101,6 +107,8 @@ export interface TerminalPublic {
   source: TerminalSource;
   /** zx_20261106_3 B7：双模协商结果——按**当前已授予的能力**现算（意图优先、指令兜底）。 */
   negotiation: TerminalNegotiation;
+  /** zx_20261121_2 M1：授权边界（设备范围/频率/是否允许联动）。 */
+  grant: TerminalGrant;
 }
 
 /** 来路归一：未知/缺列一律按 `remote`（不因一个展示字段编造来路）。 */
@@ -181,7 +189,31 @@ function rowToPublic(r: TerminalRow): TerminalPublic {
       cardIntents: parseCaps(r.card_intents_json),
       grantedCapabilities: capabilities,
     }),
+    grant: parseGrant(r),
   };
+}
+
+/** 读一台终端的授权边界；不存在 ⇒ null（不编缺省冒充“这台终端在”）。 */
+export function readTerminalGrant(db: TerminalDb, terminalId: string): TerminalGrant | null {
+  try {
+    const row = db.prepare('SELECT * FROM wa_external_terminals WHERE id = ?').get(String(terminalId ?? '').trim()) as TerminalRow | undefined;
+    return row ? parseGrant(row) : null;
+  } catch { return null; }
+}
+
+/** 写授权边界（调用方已用 `validateGrant` 校验）；不存在/写失败 ⇒ false。 */
+export function writeTerminalGrant(db: TerminalDb, terminalId: string, grant: TerminalGrant): boolean {
+  try {
+    const r = db.prepare(
+      'UPDATE wa_external_terminals SET scope_json = ?, rate_json = ?, linkage_allowed = ? WHERE id = ?',
+    ).run(
+      JSON.stringify(grant.scope),
+      JSON.stringify(grant.rate),
+      grant.linkageAllowed ? 1 : 0,
+      String(terminalId ?? '').trim(),
+    ) as { changes?: number };
+    return (r.changes ?? 0) > 0;
+  } catch { return false; }
 }
 
 /** DB 格式 UTC 串（与库内 `datetime('now')` 同基准同格式）——本文件的时刻**只此一处**。 */
@@ -332,7 +364,7 @@ export function approveTerminal(
   db: TerminalDb,
   pairingId: string,
   capabilities: string[] = [],
-  opts: { ttlDays?: number; now?: Date } = {},
+  opts: { ttlDays?: number; now?: Date; grant?: TerminalGrant } = {},
 ): { ok: true } | { ok: false; reason: string } {
   const row = db.prepare('SELECT * FROM wa_external_terminals WHERE id = ?').get(pairingId) as TerminalRow | undefined;
   if (!row) return { ok: false, reason: 'not_found' };
@@ -347,9 +379,13 @@ export function approveTerminal(
   const now = opts.now ?? new Date();
   const ttlDays = opts.ttlDays ?? GRANT_TTL_DAYS_DEFAULT;
   const expiresAt = ttlDays > 0 ? dbNowUtc(new Date(now.getTime() + ttlDays * 86_400_000)) : null;
+  const grant = opts.grant ?? defaultGrant();
   db.prepare(
-    `UPDATE wa_external_terminals SET status='approved', key_prefix=?, secret_hash=?, capabilities_json=?, approved_at=?, grant_expires_at=? WHERE id=?`,
-  ).run(key.slice(0, 8), hashTerminalSecret(secret), JSON.stringify(caps), dbNowUtc(now), expiresAt, pairingId);
+    `UPDATE wa_external_terminals SET status='approved', key_prefix=?, secret_hash=?, capabilities_json=?, approved_at=?, grant_expires_at=?, scope_json=?, rate_json=?, linkage_allowed=? WHERE id=?`,
+  ).run(
+    key.slice(0, 8), hashTerminalSecret(secret), JSON.stringify(caps), dbNowUtc(now), expiresAt,
+    JSON.stringify(grant.scope), JSON.stringify(grant.rate), grant.linkageAllowed ? 1 : 0, pairingId,
+  );
   pendingDelivery.set(pairingId, { key, secret });
   return { ok: true };
 }

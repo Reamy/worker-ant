@@ -37,24 +37,48 @@ export interface ChildRow {
  * 只查 `status = 'failed'` 一态：`archived` 是用户/引擎已处置过的终态（M3-6 已确立不该挡父），
  * 而 `completed` 本就了结。
  *
- * 回退开关 `engine.children_failed_pause`（默认 true）**在本函数内**判——五处调用点因此都是
- * 同一句 `failedChildren(db, taskId)`：开关的"键名 + 判据 + 读取动作"三者同源一处。
+ * 回退开关 `engine.children_failed_pause`（默认 true）**在本模块内**判（`failedGateOn`，两处读点共用）——
+ * 五处调用点因此都是同一句 `failedChildren(db, taskId)`：开关的"键名 + 判据 + 读取动作"三者同源一处。
  * 若把开关留在五处各读一遍，就又回到「一条规则写在多处必然分家」（见 settings-bool.ts 头注释）。
  */
-export function failedChildren(db: ChildrenGateDb, parentId: string): ChildRow[] {
+/** 「有 failed 子」的唯一 SQL——`failedChildren` 与严格读数共用（本文件内仍只此一处谓词）。 */
+const FAILED_CHILDREN_SQL = "SELECT id, title FROM wa_tasks WHERE parent_task_id = ? AND status = 'failed' ORDER BY created_at ASC";
+
+/** 回退开关是否开着（缺省即开）；读设置失败按"开"论（不因读不到就悄悄放宽一道闸）。 */
+function failedGateOn(db: ChildrenGateDb): boolean {
   try {
     const sw = db.prepare('SELECT value FROM wa_settings WHERE key = ?').get('engine.children_failed_pause') as { value?: string } | undefined;
-    if (!boolSetting(sw?.value)) return []; // 关 ⇒ 回到旧单判据（failed 视为终态放行）
+    return boolSetting(sw?.value);
   } catch {
-    /* 读不到按"缺省即开"，与 boolSetting 语义同向（不因读设置失败就悄悄放宽一道闸） */
+    return true;
   }
+}
+
+export function failedChildren(db: ChildrenGateDb, parentId: string): ChildRow[] {
+  if (!failedGateOn(db)) return []; // 关 ⇒ 回到旧单判据（failed 视为终态放行）
   try {
-    return db
-      .prepare("SELECT id, title FROM wa_tasks WHERE parent_task_id = ? AND status = 'failed' ORDER BY created_at ASC")
-      .all(parentId) as ChildRow[];
+    return db.prepare(FAILED_CHILDREN_SQL).all(parentId) as ChildRow[];
   } catch {
     /* 查不出时**不放行**也不拦：按"无失败子"论，由既有未完成判据兜底（不因读库失败把父永久扣住） */
     return [];
+  }
+}
+
+/**
+ * zx_20261116_1 M1（续）：failed 子任务的**严格计数**——只给“暂停因由回退”用。
+ *
+ * 与 `failedChildren` 同一 SQL、同一开关；区别只在**读失败返回 `null`**（不返回 0）。
+ * 「读不到 ⇒ 按无失败子论」只适用于**不放行**的收口闸（读不出时不拦住父收口）；
+ * 而这里要做的是**改世界**（把 `children_failed` 降回 `children_incomplete`），
+ * 绝不能把“读不到”当成“确无失败子”——否则一次 DB 抖动就会把真正的失败子静默放过。
+ */
+export function countFailedChildrenStrict(db: ChildrenGateDb, parentId: string): number | null {
+  if (!failedGateOn(db)) return 0;
+  try {
+    const rows = db.prepare(FAILED_CHILDREN_SQL).all(parentId) as ChildRow[];
+    return rows.length;
+  } catch {
+    return null;
   }
 }
 

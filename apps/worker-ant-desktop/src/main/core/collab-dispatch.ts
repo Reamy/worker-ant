@@ -37,7 +37,10 @@ import {
   toWireDispatchPolicy,
   type ProjectNodePolicyDb,
 } from './project-node-policy.js';
-import { NODE_ROLE_LABEL, isNodeRole, type NodeCardCategory, type NodeRole } from '@worker-ant/shared-types';
+import { NODE_ROLE_LABEL, isNodeRole, type NodeCardCategory, type NodeRole, type NodeRepoBinding } from '@worker-ant/shared-types';
+import { readBoolSetting, type BoolSettingDb } from './settings-bool.js';
+import { repoBindingFromDir } from './repo-origin.js';
+import { redactUrl } from './remote-workspace.js';
 import { type DepState, parseDepIds } from './dep-graph.js';
 import {
   countMachineRunning,
@@ -254,6 +257,13 @@ export interface CreateDispatchFacts extends ParentDispatchFacts {
    */
   needsLocalWorkspace?: boolean;
   /**
+   * zx_20261120_1 M5：本任务可随单带走的仓库绑定（仅「研究类 + 项目有 origin」时非空）。
+   * 非空且开关 `node.remote_readonly_code` 开 ⇒ 研究类可派给对端做只读分析。
+   */
+  repoBinding?: NodeRepoBinding | null;
+  /** zx_20261120_1 M5：`node.remote_readonly_code` 是否开（缺省不改变旧行为）。 */
+  remoteReadonlyEnabled?: boolean;
+  /**
    * 项目有 `working_dir`（外派节点没有这个本机目录）。
    * @deprecated 旧口径（项目级一刀切）。仅为兼容既有调用方保留；新调用方用 `needsLocalWorkspace`。
    */
@@ -314,6 +324,10 @@ export type CreateDispatchReason =
   | 'dependencies-dead'
   | 'has-attachments'
   | 'has-working-dir'
+  /** zx_20261120_1 M5：研究类涉及仓库，但项目没有可用的 git origin。 */
+  | 'repo-binding-missing'
+  /** zx_20261120_1 M5：有仓但「跨机只读代码分析」开关关着。 */
+  | 'readonly-code-off'
   | 'decomposed'
   /** 本机尚有余力（缺省开时「满负荷才溢出」；显式开不受此限）。 */
   | 'local-capacity'
@@ -358,7 +372,14 @@ export function decideCreateDispatch(f: CreateDispatchFacts): CreateDispatchDeci
   // zx_20261112_2 B1：「项目有工作目录」一刀切下沉为「这个任务需不需要本机工作目录」。
   //   新调用方给 `needsLocalWorkspace`；只给旧键的调用方按项目级旧语义（逐字节不变）。
   const needsLocal = f.needsLocalWorkspace ?? f.hasWorkingDir;
-  if (needsLocal === true) return deny('has-working-dir');
+  if (needsLocal === true) {
+    // zx_20261120_1 M5：研究类涉及仓库时，把"为什么不能只读外派"说得更具体。
+    //   ⚠ 只有**新调用方**（给了 repos/开关任一键）才细分理由；旧调用方逐字仍是 `has-working-dir`。
+    const refined = f.repoBinding !== undefined || f.remoteReadonlyEnabled !== undefined;
+    if (refined && f.category === 'research' && !f.repoBinding) return deny('repo-binding-missing');
+    if (refined && f.category === 'research' && f.repoBinding && f.remoteReadonlyEnabled === false) return deny('readonly-code-off');
+    return deny('has-working-dir');
+  }
   if (f.decomposed) return deny('decomposed');
   // zx_20261029_2 M7：「缺省开」不等于「无条件外派」——本机还有余力就先在本机跑，满负荷才溢出。
   //   显式开启（用户在设置里自己打的开关）不受此限：那是用户的主动选择，不是我们替他做的默认。
@@ -390,6 +411,8 @@ export const CREATE_DISPATCH_REASON_LABEL: Record<CreateDispatchReason, string> 
   'dependencies-dead': '前置已失败/归档，不会自动解锁',
   'has-attachments': '任务带附件（附件在本机盘上）',
   'has-working-dir': '任务需要本机工作目录（代码类或题面涉及本机仓库/文件）',
+  'repo-binding-missing': '研究类涉及仓库，但项目没有可用的 git origin（对端拿不到仓）',
+  'readonly-code-off': '有 git origin，但「跨机只读代码分析」开关关着',
   decomposed: '已按模板拆解（工作单元是子任务）',
   'position-local-only': '该岗位已设为不参与跨机派单（只在本机跑）',
   'participate-out-off': '本机已关闭「把活派出去」（只在本机跑）',
@@ -538,6 +561,7 @@ export function buildDispatchPayload(
   task: CreatedTaskInput,
   upstream?: readonly DispatchUpstream[],
   position?: DispatchPosition | null,
+  readonlyRepo?: NodeRepoBinding | null,
 ): DispatchPayload {
   const base: DispatchPayload = {
     prompt: buildDispatchPrompt(task),
@@ -552,6 +576,8 @@ export function buildDispatchPayload(
     ...base,
     ...(kept.length > 0 ? { upstream: kept.slice(0, UPSTREAM_MAX_ITEMS) } : {}),
     ...(position ? { position } : {}),
+    // zx_20261120_1 M5：只读分析随单带仓库绑定；无仓 ⇒ **不出现新键**（旧载荷形状逐字节不变）。
+    ...(readonlyRepo ? { repo: readonlyRepo, readonly: true } : {}),
   };
 }
 
@@ -645,6 +671,11 @@ export async function dispatchCreatedTask(
   const decision = decideCreateDispatch({ ...facts, projectTargeted, projectDispatchOff: dispatchOff });
   if (!decision.eligible) return { attempted: false, ok: false, reason: decision.reason };
   const category = decision.category!;
+  // zx_20261120_1 M5：研究类 + 有仓 + 开关开 ⇒ 只读分析随单带走（对端 clone 后读）。
+  const repoBinding = facts.repoBinding ?? (projectId ? repoBindingForProject(db, projectId) : null);
+  const readonlyRepo = category === 'research' && repoBinding
+    && readBoolSetting(db as unknown as BoolSettingDb, 'node.remote_readonly_code')
+    ? repoBinding : null;
 
   if (alreadyDispatched(db, task.id)) return { attempted: false, ok: false, reason: 'already-dispatched' };
 
@@ -695,7 +726,7 @@ export async function dispatchCreatedTask(
       db,
       {
         category,
-        payload: { ...buildDispatchPayload(task, upstream, position) },
+        payload: { ...buildDispatchPayload(task, upstream, position, readonlyRepo) },
         requireTarget: true,
         ...(opts.targetNodeId ? { targetNodeId: opts.targetNodeId } : {}),
         ...(policy ? { policy: toWireDispatchPolicy(policy) } : {}),
@@ -727,6 +758,14 @@ export async function dispatchCreatedTask(
   // 三键落定后占位让位（三键在 `remoteBlockOf` 里优先——即便这一清失败也仍按"已派定"拦）。
   clearOffer();
   if (!marked) return { attempted: true, ok: false, reason: 'assign-mark-failed' };
+  if (readonlyRepo) {
+    // 只记「这次是只读分析、仓库脱敏串、提交」——供任务详情上屏；不写任何凭据。
+    try {
+      db.prepare(
+        "UPDATE wa_tasks SET context_json = json_set(context_json, '$.dispatch_readonly', 1, '$.dispatch_repo_url', ?, '$.dispatch_repo_ref', ?) WHERE id = ?",
+      ).run(redactUrl(readonlyRepo.url), readonlyRepo.ref, task.id);
+    } catch { /* 标记失败不影响派发本身 */ }
+  }
   return { attempted: true, ok: true, reason: '', nodeId: result.targetNodeId };
 }
 
@@ -867,6 +906,10 @@ export function buildExistingTaskDispatchFacts(db: Database.Database, taskId: st
   }
   const category = routeCategoryForTask(row?.title, row?.description);
   const hasAttachments = Array.isArray(ctx.attachments) && ctx.attachments.length > 0;
+  const projectId = String(row?.project_id ?? '');
+  const hasWD = projectHasWorkingDir(db, projectId);
+  const repoBinding = hasWD ? repoBindingForProject(db, projectId) : null;
+  const remoteReadonlyEnabled = readBoolSetting(db as unknown as BoolSettingDb, 'node.remote_readonly_code');
   return {
     settingOn: policy.enabled,
     autoDispatchSource: policy.source,
@@ -879,12 +922,16 @@ export function buildExistingTaskDispatchFacts(db: Database.Database, taskId: st
     hasAttachments,
     // zx_20261112_2 B1：与建单路同一把尺——任务级而非项目级。
     needsLocalWorkspace: taskNeedsLocalWorkspace({
-      projectHasWorkingDir: projectHasWorkingDir(db, String(row?.project_id ?? '')),
+      projectHasWorkingDir: hasWD,
       category,
       title: row?.title,
       description: row?.description,
       hasAttachments,
+      repoBinding,
+      remoteReadonlyEnabled,
     }),
+    repoBinding,
+    remoteReadonlyEnabled,
     decomposed: ctx.auto_decomposed === true,
     category,
     projectTargeted: projectHasNodePolicy(db as unknown as ProjectNodePolicyDb, String(row?.project_id ?? '')),
@@ -1229,10 +1276,16 @@ export function taskNeedsLocalWorkspace(input: {
   title?: unknown;
   description?: unknown;
   hasAttachments?: boolean;
+  /** zx_20261120_1 M5：有 origin+HEAD 时可随单带走（仅研究类生效）。 */
+  repoBinding?: NodeRepoBinding | null;
+  /** 开关 `node.remote_readonly_code`（缺省按旧行为：不因此放开）。 */
+  remoteReadonlyEnabled?: boolean;
 }): boolean {
   if (!input.projectHasWorkingDir) return false;
   if (input.hasAttachments === true) return true;
   if (input.category !== 'research') return true;
+  // zx_20261120_1 M5：研究类 + 有仓 + 开关开 ⇒ 对端 clone 后只读分析；其余逐字维持旧判据。
+  if (input.repoBinding && input.remoteReadonlyEnabled === true) return false;
   const text = `${String(input.title ?? '')} ${String(input.description ?? '')}`;
   return REPO_BOUND_TOKENS.some((re) => re.test(text));
 }
@@ -1255,6 +1308,9 @@ export function buildCreatedTaskDispatchFacts(
 ): CreateDispatchFacts {
   const policy = autoDispatchPolicy(db as unknown as NodeSettingDb & LicenseSettingDb);
   const category = routeCategoryForTask(input.title, input.description);
+  const hasWorkingDir = projectHasWorkingDir(db, input.projectId);
+  const repoBinding = hasWorkingDir ? repoBindingForProject(db, input.projectId) : null;
+  const remoteReadonlyEnabled = readBoolSetting(db as unknown as BoolSettingDb, 'node.remote_readonly_code');
   let dependsOn: unknown;
   try {
     dependsOn = (db.prepare('SELECT depends_on FROM wa_tasks WHERE id = ?').get(input.taskId) as { depends_on?: unknown } | undefined)?.depends_on;
@@ -1269,12 +1325,16 @@ export function buildCreatedTaskDispatchFacts(
     hasDependencies: taskHasDependencies(dependsOn),
     hasAttachments: input.hasAttachments,
     needsLocalWorkspace: taskNeedsLocalWorkspace({
-      projectHasWorkingDir: projectHasWorkingDir(db, input.projectId),
+      projectHasWorkingDir: hasWorkingDir,
       category,
       title: input.title,
       description: input.description,
       hasAttachments: input.hasAttachments,
+      repoBinding,
+      remoteReadonlyEnabled,
     }),
+    repoBinding,
+    remoteReadonlyEnabled,
     decomposed: input.decomposed,
     category,
     projectTargeted: projectHasNodePolicy(db as unknown as ProjectNodePolicyDb, input.projectId),
@@ -1335,5 +1395,19 @@ export function projectHasWorkingDir(db: Database.Database, projectId: string): 
     return typeof row?.working_dir === 'string' && row.working_dir.trim() !== '';
   } catch {
     return false; // 读不到 ⇒ 不因此拦（外派仍由 ANS 侧把关）
+  }
+}
+
+/**
+ * zx_20261120_1 M5：项目的**仓库绑定**（origin + HEAD）。非仓/无 origin/读不到 ⇒ `null`。
+ * 只读、有界（`repo-origin.ts` 单条 3s）；不因一次读失败改变既有派发判据。
+ */
+export function repoBindingForProject(db: Database.Database, projectId: string): NodeRepoBinding | null {
+  try {
+    const row = db.prepare('SELECT working_dir FROM wa_projects WHERE id = ?').get(projectId) as { working_dir?: unknown } | undefined;
+    const dir = typeof row?.working_dir === 'string' ? row.working_dir.trim() : '';
+    return dir ? repoBindingFromDir(dir) : null;
+  } catch {
+    return null;
   }
 }

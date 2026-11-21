@@ -43,7 +43,7 @@ export default function TemplatesPage() {
   const [testTitle, setTestTitle] = useState('');
   const [testDesc, setTestDesc] = useState('');
   const [testResult, setTestResult] = useState<{ id: string; name: string; category: string; priority: number; success_rate: number | null; hitKeywords: string[]; method?: string; similarity?: number | null; field?: 'title' | 'description' | ''; subtaskCount: number } | null>(null);
-  const [testSkip, setTestSkip] = useState<'explicit_subtasks' | 'planning_intent' | 'repair_intent' | null>(null);
+  const [testSkip, setTestSkip] = useState<'explicit_subtasks' | 'planning_intent' | 'repair_intent' | 'intent_mismatch' | 'weak_evidence' | null>(null);
   // zx_20261028_2 M4: 语义门槛由主进程回传（`semanticMinSimilarity`），界面不再手抄数字（原写死 0.4）
   const [testMinSim, setTestMinSim] = useState<number | null>(null);
   const [testRan, setTestRan] = useState(false);
@@ -111,7 +111,11 @@ export default function TemplatesPage() {
               ? '任务已含显式子任务（子任务X / 报告X）'
               : testSkip === 'repair_intent'
                 ? '判定为修复/排查意图（标题或描述含"修复/排查/定位/报错…"），交由引擎按诊断步骤拆解'
-                : '判定为规划/优化意图（标题或描述含"规划/方案/排期/优化/设计…"），交由 AI 自主规划'}</span>
+                : testSkip === 'intent_mismatch'
+                  ? '命中的自动模板意图不同（诊断/实施/规划不是同一件事），交由 AI 自主规划'
+                  : testSkip === 'weak_evidence'
+                    ? '与自动模板只共享通用词（证据不足），交由 AI 自主规划'
+                    : '判定为规划/优化意图（标题或描述含"规划/方案/排期/优化/设计…"），交由 AI 自主规划'}</span>
             {testResult && <span className="text-gray-400 ml-2">（关键词本可命中模板「{testResult.name}」{testResult.hitKeywords.length > 0 ? `：${testResult.hitKeywords.join(', ')}` : ''}）</span>}
           </p>
         ) : testResult ? (

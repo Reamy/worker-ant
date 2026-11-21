@@ -95,6 +95,9 @@ export const PRICING: Record<LicenseTier, TierPricing> = {
       //   团队库导入三处）。句式由 `capacityBenefit` 一处出——`BENEFIT_COVERAGE` 引同一函数，改口径不漂。
       capacityBenefit('IM 渠道', TIER_LIMITS.pro.maxIMChannels, '个'),
       capacityBenefit('任务模板', TIER_LIMITS.pro.maxTaskTemplates, '套'),
+      // zx_20261120_3 M7：岗位容量两维（自建岗位 / 岗位例行）；内置 13 岗不占额度。
+      capacityBenefit('自建岗位', TIER_LIMITS.pro.maxCustomPositions, '个'),
+      capacityBenefit('岗位例行', TIER_LIMITS.pro.maxPositionRoutines, '套'),
       // zx_20261029_2 M6：只卖「安装」这一跳（`plugin_install` 真闸在 `ansCall`）；浏览市场不限档位。
       '市场插件安装（浏览不限）',
       // zx_20261108_1 B6：产出物**整批**导出成表归 Pro（`deliverable_export` 真闸在 `deliverable:exportCsv`）；
@@ -129,7 +132,10 @@ export const PRICING: Record<LicenseTier, TierPricing> = {
       '跨机成果回执核对（产出清单对得上）',
       // zx_20261115_4 M7「墙」：岗位知识成团队资产（真闸 `team_library`）——
       //   与 Pro 的 `position_transfer`（文件带走）形成阶梯：Pro = 你能带走；Team = 全队自动汇齐。
-      '岗位知识团队共享（四段 + 已采纳经验；导入落待审）',
+      '岗位知识团队共享（四段 + 已采纳经验 + 可调用技能；导入落待审）',
+      // zx_20261120_3 M7：团队档岗位容量不限（0 = 不限）。
+      capacityBenefit('自建岗位', TIER_LIMITS.team.maxCustomPositions, '个'),
+      capacityBenefit('岗位例行', TIER_LIMITS.team.maxPositionRoutines, '套'),
       // zx_20261029_2 M6: 只卖「控制」——发现/只读台账已在专业版那句里兑现，不重复圈一次。
       '设备控制（含意图执行）',
       // zx_20261104_3 M4「联」：离家场景（关灯/关空调/关风扇/合帘）走同一道 `device_control`，
@@ -223,6 +229,8 @@ export function capacityLine(tier: LicenseTier): string {
     `IM 渠道 ${capacityDisplay(tier, 'maxIMChannels', '个')}`,
     `任务模板 ${capacityDisplay(tier, 'maxTaskTemplates', '套')}`,
     `设备云账号 ${capacityDisplay(tier, 'maxCloudAccounts', '个')}`,
+    `自建岗位 ${capacityDisplay(tier, 'maxCustomPositions', '个')}`,
+    `岗位例行 ${capacityDisplay(tier, 'maxPositionRoutines', '套')}`,
   ].join(' · ');
 }
 

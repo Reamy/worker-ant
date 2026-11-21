@@ -98,7 +98,8 @@ function sectionA(): void {
   eq(failed, 'acceptance_failed', 'A-4 有题但未全过 ⇒ acceptance_failed（明确反证）');
 
   const unjudged = goalEvidenceOf({ checked_at: '2026-11-04 01:00:00', verified: false, reason: 'error' });
-  eq(unjudged, 'score_only', 'A-5 有题未判成 ⇒ score_only（没判成不等于判过了，也不凭空判未过）');
+  // zx_20261116_3 M3 用户裁定：有题未判成是独立凭据态 `unjudged`（不再混进 score_only），且 goal=false。
+  eq(unjudged, 'unjudged', 'A-5 有题未判成 ⇒ unjudged（独立凭据态；不冒充 score_only）');
 
   const noCriteria = goalEvidenceOf({ checked_at: '2026-11-04 01:00:00', verified: true, criteria_total: 0, passed_total: 0, reason: 'no_criteria' });
   eq(noCriteria, 'score_only', 'A-6 verified 且 0/0 ⇒ score_only（没有题目就没有凭据，空数组全过不算验收达成）');
@@ -381,8 +382,9 @@ function sectionF(): void {
   const ae = readCode(`${MAIN}/agent-executor.ts`);
   ok(/runArtifacts\?:\s*\{\s*mutations: number; newDeliverables: number\s*\}/.test(ae),
     'F-11 评分函数签名带可选 runArtifacts（不传则行为零变）');
-  ok(/const caps = completionCapFloors\(db, \{ taskId, workingDir, archetype, hasDeliverables: delivs\.c > 0, runArtifacts \}\);/.test(ae),
-    'F-12 评分函数把 runArtifacts 原样转给封顶真源（不在体内另判一遍）');
+  // zx_20261116_2 M1：调用面新增共享成果计数（taskDeliverableCounts），仍须把 runArtifacts 原样转给封顶真源。
+  ok(/const caps = completionCapFloors\(db, \{[\s\S]{0,500}?taskDeliverableCounts\(db, taskId\)[\s\S]{0,300}?runArtifacts,?\s*\}\);/.test(ae),
+    'F-12 评分函数把 runArtifacts 与共享成果计数一并转给封顶真源（不在体内另判一遍）');
   const close = readCode(`${MAIN}/exec-close.ts`);
   const iCount = close.indexOf('countNewDeliverablesSince(db, taskId, runStartedAtMs)');
   const iScore = close.indexOf('qualityScore = assessCompletionQuality(db, taskId, stepCount,');
@@ -471,8 +473,10 @@ function sectionI(): void {
   ok(execStep.includes(`toolRegistry.quotaKeyOf(tc.toolName) === SHELL_EXPLORE_QUOTA_KEY`)
     && execStep.includes('deriveShellExploreQuota(d.maxSteps, d.archetype)'),
     'I-12 接线：A3 只对 shell_explore 那本账派生（其余工具照读 meta 配额），且取本次 maxSteps/archetype');
+  // zx_20261120_2 M2「通」：拒绝文案内联模板收进唯一纯函数 `explorationDenialReason`；
+  //   按新真源重钉——闸门读 `limit`，文案调用**显式传 `limit.hard`**（派生一套、两处同源）。
   ok(execStep.includes('gate(toolRegistry.quotaKeyOf(tc.toolName), limit)')
-    && execStep.includes('${limit.hard}次'),
+    && execStep.includes("explorationDenialReason(k, limit.hard, 'quota')"),
     'I-13 判定与拒绝文案都读派生后的 limit（不是派生一套、闸门仍用静态一套）');
   const ratioSites = fs.readdirSync(path.join(ROOT, MAIN)).filter((f) => f.endsWith('.ts'))
     .filter((f) => fs.readFileSync(path.join(ROOT, MAIN, f), 'utf-8').includes('EXPLORATION_QUOTA_RATIO'));

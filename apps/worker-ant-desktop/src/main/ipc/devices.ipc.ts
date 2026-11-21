@@ -172,6 +172,11 @@ import { resolveLicenseTier, type LicenseSettingDb } from '../core/license.js';
 import { capacityLimit, countCloudAccounts, countDevices, type CapacityDb } from '../core/tier-capacity.js';
 // zx_20261112_2 B3：GUI 授权与 IM 授权台同一把尺——都留审计。
 import { recordAudit } from '../core/audit-log.js';
+// zx_20261121_2 M6：联动规则的 CRUD/试运行/运行账（Team `device_control` 闸；规则本身不暴露给门内终端）。
+import {
+  createRule, deleteRule, getRule, listRules, listRuleRuns, previewRule, toggleRule, updateRule, validateRuleInput,
+  type DeviceRule,
+} from '../core/device-automation.js';
 
 /** 首屏一屏读全：台账 + 最近审计 + 发现是否在跑。 */
 /** zx_20261101_2 M2：台账行 + 影子投影（期望/实况/相符判定），面板一处读全。 */
@@ -1019,6 +1024,74 @@ export function initDevicesIpc(db: Database.Database, getAnsClient?: DevicesAnsC
     } catch (e) {
       return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } };
     }
+  });
+
+  // ===== zx_20261121_2 M6：设备联动规则（本机用户资产；Team `device_control` 闸在写口） =====
+  ipcMain.handle('devices:rulesList', async () => {
+    try {
+      return { data: { rules: listRules(db as never), runs: listRuleRuns(db as never, undefined, 50) } };
+    } catch (e) { return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } }; }
+  });
+
+  ipcMain.handle('devices:ruleCreate', async (_event, { input }: { input: unknown }) => {
+    try {
+      const refusal = teamFeatureRefusal(licDb, 'device_control');
+      if (refusal) return { error: { code: 'TEAM_REQUIRED', message: refusalWithContext(db, refusal, { requiredTier: 'team' }) } };
+      const r = createRule(db as never, input);
+      if (!r.ok) return { error: { code: 'INVALID_REQUEST', message: r.message } };
+      try { recordAudit(db, { actorKind: 'local', action: 'device.rule_create', targetType: 'device_rule', targetId: r.rule.id, detail: { name: r.rule.name } }); } catch { /* 审计失败不改变创建 */ }
+      return { data: { rule: r.rule } };
+    } catch (e) { return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } }; }
+  });
+
+  ipcMain.handle('devices:ruleUpdate', async (_event, { id, input }: { id: string; input: unknown }) => {
+    try {
+      const refusal = teamFeatureRefusal(licDb, 'device_control');
+      if (refusal) return { error: { code: 'TEAM_REQUIRED', message: refusalWithContext(db, refusal, { requiredTier: 'team' }) } };
+      const r = updateRule(db as never, id, input);
+      if (!r.ok) return { error: { code: 'INVALID_REQUEST', message: r.message } };
+      try { recordAudit(db, { actorKind: 'local', action: 'device.rule_update', targetType: 'device_rule', targetId: id, detail: { name: r.rule.name } }); } catch { /* ignore */ }
+      return { data: { rule: r.rule } };
+    } catch (e) { return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } }; }
+  });
+
+  ipcMain.handle('devices:ruleDelete', async (_event, { id }: { id: string }) => {
+    try {
+      const refusal = teamFeatureRefusal(licDb, 'device_control');
+      if (refusal) return { error: { code: 'TEAM_REQUIRED', message: refusalWithContext(db, refusal, { requiredTier: 'team' }) } };
+      if (!deleteRule(db as never, id)) return { error: { code: 'NOT_FOUND', message: '规则不存在' } };
+      try { recordAudit(db, { actorKind: 'local', action: 'device.rule_delete', targetType: 'device_rule', targetId: id }); } catch { /* ignore */ }
+      return { data: { deleted: true } };
+    } catch (e) { return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } }; }
+  });
+
+  ipcMain.handle('devices:ruleToggle', async (_event, { id, enabled }: { id: string; enabled: boolean }) => {
+    try {
+      const refusal = teamFeatureRefusal(licDb, 'device_control');
+      if (refusal) return { error: { code: 'TEAM_REQUIRED', message: refusalWithContext(db, refusal, { requiredTier: 'team' }) } };
+      if (!toggleRule(db as never, id, !!enabled)) return { error: { code: 'NOT_FOUND', message: '规则不存在' } };
+      try { recordAudit(db, { actorKind: 'local', action: 'device.rule_toggle', targetType: 'device_rule', targetId: id, detail: { enabled: !!enabled } }); } catch { /* ignore */ }
+      return { data: { enabled: !!enabled } };
+    } catch (e) { return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } }; }
+  });
+
+  ipcMain.handle('devices:rulePreview', async (_event, { id, input }: { id?: string; input?: unknown } = {}) => {
+    try {
+      let rule: DeviceRule | null = null;
+      if (id) rule = getRule(db as never, id);
+      if (!rule && input !== undefined) {
+        const v = validateRuleInput(input);
+        if (!v.ok) return { error: { code: 'INVALID_REQUEST', message: v.message } };
+        rule = { id: 'preview', name: v.rule.name, enabled: true, trigger: v.rule.trigger, action: v.rule.action, cooldownSec: v.rule.cooldownSec, lastRunAt: null, createdAt: '', updatedAt: '' };
+      }
+      if (!rule) return { error: { code: 'NOT_FOUND', message: '规则不存在' } };
+      return { data: { preview: previewRule(db as never, rule, undefined) } };
+    } catch (e) { return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } }; }
+  });
+
+  ipcMain.handle('devices:ruleRuns', async (_event, { ruleId, limit }: { ruleId?: string; limit?: number } = {}) => {
+    try { return { data: { runs: listRuleRuns(db as never, ruleId, Math.min(200, Math.max(1, Number(limit) || 50))) } }; }
+    catch (e) { return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } }; }
   });
 
   /**

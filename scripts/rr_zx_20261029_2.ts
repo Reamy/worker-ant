@@ -199,6 +199,9 @@ function makeDb(opts: { trial?: boolean } = {}): DatabaseSync {
     revoked_at TEXT,
     delivered_at TEXT,
     grant_expires_at TEXT,
+    scope_json TEXT NOT NULL DEFAULT '{}',
+    rate_json TEXT NOT NULL DEFAULT '{}',
+    linkage_allowed INTEGER NOT NULL DEFAULT 1,
     source TEXT DEFAULT 'remote'
   )`);
   d.exec(`CREATE TABLE wa_intent_plans (
@@ -1034,7 +1037,8 @@ async function main(): Promise<void> {
   // zx_20261101_2 M1: 新增设备云账号三写口（保存/测试/同步）——同归 Pro「设备发现」读闸。
   eq((devIpc.match(/proFeatureRefusal\(licDb, 'device_discovery'\)/g) ?? []).length, 5,
     'H-11 发现闸读点逐处穷举（discover/cloud_sync/账号保存/账号测试/账号同步 ⇒ 5 处）');
-  eq((devIpc.match(/teamFeatureRefusal\(licDb, 'device_control'\)/g) ?? []).length, 4, 'H-12 控制闸读点逐处穷举（4 处）');
+  // zx_20261121_2 M6：新增联动规则四个写口（创/改/删/启停），控制闸读点 4→8；逐处穷举不写幻数。
+  eq((devIpc.match(/teamFeatureRefusal\(licDb, 'device_control'\)/g) ?? []).length, 8, 'H-12 控制闸读点逐处穷举（8 处：原 4 + 规则创/改/删/启停）');
   ok(devIpc.includes('discoveryGate: resolveProGate(licDb)'), 'H-13 列表回包同时带 Pro 发现闸与 Team 控制闸');
 
   // ── S 构建钉与自检 ────────────────────────────────────────────────────────

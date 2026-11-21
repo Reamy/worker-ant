@@ -8,6 +8,9 @@
  * 而不是拿 grep 冒充"四个徽标都验过"（本仓反复踩过的"断言名冒充覆盖面"）。
  */
 
+// zx_20261118_2 M7「标」：分数来路的判据在零依赖的 main 模块一处（通知/列表/详情同引）。
+import { isSelfAssessedQualityVia } from '../../../src/main/core/quality-label.js';
+
 export interface TaskBadgeView {
   status: string;
   acc_total?: number | null;
@@ -46,7 +49,14 @@ export function accountBadgeTask(t: TaskBadgeView): BadgeSpec | null {
     return { text: '待你回复', cls: 'bg-orange-100 text-orange-700', title: '任务在等你回复/审批后才会继续' };
   }
   if (ctxOf(t).verification_fix) {
-    return { text: '自动派生', cls: 'bg-cyan-50 text-cyan-700', title: '引擎验收发现问题后自动立项的修复任务' };
+    const ofTitle = String(ctxOf(t).verification_fix_of_title || '').trim();
+    return {
+      text: '自动派生',
+      cls: 'bg-cyan-50 text-cyan-700',
+      title: ofTitle
+        ? `引擎验收发现问题后自动立项的修复任务（修复自：${ofTitle}）`
+        : '引擎验收发现问题后自动立项的修复任务',
+    };
   }
   return null;
 }
@@ -57,5 +67,5 @@ export function accountBadgeTask(t: TaskBadgeView): BadgeSpec | null {
  */
 export function isSelfAssessedQuality(t: TaskBadgeView): boolean {
   const q = ctxOf(t).completion_quality as { score?: number; via?: string } | undefined;
-  return q?.score != null && q?.via === 'finalize_task';
+  return q?.score != null && isSelfAssessedQualityVia(q?.via);
 }

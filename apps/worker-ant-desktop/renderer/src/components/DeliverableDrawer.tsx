@@ -114,6 +114,27 @@ export function DeliverableDrawer({ id, onClose }: { id: string | null; onClose:
     setBusy(false);
   };
 
+  // zx_20261119_1 M5「名」：退休（与列表行同一写口 `deliverable:retire`；理由必填、页内输入）。
+  const [retireOpen, setRetireOpen] = useState(false);
+  const [retireWhy, setRetireWhy] = useState('');
+  const [retireMsg, setRetireMsg] = useState<{ text: string; ok: boolean } | null>(null);
+  const retire = async () => {
+    if (!data || busy) return;
+    const why = retireWhy.trim();
+    if (!why) { setRetireMsg({ text: '退休须填写理由', ok: false }); return; }
+    setBusy(true);
+    try {
+      const r = await deliverables.retire(data.id, why);
+      setRetireMsg({ text: r?.changed ? '已退休（可在「显示已退休」中查看）' : '该成果此前已退休', ok: true });
+      setRetireOpen(false);
+      setRetireWhy('');
+      await load();
+    } catch (e) {
+      setRetireMsg({ text: (e as Error).message || '退休失败', ok: false });
+    }
+    setBusy(false);
+  };
+
   // zx_20260914 M2-2: 抽屉打开即问主进程"这能不能当图片内联"——判据全在 main(白名单/上限/存在性)，
   //   本层只负责显示它给的结果。非图片成果返回 unsupported，静默跳过(不为每条成果占一行"不支持")。
   useEffect(() => {
@@ -176,6 +197,12 @@ export function DeliverableDrawer({ id, onClose }: { id: string | null; onClose:
                 <Check className="w-3.5 h-3.5 inline mr-0.5" />标为已验收
               </button>
             )}
+            {/* zx_20261119_1 M5「名」：退休入口（与列表行同一写口；理由页内输入） */}
+            {data && data.status !== 'retired' && (
+              <button type="button" onClick={() => { setRetireOpen((v) => !v); setRetireMsg(null); }} disabled={busy}
+                title="退休：临时件/探针不再计入成果（须写理由，会留痕）"
+                className="px-2 py-1.5 rounded hover:bg-gray-100 border border-gray-200 text-[11px] text-gray-600 disabled:opacity-50">退休</button>
+            )}
             {data?.file_path && (
               <button type="button" onClick={copyPath} title="复制路径" className="p-2 rounded hover:bg-gray-100 border border-gray-200">
                 {copied ? <Check className="w-4 h-4 text-green-600" /> : <Copy className="w-4 h-4 text-gray-500" />}
@@ -203,6 +230,26 @@ export function DeliverableDrawer({ id, onClose }: { id: string | null; onClose:
           <div className="px-5 py-2 text-xs border-b bg-amber-50 text-amber-700 border-amber-100">
             {revealMsg}
             <button type="button" onClick={() => setRevealMsg(null)} className="ml-2 underline opacity-70">知道了</button>
+          </div>
+        )}
+
+        {/* zx_20261119_1 M5「名」：退休理由（页内输入，不挂起渲染进程） */}
+        {retireOpen && (
+          <div className="px-5 py-2.5 border-b bg-gray-50 space-y-2">
+            <p className="text-xs text-gray-600">退休后默认不在主列表（可在「显示已退休」中查看），并摘掉 ★；操作留痕。</p>
+            <textarea value={retireWhy} onChange={(e) => setRetireWhy(e.target.value)} rows={2} autoFocus
+              placeholder="理由（必填）：如一次性探针脚本，不是交付成果"
+              className="w-full px-2 py-1.5 border rounded text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y" />
+            <div className="flex justify-end gap-2">
+              <button type="button" onClick={() => setRetireOpen(false)} disabled={busy} className="px-2 py-1 text-xs border rounded hover:bg-gray-50 disabled:opacity-40">取消</button>
+              <button type="button" onClick={() => void retire()} disabled={busy || !retireWhy.trim()} className="px-3 py-1 text-xs rounded bg-gray-700 text-white hover:bg-gray-800 disabled:opacity-50">确认退休</button>
+            </div>
+          </div>
+        )}
+        {retireMsg && (
+          <div className={`px-5 py-2 text-xs border-b ${retireMsg.ok ? 'bg-green-50 text-green-700 border-green-100' : 'bg-amber-50 text-amber-700 border-amber-100'}`}>
+            {retireMsg.text}
+            <button type="button" onClick={() => setRetireMsg(null)} className="ml-2 underline opacity-70">知道了</button>
           </div>
         )}
 

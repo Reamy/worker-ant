@@ -34,14 +34,20 @@ import {
   getTerminalBrief,
   listPendingTerminals,
   listTerminals,
+  readTerminalGrant,
   rejectTerminal,
   reissueTerminalCredential,
   revokeTerminal,
   terminalReasonToError as reasonToError,
+  writeTerminalGrant,
   type PendingTerminalPublic,
   type TerminalDb,
   type TerminalPublic,
 } from '../core/external-terminals.js';
+// zx_20261121_2 M1/M3：授权边界的校验与设备选择器数据。
+import { defaultGrant, validateGrant, type TerminalGrant } from '../core/external-grant.js';
+import { listDevices } from '../core/device-registry.js';
+import { recordAudit } from '../core/audit-log.js';
 import {
   LAN_SILENCE_MS,
   createTerminalBrowseLifecycle,
@@ -108,6 +114,10 @@ export interface ExternalListPayload {
   capabilities: ExternalCapabilityOption[];
   /** 审批面板勾选框的**初值集合**（与 IM 审批同一份 `DEFAULT_TERMINAL_CAPABILITIES`）。 */
   defaultCapabilities: ExternalCapability[];
+  /** zx_20261121_2 M3：设备选择器（只给 id/名/房间/品类/授权态，不给地址）。 */
+  devices: Array<{ id: string; name: string; room: string; kind_class: string; authorized: boolean; controllable: boolean }>;
+  /** zx_20261121_2 M3：新批准/新编辑的缺省边界（全部/不限/允许）。 */
+  defaultGrant: TerminalGrant;
 }
 
 /**
@@ -218,6 +228,11 @@ export function initExternalIpc(
           invocable: isInvocableCapability(id),
         })),
         defaultCapabilities: [...DEFAULT_TERMINAL_CAPABILITIES],
+        devices: listDevices(db).map((d) => ({
+          id: d.id, name: d.name, room: d.room, kind_class: d.kind_class,
+          authorized: d.authorized, controllable: d.controllable,
+        })),
+        defaultGrant: defaultGrant(),
       };
       return { data: payload };
     } catch (e) {
@@ -226,7 +241,7 @@ export function initExternalIpc(
   });
 
   // 点同意：铸发凭据（只存 hash，明文留门端点发终端）+ 记被允许的能力。**不回**明文。
-  ipcMain.handle('external:approve', async (_event, { pairingId, capabilities }: { pairingId: string; capabilities?: string[] }) => {
+  ipcMain.handle('external:approve', async (_event, { pairingId, capabilities, grant }: { pairingId: string; capabilities?: string[]; grant?: unknown }) => {
     try {
       // zx_20261104_3 M3：批准＝把一台设备放进协作面——与 `external:lanRequest` / 授权台同一位阶。
       //   两道闸（外部终端接入 + 授权台）任一锁定即如实拒；**拒绝/吊销/重签不挂闸**（收窄动作永远放行）。
@@ -236,9 +251,39 @@ export function initExternalIpc(
       }
       // 未传 `capabilities`（老渲染层/IM 语义）⇒ 取默认（意图控制）；**显式传 `[]`** 仍表示"只配对、不授予"。
       const caps = Array.isArray(capabilities) ? capabilities : [...DEFAULT_TERMINAL_CAPABILITIES];
-      const r = approveTerminal(tdb, String(pairingId ?? ''), caps);
+      // zx_20261121_2 M3：批准时即可设边界；未传 ⇒ 缺省（全部/不限/允许）。
+      const g = grant === undefined ? { ok: true as const, grant: defaultGrant() } : validateGrant(grant);
+      if (!g.ok) return { error: { code: 'INVALID_REQUEST', message: g.message } } satisfies MutateResult;
+      const r = approveTerminal(tdb, String(pairingId ?? ''), caps, { grant: g.grant });
       if (!r.ok) return { error: reasonToError(r.reason) } satisfies MutateResult;
       emitExternalStatusChanged('external:approve', { pairingId: String(pairingId ?? '') });
+      return { data: { ok: true } } satisfies MutateResult;
+    } catch (e) {
+      return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } };
+    }
+  });
+
+  // zx_20261121_2 M3：改授权边界（范围/频率/联动）。收窄是安全动作，但仍要求 Team 档（终端接入本身是 Team）。
+  ipcMain.handle('external:grantUpdate', async (_event, { terminalId, grant }: { terminalId: string; grant: unknown }) => {
+    try {
+      const id = String(terminalId ?? '').trim();
+      const refusal = teamFeatureRefusal(licDb, 'external_terminal');
+      if (refusal) return { error: { code: 'TEAM_REQUIRED', message: refusalWithContext(db, refusal, { requiredTier: 'team' }) } };
+      const before = readTerminalGrant(tdb, id);
+      if (!before) return { error: { code: 'NOT_FOUND', message: '终端不存在' } } satisfies MutateResult;
+      const v = validateGrant(grant);
+      if (!v.ok) return { error: { code: 'INVALID_REQUEST', message: v.message } } satisfies MutateResult;
+      if (!writeTerminalGrant(tdb, id, v.grant)) return { error: { code: 'INTERNAL', message: '授权边界未保存' } } satisfies MutateResult;
+      try {
+        recordAudit(db, {
+          actorKind: 'local',
+          action: 'external.grant_update',
+          targetType: 'external_terminal',
+          targetId: id,
+          detail: { previous: before, next: v.grant },
+        });
+      } catch { /* 审计写失败不改变保存结局 */ }
+      emitExternalStatusChanged('external:grant_update', { terminalId: id });
       return { data: { ok: true } } satisfies MutateResult;
     } catch (e) {
       return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } };

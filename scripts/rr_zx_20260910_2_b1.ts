@@ -300,7 +300,7 @@ ok(
   //   （不是被换掉的真源），且包装的第二个实参由判据有无派生——两半仍绑在同一句 INSERT 上。
   // zx_20261115_2 M2：INSERT 增 `position_id` 列、`.run` 尾增 `parentPositionId`——按更强的新形状钉
   //   （既仍钉 buildChildContext/withAcceptanceSource，也钉岗位随树继承；不是放宽）。
-  /INSERT INTO wa_tasks \(id, project_id, title, description, status, priority, parent_task_id, depends_on, source, acceptance_criteria, context_json, position_id\) VALUES \(\?, \?, \?, \?, \?, \?, \?, \?, 'agent', \?, \?, \?\)"\s*\)\s*\.run\([\s\S]{0,900}?JSON\.stringify\(withAcceptanceSource\(buildChildContext\(parentCtx, childDepth\), acceptanceText \? 'model' : 'missing'\)\), parentPositionId\)/.test(exe),
+  /INSERT INTO wa_tasks \(id, project_id, title, description, status, priority, parent_task_id, depends_on, source, acceptance_criteria, context_json, position_id\) VALUES \(\?, \?, \?, \?, \?, \?, \?, \?, 'agent', \?, \?, \?\)"\s*\)\s*\.run\([\s\S]{0,900}?JSON\.stringify\(\{\s*\.\.\.withAcceptanceSource\(buildChildContext\(parentCtx, childDepth\), acceptanceText \? 'model' : 'missing'\),\s*\.\.\.positionContextFields\(derivedPosition\),\s*\}\), derivedPosition\.positionId\)/.test(exe),
   'create_task 用 buildChildContext 落子任务 ctx(子任务继承 scheme_ref 与岗位)，并经 withAcceptanceSource 落判据来源',
 );
 ok(

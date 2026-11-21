@@ -7,6 +7,7 @@
  */
 import type { Tool } from 'ai';
 import { resolveExplorationQuota } from './step-budget.js';
+import type { ExploreLedgerSnapshot } from './quota-ledger.js';
 
 export type ToolCategory = 'readonly' | 'write' | 'control' | 'shell' | 'memory' | 'resource' | 'media' | 'device';
 export type PermissionLevel = 'normal' | 'privileged';
@@ -49,7 +50,7 @@ export const SHELL_EXPLORE_QUOTA: ToolQuota = {
   soft: 12,
   hard: 20,
   softMsg: '[探索配额] 探索类命令已调用 12 次（bash 与 execute_command 共用这一本账；跑测试/构建/git 提交等收尾命令不计入）。硬线 20 次；立即停止探索——用 write_file 直接写入产出文件。',
-  hardMsg: '[探索配额告警] 探索类命令已调用 20 次（bash 与 execute_command 共用这一本账；收尾命令不计入），已达上限：探索类调用将被拒绝（跑测试/构建/git 提交等收尾命令照常放行）。请立即用 write_file 保存成果，不要再执行探索命令。',
+  hardMsg: '[探索配额告警] 探索类命令已调用 20 次（bash 与 execute_command 共用这一本账；收尾命令不计入），已达上限：探索类调用将被拒绝（跑测试/构建/git 提交等收尾命令照常放行）。替代出路：read_file / search_content 不占本配额（盘点文件优先用它们，而不是 grep -r）；成果用 write_file 直接写入。',
 };
 
 /**
@@ -68,15 +69,19 @@ export function deriveShellExploreQuota(maxSteps: number, archetype?: string): T
     soft,
     hard,
     softMsg: `[探索配额] 探索类命令已调用 ${soft} 次（bash 与 execute_command 共用这一本账；跑测试/构建/git 提交等收尾命令不计入）。硬线 ${hard} 次；立即停止探索——用 write_file 直接写入产出文件。`,
-    hardMsg: `[探索配额告警] 探索类命令已调用 ${hard} 次（bash 与 execute_command 共用这一本账；收尾命令不计入），已达上限：探索类调用将被拒绝（跑测试/构建/git 提交等收尾命令照常放行）。请立即用 write_file 保存成果，不要再执行探索命令。`,
+    // zx_20261119_1 M4「通」：点名**免费替代**——探索配额只管 shell，`read_file` / `search_content` 不占这本账。
+    //   旧文案只说"去写产出"，模型随后仍反复用 grep 碰壁（真库标本：同一任务链路 18 次 exploration_limit）。
+    hardMsg: `[探索配额告警] 探索类命令已调用 ${hard} 次（bash 与 execute_command 共用这一本账；收尾命令不计入），已达上限：探索类调用将被拒绝（跑测试/构建/git 提交等收尾命令照常放行）。替代出路：read_file / search_content 不占本配额（盘点文件优先用它们，而不是 grep -r）；成果用 write_file 直接写入。`,
   };
 }
 
 /**
  * 配额账 —— **按 `quotaKey` 一本账**（zx_20260916_3 M5 / O-H）。
  *
- * 生产每次 `executeTask` 里 `new` 一个；**内存态**（跨恢复/重启会重置，属既有限制，D4 归一并未改变它——
- * 如实登记，不谎称已解决）。抽成类是为了让受控回归**直跑真账本**（"值从 0 变 1"这类正面断言只有在真实现上
+ * 生产每次 `executeTask` 里 `new` 一个；zx_20261120_2 M3 起，跨恢复由
+ * `core/quota-ledger.ts` 的 `readExploreLedger`/`writeExploreLedger` 从
+ * `context_json.shell_explore` 续算（此前内存态跨 run 清零，4 次 run 等于 4×20 次额度）。
+ * 抽成类是为了让受控回归**直跑真账本**（"值从 0 变 1"这类正面断言只有在真实现上
  * 才算数），而不是在测试里复刻一份计数逻辑。
  */
 export class ExploreQuotaLedger {
@@ -92,6 +97,24 @@ export class ExploreQuotaLedger {
 
   count(quotaKey: string): number {
     return this.counts.get(quotaKey) || 0;
+  }
+
+  /**
+   * 从持久化快照恢复（zx_20261120_2 M3「衡」）：跨恢复/重启不重置。
+   * 只覆盖快照里有的键；坏值已由 `readExploreLedger` 清洗，这里再做一次防御。
+   */
+  hydrate(snap: ExploreLedgerSnapshot | null | undefined): void {
+    if (!snap) return;
+    for (const [k, v] of Object.entries(snap.counts || {})) {
+      const n = Math.max(0, Math.floor(Number(v) || 0));
+      if (k && n > 0) this.counts.set(k, n);
+    }
+    for (const k of snap.softWarned || []) if (typeof k === 'string' && k) this.softWarned.add(k);
+  }
+
+  /** 当前账快照（供 `writeExploreLedger` 落 `context_json.shell_explore`）。 */
+  snapshot(): ExploreLedgerSnapshot {
+    return { counts: Object.fromEntries(this.counts), softWarned: [...this.softWarned] };
   }
 
   /**

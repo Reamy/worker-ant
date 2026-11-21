@@ -65,6 +65,21 @@ export const WORLD_MUTATING_TOOLS = [
 /** 表态类：非只读，但**不改变世界**，暂停期间仍应放行（见本文件头注）。 */
 export const NON_MUTATING_CONTROL_TOOLS = ['ask_user', 'escalate_to_human', 'interrupt', 'decide'] as const;
 
+/**
+ * zx_20261120_1 M5：远程只读任务的**装配期禁用面**（从任务上下文读，坏形 ⇒ 空数组）。
+ * 与运行期 `readonlyRefusal` 共用同一份键名，防两处各读各的。
+ */
+export function readonlyDenyToolsOf(ctx: Record<string, unknown>): string[] {
+  const raw = ctx.readonly_deny_tools;
+  return Array.isArray(raw) ? raw.filter((x): x is string => typeof x === 'string' && x.length > 0) : [];
+}
+
+/** 只读任务对某个变更类工具的拒绝回执（不在禁用面内 ⇒ `null`）。 */
+export function readonlyRefusal(toolName: string, deny: readonly string[]): string | null {
+  if (!deny.includes(toolName)) return null;
+  return JSON.stringify({ error: '本任务是跨机只读分析：只读工具可用，写文件/登记产出物/执行命令等变更动作被拒绝（未执行）。请用结论作答。', refused: 'readonly_run', tool: toolName });
+}
+
 export interface MutationGateVerdict {
   ok: boolean;
   /** 拒绝因由（机器词，进日志/断言的稳定键）：`status_paused` / `status_terminal:<s>` / `status_missing`。 */
@@ -82,7 +97,10 @@ export function isWorldMutatingTool(toolName: string): boolean {
  * 调用时判据。`status` 由调用方**当场**从库里读（不得传装配时的快照）。
  * 非变更类工具一律放行——闸的覆盖面只在 `WORLD_MUTATING_TOOLS`。
  */
-export function mutationGateVerdict(status: string | null | undefined, toolName: string): MutationGateVerdict {
+export function mutationGateVerdict(status: string | null | undefined, toolName: string, readonlyDeny?: readonly string[]): MutationGateVerdict {
+  if (readonlyDeny?.includes(toolName)) {
+    return { ok: false, reason: 'readonly_run', message: '本任务是跨机只读分析：只读工具可用，写文件/登记产出物/执行命令等变更动作被拒绝（未执行）。请用结论作答。' };
+  }
   if (!isWorldMutatingTool(toolName)) return { ok: true };
   if (status === 'executing' || status === 'preparing' || status === 'running') return { ok: true };
   const reason =

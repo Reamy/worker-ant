@@ -328,10 +328,11 @@ const offenders = (hits: RawHit[]): RawHit[] => hits.filter((h) => !RAW_WHITELIS
   eq(imEnqueueSites.filter((s) => imRouterSrc.includes(s)).length, imEnqueueSites.length,
     `im-router.ts enqueueJob 逐成员在册（${imEnqueueSites.length} 处）`);
   eq(countIn(`${A}/src/main/services/im-router.ts`), imEnqueueSites.length, `im-router.ts enqueueJob 恰 ${imEnqueueSites.length} 次`);
-  eq(countIn(`${A}/src/main/index.ts`), 1, 'index.ts enqueueJob 恰 1 次（cron 注入点）');
+  // zx_20261120_1 M2：index.ts 新增**岗位例行**注入点（与项目 cron 同一作业类型、各自一本账）。
+  eq(countIn(`${A}/src/main/index.ts`), 2, 'index.ts enqueueJob 恰 2 次（项目 cron + 岗位例行注入点）');
   eq(perEngineFile.reduce((n, h) => n + h.n, 0)
-    + countIn(`${A}/src/main/services/im-router.ts`) + countIn(`${A}/src/main/index.ts`), 19,
-    '三处调用点合计 enqueueJob 恰 19 次（8+10+1）');
+    + countIn(`${A}/src/main/services/im-router.ts`) + countIn(`${A}/src/main/index.ts`), 20,
+    '三处调用点合计 enqueueJob 恰 20 次（8+10+2）');
   // D4 专项：核实收口建修复任务的那一段不得再入队（否则又与父任务并发改文件）
   eq(countIn(`${A}/src/main/core/tools/control-finalize.ts`), 0,
     'control-finalize.ts enqueueJob 0 处（D4：改为 depends_on 由调度器接续）');

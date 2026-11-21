@@ -33,7 +33,7 @@ import { childBreadthRefusal } from '../apps/worker-ant-desktop/src/main/core/ta
 // zx_20261105_1 M7：重放回执体抽成具名纯函数——切片只留调用，纯 JS 窗口可直接执行。
 import { buildCreateReplay } from '../apps/worker-ant-desktop/src/main/core/acceptance-check.js';
 // zx_20261112_1 B2：切片窗口内新增「指派岗位先验再插」——判据以**真实现**注入，不在脚本里复刻。
-import { defaultPositionForProject, resolveTaskPosition, POSITIONS_DDL } from '../apps/worker-ant-desktop/src/main/core/positions.js';
+import { defaultPositionForProject, deriveTaskPosition, positionContextFields, resolveTaskPosition, POSITIONS_DDL } from '../apps/worker-ant-desktop/src/main/core/positions.js';
 import { readBoolSetting } from '../apps/worker-ant-desktop/src/main/core/settings-bool.js';
 
 let pass = 0; let fail = 0;
@@ -142,6 +142,7 @@ const mkCreate = (db: AnyDb) => new Function(
   'db', 'crypto', 'projectId', 'title', 'description', 'priority', 'acceptance_criteria', 'client_request_id',
   'parent_task_id', 'childBreadthRefusal', 'buildCreateReplay', 'positionId', 'resolveTaskPosition',
   'position_explicit', 'readBoolSetting', 'defaultPositionForProject',
+  'deriveTaskPosition', 'positionContextFields',
   `${branch}\nreturn { data: db.prepare('SELECT * FROM wa_tasks WHERE id = ?').get(id) };`,
 ) as (db: AnyDb, crypto: { randomUUID: () => string }, projectId: string, title: string,
   description: string | undefined, priority: number | undefined, acceptance_criteria: string | undefined,
@@ -152,12 +153,16 @@ const mkCreate = (db: AnyDb) => new Function(
   resolveTaskPosition: (db: AnyDb, projectId: string, positionId: string) => unknown,
   position_explicit: boolean | undefined,
   readBoolSetting: (db: AnyDb, key: string) => boolean,
-  defaultPositionForProject: (db: AnyDb, projectId: string) => { id: string; name: string } | null) =>
+  defaultPositionForProject: (db: AnyDb, projectId: string) => { id: string; name: string } | null,
+  deriveTaskPosition: (db: AnyDb, opts: Record<string, unknown>) => Record<string, unknown>,
+  positionContextFields: (d: Record<string, unknown>) => Record<string, unknown>) =>
   { data?: { id: string; position_id?: string }; error?: { code: string; message: string } };
 
 const cryptoShim = { randomUUID };
 const create = (db: AnyDb, key: string | undefined, title = '同名任务', projectId = 'p1', positionId?: string) =>
-  mkCreate(db)(db, cryptoShim, projectId, title, '', 0, '', key, undefined, childBreadthRefusal, buildCreateReplay, positionId, resolveTaskPosition, undefined, readBoolSetting, defaultPositionForProject);
+  mkCreate(db)(db, cryptoShim, projectId, title, '', 0, '', key, undefined, childBreadthRefusal, buildCreateReplay, positionId, resolveTaskPosition, undefined, readBoolSetting, defaultPositionForProject,
+    deriveTaskPosition as unknown as (db: AnyDb, opts: Record<string, unknown>) => Record<string, unknown>,
+    positionContextFields as unknown as (d: Record<string, unknown>) => Record<string, unknown>);
 
 // §S1-0（zx_20261105_1 M7）：重放回执体是**具名纯函数**——原行键一个不少，候选只读附上。
 {
@@ -182,7 +187,11 @@ const snap = (db: AnyDb) => {
   eq(rowCount(db), 1, '同键第二次调用 ⇒ **仍恰 1 行**（去重生效，不是又插一行）');
   eq(r2.data.id, r1.data.id, '第二次返回的是**既有那一行**（同一 id，调用方拿到的就是同一个任务）');
   const row = db.prepare('SELECT context_json FROM wa_tasks WHERE id = ?').get(r1.data.id) as { context_json: string };
-  eq(JSON.parse(row.context_json), { client_request_id: 'key-A' }, '幂等键确实落进 context_json（下次才查得到）');
+  // zx_20261120_3 M2：建单同时落 `position_source`（无岗位⇒none）——不再按“整对象恰好一键”钉，
+  //   改钉**更强**的新真源：幂等键在场 + 来源键如实（多余键不等于判据变了）。
+  const parsed = JSON.parse(row.context_json) as Record<string, unknown>;
+  eq(parsed.client_request_id, 'key-A', '幂等键确实落进 context_json（下次才查得到）');
+  eq(parsed.position_source, 'none', '无岗位建单如实落 position_source=none（不冒充有岗位）');
   eq(rowCount(db), 1, '键落位后仍是 1 行（写键不是新增行）');
 }
 
@@ -210,6 +219,7 @@ const snap = (db: AnyDb) => {
   const noDedupe = new Function('db', 'crypto', 'projectId', 'title', 'description', 'priority', 'acceptance_criteria', 'client_request_id',
     'parent_task_id', 'childBreadthRefusal', 'positionId', 'resolveTaskPosition',
     'position_explicit', 'readBoolSetting', 'defaultPositionForProject',
+    'deriveTaskPosition', 'positionContextFields',
     `${stripped}\nreturn { data: { id } };`) as (db: AnyDb, crypto: { randomUUID: () => string }, projectId: string,
       title: string, description: string | undefined, priority: number | undefined,
       acceptance_criteria: string | undefined, client_request_id: string | undefined,
@@ -218,8 +228,12 @@ const snap = (db: AnyDb) => {
       resolveTaskPosition: (db: AnyDb, projectId: string, positionId: string) => unknown,
       position_explicit: boolean | undefined,
       readBoolSetting: (db: AnyDb, key: string) => boolean,
-      defaultPositionForProject: (db: AnyDb, projectId: string) => { id: string; name: string } | null) => { data: { id: string } };
-  const callCreate = (f: typeof noDedupe, k: string | undefined) => f(db, cryptoShim, 'p1', '同名任务', '', 0, '', k, undefined, childBreadthRefusal, undefined, resolveTaskPosition, undefined, readBoolSetting, defaultPositionForProject);
+      defaultPositionForProject: (db: AnyDb, projectId: string) => { id: string; name: string } | null,
+      deriveTaskPosition: (db: AnyDb, opts: Record<string, unknown>) => Record<string, unknown>,
+      positionContextFields: (d: Record<string, unknown>) => Record<string, unknown>) => { data: { id: string } };
+  const callCreate = (f: typeof noDedupe, k: string | undefined) => f(db, cryptoShim, 'p1', '同名任务', '', 0, '', k, undefined, childBreadthRefusal, undefined, resolveTaskPosition, undefined, readBoolSetting, defaultPositionForProject,
+    deriveTaskPosition as unknown as (db: AnyDb, opts: Record<string, unknown>) => Record<string, unknown>,
+    positionContextFields as unknown as (d: Record<string, unknown>) => Record<string, unknown>);
   callCreate(noDedupe, 'key-A');
   callCreate(noDedupe, 'key-A');
   eq(rowCount(db), 2, '反证③：摘掉去重分支 ⇒ 同键两次 2 行（正是 M0.6 修前的实机现象）⇒ ①的判据真的抓得住缺陷');

@@ -545,7 +545,8 @@ async function groupB(): Promise<void> {
       'B-43c ★本文件（自注册路）不再自造 ANS 头——签名式样只有真源一处，抄回来即判红');
     // 该命中：签名式样归**一处真源**，非各文件自造 HMAC。
     ok(truthSrc.includes('createHmacSignature(creds.secretKey, timestamp, bodyText)')
-      && /import \{ createHmacSignature \} from '@worker-ant\/ans-client'/.test(truthSrc),
+      // zx_20261116_3 M1：同一真源还导入了 `parseRetryAfterMs`（429 退避）；仍要求签名函数来自同一包。
+      && /import \{[^}]*createHmacSignature[^}]*\} from '@worker-ant\/ans-client'/.test(truthSrc),
       'B-44 ★签的是 `createHmacSignature(secretKey, timestamp, body)`，且从 `@worker-ant/ans-client` 取（与 `AnsClient.request` 同尺）');
     // 该命中：**两种载荷形状并存**（按类型定），这正是第二病的修法；退回单一形状必有一条消失。
     ok(ipcSrc.includes('agent_card_url: endpoint') && ipcSrc.includes("endpoint, transport: 'streamable-http'"),
@@ -1993,8 +1994,11 @@ function groupJ(): void {
   //   ⚠ 钉**语句形状** `onStepFinish: createStepHandler(`，不钉 `onStepFinish:` 这个子串：
   //   后者在两份文件的**注释台账**里都出现（"搬迁来源：… `onStepFinish: async (event) => {…}`"），
   //   按子串判会把如实写下的台账读成违规（本仓"判据须能被合法数据满足"的又一例）。
-  ok(/onStepFinish: createStepHandler\(/.test(exec),
-    'J-1 ★接线点 `onStepFinish: createStepHandler(…)` 在执行体内（"在册"变成"在路"的具体语句形状）');
+  // zx_20261120_2 M3「衡」：步回调外包一层探索账落库（基座仍在 `createStepHandler` 一处），
+  //   按新真源重钉：`onStepFinish` 指向包装器，包装器由 `createStepHandler(stepScope)` 构造。
+  ok(/onStepFinish: stepHandlerWithQuotaPersist/.test(exec)
+    && /createExploreLedgerPersistingStepHandler\(\s*createStepHandler\(stepScope\)/.test(exec),
+    'J-1 ★接线点 `onStepFinish: stepHandlerWithQuotaPersist` 在执行体内（基座 createStepHandler 仍恰一处）');
   eq((step.match(/onStepFinish: createStepHandler\(/g) ?? []).length, 0,
     'J-1 反证：接线**不在** `exec-step.ts` 内重复一份（抽走的是回调体，不是接线点）');
 

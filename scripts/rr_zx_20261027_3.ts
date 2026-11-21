@@ -789,7 +789,7 @@ CREATE TABLE wa_jobs (id TEXT PRIMARY KEY, type TEXT NOT NULL, payload TEXT DEFA
     }
     // 接线：装配面真接 `makeRelayRunner`（不是只声明 `runTask` 却没人接）。
     const idx = CODE(`${A}/src/main/index.ts`);
-    ok(/runTask:\s*async/.test(idx) && /makeRelayRunner\(\{ db: db! \}\)/.test(idx) && /requester_node_id: null/.test(idx),
+    ok(/runTask:\s*async/.test(idx) && /makeRelayRunner\(\{\s*db:\s*db!(?:\s*,\s*dataDir)?\s*\}\)/.test(idx) && /requester_node_id: null/.test(idx),
       'G-31 ★★装配面真接 `makeRelayRunner`（外部终端无上游可答 ⇒ `requester_node_id: null`）');
   }
 
