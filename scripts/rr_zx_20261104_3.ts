@@ -681,7 +681,8 @@ function sectionH(): void {
     const ipc = readCode(`${A}/renderer/src/lib/ipc.ts`);
     ok(ipc.includes("ipcCall<ApprovalInboxPayload>('approval:inbox')"), 'H-3 renderer 的 approvalApi.inbox 真调 approval:inbox');
     const nav = readCode(`${A}/renderer/src/lib/navConfig.ts`);
-    ok(nav.includes("to: '/inbox'") && nav.includes("label: '授权台'"), 'H-4 导航有 /inbox「授权台」');
+    // zx_20261121_3 M3：该页已扩为「待办」（授权 + 知识待办），导航名随之改；判据钉新真源（含知识待办入口）。
+    ok(nav.includes("to: '/inbox'") && nav.includes("label: '待办'") && nav.includes('知识待办'), 'H-4 导航有 /inbox「待办」（含知识待办）');
     const app = readCode(`${A}/renderer/src/App.tsx`);
     ok(app.includes('path="/inbox"') && app.includes('<InboxPage'), 'H-5 路由挂了 /inbox');
     const layout = readCode(`${A}/renderer/src/components/AppLayout.tsx`);

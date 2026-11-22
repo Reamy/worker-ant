@@ -75,13 +75,13 @@ export default function TaskCost({
     <div className="bg-white rounded-lg border p-4">
       <div className="flex items-center justify-between mb-2">
         <h4 className="font-medium text-sm flex items-center gap-1"><TrendingUp className="w-4 h-4 text-orange-500" />任务预算</h4>
-        <button onClick={onToggleContext} className="text-xs text-blue-500 hover:text-blue-700"><Edit className="w-3.5 h-3.5 inline" /> 编辑</button>
+        <button onClick={onToggleContext} className="text-xs text-accent hover:text-accent"><Edit className="w-3.5 h-3.5 inline" /> 编辑</button>
       </div>
       <div className="grid grid-cols-2 gap-3 text-sm">
         <div className="bg-gray-50 rounded p-2">
           <p className="text-xs text-gray-400">消耗 / 预算 (tokens){executingNow ? ' · 实时' : ''}</p>
           <div className="flex items-baseline gap-1 mt-1">
-            <span className="text-lg font-bold text-blue-600">{formatTokens(displayTokens)}</span>
+            <span className="text-lg font-bold text-accent">{formatTokens(displayTokens)}</span>
             <span className="text-xs text-gray-400">/ {effectiveBudget ? formatTokens(effectiveBudget) : (ctxForm.max_tokens_per_task ? formatTokens(Number(ctxForm.max_tokens_per_task)) : '未设置')}</span>
           </div>
           {effBudgetTok > 0 && (
@@ -89,7 +89,7 @@ export default function TaskCost({
               {/* E1 (2026-09-04_2): band 越界即质变点脉冲气泡 */}
               {budgetFlash && <p className="mt-1 text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5">{budgetFlash}</p>}
               <div className="mt-1 h-1.5 bg-gray-200 rounded-full overflow-hidden">
-                <div className={`h-full rounded-full transition-all ${curBand >= 5 ? 'bg-red-500 animate-pulse' : curBand === 4 ? 'bg-orange-500' : curBand === 3 ? 'bg-yellow-500' : curBand >= 2 ? 'bg-amber-400' : 'bg-blue-500'}`}
+                <div className={`h-full rounded-full transition-all ${curBand >= 5 ? 'bg-red-500 animate-pulse' : curBand === 4 ? 'bg-orange-500' : curBand === 3 ? 'bg-yellow-500' : curBand >= 2 ? 'bg-amber-400' : 'bg-accent'}`}
                   style={{ width: `${Math.min(100, (curRatio ?? 0) * 100)}%` }} />
               </div>
               <div className="relative mt-0.5 h-3 text-[9px] text-gray-400 select-none">
@@ -148,7 +148,7 @@ export default function TaskCost({
           </div>
           <div className="flex justify-end gap-2">
             <button onClick={() => onToggleContext()} className="px-2 py-1 border rounded text-xs hover:bg-gray-50">取消</button>
-            <button onClick={onSaveContext} className="px-2 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700"><Check className="w-3 h-3 inline" /> 保存</button>
+            <button onClick={onSaveContext} className="px-2 py-1 bg-accent text-white rounded text-xs hover:bg-accent/90"><Check className="w-3 h-3 inline" /> 保存</button>
           </div>
         </div>
       )}

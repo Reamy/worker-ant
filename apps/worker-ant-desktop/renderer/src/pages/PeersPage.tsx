@@ -38,6 +38,8 @@ import type { NodeEnrollmentReason } from '../../../src/main/core/node-heartbeat
 import type { ExternalCallRow } from '../../../src/main/core/external-calls.js';
 // zx_20261023_5 批一：待派任务三分组的形状取 main 侧真源（`collab-dispatch.ts`），仅类型引用、打包期擦除。
 import type { DispatchBoardPayload } from '../../../src/main/core/collab-dispatch.js';
+// zx_20261121_3 M5：页头 / 主按钮 / 三态收进共用原语（只换呈现，判据与请求原样）
+import { PageHeader, Button, EmptyState, ErrorState, Skeleton } from '../components/ui';
 // zx_20261106_3 B7：发现到的 A2A 门牌形状取自 main 侧真源（`agent-discovery.ts`），仅类型引用、打包期擦除。
 import type { DiscoveredAgent } from '../../../src/main/core/agent-discovery.js';
 // zx_20261108_1 B2：角色建议判据（pure、零 IO ⇒ 渲染层可直引；同 `node-receipt.js` 范式）。
@@ -123,7 +125,7 @@ function CardLine({ node }: { node: AnsNode }) {
         <div className="flex items-center gap-1.5 flex-wrap text-[10px] text-gray-400">
           <span>能做</span>
           {cats.map(c => (
-            <span key={c} className="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600">{NODE_CARD_CATEGORY_LABEL[c]}</span>
+            <span key={c} className="px-1.5 py-0.5 rounded bg-accent-soft text-accent">{NODE_CARD_CATEGORY_LABEL[c]}</span>
           ))}
         </div>
       )}
@@ -233,7 +235,7 @@ function CallRecordRow({ rec }: { rec: NodeCallRecord }) {
       <div className="mt-1 flex items-center gap-3 flex-wrap text-[10px] text-gray-400">
         <span>到场 {formatDbTime(rec.receivedAt) || '—'}</span>
         {rec.completedAt && <span>收口 {formatDbTime(rec.completedAt)}</span>}
-        <span className="font-mono text-gray-300">{rec.requestId.slice(0, 8)}</span>
+        <span className="font-mono text-[11px] text-gray-300">{rec.requestId.slice(0, 8)}</span>
       </div>
       {asked && (
         <div className="mt-1.5 text-xs text-gray-700 whitespace-pre-wrap break-words line-clamp-2">
@@ -364,7 +366,7 @@ function DispatchRow({ rec, nameOf, onDone }: { rec: NodeDispatchRecord; nameOf:
       <div className="mt-1 flex items-center gap-3 flex-wrap text-[10px] text-gray-400">
         <span>派出 {formatDbTime(rec.dispatchedAt) || '—'}</span>
         {rec.resultAt && <span>收口 {formatDbTime(rec.resultAt)}</span>}
-        <span className="font-mono text-gray-300">{rec.requestId.slice(0, 8)}</span>
+        <span className="font-mono text-[11px] text-gray-300">{rec.requestId.slice(0, 8)}</span>
       </div>
       {/* zx_20261104_3 M2：每一次派单都答得出「为什么派给它」（ANS 择机理由原样转述）。 */}
       <div className="mt-1 text-[10px] text-gray-500 break-words">
@@ -458,8 +460,8 @@ function DispatchCard({ candidates, onDone }: { candidates: AnsNode[]; onDone: (
   }
 
   return (
-    <div className="mb-5 rounded-lg border border-indigo-200 bg-indigo-50/50 px-4 py-3">
-      <div className="text-sm font-medium text-indigo-900 mb-2 inline-flex items-center gap-1.5"><Send className="w-4 h-4" />派活</div>
+    <div className="mb-5 rounded-lg border border-accent/25 bg-accent-soft/50 px-4 py-3">
+      <div className="text-sm font-medium text-accent mb-2 inline-flex items-center gap-1.5"><Send className="w-4 h-4" />派活</div>
       <div className="flex flex-wrap items-center gap-2">
         <label className="text-[11px] text-gray-600 inline-flex items-center gap-1">类目
           <select value={category} onChange={e => setCategory(e.target.value as NodeCardCategory)} className="px-1.5 py-0.5 border rounded text-xs bg-white">
@@ -473,7 +475,7 @@ function DispatchCard({ candidates, onDone }: { candidates: AnsNode[]; onDone: (
           </select>
         </label>
         <button onClick={() => void onDispatch()} disabled={busy}
-          className="inline-flex items-center gap-1 text-xs px-3 py-1 bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50">
+          className="inline-flex items-center gap-1 text-xs px-3 py-1 bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50">
           <Send className="w-3 h-3" />{busy ? '派发中…' : '派发'}
         </button>
       </div>
@@ -565,7 +567,7 @@ function RoleAdviceCard({ advice, currentRole, editable, busy, onAdopt }: {
       </ul>
       {!same && editable && (
         <button onClick={() => onAdopt(advice.suggested)} disabled={busy}
-          className="mt-1 inline-flex items-center gap-1 text-[11px] px-2 py-0.5 border border-blue-300 text-blue-700 rounded hover:bg-blue-50 disabled:opacity-50">
+          className="mt-1 inline-flex items-center gap-1 text-[11px] px-2 py-0.5 border border-accent/30 text-accent rounded hover:bg-accent-soft disabled:opacity-50">
           <Check className="w-3 h-3" />采纳为{NODE_ROLE_LABEL[advice.suggested]}
         </button>
       )}
@@ -669,17 +671,17 @@ function NodeRow({ node, local, localRole, localNodeId, nowMs, reliability, onSa
   }
 
   return (
-    <div className={`rounded-lg border p-3 ${local ? 'bg-blue-50/40 border-blue-200' : 'bg-white'}`}>
+    <div className={`rounded-lg border p-3 ${local ? 'bg-accent-soft/40 border-accent/25' : 'bg-white'}`}>
       <div className="flex items-center gap-2 flex-wrap">
-        <Network className={`w-4 h-4 ${local ? 'text-blue-500' : 'text-gray-400'}`} />
+        <Network className={`w-4 h-4 ${local ? 'text-accent' : 'text-gray-400'}`} />
         <span className="font-medium text-sm text-gray-800">{node.name || node.node_id}</span>
-        {local && <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-600 text-white">本机</span>}
+        {local && <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent text-white">本机</span>}
         <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">{NODE_ROLE_LABEL[node.role]}</span>
-        <span className="text-[10px] text-gray-400">权重 {node.weight}</span>
+        <span className="text-[10px] text-gray-400 tnum">权重 {node.weight}</span>
         {/* zx_20261115_2 M5：与派活下拉同一个判据——离线机不再被写成「可派单」。 */}
         <span className={`text-[10px] px-1.5 py-0.5 rounded ${canDispatch ? 'bg-emerald-50 text-emerald-600' : 'bg-gray-100 text-gray-500'}`}>{canDispatch ? '可派单' : online ? '不派单' : '离线（不可派）'}</span>
         <OnlineDot online={online} />
-        <span className="text-[11px] text-gray-400 ml-auto">心跳 {seenAgo(node.last_seen_at, nowMs)}</span>
+        <span className="text-[11px] text-gray-400 ml-auto tnum">心跳 {seenAgo(node.last_seen_at, nowMs)}</span>
       </div>
       <div className="mt-1.5"><EnvLine env={env} /></div>
       <CardLine node={node} />
@@ -704,7 +706,7 @@ function NodeRow({ node, local, localRole, localNodeId, nowMs, reliability, onSa
       <RoleAdviceCard advice={advice} currentRole={node.role} editable={editable} busy={saving} onAdopt={(r) => void adoptRole(r)} />
       {saveErr && <p className="mt-1 text-[11px] text-red-500">{saveErr}</p>}
       {editable ? (
-        <div className={`mt-2 pt-2 border-t flex items-center gap-3 flex-wrap ${local ? 'border-blue-100' : 'border-gray-100'}`}>
+        <div className={`mt-2 pt-2 border-t flex items-center gap-3 flex-wrap ${local ? 'border-accent/15' : 'border-gray-100'}`}>
           <label className="text-[11px] text-gray-500 inline-flex items-center gap-1">名称
             <input type="text" value={name} onChange={e => setName(e.target.value)} placeholder="节点名（留空即不改）"
               className="w-40 px-1.5 py-0.5 border rounded text-xs" />
@@ -738,7 +740,7 @@ function NodeRow({ node, local, localRole, localNodeId, nowMs, reliability, onSa
               </span>
             )
           )}
-          <button onClick={save} disabled={saving} className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50">
+          <button onClick={save} disabled={saving} className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50">
             <Check className="w-3 h-3" />{saving ? '保存中…' : '保存'}
           </button>
           <span className="text-[10px] text-gray-400">
@@ -823,14 +825,14 @@ function EnrollCard({ hasToken, initialName, reason, onDone }: { hasToken: boole
 
   const canRegister = busy === null && (token.trim().length > 0 || hasToken);
   return (
-    <div className="mb-5 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3">
-      <div className="text-sm font-medium text-blue-900 mb-1">加入本 ANS 的协同网络</div>
-      <p className="text-xs text-blue-800 mb-3">
+    <div className="mb-5 rounded-lg border border-accent/25 bg-accent-soft px-4 py-3">
+      <div className="text-sm font-medium text-accent mb-1">加入本 ANS 的协同网络</div>
+      <p className="text-xs text-accent mb-3">
         本机尚未登记到 ANS 节点台账。两种方式任选其一：<b>粘贴</b>一枚注册令牌，或用本机 ANS 凭据<b>一键申请</b>一枚。
       </p>
       {/* zx_20261012：如实说清**为何**判未入网——凭据仍占位时，本机手里的 key 并非注册所得（判据增②）。 */}
       {reason === 'placeholder-credential' && (
-        <p className="text-xs text-blue-800 mb-3">
+        <p className="text-xs text-accent mb-3">
           本机 ANS 凭据仍是内置占位（<b>非注册所得</b>），故不计为协同网络一员。
         </p>
       )}
@@ -846,11 +848,11 @@ function EnrollCard({ hasToken, initialName, reason, onDone }: { hasToken: boole
           className="w-48 px-2 py-1 border rounded text-xs"
         />
         <button onClick={() => void onInput()} disabled={!canRegister}
-          className="text-xs px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50">
+          className="text-xs px-3 py-1 bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50">
           {busy === 'input' ? '注册中…' : hasToken && !token.trim() ? '用已存令牌注册' : '注册'}
         </button>
         <button onClick={() => void onApply()} disabled={busy !== null}
-          className="text-xs px-3 py-1 border border-blue-600 text-blue-700 rounded hover:bg-blue-100 disabled:opacity-50">
+          className="text-xs px-3 py-1 border border-accent text-accent rounded hover:bg-accent-soft disabled:opacity-50">
           {busy === 'apply' ? '申请中…' : '一键申请'}
         </button>
       </div>
@@ -957,7 +959,7 @@ function TerminalGrantSection({ terminalId, grant, devices, onSaved }: {
     <div className="mt-1">
       <div className="flex items-center gap-2 flex-wrap text-[10px] text-gray-500">
         <span>{grantSummary(grant)}</span>
-        <button type="button" onClick={() => setOpen(v => !v)} className="text-blue-600 hover:underline">{open ? '收起边界' : '改授权边界'}</button>
+        <button type="button" onClick={() => setOpen(v => !v)} className="text-accent hover:underline">{open ? '收起边界' : '改授权边界'}</button>
       </div>
       {open && (
         <div className="mt-1.5 rounded border border-gray-200 bg-gray-50 p-2 space-y-1.5">
@@ -1146,7 +1148,7 @@ function DoorCard() {
         {!open && pending.length > 0 && (
           <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">待审批 {pending.length}</span>
         )}
-        <button type="button" onClick={() => setOpen(v => !v)} className="ml-auto text-[11px] text-blue-600 hover:underline">
+        <button type="button" onClick={() => setOpen(v => !v)} className="ml-auto text-[11px] text-accent hover:underline">
           {open ? '收起' : `展开（待批 ${pending.length} · 已授权 ${approved.length}）`}
         </button>
         <label className="inline-flex items-center gap-1.5 text-xs text-gray-700">
@@ -1236,10 +1238,10 @@ function DoorCard() {
         {discovery.data?.locked && <p className="mt-1.5 text-[11px] text-amber-700">{discovery.data.detail}</p>}
         {!discovery.data?.locked && discoveryItems.length > 0 && (
           <div className="mt-1.5 space-y-1.5">{discoveryItems.map((d) => (
-            <div key={d.id} className="rounded-lg border border-violet-200 bg-violet-50/60 px-3 py-2">
+            <div key={d.id} className="rounded-lg border border-accent/30 bg-accent-soft px-3 py-2">
               <div className="flex items-center gap-2 flex-wrap">
                 <span className="font-medium text-sm text-gray-800">{d.name}</span>
-                <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-100 text-violet-700">{d.source === 'mdns' ? 'mDNS' : '手工'}</span>
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent-soft text-accent">{d.source === 'mdns' ? 'mDNS' : '手工'}</span>
                 <span className="text-[10px] text-gray-500 font-mono">{d.endpoint}</span>
                 {d.card.version && <span className="text-[10px] text-gray-400">v{d.card.version}</span>}
                 <span className="text-[10px] text-gray-400 ml-auto">{Math.max(0, Math.round((Date.now() - d.lastSeenMs) / 1000))} 秒前见到</span>
@@ -1251,7 +1253,7 @@ function DoorCard() {
               </div>
               <div className="mt-1 flex items-center gap-2 flex-wrap">
                 <button disabled={busyId === d.id} onClick={() => void requestAgent(d)}
-                  className="text-[11px] px-2.5 py-0.5 bg-violet-600 text-white rounded hover:bg-violet-700 disabled:opacity-50">
+                  className="text-[11px] px-2.5 py-0.5 bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50">
                   {busyId === d.id ? '处理中…' : '接入'}
                 </button>
                 <button disabled={busyId === d.id} onClick={() => void act(d.id, () => externalApi.agentIgnore(d.id))}
@@ -1278,7 +1280,7 @@ function DoorCard() {
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="font-medium text-sm text-gray-800">{p.name || '（未具名）'}</span>
                   {p.source === 'lan' && <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-50 text-sky-700">局域网发现</span>}
-                  {p.source === 'discovery' && <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-50 text-violet-700">A2A 地址发现</span>}
+                  {p.source === 'discovery' && <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent-soft text-accent">A2A 地址发现</span>}
                   <span className="text-[11px] text-gray-500">核对码
                     <span className="ml-1 font-mono text-base tracking-widest text-amber-800">{p.pair_code}</span>
                   </span>
@@ -1452,11 +1454,11 @@ function ClusterStat({ label, value, tone }: { label: string; value: number; ton
 function ClusterNodeRow({ n }: { n: ClusterNode }) {
   const caps = n.capabilities.map(c => NODE_CARD_CATEGORY_LABEL[c]).join(' / ') || '未上报能力';
   return (
-    <div className={`text-xs px-2 py-1.5 rounded ${n.local ? 'bg-indigo-50/60' : 'bg-gray-50'}`}>
+    <div className={`text-xs px-2 py-1.5 rounded ${n.local ? 'bg-accent-soft/60' : 'bg-gray-50'}`}>
       <div className="flex items-center gap-2 flex-wrap">
         <span className={`w-2 h-2 rounded-full shrink-0 ${n.online ? 'bg-emerald-500' : 'bg-gray-300'}`} />
         <span className="font-medium text-gray-800 truncate max-w-[14rem]" title={n.name}>{n.name}</span>
-        {n.local && <span className="text-[10px] px-1 rounded bg-indigo-100 text-indigo-700">本机</span>}
+        {n.local && <span className="text-[10px] px-1 rounded bg-accent-soft text-accent">本机</span>}
         <span className="text-gray-400">{NODE_ROLE_LABEL[n.role]}{n.tier ? ` · ${n.tier}` : ''}</span>
         {!n.online && <span className="text-gray-400">离线</span>}
         {n.atCapacity && <span className="text-amber-700 font-medium">满载</span>}
@@ -1484,7 +1486,7 @@ function ClusterCard({ view }: { view: NodesClusterPayload }) {
     <div className="mb-4 rounded-lg border border-gray-200 bg-white px-4 py-3">
       <div className="flex items-center justify-between">
         <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">集群一屏</p>
-        <button type="button" onClick={() => setOpen(v => !v)} className="text-[11px] text-blue-600 hover:underline">
+        <button type="button" onClick={() => setOpen(v => !v)} className="text-[11px] text-accent hover:underline">
           {open ? '收起逐节点' : `逐节点详情（${view.nodes.length}）`}
         </button>
       </div>
@@ -1635,28 +1637,49 @@ export default function PeersPage() {
     }
   }
 
-  if (q.loading && q.data == null) return <div className="flex justify-center py-12"><div className="animate-spin h-8 w-8 border-2 border-blue-500 border-t-transparent rounded-full" /></div>;
+  // zx_20261121_3 M5：页头一句主张——只由已读到的台账 / 集群数派生（读不到就说读不到，不编）。
+  const peersClaim = gate && !gate.unlocked
+    ? `当前档位 ${gate.tierLabel}——多机协同是团队版能力`
+    : data == null
+      ? (q.loading ? '正在读取 ANS 节点台账…' : '节点台账尚未读到')
+      : data.error
+        ? '节点台账读不到——原因与重试见下方'
+        : data.nodes.length === 0
+          ? '节点台账为空——本机行尚未出现在台账里'
+          : cluster.data
+            ? `在线 ${cluster.data.totals.online} 台 · 离线 ${cluster.data.totals.offline} 台 · 排队 ${cluster.data.totals.queued} 项`
+            : `本机与 ${others.length} 台其他节点在此协同`;
+
+  if (q.loading && q.data == null) return (
+    <div>
+      <PageHeader eyebrow="协同" title="协同面板" claim="正在读取 ANS 节点台账…" />
+      <div className="space-y-2" role="status" aria-live="polite">
+        <span className="sr-only">载入中…</span>
+        {Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-[132px]" />)}
+      </div>
+    </div>
+  );
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-4">
-        <h2 className="text-xl font-bold">协同面板</h2>
-        <div className="flex items-center gap-2">
-          <FreshnessPill q={q} />
-          <button onClick={() => void q.reload()} className="p-2 hover:bg-gray-100 rounded-lg"><RefreshCw className="w-4 h-4" /></button>
-        </div>
-      </div>
+      <PageHeader
+        eyebrow="协同"
+        title="协同面板"
+        claim={peersClaim}
+        actions={<FreshnessPill q={q} />}
+        primaryAction={<Button variant="primary" size="sm" onClick={() => void q.reload()} icon={<RefreshCw className="w-3.5 h-3.5" />}>刷新</Button>}
+      />
 
       {gate && !gate.unlocked ? (
-        <div className="rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-3">
+        <div className="rounded-lg border border-accent/25 bg-accent-soft px-4 py-3">
           <div className="flex items-center gap-2 mb-1">
-            <div className="text-sm font-medium text-indigo-800">「多机协同」是团队版旗舰能力</div>
-            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-white text-indigo-700 border border-indigo-200">
+            <div className="text-sm font-medium text-accent">「多机协同」是团队版旗舰能力</div>
+            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-white text-accent border border-accent/25">
               当前：{gate.tierLabel}
             </span>
           </div>
-          <div className="text-xs text-indigo-700">{gate.detail}</div>
-          <ul className="mt-1.5 text-[11px] text-indigo-700 list-disc pl-4 space-y-0.5">
+          <div className="text-xs text-accent">{gate.detail}</div>
+          <ul className="mt-1.5 text-[11px] text-accent list-disc pl-4 space-y-0.5">
             <li>团队版：最多 20 台协同节点（含本机），能力优先派发、跨机进度与失败收口、AI 终端接入。</li>
             <li>跨机外派只发「不需要本机工作目录」的任务（纯调研且题面不涉仓库/文件）；派没派、为什么没派，任务详情第一屏可见。</li>
             <li>专业版：仍是单机专业版——并发与项目照常，不跨机派活、不接入外部终端。</li>
@@ -1665,8 +1688,8 @@ export default function PeersPage() {
         </div>
       ) : (<>
       {data?.error && (
-        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
-          读不到 ANS 节点台账：{data.error}
+        <div className="mb-4">
+          <ErrorState title="读不到 ANS 节点台账" reason={data.error} onRetry={() => void q.reload()} />
         </div>
       )}
       {removeErr && (
@@ -1707,8 +1730,9 @@ export default function PeersPage() {
           { ok: localNode ? !!localNode.participate : null, label: '本机参与协同（接活）', how: '在本机卡片把「参与」打开；派活只看角色与入网，不看这一项' },
           { ok: localNode ? canDispatchRole : null, label: `派发方角色 ${role ?? '未知'}`, how: '本机改成 primary 或 observer 才能派活（worker 只接不分）' },
         ];
-        const tone = mode === 'off' ? 'border-gray-200 bg-gray-50 text-gray-600'
-          : 'border-emerald-200 bg-emerald-50 text-emerald-800';
+        // zx_20261121_3 M5：这是**设置面板**不是结果——纸面 + 线；颜色只留给「已开启」的那一枚态标。
+        const tone = mode === 'off' ? 'border-line bg-paper text-ink-soft'
+          : 'border-line bg-surface text-ink';
         return (
           <div className={`mb-4 rounded-lg border px-3 py-2.5 text-xs ${tone}`}>
             <div className="flex items-center justify-between gap-2">
@@ -1724,7 +1748,7 @@ export default function PeersPage() {
                 ['always', '总是外派'],
               ] as const).map(([m, label]) => (
                 <button key={m} type="button" disabled={autoBusy} onClick={() => void changeAutoMode(m)}
-                  className={`px-2 py-0.5 rounded border ${mode === m ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'} disabled:opacity-50`}>
+                  className={`px-2 py-0.5 rounded-control border ${mode === m ? 'bg-accent text-paper border-accent' : 'bg-surface text-ink-soft border-line-strong hover:bg-paper'} disabled:opacity-50`}>
                   {label}
                 </button>
               ))}
@@ -1766,23 +1790,23 @@ export default function PeersPage() {
 
       {/* zx_20261018_1 批一: 首次满足条件的**一次性告知**（zx_20261029_2 M7：询问→告知）——说过即不再出现。 */}
       {showOnboard && (
-        <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2.5 text-xs text-blue-900">
+        <div className="mb-4 rounded-lg border border-accent/25 bg-accent-soft px-3 py-2.5 text-xs text-accent">
           <div className="font-medium">已为本机开启「建单即派」：仅在本机满负荷时溢出到其他节点</div>
-          <div className="mt-0.5 text-blue-800">
+          <div className="mt-0.5 text-accent">
             团队版已解锁且本机已入网，因此默认替你打开了它——本机跑得动就先在本机跑，跑满了才把新任务交给擅长这类活的对端。
             只外派无父、无依赖、无附件、且**不需要本机工作目录**的任务（纯调研且题面不涉及仓库/文件）；其余一律留在本机。
           </div>
           {onboardErr && <div className="mt-1 text-red-600">{onboardErr}</div>}
           <div className="mt-1.5 flex items-center gap-2">
             <button onClick={() => void answerOnboard(true)} disabled={onboardBusy}
-              className="px-2.5 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50">
+              className="px-2.5 py-1 bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50">
               {onboardBusy ? '处理中…' : '知道了'}
             </button>
             <button onClick={() => void answerOnboard(false)} disabled={onboardBusy}
-              className="px-2.5 py-1 border border-blue-300 text-blue-800 rounded hover:bg-white disabled:opacity-50">
+              className="px-2.5 py-1 border border-accent/30 text-accent rounded hover:bg-white disabled:opacity-50">
               一键关闭
             </button>
-            <span className="text-[10px] text-blue-600">以后可在「设置 · 多机协同编排」随时改。</span>
+            <span className="text-[10px] text-accent">以后可在「设置 · 多机协同编排」随时改。</span>
           </div>
         </div>
       )}
@@ -1823,7 +1847,7 @@ export default function PeersPage() {
 
       {/* zx_20261115_2 M5：读不到台账（`data==null` / IPC 抛错）或 ANS 明确回错时，不把空 `others` 说成「暂无其他工蚁节点」。 */}
       {data && !data.error && !q.error && (groups.length === 0
-        ? <p className="text-gray-400 text-center py-8">暂无其他工蚁节点</p>
+        ? <EmptyState title="暂无其他工蚁节点" />
         : groups.map(g => (
           <div key={g.role} className="mb-5">
             <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5">{NODE_ROLE_LABEL[g.role]}（{g.peers.length}）</p>

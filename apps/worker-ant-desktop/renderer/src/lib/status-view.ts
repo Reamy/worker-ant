@@ -68,14 +68,14 @@ export function statusText(table: Record<string, string>, status: unknown): stri
  */
 export const TASK_STATUS_TONE: Record<string, string> = {
   pending: 'bg-gray-100 text-gray-600',
-  planning: 'bg-blue-50 text-blue-600',
-  preparing: 'bg-blue-100 text-blue-600',
+  planning: 'bg-accent-soft text-accent',
+  preparing: 'bg-accent-soft text-accent',
   executing: 'bg-yellow-100 text-yellow-700',
   running: 'bg-yellow-100 text-yellow-700',
   completed: 'bg-green-100 text-green-700',
   failed: 'bg-red-100 text-red-600',
   paused: 'bg-orange-100 text-orange-600',
-  investigating: 'bg-purple-50 text-purple-600',
+  investigating: 'bg-accent-soft text-accent',
   stabilizing: 'bg-amber-50 text-amber-700',
   archived: 'bg-gray-200 text-gray-600',
 };

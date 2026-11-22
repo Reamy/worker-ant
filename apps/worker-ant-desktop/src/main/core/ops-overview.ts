@@ -179,13 +179,19 @@ async function ansBlock(baseUrl: string | undefined, probe?: OpsDeps['probeAns']
   }
 }
 
+/** ANS 健康检查 URL：真路由挂在 `/api/v1` 下（与 ans-client `healthCheck` 同一路径）。 */
+export function ansHealthUrl(baseUrl: string): string {
+  return `${String(baseUrl ?? '').replace(/\/$/, '')}/api/v1/health`;
+}
+
 async function defaultProbe(baseUrl: string): Promise<{ ok: boolean; latencyMs: number | null; reason: string }> {
   const started = Date.now();
   try {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 2_000);
     try {
-      const res = await fetch(`${baseUrl.replace(/\/$/, '')}/health`, { signal: ctrl.signal });
+      // ⚠ 真路由是 `/api/v1/health`，不是根下 `/health`（后者恒 404）。
+      const res = await fetch(ansHealthUrl(baseUrl), { signal: ctrl.signal });
       return { ok: res.ok, latencyMs: Date.now() - started, reason: res.ok ? '' : `http_${res.status}` };
     } finally { clearTimeout(timer); }
   } catch (e) {

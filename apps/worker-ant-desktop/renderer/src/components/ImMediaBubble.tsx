@@ -137,14 +137,14 @@ export function ImMediaBubble({ media, onNotice }: Props) {
 
       <div className="mt-1.5 flex items-center gap-2 text-gray-500">
         <button onClick={() => void handleOpen()} disabled={!!busy}
-          className="flex items-center gap-1 hover:text-blue-600 disabled:opacity-50" title="用系统默认程序打开">
+          className="flex items-center gap-1 hover:text-accent disabled:opacity-50" title="用系统默认程序打开">
           {busy === 'open' ? <Loader2 className="w-3 h-3 animate-spin" /> : <ExternalLink className="w-3 h-3" />}打开
         </button>
         <button onClick={() => void handleSave()} disabled={!!busy}
-          className="flex items-center gap-1 hover:text-blue-600 disabled:opacity-50" title="另存到本地任意位置">
+          className="flex items-center gap-1 hover:text-accent disabled:opacity-50" title="另存到本地任意位置">
           {busy === 'save' ? <Loader2 className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}另存
         </button>
-        <button onClick={() => void handleReveal()} className="flex items-center gap-1 hover:text-blue-600" title="在系统文件管理器中显示">
+        <button onClick={() => void handleReveal()} className="flex items-center gap-1 hover:text-accent" title="在系统文件管理器中显示">
           <FolderOpen className="w-3 h-3" />在文件夹中显示
         </button>
       </div>

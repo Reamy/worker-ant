@@ -36,10 +36,10 @@ const FAMILY_OF = (t: string): FamilyKey => FAMILY_OF_MAP[t] ?? 'other';
 /** `task.status_changed` 里**会落通知行**的状态（与 main 侧 `notification-core.ts` 的分支同集） */
 const NOTABLE_VIA_STATUS = new Set(['completed', 'paused', 'failed']);
 const FAMILY_META: Record<FamilyKey, { l: string; dot: string }> = {
-  failed: { l: '失败', dot: 'bg-red-500' },
-  await: { l: '需处理', dot: 'bg-orange-400' },
-  done: { l: '完成', dot: 'bg-green-500' },
-  other: { l: '其它', dot: 'bg-gray-400' },
+  failed: { l: '失败', dot: 'bg-bad' },
+  await: { l: '需处理', dot: 'bg-warn' },
+  done: { l: '完成', dot: 'bg-ok' },
+  other: { l: '其它', dot: 'bg-ink-mute' },
 };
 
 function fmtTime(ts?: string | null): string {
@@ -200,20 +200,20 @@ export default function NotificationBell() {
     const fam = FAMILY_OF(it.type);
     const canRetry = fam === 'failed' && !!it.task_id;
     return (
-      <div role="button" tabIndex={0} onClick={() => openTask(it)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openTask(it); } }} className={`w-full text-left px-3 py-2 hover:bg-gray-50 transition-colors cursor-pointer ${!it.read_at ? 'bg-blue-50/40' : ''}`}>
+      <div role="button" tabIndex={0} onClick={() => openTask(it)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openTask(it); } }} className={`w-full text-left px-3 py-2 hover:bg-paper transition-colors cursor-pointer ${!it.read_at ? 'bg-accent-soft/40' : ''}`}>
         <div className="flex items-start gap-2">
-          <span className={`mt-1.5 w-2 h-2 shrink-0 rounded-full ${!it.read_at ? FAMILY_META[fam].dot : 'bg-transparent border border-gray-200'}`} />
+          <span className={`mt-1.5 w-2 h-2 shrink-0 rounded-full ${!it.read_at ? FAMILY_META[fam].dot : 'bg-transparent border border-line'}`} />
           <div className="flex-1 min-w-0">
             <div className="flex items-center justify-between gap-2">
-              <p className="text-sm font-medium text-gray-800 truncate">{it.title}</p>
-              <span className="text-[10px] text-gray-400 shrink-0">{fmtTime(it.created_at)}</span>
+              <p className="text-sm font-medium text-ink truncate">{it.title}</p>
+              <span className="text-[10px] text-ink-mute shrink-0 tnum">{fmtTime(it.created_at)}</span>
             </div>
-            {it.body && <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{it.body}</p>}
+            {it.body && <p className="text-xs text-ink-mute mt-0.5 line-clamp-2">{it.body}</p>}
           </div>
         </div>
         {canRetry && (
           <div className="flex justify-end mt-1 -mb-0.5">
-            <button type="button" onClick={(e) => { e.stopPropagation(); retryFailed(it); }} title="继续执行（保留对话，task:resume）；如需清空重跑请到任务详情用「重试」" className="text-[10px] px-2 py-0.5 rounded bg-green-50 text-green-700 hover:bg-green-100 font-medium">↻ 继续</button>
+            <button type="button" onClick={(e) => { e.stopPropagation(); retryFailed(it); }} title="继续执行（保留对话，task:resume）；如需清空重跑请到任务详情用「重试」" className="text-[10px] px-2 py-0.5 rounded bg-ok-soft text-ok hover:bg-ok-soft/80 font-medium">↻ 继续</button>
           </div>
         )}
       </div>
@@ -222,61 +222,61 @@ export default function NotificationBell() {
 
   return (
     <div className="relative">
-      <button type="button" onClick={toggle} aria-label="通知中心" title="通知中心" className="relative p-2 rounded-lg text-gray-500 hover:bg-gray-100 hover:text-gray-700 transition-colors">
+      <button type="button" onClick={toggle} aria-label="通知中心" title="通知中心" className="relative p-2 rounded-control text-ink-soft hover:bg-paper hover:text-ink transition-colors">
         <Bell className="w-5 h-5" />
-        {unread > 0 && <span className="absolute -top-0.5 -right-0.5 min-w-[17px] h-4 px-1 rounded-full bg-red-500 text-white text-[10px] leading-4 font-medium text-center">{unread > 99 ? '99+' : unread}</span>}
+        {unread > 0 && <span className="absolute -top-0.5 -right-0.5 min-w-[17px] h-4 px-1 rounded-full bg-cinnabar text-paper text-[10px] leading-4 font-medium text-center tnum">{unread > 99 ? '99+' : unread}</span>}
       </button>
 
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-full mt-2 z-50 w-[26rem] max-w-[calc(100vw-18rem)] bg-white border border-gray-200 rounded-xl shadow-lg flex flex-col overflow-hidden">
-            <div className="flex items-center justify-between px-3 py-2 border-b border-gray-100">
-              <p className="text-sm font-semibold text-gray-700">通知中心</p>
+          <div className="absolute right-0 top-full mt-2 z-50 w-[26rem] max-w-[calc(100vw-18rem)] bg-surface border border-line rounded-card shadow-card flex flex-col overflow-hidden">
+            <div className="flex items-center justify-between px-3 py-2 border-b border-line">
+              <p className="font-display text-sm font-semibold text-ink">通知中心</p>
               <div className="flex items-center gap-1">
                 {unread > 0 && (
-                  <button type="button" onClick={markAllRead} className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 px-2 py-1 rounded hover:bg-blue-50">
+                  <button type="button" onClick={markAllRead} className="flex items-center gap-1 text-xs text-accent hover:text-accent/80 px-2 py-1 rounded hover:bg-accent-soft">
                     <CheckCheck className="w-3.5 h-3.5" />全部已读
                   </button>
                 )}
                 {items.some((i) => i.read_at) && (
-                  <button type="button" onClick={clearRead} title="清除已读历史" className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600 px-2 py-1 rounded hover:bg-gray-100">
+                  <button type="button" onClick={clearRead} title="清除已读历史" className="flex items-center gap-1 text-xs text-ink-mute hover:text-ink px-2 py-1 rounded hover:bg-paper">
                     <Trash2 className="w-3 h-3" />清空已读
                   </button>
                 )}
-                <button type="button" onClick={() => setOpen(false)} className="p-1 text-gray-400 hover:text-gray-600 rounded hover:bg-gray-100"><X className="w-4 h-4" /></button>
+                <button type="button" onClick={() => setOpen(false)} className="p-1 text-ink-mute hover:text-ink rounded hover:bg-paper"><X className="w-4 h-4" /></button>
               </div>
             </div>
 
             {/* C2 (2026-09-04_2 整改): 项目过滤（通知按 project_id 分组查看） */}
             {projectOpts.length > 0 && (
-              <div className="flex items-center gap-2 px-3 py-1.5 border-b border-gray-50">
-                <span className="text-[10px] text-gray-400 shrink-0">项目</span>
-                <select value={projFilter} onChange={(e) => applyProjectFilter(e.target.value)} className="flex-1 min-w-0 px-2 py-1 border border-gray-200 rounded text-xs bg-white text-gray-600" aria-label="按项目过滤通知">
+              <div className="flex items-center gap-2 px-3 py-1.5 border-b border-line/70">
+                <span className="text-[10px] text-ink-mute shrink-0">项目</span>
+                <select value={projFilter} onChange={(e) => applyProjectFilter(e.target.value)} className="flex-1 min-w-0 px-2 py-1 border border-line rounded text-xs bg-surface text-ink-soft" aria-label="按项目过滤通知">
                   <option value="">全部项目</option>
                   {projectOpts.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
                 </select>
-                {projFilter && <button type="button" onClick={() => applyProjectFilter('')} className="shrink-0 text-[10px] text-gray-400 hover:text-gray-600">清除</button>}
+                {projFilter && <button type="button" onClick={() => applyProjectFilter('')} className="shrink-0 text-[10px] text-ink-mute hover:text-ink">清除</button>}
               </div>
             )}
 
             {/* C2 (2026-09-04_2): 家族相似过滤 chips（含未读角标） */}
-            <div className="flex flex-wrap items-center gap-1.5 px-3 py-2 border-b border-gray-50 text-[11px]">
-              <button type="button" onClick={() => setFamilyFilter('')} className={`px-2 py-0.5 rounded-full font-medium ${familyFilter === '' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>全部 {items.length}</button>
+            <div className="flex flex-wrap items-center gap-1.5 px-3 py-2 border-b border-line/70 text-[11px]">
+              <button type="button" onClick={() => setFamilyFilter('')} className={`px-2 py-0.5 rounded-full font-medium ${familyFilter === '' ? 'bg-accent text-paper' : 'bg-paper text-ink-soft hover:bg-line/50'}`}>全部 {items.length}</button>
               {(['failed', 'await', 'done'] as FamilyKey[]).map((f) => famCounts[f].n > 0 ? (
-                <button key={f} type="button" onClick={() => setFamilyFilter(familyFilter === f ? '' : f)} className={`px-2 py-0.5 rounded-full font-medium flex items-center gap-1 ${familyFilter === f ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
-                  {FAMILY_META[f].l} {famCounts[f].n}{famCounts[f].unread > 0 ? <span className="w-1.5 h-1.5 rounded-full bg-red-500" /> : null}
+                <button key={f} type="button" onClick={() => setFamilyFilter(familyFilter === f ? '' : f)} className={`px-2 py-0.5 rounded-full font-medium flex items-center gap-1 ${familyFilter === f ? 'bg-accent text-paper' : 'bg-paper text-ink-soft hover:bg-line/50'}`}>
+                  {FAMILY_META[f].l} {famCounts[f].n}{famCounts[f].unread > 0 ? <span className="w-1.5 h-1.5 rounded-full bg-cinnabar" /> : null}
                 </button>
               ) : null)}
             </div>
 
             <div className="max-h-[min(70vh,440px)] overflow-y-auto">
               {loading ? (
-                <p className="text-sm text-gray-400 text-center py-8">加载中...</p>
+                <p className="text-sm text-ink-mute text-center py-8">加载中...</p>
               ) : groups.length === 0 ? (
-                <p className="text-sm text-gray-400 text-center py-8">暂无通知</p>
+                <p className="text-sm text-ink-mute text-center py-8">暂无通知</p>
               ) : (
-                <ul className="divide-y divide-gray-50">
+                <ul className="divide-y divide-line/70">
                   {groups.map((g) => {
                     const first = g.items[0]!;
                     const count = g.items.length;
@@ -286,23 +286,23 @@ export default function NotificationBell() {
                     return (
                       <li key={g.key}>
                         <div className="flex items-center px-2">
-                          <button type="button" onClick={() => setExpanded((p) => { const s = new Set(p); if (s.has(g.key)) s.delete(g.key); else s.add(g.key); return s; })} className="shrink-0 p-1 text-gray-300 hover:text-gray-500">
+                          <button type="button" onClick={() => setExpanded((p) => { const s = new Set(p); if (s.has(g.key)) s.delete(g.key); else s.add(g.key); return s; })} className="shrink-0 p-1 text-line-strong hover:text-ink-soft">
                             {isOpen ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
                           </button>
-                          <button type="button" onClick={() => openTask(first)} className={`flex-1 min-w-0 text-left px-1 py-2.5 hover:bg-gray-50 transition-colors ${unreadGrp ? 'bg-blue-50/40' : ''}`}>
+                          <button type="button" onClick={() => openTask(first)} className={`flex-1 min-w-0 text-left px-1 py-2.5 hover:bg-paper transition-colors ${unreadGrp ? 'bg-accent-soft/40' : ''}`}>
                             <div className="flex items-center gap-2">
-                              <span className={`w-2 h-2 shrink-0 rounded-full ${unreadGrp ? FAMILY_META[g.family].dot : 'bg-transparent border border-gray-200'}`} />
-                              <p className="flex-1 min-w-0 text-sm font-medium text-gray-800 truncate">{first.title}</p>
-                              <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 font-medium">×{count}</span>
-                              <span className="text-[10px] text-gray-400 shrink-0">{fmtTime(g.items[g.items.length - 1]?.created_at)}</span>
+                              <span className={`w-2 h-2 shrink-0 rounded-full ${unreadGrp ? FAMILY_META[g.family].dot : 'bg-transparent border border-line'}`} />
+                              <p className="flex-1 min-w-0 text-sm font-medium text-ink truncate">{first.title}</p>
+                              <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full bg-warn-soft text-warn font-medium tnum">×{count}</span>
+                              <span className="text-[10px] text-ink-mute shrink-0 tnum">{fmtTime(g.items[g.items.length - 1]?.created_at)}</span>
                             </div>
                           </button>
                           {unreadGrp && (
-                            <button type="button" onClick={() => markTaskRead(g.task_id)} title="本任务已读" className="shrink-0 p-1 text-blue-400 hover:text-blue-600"><CheckCheck className="w-3.5 h-3.5" /></button>
+                            <button type="button" onClick={() => markTaskRead(g.task_id)} title="本任务已读" className="shrink-0 p-1 text-accent/70 hover:text-accent"><CheckCheck className="w-3.5 h-3.5" /></button>
                           )}
                         </div>
                         {isOpen && (
-                          <ul className="pl-7 pr-2 pb-1 border-l ml-5">
+                          <ul className="pl-7 pr-2 pb-1 border-l border-line ml-5">
                             {g.items.map((it) => (
                               <li key={it.id}>{renderItem(it)}</li>
                             ))}
@@ -316,7 +316,7 @@ export default function NotificationBell() {
             </div>
             {/* C2 (2026-09-04_2 整改): 分页"加载更多"（增量合入，同任务同家族跨页仍合并 ×N） */}
             {hasMore && (
-              <button type="button" onClick={() => fetchList(false)} disabled={loadingMore} className="w-full py-2 text-xs text-blue-600 hover:bg-blue-50 disabled:opacity-50 disabled:cursor-wait border-t border-gray-50">
+              <button type="button" onClick={() => fetchList(false)} disabled={loadingMore} className="w-full py-2 text-xs text-accent hover:bg-accent-soft disabled:opacity-50 disabled:cursor-wait border-t border-line/70">
                 {loadingMore ? '加载中...' : `加载更多（已显示 ${items.length} / ${total ?? items.length}）`}
               </button>
             )}

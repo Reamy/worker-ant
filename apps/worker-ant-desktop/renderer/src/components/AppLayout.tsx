@@ -89,32 +89,33 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex h-screen">
-      <aside className="w-56 bg-gray-900 text-white flex flex-col shrink-0">
-        <div className="p-4 border-b border-gray-700">
-          <h1 className="flex items-center gap-2 text-lg font-bold">
-            <img src={brandLogo} alt="" className="h-7 w-7 rounded-md" />
+      {/* zx_20261121_3 M5-c「墨与纸」：侧栏墨面、当前项纸色文字 + 2px 朱砂左棱（不用整块蓝底）。 */}
+      <aside className="w-56 bg-sidebar text-sidebar-ink flex flex-col shrink-0">
+        <div className="p-4 border-b border-sidebar-ink/10">
+          <h1 className="flex items-center gap-2 font-display text-lg font-semibold tracking-wide">
+            <img src={brandLogo} alt="" className="h-7 w-7 rounded-control" />
             工蚁系统
           </h1>
-          <p className="text-xs text-gray-400 mt-0.5">Worker Ant Desktop</p>
+          <p className="text-xs text-sidebar-ink/55 mt-0.5">Worker Ant Desktop</p>
         </div>
         <nav className="flex-1 overflow-y-auto p-2">
           {NAV_GROUPS.map(group => (
-            <div key={group.label} className="mb-3">
-              <p className="px-3 mb-1 text-[10px] font-semibold text-gray-500 uppercase tracking-wider">{group.label}</p>
+            <div key={group.label} className="mb-4">
+              <p className="pl-3.5 pr-3 mb-1.5 font-display text-[10px] font-medium tracking-[0.18em] text-sidebar-ink/40 uppercase">{group.label}</p>
               {group.items.map(({ to, icon: Icon, label }) => (
                 <NavLink key={to} to={to} end={to === '/'} data-tour={to}
-                  className={({ isActive }) => `flex items-center gap-3 px-3 py-1.5 rounded-md text-sm transition-colors ${isActive ? 'bg-blue-600 text-white' : 'text-gray-300 hover:bg-gray-800'}`}>
+                  className={({ isActive }) => `flex items-center gap-3 border-l-2 px-3 py-1.5 text-sm transition-colors ${isActive ? 'border-cinnabar bg-sidebar-ink/5 text-sidebar-ink font-medium' : 'border-transparent text-sidebar-ink/70 hover:bg-sidebar-ink/5 hover:text-sidebar-ink'}`}>
                   <Icon className="w-4 h-4" />{label}
                   {/* zx_20260914 M1-3: IM 未读红点——数与托盘角标同源（都来自 main 那一次计算），
                       这里不自增、不自减；上限 99+ 只是显示收敛，不改真值。 */}
                   {to === '/im' && imUnread > 0 && (
-                    <span className="ml-auto min-w-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] leading-[18px] text-center" title={`${imUnread} 条未读消息`}>
+                    <span className="ml-auto min-w-[18px] px-1 rounded-full bg-cinnabar text-paper text-[10px] leading-[18px] text-center tnum" title={`${imUnread} 条未读消息`}>
                       {imUnread > 99 ? '99+' : imUnread}
                     </span>
                   )}
                   {/* zx_20261104_3 M3: 待办角标（三类合计；数来自 approval:inbox，不在此自算）。 */}
                   {to === '/inbox' && inboxCount > 0 && (
-                    <span className="ml-auto min-w-[18px] px-1 rounded-full bg-indigo-500 text-white text-[10px] leading-[18px] text-center" title={`${inboxCount} 件待办`}>
+                    <span className="ml-auto min-w-[18px] px-1 rounded-full bg-sidebar-ink/15 text-sidebar-ink text-[10px] leading-[18px] text-center tnum" title={`${inboxCount} 件授权待办（知识待办见待办页）`}>
                       {inboxCount > 99 ? '99+' : inboxCount}
                     </span>
                   )}
@@ -123,29 +124,29 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
             </div>
           ))}
         </nav>
-        <div className="p-3 border-t border-gray-700 space-y-2">
-          {user.email && <p className="text-xs text-gray-400 truncate">{user.email}{user.role && <span className="ml-1 text-gray-500">({user.role})</span>}</p>}
-          <button onClick={handleLogout} className="flex items-center gap-2 text-xs text-gray-400 hover:text-white transition-colors w-full"><LogOut className="w-3 h-3" />退出登录</button>
-          {appVersion && <p className="text-xs text-gray-600">v{appVersion}</p>}
+        <div className="p-3 border-t border-sidebar-ink/10 space-y-2">
+          {user.email && <p className="text-xs text-sidebar-ink/55 truncate">{user.email}{user.role && <span className="ml-1 text-sidebar-ink/35">({user.role})</span>}</p>}
+          <button onClick={handleLogout} className="flex items-center gap-2 text-xs text-sidebar-ink/55 hover:text-sidebar-ink transition-colors w-full"><LogOut className="w-3 h-3" />退出登录</button>
+          {appVersion && <p className="text-xs text-sidebar-ink/30 tnum">v{appVersion}</p>}
         </div>
       </aside>
       <main className="flex-1 flex flex-col min-w-0">
-        {/* A3: 全局顶栏（通知中心入口 + 未来全局动作） */}
-        <header className="h-12 shrink-0 bg-white border-b border-gray-200 flex items-center justify-end px-4 gap-1 z-20">
+        {/* A3: 全局顶栏（通知中心入口 + 未来全局动作）——纸面 + 1px 线 */}
+        <header className="h-12 shrink-0 bg-paper border-b border-line flex items-center justify-end px-4 gap-1 z-20">
           <ActionNeeded />
           <NotificationBell />
         </header>
-        <div className="flex-1 overflow-auto p-6">
+        <div className="flex-1 overflow-auto p-6 lg:p-8">
           {/* zx_20260908 D1/D4: 全局执行在场条（任意页可见，含无推进反色） */}
           <PresenceBar />
           {prospective && (
-            <div className="mb-3 flex items-start gap-2 rounded-lg border border-cyan-200 bg-cyan-50 p-3 text-sm shadow-sm">
-              <BellRing className="w-4 h-4 text-cyan-500 mt-0.5 shrink-0" />
+            <div className="mb-3 flex items-start gap-2 rounded-card border border-accent/20 bg-accent-soft p-3 text-sm shadow-card">
+              <BellRing className="w-4 h-4 text-accent mt-0.5 shrink-0" />
               <div className="min-w-0 flex-1">
-                <p className="text-xs font-semibold text-cyan-700">前瞻记忆·到期提醒</p>
-                <button type="button" onClick={() => { if (prospective.projectId) navigate(`/projects/${prospective.projectId}`); else navigate('/memories'); setProspective(null); }} className="text-left text-cyan-800 hover:text-cyan-950 hover:underline break-words" title="点击定位">“{prospective.content}”</button>
+                <p className="text-xs font-semibold text-accent">前瞻记忆·到期提醒</p>
+                <button type="button" onClick={() => { if (prospective.projectId) navigate(`/projects/${prospective.projectId}`); else navigate('/memories'); setProspective(null); }} className="text-left text-ink hover:text-accent hover:underline break-words transition-colors" title="点击定位">“{prospective.content}”</button>
               </div>
-              <button type="button" onClick={() => setProspective(null)} className="text-cyan-400 hover:text-cyan-700 text-xs">✕</button>
+              <button type="button" onClick={() => setProspective(null)} className="text-accent/70 hover:text-accent text-xs transition-colors">✕</button>
             </div>
           )}
           {children}

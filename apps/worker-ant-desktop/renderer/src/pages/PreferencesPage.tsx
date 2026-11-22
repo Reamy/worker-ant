@@ -102,7 +102,7 @@ export default function PreferencesPage() {
               className="w-full px-3 py-2 border rounded-lg text-sm">{cfg.options.map(o => <option key={o} value={o}>{o}</option>)}</select>
           </div>
         ))}
-        <button onClick={saveUiPrefs} className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium ${uiSaved ? 'bg-green-600 text-white' : 'bg-blue-600 text-white hover:bg-blue-700'}`}>
+        <button onClick={saveUiPrefs} className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium ${uiSaved ? 'bg-green-600 text-white' : 'bg-accent text-white hover:bg-accent/90'}`}>
           {uiSaved ? '已保存' : <><Save className="w-4 h-4"/>保存界面偏好</>}
         </button>
       </div>
@@ -135,7 +135,7 @@ export default function PreferencesPage() {
             <p className="text-base font-medium mb-1">尚无用户偏好</p>
             <p className="text-sm mb-6">通过引导向导快速设置，或让 Agent 在对话中逐渐了解你</p>
             <div className="flex gap-3 justify-center flex-wrap">
-              <Link to="/preferences-wizard" className="inline-flex items-center gap-1 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"><Sparkles className="w-4 h-4"/>偏好设置向导</Link>
+              <Link to="/preferences-wizard" className="inline-flex items-center gap-1 px-4 py-2 bg-accent text-white rounded-lg text-sm hover:bg-accent/90"><Sparkles className="w-4 h-4"/>偏好设置向导</Link>
               <button onClick={() => setShowAdd(true)} className="inline-flex items-center gap-1 px-4 py-2 border rounded-lg text-sm hover:bg-gray-50"><Plus className="w-4 h-4"/>添加偏好</button>
               <button onClick={handleAutoExtract} disabled={extracting} className="inline-flex items-center gap-1 px-4 py-2 border rounded-lg text-sm hover:bg-gray-50 disabled:opacity-50"><Scan className="w-4 h-4"/>{extracting ? '提取中...' : '自动提取'}</button>
             </div>
@@ -144,8 +144,8 @@ export default function PreferencesPage() {
         ) : (
           <div className="space-y-3">
             <div className="flex items-center gap-2 mb-2">
-              <button onClick={() => setShowAdd(true)} className="text-xs px-2 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 flex items-center gap-1"><Plus className="w-3 h-3"/>添加偏好</button>
-              <button onClick={handleAutoExtract} disabled={extracting} className="text-xs px-2 py-1 bg-purple-100 text-purple-700 rounded hover:bg-purple-200 flex items-center gap-1"><Wand2 className="w-3 h-3"/>{extracting ? '提取中...' : '自动提取'}</button>
+              <button onClick={() => setShowAdd(true)} className="text-xs px-2 py-1 bg-accent text-white rounded hover:bg-accent/90 flex items-center gap-1"><Plus className="w-3 h-3"/>添加偏好</button>
+              <button onClick={handleAutoExtract} disabled={extracting} className="text-xs px-2 py-1 bg-accent-soft text-accent rounded hover:bg-accent/90 flex items-center gap-1"><Wand2 className="w-3 h-3"/>{extracting ? '提取中...' : '自动提取'}</button>
             </div>
             {prefs.map(p => (
               <div key={p.id} className="bg-white rounded-lg border p-4 flex items-start justify-between gap-4 hover:bg-gray-50 group">
@@ -158,7 +158,7 @@ export default function PreferencesPage() {
                   </div>
                 </div>
                 <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
-                  <button onClick={() => { setEditing(p); setEditContent(p.content); setEditReasoning(p.reasoning || ''); }} className="p-1 hover:bg-blue-50 rounded"><Edit className="w-3 h-3 text-blue-500"/></button>
+                  <button onClick={() => { setEditing(p); setEditContent(p.content); setEditReasoning(p.reasoning || ''); }} className="p-1 hover:bg-accent-soft rounded"><Edit className="w-3 h-3 text-accent"/></button>
                   <button onClick={() => handleDelete(p.id)} className="p-1 hover:bg-red-50 rounded"><Trash2 className="w-3 h-3 text-red-400"/></button>
                 </div>
               </div>
@@ -176,7 +176,7 @@ export default function PreferencesPage() {
               <div><label className="text-sm font-medium">偏好内容 *</label><textarea value={addContent} onChange={e => setAddContent(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm mt-1" rows={3} placeholder="如：用户偏好使用TypeScript+Elysia+Zod做后端开发"/></div>
               <div><label className="text-sm font-medium">原因（可选）</label><input value={addReasoning} onChange={e => setAddReasoning(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm mt-1" placeholder="如：用户在第3次纠正Agent的框架选择后明确表达"/></div>
             </div>
-            <div className="flex justify-end gap-2 mt-4"><button onClick={() => setShowAdd(false)} className="px-4 py-2 border rounded-lg text-sm">取消</button><button onClick={handleAdd} disabled={!addContent} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm disabled:opacity-50">保存</button></div>
+            <div className="flex justify-end gap-2 mt-4"><button onClick={() => setShowAdd(false)} className="px-4 py-2 border rounded-lg text-sm">取消</button><button onClick={handleAdd} disabled={!addContent} className="px-4 py-2 bg-accent text-white rounded-lg text-sm disabled:opacity-50">保存</button></div>
           </div>
         </div>
       )}
@@ -190,7 +190,7 @@ export default function PreferencesPage() {
               <div><label className="text-sm font-medium">偏好内容</label><textarea value={editContent} onChange={e => setEditContent(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm mt-1" rows={3}/></div>
               <div><label className="text-sm font-medium">原因（可选）</label><input value={editReasoning} onChange={e => setEditReasoning(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm mt-1"/></div>
             </div>
-            <div className="flex justify-end gap-2 mt-4"><button onClick={() => setEditing(null)} className="px-4 py-2 border rounded-lg text-sm">取消</button><button onClick={handleEdit} disabled={!editContent} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm disabled:opacity-50">保存</button></div>
+            <div className="flex justify-end gap-2 mt-4"><button onClick={() => setEditing(null)} className="px-4 py-2 border rounded-lg text-sm">取消</button><button onClick={handleEdit} disabled={!editContent} className="px-4 py-2 bg-accent text-white rounded-lg text-sm disabled:opacity-50">保存</button></div>
           </div>
         </div>
       )}

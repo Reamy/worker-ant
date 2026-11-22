@@ -49,18 +49,18 @@ export default function A2aPage() {
 
   const parseCaps = (s: A2aServer) => { try { if (s.capabilities) return JSON.parse(s.capabilities) as string[]; } catch {} return []; };
 
-  if (loading) return <div className="flex justify-center py-12"><div className="animate-spin h-8 w-8 border-2 border-blue-500 border-t-transparent rounded-full" /></div>;
+  if (loading) return <div className="flex justify-center py-12"><div className="animate-spin h-8 w-8 border-2 border-accent border-t-transparent rounded-full" /></div>;
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
         <h2 className="text-xl font-bold">A2A 服务</h2>
         <div className="flex items-center gap-2">
           <div className="flex items-center gap-0 border rounded-lg overflow-hidden">
-            <button onClick={() => setView('list')} className={`p-1.5 ${view === 'list' ? 'bg-blue-600 text-white' : 'bg-white text-gray-500 hover:bg-gray-50'}`} title="列表视图"><LayoutList className="w-4 h-4" /></button>
-            <button onClick={() => setView('grid')} className={`p-1.5 ${view === 'grid' ? 'bg-blue-600 text-white' : 'bg-white text-gray-500 hover:bg-gray-50'}`} title="卡片视图"><LayoutGrid className="w-4 h-4" /></button>
+            <button onClick={() => setView('list')} className={`p-1.5 ${view === 'list' ? 'bg-accent text-white' : 'bg-white text-gray-500 hover:bg-gray-50'}`} title="列表视图"><LayoutList className="w-4 h-4" /></button>
+            <button onClick={() => setView('grid')} className={`p-1.5 ${view === 'grid' ? 'bg-accent text-white' : 'bg-white text-gray-500 hover:bg-gray-50'}`} title="卡片视图"><LayoutGrid className="w-4 h-4" /></button>
           </div>
           <button onClick={load} className="p-2 hover:bg-gray-100 rounded-lg" title="刷新"><RefreshCw className="w-4 h-4" /></button>
-          <button onClick={() => { setEditItem(null); setShowForm(true); }} className="flex items-center gap-1 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"><Plus className="w-3.5 h-3.5" />注册服务</button>
+          <button onClick={() => { setEditItem(null); setShowForm(true); }} className="flex items-center gap-1 px-3 py-1.5 bg-accent text-white rounded-lg text-sm hover:bg-accent/90"><Plus className="w-3.5 h-3.5" />注册服务</button>
         </div>
       </div>
       {error && <p className="text-red-500 text-sm mb-4">错误: {error}</p>}
@@ -101,7 +101,7 @@ export default function A2aPage() {
                 <div className="flex items-center gap-3 min-w-0 flex-1">
                   <Globe className="w-5 h-5 text-green-500 flex-shrink-0" />
                   <div className="min-w-0">
-                    <h3 className="font-medium cursor-pointer hover:text-blue-600" onClick={() => setDetailItem(a)}>{a.name}</h3>
+                    <h3 className="font-medium cursor-pointer hover:text-accent" onClick={() => setDetailItem(a)}>{a.name}</h3>
                     <p className="text-xs text-gray-400 font-mono truncate">{a.agent_card_url || a.endpoint || '—'}</p>
                     <p className="text-xs text-gray-400 mt-0.5">最近检查: {formatTime(a.health_check_at)} {caps.length > 0 && <span className="ml-2">{caps.map(c => <span key={c} className="text-[10px] px-1 py-0.5 bg-gray-100 rounded mr-0.5">{c}</span>)}</span>}</p>
                   </div>
@@ -109,9 +109,9 @@ export default function A2aPage() {
                 <div className="flex items-center gap-2 flex-shrink-0">
                   {runningHere(a) && <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-600 text-white" title={`本进程运行中：端口 ${runningHere(a)!.port}`}>本进程运行中</span>}
                   <span className={`text-xs px-2 py-0.5 rounded-full ${STATUS_COLORS[a.status || 'unknown']}`}>{STATUS_LABELS[a.status || 'unknown'] || a.status || '未知'}</span>
-                  <button onClick={() => handleHealthCheck(a.id)} className="p-1 hover:bg-blue-50 rounded" title="健康检查"><Activity className="w-3.5 h-3.5 text-blue-500" /></button>
+                  <button onClick={() => handleHealthCheck(a.id)} className="p-1 hover:bg-accent-soft rounded" title="健康检查"><Activity className="w-3.5 h-3.5 text-accent" /></button>
                   <button onClick={() => handleRefresh(a.id)} className="p-1 hover:bg-green-50 rounded" title="刷新代理卡"><RotateCcw className="w-3.5 h-3.5 text-green-500" /></button>
-                  <button onClick={() => { setEditItem(a); setShowForm(true); }} className="p-1 hover:bg-blue-50 rounded" title="编辑"><Pencil className="w-3.5 h-3.5 text-blue-500" /></button>
+                  <button onClick={() => { setEditItem(a); setShowForm(true); }} className="p-1 hover:bg-accent-soft rounded" title="编辑"><Pencil className="w-3.5 h-3.5 text-accent" /></button>
                   <button onClick={() => handleDelete(a.id)} className="p-1 hover:bg-red-50 rounded" title="删除"><Trash2 className="w-3.5 h-3.5 text-red-400" /></button>
                 </div>
               </div>
@@ -183,7 +183,7 @@ function A2aDialog({ server, onClose, onSuccess }: { server?: A2aServer | null; 
         </div>
         <div className="flex justify-end gap-2 mt-6">
           <button onClick={onClose} className="px-4 py-2 border rounded-lg text-sm">取消</button>
-          <button onClick={submit} disabled={!name || !url || saving} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm disabled:opacity-50">{saving ? '保存中...' : '保存'}</button>
+          <button onClick={submit} disabled={!name || !url || saving} className="px-4 py-2 bg-accent text-white rounded-lg text-sm disabled:opacity-50">{saving ? '保存中...' : '保存'}</button>
         </div>
       </div>
     </div>

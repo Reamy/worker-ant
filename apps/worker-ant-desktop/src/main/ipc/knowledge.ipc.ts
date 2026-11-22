@@ -67,6 +67,9 @@ import {
 } from '../core/domain-pack.js';
 // zx_20261115_3 M5「传」：按任务题面命中的候选包建议（只读；启用仍走 packs:apply）。
 import { suggestDomainPacksForTask } from '../core/domain-pack-suggest.js';
+// zx_20261121_3 M1「用·账」：知识待办四组的只读单一真源（本文件只做壳；不写库、不决定）。
+import { buildKnowledgeInbox, pendingLessonsForTask } from '../core/knowledge-inbox.js';
+import { emitKnowledgeChanged } from '../core/refresh-events.js';
 
 type IpcFailure = { error: { code: string; message: string } };
 
@@ -346,7 +349,9 @@ export function initKnowledgeIpc(db: Database.Database, dataDir: string): void {
     try {
       const packId = typeof input?.packId === 'string' ? input.packId : '';
       if (!packId) return { error: { code: 'INVALID_REQUEST', message: '缺少领域包 id' } } satisfies IpcFailure;
-      return { data: { dismissed: dismissAutoCandidateDomainPack(db as never, packId) } };
+      const dismissed = dismissAutoCandidateDomainPack(db as never, packId);
+      if (dismissed) emitKnowledgeChanged('packs.dismiss', { packId });
+      return { data: { dismissed } };
     } catch (e) {
       return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } } satisfies IpcFailure;
     }
@@ -384,6 +389,29 @@ export function initKnowledgeIpc(db: Database.Database, dataDir: string): void {
         suggestedPacks: listSuggestedDomainPacks(db as never, projectId).length,
       };
       return { data: status };
+    } catch (e) {
+      return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } } satisfies IpcFailure;
+    }
+  });
+
+  // zx_20261121_3 M1「用·账」：知识待办四组（经验 / 技能 / 领域包 / 提案）——只读、无闸。
+  //   读不到 ≠ 0：每组各自回 `status:'error'`，不冒充「没有待办」。
+  ipcMain.handle('knowledge:inbox', async (_event, input?: { limit?: unknown }) => {
+    try {
+      const limit = typeof input?.limit === 'number' ? input.limit : undefined;
+      return { data: buildKnowledgeInbox(db as never, { limit }) };
+    } catch (e) {
+      return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } } satisfies IpcFailure;
+    }
+  });
+
+  // 某任务自己的待审经验（任务详情就地决定用）——同样只读、无闸。
+  ipcMain.handle('knowledge:forTask', async (_event, input?: { taskId?: unknown; limit?: unknown }) => {
+    try {
+      const taskId = typeof input?.taskId === 'string' ? input.taskId : '';
+      if (!taskId) return { error: { code: 'INVALID_REQUEST', message: '缺少任务 id' } } satisfies IpcFailure;
+      const limit = typeof input?.limit === 'number' ? input.limit : undefined;
+      return { data: pendingLessonsForTask(db as never, taskId, limit) };
     } catch (e) {
       return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } } satisfies IpcFailure;
     }

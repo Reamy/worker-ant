@@ -34,7 +34,8 @@ export const NAV_GROUPS: NavGroup[] = [
     label: '协同与设备',
     items: [
       // zx_20261104_3 M3: 授权台一屏——终端 / 设备 / 跨机问题都在这里点头；角标即在等你的件数。
-      { to: '/inbox', icon: Inbox, label: '授权台', tour: '有事等你点头都汇总在这里：设备接入、外部终端、跨机问题。' },
+      // zx_20261121_3 M3：加上「知识待办」后它不再只有授权，页名与导航统一为「待办」。
+      { to: '/inbox', icon: Inbox, label: '待办', tour: '有事等你点头都汇总在这里：设备接入、外部终端、跨机问题，以及经验/技能/领域包的知识待办。' },
       { to: '/peers', icon: Network, label: '协同面板', tour: '多台工蚁互相派活、看对端在不在场——一个人也能组起一队。' },
       { to: '/devices', icon: Router, label: '设备' },
       // zx_20261017_1 批二: 审计视图（三本账合成一个时间线；Team 能力，锁定显升级提示）。

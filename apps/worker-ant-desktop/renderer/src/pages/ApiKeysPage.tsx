@@ -24,14 +24,14 @@ export default function ApiKeysPage() {
     try { await navigator.clipboard.writeText(text); setCopied(label); setTimeout(() => setCopied(null), 2000); } catch { alert('复制失败'); }
   }
 
-  if (loading) return <div className="flex justify-center py-12"><div className="animate-spin h-8 w-8 border-2 border-blue-500 border-t-transparent rounded-full" /></div>;
+  if (loading) return <div className="flex justify-center py-12"><div className="animate-spin h-8 w-8 border-2 border-accent border-t-transparent rounded-full" /></div>;
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
         <h2 className="text-xl font-bold">API Keys</h2>
         <div className="flex items-center gap-2">
           <button onClick={load} className="p-2 hover:bg-gray-100 rounded-lg" title="刷新"><RefreshCw className="w-4 h-4" /></button>
-          <button onClick={() => { setNewKey(null); setShowForm(true); }} className="flex items-center gap-1 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"><Plus className="w-3.5 h-3.5" />创建 API Key</button>
+          <button onClick={() => { setNewKey(null); setShowForm(true); }} className="flex items-center gap-1 px-3 py-1.5 bg-accent text-white rounded-lg text-sm hover:bg-accent/90"><Plus className="w-3.5 h-3.5" />创建 API Key</button>
         </div>
       </div>
       {error && <p className="text-red-500 text-sm mb-4">错误: {error}</p>}
@@ -47,7 +47,7 @@ export default function ApiKeysPage() {
                   <div className="flex items-center gap-2 mt-0.5">
                     <span className="text-xs text-gray-400">{k.name || '—'}</span>
                     <span className={`text-[10px] px-1.5 py-0.5 rounded ${k.status === 'active' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>{k.status === 'active' ? '启用' : '已吊销'}</span>
-                    {k.resource_groups && k.resource_groups.length > 0 && k.resource_groups.map(g => <span key={g} className="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-600">{g}</span>)}
+                    {k.resource_groups && k.resource_groups.length > 0 && k.resource_groups.map(g => <span key={g} className="text-[10px] px-1.5 py-0.5 rounded bg-accent-soft text-accent">{g}</span>)}
                     <span className="text-xs text-gray-400">创建: {formatDbTime(k.created_at) || '—'}</span>
                     {k.status === 'active' && (
                       <button onClick={(e) => { e.stopPropagation(); const v = prompt('编辑资源组（逗号分隔，留空=全部资源）', (k.resource_groups || []).join(', ')); if (v !== null) { const g = v.split(',').map(s=>s.trim()).filter(Boolean); ansProxy.put(`/api/v1/auth/api-keys/${k.key_prefix || k.id}`, {resource_groups:g}).then(load).catch(()=>{}); } }} className="text-[10px] px-1 py-0.5 bg-gray-100 rounded hover:bg-gray-200 ml-1">编辑</button>
@@ -72,9 +72,9 @@ export default function ApiKeysPage() {
         <div className="text-sm text-gray-600 space-y-2">
           <p>向 ANS API 发起请求时需要携带以下 HTTP 头：</p>
           <div className="space-y-1 font-mono text-xs bg-gray-50 p-3 rounded">
-            <p><span className="text-blue-600">X-Api-Key</span>: wa_xxxxxxxxxxxxx</p>
-            <p><span className="text-blue-600">X-Timestamp</span>: {Date.now()}</p>
-            <p><span className="text-blue-600">X-Signature</span>: HMAC-SHA256(secret, timestamp + ':' + request_body)</p>
+            <p><span className="text-accent">X-Api-Key</span>: wa_xxxxxxxxxxxxx</p>
+            <p><span className="text-accent">X-Timestamp</span>: {Date.now()}</p>
+            <p><span className="text-accent">X-Signature</span>: HMAC-SHA256(secret, timestamp + ':' + request_body)</p>
           </div>
           <p className="text-xs text-gray-400">签名算法：使用创建时返回的 Secret，将时间戳和请求体用冒号拼接后做 HMAC-SHA256 签名</p>
           <p className="text-xs text-gray-400">资源组：为空=可访问全部资源；设置后仅匹配同组或无组资源</p>
@@ -112,12 +112,12 @@ export default function ApiKeysPage() {
               </div>
               {newKey.resource_groups?.length > 0 && (
                 <div className="flex gap-1 flex-wrap">
-                  {newKey.resource_groups.map(g => <span key={g} className="text-[10px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-600">{g}</span>)}
+                  {newKey.resource_groups.map(g => <span key={g} className="text-[10px] px-1.5 py-0.5 rounded bg-accent-soft text-accent">{g}</span>)}
                 </div>
               )}
             </div>
             <div className="flex justify-end mt-4">
-              <button onClick={() => setNewKey(null)} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700">我已保存</button>
+              <button onClick={() => setNewKey(null)} className="px-4 py-2 bg-accent text-white rounded-lg text-sm hover:bg-accent/90">我已保存</button>
             </div>
           </div>
         </div>
@@ -149,12 +149,12 @@ function CreateKeyDialog({ onSuccess, onClose }: { onSuccess: (result: NewKeyRes
           <button onClick={onClose} className="p-1 hover:bg-gray-100 rounded"><X className="w-4 h-4" /></button>
         </div>
         <div className="space-y-3">
-          <div><label className="text-sm font-medium">名称</label><input value={name} onChange={e => setName(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm mt-1 focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="如 team-a-key" /></div>
-          <div><label className="text-sm font-medium">资源组（逗号分隔，留空=全部资源可见）</label><input value={groupsStr} onChange={e => setGroupsStr(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm mt-1 focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="如 team-a,team-b" /><p className="text-xs text-gray-400 mt-1">绑定资源组后，此 Key 只能访问对应资源组的模型/技能/MCP/A2A</p></div>
+          <div><label className="text-sm font-medium">名称</label><input value={name} onChange={e => setName(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm mt-1 focus:outline-none focus:ring-2 focus:ring-accent" placeholder="如 team-a-key" /></div>
+          <div><label className="text-sm font-medium">资源组（逗号分隔，留空=全部资源可见）</label><input value={groupsStr} onChange={e => setGroupsStr(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm mt-1 focus:outline-none focus:ring-2 focus:ring-accent" placeholder="如 team-a,team-b" /><p className="text-xs text-gray-400 mt-1">绑定资源组后，此 Key 只能访问对应资源组的模型/技能/MCP/A2A</p></div>
         </div>
         <div className="flex justify-end gap-2 mt-6">
           <button onClick={onClose} className="px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">取消</button>
-          <button onClick={submit} disabled={saving} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50"><Key className="w-4 h-4 inline mr-1" />生成</button>
+          <button onClick={submit} disabled={saving} className="px-4 py-2 bg-accent text-white rounded-lg text-sm hover:bg-accent/90 disabled:opacity-50"><Key className="w-4 h-4 inline mr-1" />生成</button>
         </div>
       </div>
     </div>

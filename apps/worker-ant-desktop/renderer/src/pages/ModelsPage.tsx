@@ -1,5 +1,5 @@
 import { useState, useEffect, type ReactNode } from 'react';
-import { ansProxy, invoke } from '../lib/ipc';
+import { ansProxy, invoke, projects as projectsApi } from '../lib/ipc';
 import { parseCapabilities } from '../lib/model-caps';
 // zx_20261107_1 B9: 成本/token 展示与全站同尺（币种真源仍待 B6 从推荐目录取）
 import { formatMoney, formatTokens } from '../lib/format';
@@ -17,6 +17,8 @@ import { deriveModelAvailability } from '../../../src/main/core/model-availabili
 //   测试结果的一句话文案在 `lib/probe-models`（成功带延迟、失败带原因）。
 import { describeModelAvailability } from '../lib/model-availability';
 import { endpointTestLine } from '../lib/probe-models';
+// zx_20261122_1 M2「省·实」：模型实绩的形状取 main 真源（仅类型，打包期擦除）。
+import type { ModelPerfView } from '../../../src/main/core/model-performance.js';
 
 interface ModelStats { call_count?: number; success_rate?: number | null; avg_latency_ms?: number | null; total_cost?: number; total_tokens?: number; }
 interface Model { id: string; name: string; provider_id?: string; provider_name?: string; capabilities?: string; context_window?: number; max_output_tokens?: number; input_price_per_1k?: number; output_price_per_1k?: number; enabled?: number; status?: string; description?: string; source?: string; has_endpoint?: boolean; available?: boolean; endpoint_count?: number; stats?: ModelStats; quality_score?: number | null; }
@@ -134,6 +136,12 @@ export default function ModelsPage() {
   const [recommended, setRecommended] = useState<RecEnvelope | null>(null);
   // zx_20261107_1 B6: 全局默认模型（`wa_settings['model.default_model']`；空串 = 未指定 ⇒ 自动选型）。
   const [defaultModel, setDefaultModel] = useState('');
+  // zx_20261122_1 M2「省·实」：本机模型实绩（只读派生；不新增表）。
+  const [perf, setPerf] = useState<ModelPerfView | null>(null);
+  const [perfLoading, setPerfLoading] = useState(false);
+  const [perfErr, setPerfErr] = useState('');
+  const [perfProjectId, setPerfProjectId] = useState('');
+  const [projList, setProjList] = useState<Array<{ id: string; name: string }>>([]);
   const [providerGuides, setProviderGuides] = useState<Record<string, Record<string, unknown>>>({});
   const [expandedGuide, setExpandedGuide] = useState<string | null>(null);
   // DataTable 排序
@@ -160,6 +168,35 @@ export default function ModelsPage() {
     try { const dm = await invoke<string | null>('settings:get', 'model.default_model'); setDefaultModel(dm || ''); } catch {}
     setLoading(false);
   }
+  // zx_20261122_1 M2：模型实绩（只读）——项目选择器变化时重取；失败如实上屏，不冒充「没有」。
+  async function loadPerf(pid = perfProjectId): Promise<void> {
+    setPerfLoading(true);
+    setPerfErr('');
+    try {
+      const d = await invoke<ModelPerfView>('models:performance', { projectId: pid || undefined });
+      setPerf(d);
+    } catch (e) {
+      setPerf(null);
+      setPerfErr((e as Error)?.message || String(e));
+    } finally {
+      setPerfLoading(false);
+    }
+  }
+  useEffect(() => { void loadPerf(); }, [perfProjectId]);
+  useEffect(() => {
+    projectsApi.list()
+      .then((rows) => setProjList(rows.map((r) => ({ id: String(r.id ?? ''), name: String(r.name ?? r.id ?? '') })).filter((x) => x.id)))
+      .catch(() => { /* 项目列表读不到 ⇒ 只显示全部；不影响实绩 */ });
+  }, []);
+  async function setProjectDefaultModel(model: string): Promise<void> {
+    if (!perfProjectId) return;
+    try {
+      await projectsApi.modelOverride.set(perfProjectId, model);
+      fb.ok(`项目默认模型已设为「${model}」`);
+      void loadPerf();
+    } catch (e) { fb.fail('「项目默认模型」未保存', e); }
+  }
+
   /** 设/清全局默认模型（空串 ⇒ **删掉这一项**，回落自动选型）。与 `model-preference.ts` 的键逐字一致。 */
   async function setDefaultModelTo(name: string | null) {
     try {
@@ -294,7 +331,7 @@ export default function ModelsPage() {
   const isFiltering = filter.status !== 'all' || filter.provider !== '' || filter.cap !== '' || filter.hasEp !== 'all';
   const resetFilter = () => setFilter({ status: 'all', provider: '', cap: '', hasEp: 'all' });
 
-  if (loading) return <div className="flex justify-center py-12"><div className="animate-spin h-8 w-8 border-2 border-blue-500 border-t-transparent rounded-full" /></div>;
+  if (loading) return <div className="flex justify-center py-12"><div className="animate-spin h-8 w-8 border-2 border-accent border-t-transparent rounded-full" /></div>;
   // zx_20261111_3「显」：第一行——"能不能跑"用首启判据同一把尺（`deriveModelAvailability.hasChat`）。
   const modelAvailability = deriveModelAvailability(models);
   const modelNextAction = nextActionForModels({
@@ -319,7 +356,8 @@ export default function ModelsPage() {
             全局默认模型：{defaultModel
               ? <span className="font-medium text-gray-700">{defaultModel}</span>
               : <span className="text-gray-400">未指定（按任务自动选型）</span>}
-            {defaultModel && <button onClick={() => setDefaultModelTo(null)} className="ml-2 text-blue-600 hover:underline">取消默认</button>}
+            {defaultModel && <button onClick={() => setDefaultModelTo(null)} className="ml-2 text-accent hover:underline">取消默认</button>}
+            {perf && <span className="text-gray-400"> · 近 {perf.windowDays} 天 <span className="tnum">{perf.samples.tasks}</span> 单有模型实绩</span>}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -333,15 +371,88 @@ export default function ModelsPage() {
           )}
           <button onClick={() => setSortAsc(!sortAsc)} className="px-2 py-1.5 border rounded-lg text-sm bg-white hover:bg-gray-50" title="切换升降序">{sortAsc ? '↑升序' : '↓降序'}</button>
           <button onClick={loadData} className="p-2 hover:bg-gray-100 rounded-lg" title="刷新"><RefreshCw className="w-4 h-4" /></button>
-          <button onClick={() => { setShowAdd(true); setEditItem(null); }} className="flex items-center gap-1 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"><Plus className="w-3.5 h-3.5" />添加{tab === 'providers' ? '供应商' : '模型'}</button>
+          <button onClick={() => { setShowAdd(true); setEditItem(null); }} className="flex items-center gap-1 px-3 py-1.5 bg-accent text-white rounded-lg text-sm hover:bg-accent/90"><Plus className="w-3.5 h-3.5" />添加{tab === 'providers' ? '供应商' : '模型'}</button>
         </div>
       </div>
       {/* zx_20261111_3「显」：第一行——此刻是什么 / 凭什么 / 下一步点哪个 */}
       <div className="mb-3"><NextActionBar action={modelNextAction} onAction={handleModelNextAction} /></div>
 
+      {/* zx_20261122_1 M2「省·实」：本机模型实绩——只报四件；相关非因果；不自动改默认。 */}
+      <div className="mb-5 rounded-card border border-line bg-surface p-4">
+        <div className="flex items-center justify-between gap-3 mb-2">
+          <h3 className="font-display text-sm font-semibold text-ink">
+            模型实绩（本机任务账 · 近 {perf?.windowDays ?? 90} 天）
+          </h3>
+          <select value={perfProjectId} onChange={(e) => setPerfProjectId(e.target.value)}
+            className="px-2 py-1 border border-line-strong rounded-control text-xs bg-surface text-ink" title="按项目收窄（建议只在同一项目内比较）">
+            <option value="">全部项目</option>
+            {projList.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        </div>
+        <p className="text-[11px] text-ink-mute mb-2">
+          从每次执行记下的真实模型与执行账派生；成功率分母不足 3 单、或没有 token/成本时显示「—」。建议只表示相关，不承诺因果。
+        </p>
+        {perfErr ? (
+          <p className="text-xs text-bad">读取失败：{perfErr}（不当作「没有实绩」）</p>
+        ) : perfLoading && !perf ? (
+          <p className="text-xs text-ink-mute">读取中…</p>
+        ) : !perf || perf.rows.length === 0 ? (
+          <p className="text-xs text-ink-mute">近 {perf?.windowDays ?? 90} 天还没有带模型名的执行账。</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-left text-ink-mute border-b border-line">
+                  <th className="py-1.5 pr-3 font-medium">模型</th>
+                  <th className="py-1.5 pr-3 font-medium tnum">任务</th>
+                  <th className="py-1.5 pr-3 font-medium tnum">成功率</th>
+                  <th className="py-1.5 pr-3 font-medium tnum">p50 token</th>
+                  <th className="py-1.5 pr-3 font-medium tnum">p90 token</th>
+                  <th className="py-1.5 pr-3 font-medium tnum">均成本</th>
+                  <th className="py-1.5 pr-3 font-medium">最近使用</th>
+                  <th className="py-1.5 font-medium">设为默认</th>
+                </tr>
+              </thead>
+              <tbody>
+                {perf.rows.map((r) => (
+                  <tr key={r.model} className="border-b border-line/70 last:border-0">
+                    <td className="py-1.5 pr-3 font-mono text-[11px] text-ink">{r.model}</td>
+                    <td className="py-1.5 pr-3 tnum text-ink-soft">{r.tasks}</td>
+                    <td className="py-1.5 pr-3 tnum text-ink-soft">{r.successRate === null ? '—（样本不足）' : `${Math.round(r.successRate * 100)}%`}</td>
+                    <td className="py-1.5 pr-3 tnum text-ink-soft">{r.tokensP50 === null ? '—' : formatTokens(r.tokensP50)}</td>
+                    <td className="py-1.5 pr-3 tnum text-ink-soft">{r.tokensP90 === null ? '—' : formatTokens(r.tokensP90)}</td>
+                    <td className="py-1.5 pr-3 tnum text-ink-soft">{r.avgCost === null ? '—' : formatMoney(r.avgCost, { digits: 4 })}</td>
+                    <td className="py-1.5 pr-3 text-ink-mute">{r.lastUsedAt ? r.lastUsedAt.slice(5, 16) : '—'}</td>
+                    <td className="py-1.5">
+                      {perfProjectId ? (
+                        <button type="button" onClick={() => void setProjectDefaultModel(r.model)}
+                          className="px-2 py-0.5 rounded-control border border-line-strong text-ink-soft hover:bg-paper">本项目默认</button>
+                      ) : (
+                        <button type="button" onClick={() => void setDefaultModelTo(r.model)}
+                          className="px-2 py-0.5 rounded-control border border-line-strong text-ink-soft hover:bg-paper">全局默认</button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {perf?.recommendation && (
+          <div className="mt-2 rounded-control border border-accent/25 bg-accent-soft px-3 py-2 text-xs text-ink">
+            <span className="font-medium">建议（相关，非因果）：</span>
+            {perf.recommendation.reason}
+            {perfProjectId && (
+              <button type="button" onClick={() => void setProjectDefaultModel(perf.recommendation!.model)}
+                className="ml-2 px-2 py-0.5 rounded-control bg-accent text-paper hover:bg-accent/90">设为项目默认</button>
+            )}
+          </div>
+        )}
+      </div>
+
       <div className="flex gap-2 mb-4">
         {(['providers', 'models'] as const).map(t => (
-          <button key={t} onClick={() => setTab(t)} className={`px-4 py-1.5 rounded-lg text-sm font-medium ${tab === t ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>{t === 'providers' ? '供应商' : '模型列表'}</button>
+          <button key={t} onClick={() => setTab(t)} className={`px-4 py-1.5 rounded-lg text-sm font-medium ${tab === t ? 'bg-accent text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>{t === 'providers' ? '供应商' : '模型列表'}</button>
         ))}
       </div>
 
@@ -381,7 +492,7 @@ export default function ModelsPage() {
             </select>
           </>
         )}
-        {isFiltering && <button onClick={resetFilter} className="text-xs px-2 py-1.5 text-blue-600 hover:bg-blue-50 rounded-lg">清除筛选</button>}
+        {isFiltering && <button onClick={resetFilter} className="text-xs px-2 py-1.5 text-accent hover:bg-accent-soft rounded-lg">清除筛选</button>}
         <span className="text-xs text-gray-400 ml-auto">共 {(tab === 'models' ? filteredModels : filteredProviders).length} 个{isFiltering && `（过滤）`}</span>
       </div>
       {error && <p className="text-red-500 text-sm mb-4">错误: {error}</p>}
@@ -395,7 +506,7 @@ export default function ModelsPage() {
               <div key={i} className="border rounded-lg p-3 text-sm">
                 <p className="font-medium text-gray-800">{uc.scenario}</p>
                 <p className="text-xs text-gray-500 mt-1">
-                  <span className="text-blue-600 font-medium">首选：{uc.primary}</span>
+                  <span className="text-accent font-medium">首选：{uc.primary}</span>
                   {uc.fallback ? <><span className="mx-1">|</span><span className="text-gray-400">备选：{uc.fallback}</span></> : null}
                 </p>
                 {uc.note ? <p className="text-[11px] text-gray-400 mt-1">{uc.note}</p> : null}
@@ -419,7 +530,7 @@ export default function ModelsPage() {
                 {(() => { const b = providerStatusBadge(p); return <span className={`text-xs px-2 py-0.5 rounded-full ${b.cls}`}>{b.label}</span>; })()}
                 <span className="text-xs text-gray-400" title="可用模型数">{p.available_models ?? 0} 可用</span>
                 <button onClick={() => handleToggleProvider(p.id, p.enabled !== 1)} className="text-xs px-2 py-0.5 rounded bg-gray-100 hover:bg-gray-200">{p.enabled === 1 ? '禁用' : '启用'}</button>
-                <button onClick={() => { setEditItem(p); setShowAdd(true); }} className="p-1 hover:bg-blue-50 rounded" title="编辑"><Pencil className="w-3.5 h-3.5 text-blue-500" /></button>
+                <button onClick={() => { setEditItem(p); setShowAdd(true); }} className="p-1 hover:bg-accent-soft rounded" title="编辑"><Pencil className="w-3.5 h-3.5 text-accent" /></button>
                 <button onClick={() => handleDelete('models/providers', p.id)} className="p-1 hover:bg-red-50 rounded" title="删除"><Trash2 className="w-3.5 h-3.5 text-red-400" /></button>
               </div>
             </div>
@@ -438,10 +549,10 @@ export default function ModelsPage() {
               </div>
             );
             return (
-              <div className="bg-white rounded-lg border border-blue-300 p-3 overflow-x-auto">
+              <div className="bg-white rounded-lg border border-accent/30 p-3 overflow-x-auto">
                 <div className="flex items-center justify-between mb-2">
-                  <p className="text-sm font-medium text-gray-700 flex items-center gap-1"><Scale className="w-4 h-4 text-blue-500" />模型对比（{sel.length} 个）</p>
-                  <button onClick={() => setCompareSel([])} className="text-xs text-blue-500 hover:text-blue-700 flex items-center gap-0.5"><X className="w-3 h-3" />清除对比</button>
+                  <p className="text-sm font-medium text-gray-700 flex items-center gap-1"><Scale className="w-4 h-4 text-accent" />模型对比（{sel.length} 个）</p>
+                  <button onClick={() => setCompareSel([])} className="text-xs text-accent hover:text-accent flex items-center gap-0.5"><X className="w-3 h-3" />清除对比</button>
                 </div>
                 {row('模型', m => <span className="font-medium">{m.description || m.name}</span>)}
                 {row('供应商', m => m.provider_name || m.provider_id || '—')}
@@ -462,14 +573,14 @@ export default function ModelsPage() {
             const guide = providerGuides[m.provider_id || ''];
             const isGuideExpanded = expandedGuide === m.id;
             return (
-              <div key={m.id} className={`bg-white rounded-lg border p-4 ${isRecommended ? 'bg-blue-50/50' : ''} ${compareSel.includes(m.id) ? 'ring-2 ring-blue-400' : ''}`}>
+              <div key={m.id} className={`bg-white rounded-lg border p-4 ${isRecommended ? 'bg-accent-soft/50' : ''} ${compareSel.includes(m.id) ? 'ring-2 ring-accent/40' : ''}`}>
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3 flex-1">
-                    <button onClick={() => loadEndpoints(m.id)} className="hover:text-blue-600"><Cpu className="w-5 h-5 text-blue-500" /></button>
+                    <button onClick={() => loadEndpoints(m.id)} className="hover:text-accent"><Cpu className="w-5 h-5 text-accent" /></button>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
                         <h3 className="font-medium">{m.description || m.name}</h3>
-                        {isRecommended && <span className="text-[10px] px-1.5 py-0.5 bg-blue-500 text-white rounded-full">推荐</span>}
+                        {isRecommended && <span className="text-[10px] px-1.5 py-0.5 bg-accent text-white rounded-full">推荐</span>}
                         {/* C5: 端点数量角标 */}
                         <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${(m.endpoint_count ?? 0) > 0 ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-gray-100 text-gray-400'}`} title="端点数量">{m.endpoint_count ?? 0} 端点</span>
                       </div>
@@ -487,7 +598,7 @@ export default function ModelsPage() {
                     {Number(m.input_price_per_1k || 0) === 0 && Number(m.output_price_per_1k || 0) === 0 && (
                       <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200" title="input/output_price_per_1k 均为 0：费用无法计量，使用该模型的任务费用闸不生效（仅 Token 闸）">缺单价·费用闸不生效</span>
                     )}
-                    <button onClick={() => loadEndpoints(m.id)} className="p-1 hover:bg-blue-50 rounded" title="端点">{isExpanded ? <ChevronDown className="w-4 h-4 text-blue-500" /> : <ChevronRight className="w-4 h-4 text-blue-500" />}</button>
+                    <button onClick={() => loadEndpoints(m.id)} className="p-1 hover:bg-accent-soft rounded" title="端点">{isExpanded ? <ChevronDown className="w-4 h-4 text-accent" /> : <ChevronRight className="w-4 h-4 text-accent" />}</button>
                     {(() => { const b = availabilityOf(m, providers); return <span className={`text-xs px-2 py-0.5 rounded-full ${b.cls}`} title={b.title}>{b.label}</span>; })()}
                     {(() => {
                       const r = modelTest[m.id];
@@ -497,12 +608,12 @@ export default function ModelsPage() {
                     })()}
                     {/* zx_20261107_1 B6: 全局默认模型入口（键与 `model-preference.ts` 逐字一致） */}
                     {m.name === defaultModel
-                      ? <span className="text-[10px] px-1.5 py-0.5 bg-indigo-100 text-indigo-700 rounded-full" title="全局默认模型：未指定项目级覆盖时优先用它">默认</span>
-                      : <button onClick={() => setDefaultModelTo(m.name)} className="text-xs px-2 py-0.5 rounded bg-indigo-50 text-indigo-600 hover:bg-indigo-100" title={`把 ${m.name} 设为全局默认模型`}>设为默认</button>}
-                    <button onClick={() => toggleCompare(m.id)} className={`text-xs px-2 py-0.5 rounded flex items-center gap-1 ${compareSel.includes(m.id) ? 'bg-blue-600 text-white' : 'bg-gray-100 hover:bg-gray-200'}`} title={compareSel.includes(m.id) ? '取消对比' : '加入对比（最多 4 个）'}><Scale className="w-3 h-3" />{compareSel.includes(m.id) ? '已选' : '对比'}</button>
-                    <button onClick={() => testModel(m)} disabled={testingModel === m.id} className="text-xs px-2 py-0.5 rounded bg-blue-50 text-blue-600 hover:bg-blue-100 disabled:opacity-50" title="测试首选端点连通性（结果显示在右侧）">{testingModel === m.id ? '测试中...' : '测试连接'}</button>
+                      ? <span className="text-[10px] px-1.5 py-0.5 bg-accent-soft text-accent rounded-full" title="全局默认模型：未指定项目级覆盖时优先用它">默认</span>
+                      : <button onClick={() => setDefaultModelTo(m.name)} className="text-xs px-2 py-0.5 rounded bg-accent-soft text-accent hover:bg-accent-soft" title={`把 ${m.name} 设为全局默认模型`}>设为默认</button>}
+                    <button onClick={() => toggleCompare(m.id)} className={`text-xs px-2 py-0.5 rounded flex items-center gap-1 ${compareSel.includes(m.id) ? 'bg-accent text-white' : 'bg-gray-100 hover:bg-gray-200'}`} title={compareSel.includes(m.id) ? '取消对比' : '加入对比（最多 4 个）'}><Scale className="w-3 h-3" />{compareSel.includes(m.id) ? '已选' : '对比'}</button>
+                    <button onClick={() => testModel(m)} disabled={testingModel === m.id} className="text-xs px-2 py-0.5 rounded bg-accent-soft text-accent hover:bg-accent-soft disabled:opacity-50" title="测试首选端点连通性（结果显示在右侧）">{testingModel === m.id ? '测试中...' : '测试连接'}</button>
                     <button onClick={() => handleToggleModel(m.id, m.enabled !== 1)} className="text-xs px-2 py-0.5 rounded bg-gray-100 hover:bg-gray-200">{m.enabled === 1 ? '禁用' : '启用'}</button>
-                    <button onClick={() => { setEditItem(m); setShowAdd(true); }} className="p-1 hover:bg-blue-50 rounded" title="编辑"><Pencil className="w-3.5 h-3.5 text-blue-500" /></button>
+                    <button onClick={() => { setEditItem(m); setShowAdd(true); }} className="p-1 hover:bg-accent-soft rounded" title="编辑"><Pencil className="w-3.5 h-3.5 text-accent" /></button>
                     <button onClick={() => handleDelete('models', m.id)} className="p-1 hover:bg-red-50 rounded" title="删除"><Trash2 className="w-3.5 h-3.5 text-red-400" /></button>
                   </div>
                 </div>
@@ -511,13 +622,13 @@ export default function ModelsPage() {
                   <div className="mt-3 pt-3 border-t">
                     <div className="flex items-center justify-between mb-2">
                       <p className="text-xs text-gray-400">端点 ({eps.length}){(() => { const hs = eps.filter(e => e.health_status === 'ok').length; const hf = eps.filter(e => e.health_status === 'fail').length; if (hs + hf === 0) return null; return <span className="ml-2 font-medium"><span className="text-emerald-600">健康 {hs}</span><span className={hf > 0 ? 'text-red-500 ml-1' : 'text-gray-400 ml-1'}>{hf > 0 ? `异常 ${hf}` : ''}</span></span>; })()}</p>
-                      <button onClick={() => { setShowEpForm(true); setEditEp(null); }} className="text-xs px-2 py-0.5 bg-blue-600 text-white rounded hover:bg-blue-700"><Plus className="w-3 h-3 inline" /> 添加端点</button>
+                      <button onClick={() => { setShowEpForm(true); setEditEp(null); }} className="text-xs px-2 py-0.5 bg-accent text-white rounded hover:bg-accent/90"><Plus className="w-3 h-3 inline" /> 添加端点</button>
                     </div>
                     {eps.length === 0 ? (
                       <div className="text-xs text-orange-500 flex items-center gap-2 flex-wrap">
                         待配置端点
                         {isRecommended && (
-                          <button className="text-blue-500 hover:text-blue-700 underline" onClick={(e) => {
+                          <button className="text-accent hover:text-accent underline" onClick={(e) => {
                             e.stopPropagation();
                             if (isGuideExpanded) { setExpandedGuide(null); return; }
                             setExpandedGuide(m.id);
@@ -543,9 +654,9 @@ export default function ModelsPage() {
                               const line = endpointTestLine(epTest[e.id]);
                               return <span className={`flex-shrink-0 mx-1 ${line.ok ? 'text-green-600' : 'text-red-500'}`}>{line.text}</span>;
                             })()}
-                            <button onClick={() => handleTestEp(e.id!, epsModelId ?? undefined)} disabled={testingEp === e.id} className="px-1.5 py-0.5 rounded bg-blue-50 text-blue-600 hover:bg-blue-100 disabled:opacity-50 flex-shrink-0">{testingEp === e.id ? '测试中...' : '测试'}</button>
+                            <button onClick={() => handleTestEp(e.id!, epsModelId ?? undefined)} disabled={testingEp === e.id} className="px-1.5 py-0.5 rounded bg-accent-soft text-accent hover:bg-accent-soft disabled:opacity-50 flex-shrink-0">{testingEp === e.id ? '测试中...' : '测试'}</button>
                             <span className="text-gray-400 mx-2 flex-shrink-0">P{e.priority ?? 0} W{e.weight ?? 1}</span>
-                            <button onClick={() => { setEditEp(e); setShowEpForm(true); }} className="p-0.5 hover:bg-blue-50 rounded"><Pencil className="w-3 h-3 text-blue-500" /></button>
+                            <button onClick={() => { setEditEp(e); setShowEpForm(true); }} className="p-0.5 hover:bg-accent-soft rounded"><Pencil className="w-3 h-3 text-accent" /></button>
                             <button onClick={() => handleDeleteEp(e.id!)} className="p-0.5 hover:bg-red-50 rounded"><Trash2 className="w-3 h-3 text-red-400" /></button>
                           </div>
                         ))}
@@ -557,10 +668,10 @@ export default function ModelsPage() {
                         const steps = apiGuide?.steps as string[] | undefined;
                         const docsUrl = apiGuide?.docs_url as string | undefined;
                         return (
-                          <div className="mt-2 p-3 bg-blue-50 border border-blue-200 rounded text-xs">
-                            <p className="font-medium text-blue-800 mb-1">{(apiGuide?.title as string) || 'API Key获取指引'}</p>
+                          <div className="mt-2 p-3 bg-accent-soft border border-accent/25 rounded text-xs">
+                            <p className="font-medium text-accent mb-1">{(apiGuide?.title as string) || 'API Key获取指引'}</p>
                             {steps && <ol className="list-decimal list-inside space-y-0.5 text-gray-600">{steps.map((s, i) => <li key={i}>{s}</li>)}</ol>}
-                            {docsUrl && <a href={docsUrl} target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline mt-1 inline-block">官方文档 →</a>}
+                            {docsUrl && <a href={docsUrl} target="_blank" rel="noopener noreferrer" className="text-accent hover:underline mt-1 inline-block">官方文档 →</a>}
                           </div>
                         );
                       })()
@@ -624,11 +735,11 @@ function ProviderDialog({ provider, onClose, onSuccess }: { provider?: Provider;
   return (
     <Modal onClose={onClose} title={isEdit ? '编辑供应商' : '添加供应商'}>
       <div className="space-y-3">
-        <div><label className="block text-sm font-medium mb-1">名称 *</label><input value={name} onChange={e => setName(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="如 openai" /></div>
-        <div><label className="block text-sm font-medium mb-1">Base URL</label><input value={baseUrl} onChange={e => setBaseUrl(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="https://api.openai.com" /></div>
+        <div><label className="block text-sm font-medium mb-1">名称 *</label><input value={name} onChange={e => setName(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" placeholder="如 openai" /></div>
+        <div><label className="block text-sm font-medium mb-1">Base URL</label><input value={baseUrl} onChange={e => setBaseUrl(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" placeholder="https://api.openai.com" /></div>
         {isEdit && (
           <label className="flex items-center gap-2 text-sm text-gray-700">
-            <input type="checkbox" checked={enabled} onChange={e => setEnabled(e.target.checked)} className="w-4 h-4 accent-blue-600" />
+            <input type="checkbox" checked={enabled} onChange={e => setEnabled(e.target.checked)} className="w-4 h-4 accent-[var(--color-accent)]" />
             启用（关闭后该供应商模型不参与匹配）
           </label>
         )}
@@ -636,7 +747,7 @@ function ProviderDialog({ provider, onClose, onSuccess }: { provider?: Provider;
       </div>
       <div className="flex justify-end gap-2 mt-6">
         <button onClick={onClose} className="px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">取消</button>
-        <button onClick={submit} disabled={!name || saving} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50">{saving ? '保存中...' : '保存'}</button>
+        <button onClick={submit} disabled={!name || saving} className="px-4 py-2 bg-accent text-white rounded-lg text-sm hover:bg-accent/90 disabled:opacity-50">{saving ? '保存中...' : '保存'}</button>
       </div>
     </Modal>
   );
@@ -709,13 +820,13 @@ function ModelDialog({ model, providers, onClose, onSuccess }: { model?: Model; 
     <Modal onClose={onClose} title={isEdit ? '编辑模型' : '添加模型'}>
       <div className="space-y-3">
         <div><label className="block text-sm font-medium mb-1">供应商 *</label>
-          <select value={pid} onChange={e => setPid(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
+          <select value={pid} onChange={e => setPid(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent bg-white">
             <option value="">选择供应商...</option>
             {providers.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
           </select>
         </div>
-        <div><label className="block text-sm font-medium mb-1">模型名称 *</label><input value={name} onChange={e => setName(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="如 gpt-4o" /></div>
-        <div><label className="block text-sm font-medium mb-1">描述</label><input value={desc} onChange={e => setDesc(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="模型说明" /></div>
+        <div><label className="block text-sm font-medium mb-1">模型名称 *</label><input value={name} onChange={e => setName(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" placeholder="如 gpt-4o" /></div>
+        <div><label className="block text-sm font-medium mb-1">描述</label><input value={desc} onChange={e => setDesc(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" placeholder="模型说明" /></div>
         <div>
           <label className="block text-sm font-medium mb-1">能力</label>
           <div className="flex flex-wrap gap-1">
@@ -724,7 +835,7 @@ function ModelDialog({ model, providers, onClose, onSuccess }: { model?: Model; 
               const selected = caps.includes(c.value);
               return (
                 <button key={c.value} type="button" onClick={() => toggleCap(c.value)} title={c.desc}
-                  className={`px-2 py-0.5 rounded text-xs border ${selected ? 'bg-blue-100 border-blue-300 text-blue-800 font-medium' : suggested ? 'bg-amber-50 border-amber-200 text-amber-700' : 'bg-white border-gray-200 text-gray-400 hover:border-gray-300'}`}>
+                  className={`px-2 py-0.5 rounded text-xs border ${selected ? 'bg-accent-soft border-accent/30 text-accent font-medium' : suggested ? 'bg-amber-50 border-amber-200 text-amber-700' : 'bg-white border-gray-200 text-gray-400 hover:border-gray-300'}`}>
                   {c.label}{suggested && !selected ? ' *' : ''}
                 </button>
               );
@@ -738,14 +849,14 @@ function ModelDialog({ model, providers, onClose, onSuccess }: { model?: Model; 
           )}
         </div>
         <div className="grid grid-cols-2 gap-3">
-          <div><label className="block text-sm font-medium mb-1">上下文窗口</label><input value={context} onChange={e => setContext(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="未设置（如 128K）" /></div>
-          <div><label className="block text-sm font-medium mb-1">最大输出tokens</label><input value={maxTokens} onChange={e => setMaxTokens(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="未设置（如 4K）" /></div>
-          <div><label className="block text-sm font-medium mb-1">输入价格/1K tokens</label><input type="number" step="0.0001" value={inp} onChange={e => setInp(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="未设置" /></div>
-          <div><label className="block text-sm font-medium mb-1">输出价格/1K tokens</label><input type="number" step="0.0001" value={out} onChange={e => setOut(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="未设置" /></div>
+          <div><label className="block text-sm font-medium mb-1">上下文窗口</label><input value={context} onChange={e => setContext(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" placeholder="未设置（如 128K）" /></div>
+          <div><label className="block text-sm font-medium mb-1">最大输出tokens</label><input value={maxTokens} onChange={e => setMaxTokens(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" placeholder="未设置（如 4K）" /></div>
+          <div><label className="block text-sm font-medium mb-1">输入价格/1K tokens</label><input type="number" step="0.0001" value={inp} onChange={e => setInp(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" placeholder="未设置" /></div>
+          <div><label className="block text-sm font-medium mb-1">输出价格/1K tokens</label><input type="number" step="0.0001" value={out} onChange={e => setOut(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" placeholder="未设置" /></div>
         </div>
         {isEdit && (
           <label className="flex items-center gap-2 text-sm text-gray-700">
-            <input type="checkbox" checked={enabled} onChange={e => setEnabled(e.target.checked)} className="w-4 h-4 accent-blue-600" />
+            <input type="checkbox" checked={enabled} onChange={e => setEnabled(e.target.checked)} className="w-4 h-4 accent-[var(--color-accent)]" />
             启用（关闭后该模型不参与匹配）
           </label>
         )}
@@ -753,7 +864,7 @@ function ModelDialog({ model, providers, onClose, onSuccess }: { model?: Model; 
       {err && <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-2 py-1 mt-3 whitespace-pre-wrap break-words">{err}</p>}
       <div className="flex justify-end gap-2 mt-6">
         <button onClick={onClose} className="px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">取消</button>
-        <button onClick={submit} disabled={!pid || !name || saving} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50">{saving ? '保存中...' : '保存'}</button>
+        <button onClick={submit} disabled={!pid || !name || saving} className="px-4 py-2 bg-accent text-white rounded-lg text-sm hover:bg-accent/90 disabled:opacity-50">{saving ? '保存中...' : '保存'}</button>
       </div>
     </Modal>
   );
@@ -789,19 +900,19 @@ function EndpointDialog({ modelId, endpoint, providerUrl, onClose, onSuccess }: 
 
   return (
     <Modal onClose={onClose} title={isEdit ? '编辑端点' : '添加端点'}>
-      {!isEdit && providerUrl && <p className="text-xs text-blue-600 bg-blue-50 px-3 py-2 rounded mb-3">已自动填入供应商Base URL</p>}
+      {!isEdit && providerUrl && <p className="text-xs text-accent bg-accent-soft px-3 py-2 rounded mb-3">已自动填入供应商Base URL</p>}
       <div className="space-y-3">
-        <div><label className="block text-sm font-medium mb-1">端点URL *</label><input value={url} onChange={e => setUrl(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono" placeholder="https://api.openai.com/v1" /></div>
-        <div><label className="block text-sm font-medium mb-1">API Key {!isEdit && '*'}</label><input type="password" value={key} onChange={e => setKey(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder={isEdit ? '留空则不修改' : 'sk-...'} /></div>
+        <div><label className="block text-sm font-medium mb-1">端点URL *</label><input value={url} onChange={e => setUrl(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent font-mono" placeholder="https://api.openai.com/v1" /></div>
+        <div><label className="block text-sm font-medium mb-1">API Key {!isEdit && '*'}</label><input type="password" value={key} onChange={e => setKey(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" placeholder={isEdit ? '留空则不修改' : 'sk-...'} /></div>
         <div className="grid grid-cols-2 gap-3">
-          <div><label className="block text-sm font-medium mb-1">优先级</label><input type="number" value={priority} onChange={e => setPriority(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" /></div>
-          <div><label className="block text-sm font-medium mb-1">权重</label><input type="number" step="0.1" value={weight} onChange={e => setWeight(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" /></div>
+          <div><label className="block text-sm font-medium mb-1">优先级</label><input type="number" value={priority} onChange={e => setPriority(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" /></div>
+          <div><label className="block text-sm font-medium mb-1">权重</label><input type="number" step="0.1" value={weight} onChange={e => setWeight(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" /></div>
         </div>
       </div>
       {err && <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-2 py-1 mt-3 whitespace-pre-wrap break-words">{err}</p>}
       <div className="flex justify-end gap-2 mt-6">
         <button onClick={onClose} className="px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">取消</button>
-        <button onClick={submit} disabled={!url || saving} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50">{saving ? '保存中...' : '保存'}</button>
+        <button onClick={submit} disabled={!url || saving} className="px-4 py-2 bg-accent text-white rounded-lg text-sm hover:bg-accent/90 disabled:opacity-50">{saving ? '保存中...' : '保存'}</button>
       </div>
     </Modal>
   );

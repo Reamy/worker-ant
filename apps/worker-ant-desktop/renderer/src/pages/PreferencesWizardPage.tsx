@@ -228,7 +228,7 @@ export default function PreferencesWizardPage() {
             {/* 问题卡片 */}
             <div className="bg-white rounded-xl border p-6 shadow-sm">
               <div className="flex items-center gap-2 mb-1">
-                <span className="bg-blue-500 text-white rounded-full px-2 py-0.5 text-xs font-semibold">维度 {step + 1}/{DIMENSIONS.length}</span>
+                <span className="bg-accent text-white rounded-full px-2 py-0.5 text-xs font-semibold">维度 {step + 1}/{DIMENSIONS.length}</span>
                 <h3 className="text-lg font-semibold text-gray-900">{dim.title}</h3>
               </div>
               <p className="text-xs text-gray-500">{dim.why}</p>
@@ -271,7 +271,7 @@ export default function PreferencesWizardPage() {
                 <ChevronLeft className="w-4 h-4" />上一步
               </button>
               <button onClick={() => setStep(step === DIMENSIONS.length - 1 ? DIMENSIONS.length : step + 1)} disabled={!canNext}
-                className="flex items-center gap-1 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm disabled:opacity-50 hover:bg-blue-700">
+                className="flex items-center gap-1 px-4 py-2 bg-accent text-white rounded-lg text-sm disabled:opacity-50 hover:bg-accent/90">
                 {step === DIMENSIONS.length - 1 ? '查看摘要' : '下一步'}<ChevronRight className="w-4 h-4" />
               </button>
             </div>
@@ -286,7 +286,7 @@ export default function PreferencesWizardPage() {
               return (
                 <>
                   <div className="text-center mb-6">
-                    <Sparkles className="w-12 h-12 mx-auto mb-2 text-blue-500" />
+                    <Sparkles className="w-12 h-12 mx-auto mb-2 text-accent" />
                     <h2 className="text-xl font-bold text-gray-900">确认你的偏好设置</h2>
                     <p className="text-sm mt-1 text-gray-500">以下是根据你的回答生成的偏好，确认无误后提交</p>
                   </div>
@@ -300,7 +300,7 @@ export default function PreferencesWizardPage() {
                       className="flex items-center gap-1 px-4 py-2 border rounded-lg text-sm hover:bg-gray-50"><ChevronLeft className="w-4 h-4" />返回修改</button>
                     {submitError && <p className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded mb-3">保存失败: {submitError}</p>}
                     <button onClick={handleSubmit} disabled={submitting || prefs.length === 0}
-                      className="px-6 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50">
+                      className="px-6 py-2 bg-accent text-white rounded-lg text-sm hover:bg-accent/90 disabled:opacity-50">
                       {submitting ? '提交中...' : `确认提交（${prefs.length}条偏好）`}
                     </button>
                   </div>

@@ -120,51 +120,51 @@ export default function CommandPalette() {
 
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-[95] bg-black/25 flex items-start justify-center pt-[16vh]" onClick={reset}>
-      <div className="w-[34rem] max-w-[92vw] bg-white rounded-xl shadow-2xl border border-gray-200 overflow-hidden" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-100">
-          <Search className="w-4 h-4 text-gray-400" />
-          <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={onEnter} placeholder="跳转页面 / 按名直达项目·任务·产出物…（Esc 关闭）" className="flex-1 text-sm focus:outline-none" />
-          <kbd className="text-[10px] text-gray-400 border rounded px-1.5 py-0.5">Ctrl/⌘ K</kbd>
+    <div className="fixed inset-0 z-[95] bg-ink/25 flex items-start justify-center pt-[16vh]" onClick={reset}>
+      <div className="w-[34rem] max-w-[92vw] bg-surface rounded-card shadow-card border border-line overflow-hidden" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center gap-2 px-4 py-3 border-b border-line">
+          <Search className="w-4 h-4 text-ink-mute" />
+          <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={onEnter} placeholder="跳转页面 / 按名直达项目·任务·产出物…（Esc 关闭）" className="flex-1 bg-transparent text-sm text-ink placeholder:text-ink-mute" />
+          <kbd className="text-[10px] text-ink-mute border border-line bg-paper rounded px-1.5 py-0.5">Ctrl/⌘ K</kbd>
         </div>
         <ul className="max-h-[46vh] overflow-y-auto py-1">
           {!q.trim() ? (
             navResults.map((p) => (
               <li key={p.to}>
-                <button type="button" onClick={() => go(p.to)} className="w-full flex items-center justify-between gap-3 px-4 py-2 text-sm text-left hover:bg-blue-50">
-                  <span className="text-gray-700">{p.label}</span>
-                  <CornerDownLeft className="w-3 h-3 text-gray-300" />
+                <button type="button" onClick={() => go(p.to)} className="w-full flex items-center justify-between gap-3 px-4 py-2 text-sm text-left hover:bg-accent-soft">
+                  <span className="text-ink-soft">{p.label}</span>
+                  <CornerDownLeft className="w-3 h-3 text-line-strong" />
                 </button>
               </li>
             ))
           ) : (
             <>
               {navResults.length > 0 && (
-                <li><p className="px-4 pt-1.5 pb-1 text-[10px] text-gray-400 font-medium uppercase tracking-wide">页面导航</p>
+                <li><p className="px-4 pt-1.5 pb-1 text-[10px] text-ink-mute font-medium uppercase tracking-wide">页面导航</p>
                   <div className="flex flex-wrap gap-1 px-3 pb-1.5">
                     {navResults.map((p) => (
-                      <button key={p.to} type="button" onClick={() => go(p.to)} className="text-xs px-2 py-1 rounded-md bg-gray-100 text-gray-600 hover:bg-blue-100 hover:text-blue-700">{p.label}</button>
+                      <button key={p.to} type="button" onClick={() => go(p.to)} className="text-xs px-2 py-1 rounded-control bg-paper text-ink-soft hover:bg-accent-soft hover:text-accent">{p.label}</button>
                     ))}
                   </div>
                 </li>
               )}
               <li>
-                <p className="px-4 pt-1.5 pb-1 text-[10px] text-gray-400 font-medium uppercase tracking-wide">直达对象 {searching ? '…' : hasObjs ? `(${flatObjs.length})` : ''}</p>
+                <p className="px-4 pt-1.5 pb-1 text-[10px] text-ink-mute font-medium uppercase tracking-wide">直达对象 {searching ? '…' : hasObjs ? `(${flatObjs.length})` : ''}</p>
                 {!hasObjs ? (
-                  !searching && <p className="px-4 py-4 text-sm text-gray-400 text-center">无匹配对象</p>
+                  !searching && <p className="px-4 py-4 text-sm text-ink-mute text-center">无匹配对象</p>
                 ) : (
                   <div className="pb-1">
                     {flatObjs.map((row, i) => (
                       <div key={`${row.kind}-${i}`} className="flex items-center gap-1 pl-3 pr-2">
-                        <button type="button" onClick={() => openObj(row.kind, row.o)} className="flex-1 min-w-0 flex items-center gap-2 px-1.5 py-1.5 text-left hover:bg-blue-50 rounded-lg">
-                          <span className={`shrink-0 text-[9px] px-1 py-0.5 rounded font-medium ${row.kind === 'project' ? 'bg-green-100 text-green-700' : row.kind === 'task' ? 'bg-blue-100 text-blue-700' : row.kind === 'deliverable' ? 'bg-purple-100 text-purple-700' : 'bg-amber-100 text-amber-700'}`}>
+                        <button type="button" onClick={() => openObj(row.kind, row.o)} className="flex-1 min-w-0 flex items-center gap-2 px-1.5 py-1.5 text-left hover:bg-accent-soft rounded-control">
+                          <span className={`shrink-0 text-[9px] px-1 py-0.5 rounded font-medium ${row.kind === 'project' ? 'bg-ok-soft text-ok' : row.kind === 'task' ? 'bg-accent-soft text-accent' : row.kind === 'deliverable' ? 'bg-warn-soft text-warn' : 'bg-paper border border-line text-ink-mute'}`}>
                             {row.kind === 'project' ? '项目' : row.kind === 'task' ? '任务' : row.kind === 'deliverable' ? '产出' : '里程碑'}
                           </span>
-                          <span className="truncate text-sm text-gray-800">{row.label}</span>
-                          <span className="truncate text-[10px] text-gray-400 shrink-0">{row.sub}</span>
+                          <span className="truncate text-sm text-ink">{row.label}</span>
+                          <span className="truncate text-[10px] text-ink-mute shrink-0">{row.sub}</span>
                         </button>
                         {row.kind === 'task' && String(row.o.status) === 'failed' && (
-                          <button type="button" onClick={() => retryTaskObj(row.o)} title="继续执行（保留对话，task:resume）；如需清空重跑请到任务详情用「重试」" className="shrink-0 text-[10px] px-2 py-1 rounded bg-green-50 text-green-700 hover:bg-green-100 font-medium">继续</button>
+                          <button type="button" onClick={() => retryTaskObj(row.o)} title="继续执行（保留对话，task:resume）；如需清空重跑请到任务详情用「重试」" className="shrink-0 text-[10px] px-2 py-1 rounded bg-ok-soft text-ok hover:bg-ok-soft/80 font-medium">继续</button>
                         )}
                       </div>
                     ))}

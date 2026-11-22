@@ -18,6 +18,8 @@ import KnowledgeInboxCard from '../components/KnowledgeInboxCard';
 import ProjectPositionsCard from '../components/ProjectPositionsCard';
 import DomainPackCard from '../components/DomainPackCard';
 import LoadFailure from '../components/LoadFailure';
+// zx_20261121_3 M5：页头 / 按钮 / 三态统一走共用原语（一处形状），逻辑与文案保持原样。
+import { PageHeader, Button, Pill, EmptyState, ErrorState, Skeleton } from '../components/ui';
 // zx_20261111_3「显」：第一行的唯一真源在 main 纯模块（页面只说事实，不自己排优先级）。
 import NextActionBar from '../components/NextActionBar';
 import { nextActionForProject, type NextActionId } from '../../../src/main/core/next-action.js';
@@ -56,7 +58,7 @@ interface CtxData { budget?: { max_tokens_per_task?: number; max_cost_usd_per_ta
 //   词表缺项的后果是页面显示英文原始键（「renderer 是词表的第二个落点」——已两次复发）。
 const MEMORY_TYPES: Record<string, string> = MEM_TYPE_LABEL;
 // zx_20260906 批3 (3c): 产出物类型 chip 配色（知识全景 byType/最近产出物共用）；文案取共享词表
-const DELIV_TYPE_CLS: Record<string, string> = { mcp: 'bg-blue-100 text-blue-700', a2a: 'bg-green-100 text-green-700', ui: 'bg-purple-100 text-purple-700', doc: 'bg-amber-100 text-amber-700', daemon: 'bg-orange-100 text-orange-700', code: 'bg-slate-100 text-slate-700' };
+const DELIV_TYPE_CLS: Record<string, string> = { mcp: 'bg-accent-soft text-accent', a2a: 'bg-green-100 text-green-700', ui: 'bg-accent-soft text-accent', doc: 'bg-amber-100 text-amber-700', daemon: 'bg-orange-100 text-orange-700', code: 'bg-slate-100 text-slate-700' };
 
 export default function ProjectDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -548,6 +550,10 @@ export default function ProjectDetailPage() {
   const [briefStale, setBriefStale] = useState<boolean | null>(null);
   const [briefLoading, setBriefLoading] = useState(true);
   const [briefWait, setBriefWait] = useState(false);
+  // zx_20261121_3 M5：须知摘要可能很长——默认收起，先给「一屏读得完」的一段，再让人展开全文。
+  const [briefExpanded, setBriefExpanded] = useState(false);
+  // zx_20261121_3 M5：项目描述可能是整篇 CLAUDE.md——默认只给一段，别让首屏变成文字墙。
+  const [descExpanded, setDescExpanded] = useState(false);
   const briefTimer = useRef<number | undefined>(undefined);
   async function loadBrief(): Promise<ProjectBriefRecord | null> {
     if (!id) return null;
@@ -655,15 +661,36 @@ export default function ProjectDetailPage() {
     } catch (e) { fb.fail('「项目设置」未保存', e); }
   }
 
-  if (loading) return <div className="flex justify-center py-12"><div className="animate-spin h-8 w-8 border-2 border-blue-500 border-t-transparent rounded-full"/></div>;
+  // zx_20261121_3 M5：首屏三态同形（载入骨架 / 读失败可重试 / 不存在给事实），读不到不谎报成"没有"。
+  if (loading) {
+    return (
+      <div>
+        <PageHeader eyebrow="项目" title="项目详情" claim="正在读取项目详情。" />
+        <div className="space-y-4">
+          <Skeleton className="h-10 w-full" />
+          <Skeleton className="h-24 w-full" />
+          <Skeleton className="h-64 w-full" />
+        </div>
+      </div>
+    );
+  }
   // zx_20261108_1 B5：读失败与「不存在」分开说——读失败给重试，不把"没加载到"谎报成"没有"。
-  if (!project && loadError) return (
-    <div className="p-6 space-y-3">
-      <p className="text-sm text-red-600">项目加载失败：{loadError}</p>
-      <button onClick={() => void load()} className="px-3 py-1.5 rounded-lg bg-blue-600 text-white text-sm hover:bg-blue-700">重试</button>
-    </div>
-  );
-  if (!project) return <p className="text-red-500 p-6">项目不存在</p>;
+  if (!project && loadError) {
+    return (
+      <div>
+        <PageHeader eyebrow="项目" title="项目详情" claim="项目读取失败，可重试。" />
+        <ErrorState title="项目加载失败" reason={loadError} onRetry={() => void load()} />
+      </div>
+    );
+  }
+  if (!project) {
+    return (
+      <div>
+        <PageHeader eyebrow="项目" title="项目详情" claim="项目不存在。" />
+        <EmptyState title="项目不存在" />
+      </div>
+    );
+  }
 
   // zx_20261027_1 M6: 有推进的板在前；空转板（done+doing=0）折叠到开关后。
   const boardProgress = (p: Record<string, unknown>) => Number(p.done || 0) + Number(p.doing || 0);
@@ -701,19 +728,34 @@ export default function ProjectDetailPage() {
   const expSuggested = expTopScale?.tokensP90 != null ? Math.ceil((expTopScale.tokensP90 * 1.2) / 10_000) * 10_000 : null;
   const expCurrent = ctx.budget?.max_tokens_per_task ?? null;
 
+  // zx_20261121_3 M5：一句主张只用项目自身已有事实（状态 / 任务数 / 完成数），不编数字。
+  const projectClaimTotal = project.taskStats?.total;
+  const projectClaim = projectClaimTotal == null
+    ? `${statusText(PROJECT_STATUS_LABEL, project.status)} · 任务统计暂不可用。`
+    : `${statusText(PROJECT_STATUS_LABEL, project.status)} · 任务 ${projectClaimTotal}，完成 ${project.taskStats?.completed || 0}。`;
+  const projectStatusTone = project.status === 'active' ? 'ok' : project.status === 'paused' ? 'warn' : project.status === 'completed' ? 'accent' : 'neutral';
+
   return (
     <div className="space-y-6">
       {/* zx_20261108_1 B5：动作/面板失败在此如实上屏（含原因） */}
       <ActionFeedback note={fb.note} onClose={() => fb.setNote(null)} />
-      <div className="flex items-center gap-3">
-        <button onClick={() => navigate('/projects')} className="p-1 hover:bg-gray-100 rounded"><ArrowLeft className="w-5 h-5"/></button>
-        <h1 className="text-2xl font-bold">{project.name}</h1>
-        <span className={`text-sm px-2 py-0.5 rounded-full ${project.status==='active'?'bg-green-100 text-green-700':project.status==='paused'?'bg-yellow-100 text-yellow-700':'bg-gray-100'}`}>{statusText(PROJECT_STATUS_LABEL, project.status)}</span>
-        <div className="flex-1"/>
-        <FreshnessPill q={{ loading: lastUpdated == null, data: null, error: null, updatedAt: lastUpdated, stale: projStale, isLive: true, reload: refreshHeader }} />
-        <Link to={`/tasks?projectId=${id}`} className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700">查看任务</Link>
-        <button onClick={() => setEditing(!editing)} className="p-1.5 hover:bg-gray-100 rounded"><Edit className="w-4 h-4 text-gray-500"/></button>
-        <button onClick={() => setShowDelete(true)} className="p-1.5 hover:bg-red-50 rounded"><Trash2 className="w-4 h-4 text-red-500"/></button>
+      <div>
+        <Button variant="ghost" size="sm" icon={<ArrowLeft className="w-4 h-4" />} className="-ml-2 mb-1" onClick={() => navigate('/projects')}>项目列表</Button>
+        <PageHeader
+          className="mb-0"
+          eyebrow="项目"
+          title={project.name}
+          claim={projectClaim}
+          actions={
+            <>
+              <Pill tone={projectStatusTone}>{statusText(PROJECT_STATUS_LABEL, project.status)}</Pill>
+              <FreshnessPill q={{ loading: lastUpdated == null, data: null, error: null, updatedAt: lastUpdated, stale: projStale, isLive: true, reload: refreshHeader }} />
+              <Button variant="ghost" size="sm" aria-label="编辑项目" title="编辑项目" icon={<Edit className="w-4 h-4" />} onClick={() => setEditing(!editing)} />
+              <Button variant="ghost" size="sm" aria-label="删除项目" title="删除项目" icon={<Trash2 className="w-4 h-4" />} className="text-cinnabar" onClick={() => setShowDelete(true)} />
+            </>
+          }
+          primaryAction={<Button variant="primary" onClick={() => navigate(`/tasks?projectId=${id}`)}>查看任务</Button>}
+        />
       </div>
 
       {/* zx_20261111_3「显」：第一行——此刻是什么 / 凭什么 / 下一步点哪个（唯一真源 `core/next-action.ts`） */}
@@ -726,12 +768,25 @@ export default function ProjectDetailPage() {
         <div className="flex items-center gap-2 px-3 pb-2.5">
           {project.status==='active' && <button onClick={() => handleStatus('paused')} className="flex items-center gap-1 px-3 py-1 border rounded-lg text-sm hover:bg-yellow-50"><Pause className="w-3.5 h-3.5 text-yellow-600"/>暂停</button>}
           {project.status==='paused' && <button onClick={() => handleStatus('active')} className="flex items-center gap-1 px-3 py-1 border rounded-lg text-sm hover:bg-green-50"><Play className="w-3.5 h-3.5 text-green-600"/>恢复</button>}
-          {(project.status==='active'||project.status==='paused')&&<button onClick={() => { if (window.confirm('确定把项目标记为「完成」吗？完成后不可退回进行中，只能归档。')) void handleStatus('completed'); }} className="flex items-center gap-1 px-3 py-1 border rounded-lg text-sm hover:bg-blue-50"><Check className="w-3.5 h-3.5 text-blue-600"/>完成</button>}
+          {(project.status==='active'||project.status==='paused')&&<button onClick={() => { if (window.confirm('确定把项目标记为「完成」吗？完成后不可退回进行中，只能归档。')) void handleStatus('completed'); }} className="flex items-center gap-1 px-3 py-1 border rounded-lg text-sm hover:bg-accent-soft"><Check className="w-3.5 h-3.5 text-accent"/>完成</button>}
           {project.status==='completed'&&<button onClick={() => handleStatus('archived')} className="flex items-center gap-1 px-3 py-1 border rounded-lg text-sm hover:bg-gray-100"><Archive className="w-3.5 h-3.5"/>归档</button>}
         </div>
       </details>
 
-      {project.description && <p className="text-sm text-gray-500">{project.description}</p>}
+      {project.description && (() => {
+        const s = String(project.description);
+        const clipped = s.length > 280;
+        return (
+          <div className="measure">
+            <p className="whitespace-pre-wrap break-words text-sm text-ink-mute">{descExpanded || !clipped ? s : `${s.slice(0, 280)}…`}</p>
+            {clipped && (
+              <Button size="sm" variant="ghost" className="-ml-2 mt-0.5" onClick={() => setDescExpanded((v) => !v)}>
+                {descExpanded ? '收起描述' : `展开描述（${s.length} 字）`}
+              </Button>
+            )}
+          </div>
+        );
+      })()}
 
       {/* zx_20261112_2 B6「面」：首屏一条「进度 + 风险 + 待办」摘要。
           数据与既有读口同源（taskStats / projectDeliverables / blockers / tokenStats），不新建计数器；
@@ -741,7 +796,7 @@ export default function ProjectDetailPage() {
         const done = project.taskStats?.completed || 0;
         const pct = total > 0 ? Math.round((done / total) * 100) : 0;
         return (
-          <div className="bg-white rounded-lg border px-3 py-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+          <div className="tnum bg-white rounded-lg border px-3 py-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
             <span className="font-semibold text-gray-700">进度</span>
             <span title="本项目全部任务（含子任务）">任务 {total} · 完成 {done}（{pct}%）</span>
             <span className="text-gray-500">未完成 {Math.max(0, total - done)}</span>
@@ -820,7 +875,7 @@ export default function ProjectDetailPage() {
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-sm font-semibold text-gray-700">质量评定</span>
             <span className="text-xs px-2 py-0.5 rounded-full bg-green-100 text-green-700">平均 ★{(qualityStats as { avg?: number | null }).avg ?? '—'}</span>
-            <span className="text-xs px-2 py-0.5 rounded-full bg-blue-100 text-blue-700">已评定 {(qualityStats as { count?: number }).count ?? 0} 项</span>
+            <span className="text-xs px-2 py-0.5 rounded-full bg-accent-soft text-accent">已评定 {(qualityStats as { count?: number }).count ?? 0} 项</span>
             {(qualityStats as { low?: number }).low ? <span className="text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-700">低质&lt;60 {(qualityStats as { low?: number }).low} 项</span> : null}
           </div>
           {((qualityStats as { recent?: Array<Record<string, unknown>> }).recent?.length ?? 0) > 0 && (
@@ -869,7 +924,7 @@ export default function ProjectDetailPage() {
       {/* ③ 知识资产组：知识包（会被注入什么）+ 知识收件箱（新知识从哪来）。 */}
       <details className="mt-3" id="project-knowledge-assets">
         <summary className="cursor-pointer select-none text-sm font-semibold text-gray-700 flex items-center gap-2 py-1">
-          <BookOpen className="w-4 h-4 text-indigo-600 shrink-0" />知识资产（知识包 · 知识收件箱）
+          <BookOpen className="w-4 h-4 text-accent shrink-0" />知识资产（知识包 · 知识收件箱）
           <span className="text-xs font-normal text-gray-400">会被注入什么、新知识从哪来</span>
         </summary>
         {/* zx_20261017_1 批七: 项目知识包——预览（与注入同一把尺）+ 导出 JSONL（仅导出，不训练） */}
@@ -924,7 +979,20 @@ export default function ProjectDetailPage() {
                 </p>
               </div>
             )}
-            {briefRec.brief.summary && <p className="text-gray-700">{briefRec.brief.summary}</p>}
+            {briefRec.brief.summary && (() => {
+              const s = String(briefRec.brief.summary);
+              const clipped = s.length > 280;
+              return (
+                <div>
+                  <p className="whitespace-pre-wrap break-words text-gray-700">{briefExpanded || !clipped ? s : `${s.slice(0, 280)}…`}</p>
+                  {clipped && (
+                    <Button size="sm" variant="ghost" className="-ml-2 mt-0.5" onClick={() => setBriefExpanded((v) => !v)}>
+                      {briefExpanded ? '收起全文' : `展开全文（${s.length} 字）`}
+                    </Button>
+                  )}
+                </div>
+              );
+            })()}
             {briefRec.brief.stack.length > 0 && (
               <div className="flex items-center gap-1 flex-wrap">
                 <span className="text-xs text-gray-400">技术栈</span>
@@ -968,11 +1036,11 @@ export default function ProjectDetailPage() {
       {/* Tab 切换 */}
       <div className="flex gap-2">
         {[{k:'overview',l:'运行配置'},{k:'memories',l:'项目记忆'},{k:'milestones',l:'里程碑/阻塞'},{k:'deliverables',l:'本项目成果'},{k:'tensions',l:'矛盾张力'},{k:'packs',l:'领域包'},{k:'positions',l:'岗位'}].map(tab=>(
-          <button key={tab.k} onClick={()=>setActiveTab(tab.k as typeof activeTab)} className={`px-4 py-1.5 rounded-lg text-sm font-medium ${activeTab===tab.k?'bg-blue-600 text-white':'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>{tab.l}</button>
+          <button key={tab.k} onClick={()=>setActiveTab(tab.k as typeof activeTab)} className={`px-4 py-1.5 rounded-lg text-sm font-medium ${activeTab===tab.k?'bg-accent text-white':'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>{tab.l}</button>
         ))}
       </div>
       {/* A3 (2026-09-03_2): 项目活动时间线入口（对象回看） */}
-      <div className="mt-1"><button type="button" onClick={() => navigate(`/activity?obj=${id}`)} className="px-3 py-1.5 rounded-lg text-sm bg-white border text-gray-600 hover:text-blue-600 hover:border-blue-300">项目活动时间线</button></div>
+      <div className="mt-1"><button type="button" onClick={() => navigate(`/activity?obj=${id}`)} className="px-3 py-1.5 rounded-lg text-sm bg-white border text-gray-600 hover:text-accent hover:border-accent/30">项目活动时间线</button></div>
 
       {/* Tab内容 */}
       {activeTab === 'overview' && (
@@ -993,7 +1061,7 @@ export default function ProjectDetailPage() {
                     {strategyInfo.adjustments.slice().reverse().map((a, i) => (
                       <li key={i} className="text-xs bg-gray-50 rounded px-2 py-1">
                         <span className="text-gray-400 mr-2">{String((a.at as string) || '').slice(5, 16)}</span>
-                        <span className="text-blue-600 mr-2">{a.reason ? statusText(TASK_STATUS_LABEL, a.reason) : ''}</span>
+                        <span className="text-accent mr-2">{a.reason ? statusText(TASK_STATUS_LABEL, a.reason) : ''}</span>
                         <span className="text-gray-600">{formatStrategyAdjustments(a.adjustments)}</span>
                       </li>
                     ))}
@@ -1011,7 +1079,7 @@ export default function ProjectDetailPage() {
                 <ul className="space-y-1">
                   {bottleneck.principals.map((p, i) => (
                     <li key={i} className="flex items-center justify-between text-sm bg-red-50 rounded px-2 py-1">
-                      <Link to={`/tasks/${String(p.taskId)}`} className="text-blue-600 hover:underline truncate">{String(p.title || p.taskId)}</Link>
+                      <Link to={`/tasks/${String(p.taskId)}`} className="text-accent hover:underline truncate">{String(p.title || p.taskId)}</Link>
                       <span className="text-xs text-gray-500 shrink-0 ml-2">状态 {statusText(TASK_STATUS_LABEL, p.status)} · 动态优先级 {Number(p.dynamicPriority).toFixed(2)}</span>
                     </li>
                   ))}
@@ -1063,7 +1131,7 @@ export default function ProjectDetailPage() {
                       placeholder="本项目指定模型（留空=跟随全局/自动）"
                       className="flex-1 min-w-0 border rounded px-2 py-1 text-xs"
                     />
-                    <button onClick={() => void saveModelOverride()} disabled={modelSaving} className="px-2 py-1 text-xs bg-blue-600 text-white rounded disabled:opacity-50">保存</button>
+                    <button onClick={() => void saveModelOverride()} disabled={modelSaving} className="px-2 py-1 text-xs bg-accent text-white rounded disabled:opacity-50">保存</button>
                     {modelOv?.project_override && (
                       <button onClick={() => void saveModelOverride(null)} disabled={modelSaving} className="px-2 py-1 text-xs border rounded">清除</button>
                     )}
@@ -1077,7 +1145,7 @@ export default function ProjectDetailPage() {
               {ctx.im_commands && Object.keys(ctx.im_commands).length>0 ? (
                 <div className="space-y-1 max-h-48 overflow-y-auto">{Object.entries(ctx.im_commands).map(([cmd, info])=>(
                   <div key={cmd} className="flex items-center justify-between text-sm py-1 px-2 bg-gray-50 rounded">
-                    <span className="font-mono text-xs text-blue-600">"{cmd}"</span>
+                    <span className="font-mono text-xs text-accent">"{cmd}"</span>
                     <span className="text-xs text-gray-400 mx-2">→</span>
                     <span className="text-xs text-gray-500">{info.label}</span>
                   </div>
@@ -1207,7 +1275,7 @@ export default function ProjectDetailPage() {
 
           {(panorama || panoErr) && (
             <div className="bg-white rounded-lg border p-4">
-              <h3 className="font-semibold mb-3 flex items-center gap-2"><Brain className="w-4 h-4 text-indigo-500"/>知识全景</h3>
+              <h3 className="font-semibold mb-3 flex items-center gap-2"><Brain className="w-4 h-4 text-accent"/>知识全景</h3>
               {panoErr && <div className="mb-3"><LoadFailure what="「知识全景」" reason={panoErr} onRetry={() => void loadPanorama()} busy={panoBusy} /></div>}
               {panorama && <>
               <div className="grid grid-cols-2 gap-3 text-sm">
@@ -1241,8 +1309,8 @@ export default function ProjectDetailPage() {
               {/* zx_20260906 批3 (3c): 最近产出物（跨类型 ≤5，随 deliverable.* 事件刷新）
                   zx_20260909 X1(可直达·消三跳): 行内点开"就地成果详情抽屉"(doc_drawer 门控) */}
               {(((panorama.deliverableSummary as Record<string, unknown>)?.recentDeliverables as Array<{ id?: string; name: string; type: string; status: string; created_at?: string }> | undefined)?.length ?? 0) > 0 && (
-                <div className="mt-3 border border-indigo-100 rounded p-2.5 bg-indigo-50/40">
-                  <p className="text-[11px] font-medium text-indigo-700 mb-1.5">最近产出物（点行开详情）</p>
+                <div className="mt-3 border border-accent/25 rounded p-2.5 bg-accent-soft/40">
+                  <p className="text-[11px] font-medium text-accent mb-1.5">最近产出物（点行开详情）</p>
                   <ul className="space-y-1">
                     {((panorama.deliverableSummary as Record<string, unknown>).recentDeliverables as Array<{ id?: string; name: string; type: string; status: string; created_at?: string }>).map((r, i) => (
                       <li key={i}
@@ -1279,7 +1347,7 @@ export default function ProjectDetailPage() {
                   <div key={i} className="flex items-center justify-between text-sm py-1 px-2 bg-gray-50 rounded">
                     <span className="font-medium">{m.name as string}</span>
                     <span className="text-xs text-gray-400">{m.email as string}</span>
-                    <span className="text-xs text-blue-600">{m.role as string}</span>
+                    <span className="text-xs text-accent">{m.role as string}</span>
                   </div>
                 ))}
               </div>
@@ -1291,7 +1359,7 @@ export default function ProjectDetailPage() {
                   <option key={u.id as string} value={u.id as string}>{u.name as string} ({u.email as string})</option>
                 ))}
               </select>
-              <button onClick={handleAddMember} disabled={!addMemberId} className="px-2 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700 disabled:opacity-50">添加</button>
+              <button onClick={handleAddMember} disabled={!addMemberId} className="px-2 py-1 bg-accent text-white rounded text-xs hover:bg-accent/90 disabled:opacity-50">添加</button>
             </div>
           </div>
         </div>
@@ -1305,9 +1373,9 @@ export default function ProjectDetailPage() {
           </div>
           {/* 类型筛选 */}
           <div className="flex gap-1.5 mb-3 flex-wrap">
-            <button onClick={() => setMemTypeFilter('')} className={`px-2.5 py-1 rounded text-xs font-medium ${memTypeFilter===''?'bg-blue-600 text-white':'bg-gray-100 text-gray-600'}`}>全部 ({memories.length})</button>
+            <button onClick={() => setMemTypeFilter('')} className={`px-2.5 py-1 rounded text-xs font-medium ${memTypeFilter===''?'bg-accent text-white':'bg-gray-100 text-gray-600'}`}>全部 ({memories.length})</button>
             {memCounts.map(c => (
-              <button key={c.memory_type} onClick={() => setMemTypeFilter(c.memory_type)} className={`px-2.5 py-1 rounded text-xs font-medium ${memTypeFilter===c.memory_type?'bg-blue-600 text-white':'bg-gray-100 text-gray-600'}`}>{MEMORY_TYPES[c.memory_type]||c.memory_type} ({c.cnt})</button>
+              <button key={c.memory_type} onClick={() => setMemTypeFilter(c.memory_type)} className={`px-2.5 py-1 rounded text-xs font-medium ${memTypeFilter===c.memory_type?'bg-accent text-white':'bg-gray-100 text-gray-600'}`}>{MEMORY_TYPES[c.memory_type]||c.memory_type} ({c.cnt})</button>
             ))}
           </div>
           {tabErrors.memories && <div className="mb-3"><LoadFailure what="「记忆」" reason={tabErrors.memories} onRetry={() => void loadMemories(memTypeFilter)} busy={memLoading} /></div>}
@@ -1352,7 +1420,7 @@ export default function ProjectDetailPage() {
                     {/* zx_20260906_1 3e: M chip 含 impl 时可点进对应实施任务（量变质变·语言游戏——里程碑状态有合法"玩法"：跳转落地任务） */}
                     {(p.milestones as Array<Record<string,unknown>>).map((m: Record<string,unknown>,j:number)=>(
                       m.impl ? (
-                        <button key={j} type="button" onClick={()=>navigate(`/tasks/${String(m.impl)}`)} className={`text-[10px] px-1.5 py-0.5 rounded font-mono hover:ring-1 hover:ring-blue-400 cursor-pointer ${m.st==='done'?'bg-green-100 text-green-700 hover:bg-green-200':m.st==='doing'?'bg-amber-100 text-amber-700 ring-1 ring-amber-300 hover:bg-amber-200':'bg-gray-100 text-gray-500 hover:bg-gray-200'}`} title={`${String(m.ms)} · ${m.st==='done'?'已落地':m.st==='doing'?'进行中':'待实施'} · 点击打开落地任务`}>{String(m.ms)}{m.st==='done'?'✓':m.st==='doing'?'●':'○'}</button>
+                        <button key={j} type="button" onClick={()=>navigate(`/tasks/${String(m.impl)}`)} className={`text-[10px] px-1.5 py-0.5 rounded font-mono hover:ring-1 hover:ring-accent/40 cursor-pointer ${m.st==='done'?'bg-green-100 text-green-700 hover:bg-green-200':m.st==='doing'?'bg-amber-100 text-amber-700 ring-1 ring-amber-300 hover:bg-amber-200':'bg-gray-100 text-gray-500 hover:bg-gray-200'}`} title={`${String(m.ms)} · ${m.st==='done'?'已落地':m.st==='doing'?'进行中':'待实施'} · 点击打开落地任务`}>{String(m.ms)}{m.st==='done'?'✓':m.st==='doing'?'●':'○'}</button>
                       ) : (
                         <span key={j} className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${m.st==='done'?'bg-green-100 text-green-700':m.st==='doing'?'bg-amber-100 text-amber-700 ring-1 ring-amber-300':'bg-gray-100 text-gray-500'}`} title={`${String(m.ms)} · ${m.st==='done'?'已落地':m.st==='doing'?'进行中':'待实施'}`}>{String(m.ms)}{m.st==='done'?'✓':m.st==='doing'?'●':'○'}</span>
                       )
@@ -1389,12 +1457,12 @@ export default function ProjectDetailPage() {
           </div>
           {/* 里程碑建议（启发式 phase_transition/refactor/knowledge_mature，与方案 M0-M6 语义不同） */}
           <div className="bg-white rounded-lg border p-4">
-            <h3 className="font-semibold mb-3 flex items-center gap-2"><Lightbulb className="w-4 h-4 text-blue-500"/>里程碑建议 ({milestones.length})</h3>
+            <h3 className="font-semibold mb-3 flex items-center gap-2"><Lightbulb className="w-4 h-4 text-accent"/>里程碑建议 ({milestones.length})</h3>
             {milestoneLoading ? <p className="text-sm text-gray-400 py-2">加载中...</p> : milestones.length===0 ? (tabErrors.milestones ? null : <p className="text-sm text-gray-400">暂无建议</p>) : (
               <div className="space-y-2">{milestones.map((ml: Record<string,unknown>,i:number)=>(
-                <div key={i} className="text-sm p-2 bg-blue-50 rounded">
-                  <p className="font-medium text-blue-800">{String(ml.title ?? ml.milestone ?? '')}</p>
-                  <p className="text-xs text-blue-500 mt-0.5">{String(ml.type ?? '')}{ml.reason ? ` · ${String(ml.reason)}` : ''}</p>
+                <div key={i} className="text-sm p-2 bg-accent-soft rounded">
+                  <p className="font-medium text-accent">{String(ml.title ?? ml.milestone ?? '')}</p>
+                  <p className="text-xs text-accent mt-0.5">{String(ml.type ?? '')}{ml.reason ? ` · ${String(ml.reason)}` : ''}</p>
                 </div>
               ))}</div>
             )}
@@ -1404,7 +1472,7 @@ export default function ProjectDetailPage() {
 
       {activeTab === 'tensions' && (
         <div className="bg-white rounded-lg border p-4">
-          <h3 className="font-semibold mb-4 flex items-center gap-2"><Activity className="w-4 h-4 text-blue-500"/>矛盾张力面板（矛盾论）</h3>
+          <h3 className="font-semibold mb-4 flex items-center gap-2"><Activity className="w-4 h-4 text-accent"/>矛盾张力面板（矛盾论）</h3>
           {tabErrors.tensions && <div className="mb-3"><LoadFailure what="「矛盾张力」" reason={tabErrors.tensions} onRetry={() => void loadTensions()} /></div>}
           {Object.keys(tensionConfigs).length === 0 ? (tabErrors.tensions ? null : <p className="text-sm text-gray-400 py-4 text-center">暂无张力数据</p>) : (
             <div className="space-y-4">
@@ -1462,7 +1530,7 @@ export default function ProjectDetailPage() {
             </div>
           </div>
           {pjDelivLoading ? (
-            <div className="flex justify-center py-8"><div className="animate-spin h-6 w-6 border-2 border-blue-500 border-t-transparent rounded-full" /></div>
+            <div className="flex justify-center py-8"><div className="animate-spin h-6 w-6 border-2 border-accent border-t-transparent rounded-full" /></div>
           ) : pjDelivs.length === 0 ? (
             tabErrors.deliverables ? null : <p className="text-sm text-gray-400 py-6 text-center">本项目暂无成果</p>
           ) : (
@@ -1495,7 +1563,7 @@ export default function ProjectDetailPage() {
                       <td className="p-2 text-xs text-gray-500">
                         {d.task_id
                           ? <button type="button" onClick={(e) => { e.stopPropagation(); navigate(`/tasks/${d.task_id}`); }}
-                              className="text-blue-500 hover:text-blue-700 hover:underline truncate max-w-[180px]" title={String(d.task_title || d.task_id)}>
+                              className="text-accent hover:text-accent hover:underline truncate max-w-[180px]" title={String(d.task_title || d.task_id)}>
                               {String(d.task_title || '未知任务')}
                             </button>
                           : <span className="text-gray-400">项目级</span>}
@@ -1540,7 +1608,7 @@ export default function ProjectDetailPage() {
             ) : (
               <div className="space-y-1.5">
                 {posBoard.map((p) => (
-                  <div key={p.id} className={`rounded border px-3 py-2 text-sm ${posPreviewId === p.id ? 'border-blue-400 bg-blue-50/40' : ''}`}>
+                  <div key={p.id} className={`rounded border px-3 py-2 text-sm ${posPreviewId === p.id ? 'border-accent/40 bg-accent-soft/40' : ''}`}>
                     <div className="flex items-center gap-2 flex-wrap">
                       <button onClick={() => setPosPreviewId(p.id)} className="font-medium hover:underline">{p.name}</button>
                       <span className={`text-[10px] px-1.5 py-0.5 rounded ${p.enabled ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-500'}`}>{p.enabled ? '启用' : '停用'}</span>
@@ -1561,7 +1629,7 @@ export default function ProjectDetailPage() {
                 {posBoard.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
               </select>
               <input value={posPreviewQuery} onChange={(e) => setPosPreviewQuery(e.target.value)} placeholder="拟派任务的标题/描述（可空；空=按时间序）" className="text-xs border rounded px-2 py-1 flex-1 min-w-[240px]" />
-              <button onClick={() => void previewPositionInjection()} className="text-xs px-2 py-1 rounded bg-blue-600 text-white hover:bg-blue-700">预演</button>
+              <button onClick={() => void previewPositionInjection()} className="text-xs px-2 py-1 rounded bg-accent text-white hover:bg-accent/90">预演</button>
               <span className="text-[10px] text-gray-400">与执行期同一构造；上限 1200 字；不写注入账。</span>
             </div>
             {posPreviewErr && <p className="text-xs text-red-600">{posPreviewErr}</p>}
@@ -1630,7 +1698,7 @@ export default function ProjectDetailPage() {
                 <div><label className="text-xs text-gray-500">最大并发</label><input type="number" min={1} max={10} value={rhythmForm.maxConcurrency} onChange={e=>setRhythmForm({...rhythmForm,maxConcurrency:e.target.value})} className="w-full px-3 py-2 border rounded-lg text-sm mt-0.5"/></div>
               </div>
             </div>
-            <div className="flex justify-end gap-2 mt-6"><button onClick={()=>setEditing(false)} className="px-4 py-2 border rounded-lg text-sm">取消</button><button onClick={handleSave} disabled={!cronValid} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm disabled:opacity-50 disabled:cursor-not-allowed">保存</button></div>
+            <div className="flex justify-end gap-2 mt-6"><button onClick={()=>setEditing(false)} className="px-4 py-2 border rounded-lg text-sm">取消</button><button onClick={handleSave} disabled={!cronValid} className="px-4 py-2 bg-accent text-white rounded-lg text-sm disabled:opacity-50 disabled:cursor-not-allowed">保存</button></div>
           </div>
         </div>
       )}

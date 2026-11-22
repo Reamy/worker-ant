@@ -170,8 +170,8 @@ export default function CollabBoardCard({ projectId }: { projectId: string }) {
     <div className="mt-3 bg-white rounded-lg border p-4">
       <div className="flex items-center justify-between mb-2 gap-2">
         <h3 className="text-sm font-semibold flex items-center gap-1.5 text-gray-700">
-          <Network className="w-4 h-4 text-indigo-500" />协同看板
-          <span className="text-[10px] font-normal px-1.5 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200">
+          <Network className="w-4 h-4 text-accent" />协同看板
+          <span className="text-[10px] font-normal px-1.5 py-0.5 rounded-full bg-accent-soft text-accent border border-accent/25">
             团队版旗舰
           </span>
         </h3>
@@ -181,10 +181,10 @@ export default function CollabBoardCard({ projectId }: { projectId: string }) {
       </div>
 
       {locked ? (
-        <div className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2">
-          <div className="text-xs font-medium text-indigo-800 mb-0.5">「多机协同」是团队版旗舰能力</div>
-          <div className="text-[11px] text-indigo-700">{gate?.detail}</div>
-          <div className="text-[11px] text-indigo-700 mt-1">
+        <div className="rounded-lg border border-accent/25 bg-accent-soft px-3 py-2">
+          <div className="text-xs font-medium text-accent mb-0.5">「多机协同」是团队版旗舰能力</div>
+          <div className="text-[11px] text-accent">{gate?.detail}</div>
+          <div className="text-[11px] text-accent mt-1">
             专业版仍为单机（并发与项目照常，不跨机派活）；团队授权包覆盖最多 20 台协同节点。
           </div>
         </div>

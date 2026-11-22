@@ -95,7 +95,7 @@ export default function KnowledgeInboxCard({ projectId, onChanged }: { projectId
     <div className="bg-white rounded-lg border p-4">
       <div className="flex items-center justify-between mb-2">
         <h3 className="text-sm font-semibold flex items-center gap-1.5 text-gray-700">
-          <Inbox className="w-4 h-4 text-indigo-600" />知识收件箱
+          <Inbox className="w-4 h-4 text-accent" />知识收件箱
           <span className="text-[10px] font-normal text-gray-400">· 增量吸收 / 建议领域包 / 相似项目</span>
         </h3>
         <button
@@ -122,7 +122,7 @@ export default function KnowledgeInboxCard({ projectId, onChanged }: { projectId
       {/* ① 增量水位 */}
       <div className="mb-3">
         <p className="text-xs font-medium text-gray-600 flex items-center gap-1.5 mb-1">
-          <Sparkles className="w-3.5 h-3.5 text-indigo-500" />知识书增量
+          <Sparkles className="w-3.5 h-3.5 text-accent" />知识书增量
         </p>
         {unabsorbed && unabsorbed.count > 0 ? (
           <div className="flex items-center justify-between gap-3 bg-amber-50 border border-amber-200 rounded px-2 py-1.5">
@@ -217,7 +217,7 @@ export default function KnowledgeInboxCard({ projectId, onChanged }: { projectId
       {/* ③ 相似项目（只展示、不自动注入） */}
       <div>
         <p className="text-xs font-medium text-gray-600 flex items-center gap-1.5 mb-1">
-          <Users className="w-3.5 h-3.5 text-blue-600" />相似项目
+          <Users className="w-3.5 h-3.5 text-accent" />相似项目
           <span className="text-[10px] font-normal text-gray-400">· 确定性相似度，有据才推荐、只展示</span>
         </p>
         {similar.length === 0 ? (
@@ -238,7 +238,7 @@ export default function KnowledgeInboxCard({ projectId, onChanged }: { projectId
                 <button
                   type="button"
                   onClick={() => navigate(`/projects/${s.projectId}`)}
-                  className="shrink-0 flex items-center gap-1 text-xs px-2 py-1 rounded border text-gray-600 border-gray-300 hover:text-blue-700 hover:border-blue-300"
+                  className="shrink-0 flex items-center gap-1 text-xs px-2 py-1 rounded border text-gray-600 border-gray-300 hover:text-accent hover:border-accent/30"
                 >
                   去看看<ArrowRight className="w-3 h-3" />
                 </button>

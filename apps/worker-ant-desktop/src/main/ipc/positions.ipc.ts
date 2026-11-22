@@ -10,6 +10,8 @@ import path from 'node:path';
 import type Database from 'better-sqlite3';
 import cron from 'node-cron';
 import { recordAudit } from '../core/audit-log.js';
+// zx_20261121_3 M4「见·首」：知识决定生效后发一根瞬态线，铃铛/待办中心订阅即刷。
+import { emitKnowledgeChanged } from '../core/refresh-events.js';
 import { enqueueJob } from '../core/job-enqueuer.js';
 import {
   createRoutine,
@@ -347,6 +349,7 @@ export function initPositionsIpc(db: Database.Database): void {
       const r = decidePositionLesson(db, id, input.decision, by);
       if (!r.ok) return { error: { code: r.code, message: r.message } } satisfies IpcFailure;
       writeAudit('position.lesson_decide', r.lesson.positionId, { lessonId: id, decision: input.decision });
+      emitKnowledgeChanged('position.lesson_decide', { lessonId: id, decision: input.decision });
       return { data: { lesson: r.lesson } };
     } catch (e) {
       return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } } satisfies IpcFailure;
@@ -450,6 +453,7 @@ export function initPositionsIpc(db: Database.Database): void {
       const r = decidePositionSkill(db, id, input.decision);
       if (!r.ok) return { error: { code: r.code, message: r.message } } satisfies IpcFailure;
       writeAudit(`position.skill_${input.decision}`, r.skill.positionId, { skillId: r.skill.id, name: r.skill.name });
+      emitKnowledgeChanged('position.skill_decide', { skillId: r.skill.id, decision: input.decision });
       return { data: { skill: r.skill } };
     } catch (e) {
       return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } } satisfies IpcFailure;
@@ -505,12 +509,15 @@ export function initPositionsIpc(db: Database.Database): void {
 
   ipcMain.handle('positionRoutine:list', async (_event, input?: { positionId?: unknown; projectId?: unknown; enabledOnly?: unknown }) => {
     try {
+      // ⚠ 回 `{ data }` 信封：渲染层 `ipcCall` 只认这一形（2026-11-22 修，同运维页）。
       return {
-        routines: listRoutines(db, {
-          positionId: str(input?.positionId) || undefined,
-          projectId: str(input?.projectId) || undefined,
-          enabledOnly: input?.enabledOnly === true,
-        }),
+        data: {
+          routines: listRoutines(db, {
+            positionId: str(input?.positionId) || undefined,
+            projectId: str(input?.projectId) || undefined,
+            enabledOnly: input?.enabledOnly === true,
+          }),
+        },
       };
     } catch (e) {
       return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } } satisfies IpcFailure;
@@ -540,7 +547,7 @@ export function initPositionsIpc(db: Database.Database): void {
       if (!r.ok) return { error: { code: r.reason.toUpperCase(), message: r.reason } } satisfies IpcFailure;
       writeAudit('position.routine_create', r.id, { positionId: body.position_id, projectId: body.project_id, name: body.name, cron: body.cron });
       _routineRegistrar?.(r.id);
-      return { id: r.id };
+      return { data: { id: r.id } };
     } catch (e) {
       return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } } satisfies IpcFailure;
     }
@@ -570,7 +577,7 @@ export function initPositionsIpc(db: Database.Database): void {
       if (!r.ok) return { error: { code: r.reason.toUpperCase(), message: r.reason } } satisfies IpcFailure;
       writeAudit('position.routine_update', id, { fields: Object.keys(patch) });
       _routineRegistrar?.(id);
-      return { id };
+      return { data: { id } };
     } catch (e) {
       return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } } satisfies IpcFailure;
     }
@@ -584,7 +591,7 @@ export function initPositionsIpc(db: Database.Database): void {
       if (!ok) return { error: { code: 'NOT_FOUND', message: '例行不存在' } } satisfies IpcFailure;
       writeAudit('position.routine_delete', id, {});
       _routineRegistrar?.(id);
-      return { deleted: true };
+      return { data: { deleted: true } };
     } catch (e) {
       return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } } satisfies IpcFailure;
     }
@@ -599,7 +606,7 @@ export function initPositionsIpc(db: Database.Database): void {
         enqueue: (taskId, projectId) => { enqueueJob(db, 'ai-task', { taskId, projectId, source: 'routine' }); },
       });
       writeAudit('position.routine_run_now', id, { ok: r.ok, taskId: r.taskId, skipped: r.skipped, reason: r.reason });
-      return r;
+      return { data: r };
     } catch (e) {
       return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } } satisfies IpcFailure;
     }
@@ -610,7 +617,7 @@ export function initPositionsIpc(db: Database.Database): void {
       const positionId = str(input?.positionId);
       const projectId = str(input?.projectId);
       if (!positionId || !projectId) return { error: { code: 'INVALID_INPUT', message: '缺少岗位或项目' } } satisfies IpcFailure;
-      return { suggestions: suggestRoutineCandidates(db, { positionId, projectId, days: Number(input?.days) || 90, minRuns: Number(input?.minRuns) || 3 }) };
+      return { data: { suggestions: suggestRoutineCandidates(db, { positionId, projectId, days: Number(input?.days) || 90, minRuns: Number(input?.minRuns) || 3 }) } };
     } catch (e) {
       return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } } satisfies IpcFailure;
     }
@@ -620,7 +627,7 @@ export function initPositionsIpc(db: Database.Database): void {
     try {
       const positionId = str(input?.positionId);
       if (!positionId) return { error: { code: 'INVALID_INPUT', message: '缺少岗位 id' } } satisfies IpcFailure;
-      return routineBoard(db, { positionId, projectId: str(input?.projectId) || undefined, days: Number(input?.days) || 90 });
+      return { data: routineBoard(db, { positionId, projectId: str(input?.projectId) || undefined, days: Number(input?.days) || 90 }) };
     } catch (e) {
       return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } } satisfies IpcFailure;
     }

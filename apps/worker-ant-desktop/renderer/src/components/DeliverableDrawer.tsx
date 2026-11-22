@@ -33,8 +33,8 @@ type DrawerData = {
   content_truncated?: boolean; content_source?: string;
 };
 
-const TYPE_CLS: Record<string, string> = { mcp: 'bg-blue-100 text-blue-700', a2a: 'bg-green-100 text-green-700', ui: 'bg-purple-100 text-purple-700', doc: 'bg-amber-100 text-amber-700', daemon: 'bg-orange-100 text-orange-700', code: 'bg-slate-100 text-slate-700' };
-const STATUS_CLS: Record<string, string> = { completed: 'bg-green-100 text-green-700', retired: 'bg-gray-200 text-gray-500 line-through', running: 'bg-green-100 text-green-700', registered: 'bg-blue-100 text-blue-700', stopped: 'bg-orange-100 text-orange-600', stale: 'bg-yellow-100 text-yellow-600', failed: 'bg-red-100 text-red-600' };
+const TYPE_CLS: Record<string, string> = { mcp: 'bg-accent-soft text-accent', a2a: 'bg-green-100 text-green-700', ui: 'bg-accent-soft text-accent', doc: 'bg-amber-100 text-amber-700', daemon: 'bg-orange-100 text-orange-700', code: 'bg-slate-100 text-slate-700' };
+const STATUS_CLS: Record<string, string> = { completed: 'bg-green-100 text-green-700', retired: 'bg-gray-200 text-gray-500 line-through', running: 'bg-green-100 text-green-700', registered: 'bg-accent-soft text-accent', stopped: 'bg-orange-100 text-orange-600', stale: 'bg-yellow-100 text-yellow-600', failed: 'bg-red-100 text-red-600' };
 
 export function DeliverableDrawer({ id, onClose }: { id: string | null; onClose: () => void }) {
   const navigate = useNavigate();
@@ -239,7 +239,7 @@ export function DeliverableDrawer({ id, onClose }: { id: string | null; onClose:
             <p className="text-xs text-gray-600">退休后默认不在主列表（可在「显示已退休」中查看），并摘掉 ★；操作留痕。</p>
             <textarea value={retireWhy} onChange={(e) => setRetireWhy(e.target.value)} rows={2} autoFocus
               placeholder="理由（必填）：如一次性探针脚本，不是交付成果"
-              className="w-full px-2 py-1.5 border rounded text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y" />
+              className="w-full px-2 py-1.5 border rounded text-xs focus:outline-none focus:ring-2 focus:ring-accent resize-y" />
             <div className="flex justify-end gap-2">
               <button type="button" onClick={() => setRetireOpen(false)} disabled={busy} className="px-2 py-1 text-xs border rounded hover:bg-gray-50 disabled:opacity-40">取消</button>
               <button type="button" onClick={() => void retire()} disabled={busy || !retireWhy.trim()} className="px-3 py-1 text-xs rounded bg-gray-700 text-white hover:bg-gray-800 disabled:opacity-50">确认退休</button>
@@ -259,7 +259,7 @@ export function DeliverableDrawer({ id, onClose }: { id: string | null; onClose:
             {data?.project_name && <div>项目：<span className="font-medium">{data.project_name}</span></div>}
             {data?.task_id && (
               <button type="button" onClick={() => { onClose(); navigate(`/tasks/${data.task_id}`); }}
-                className="flex items-center gap-1 text-blue-600 hover:underline">
+                className="flex items-center gap-1 text-accent hover:underline">
                 产出任务：{data.task_title || data.task_id.slice(0, 8)} <ArrowRight className="w-3 h-3" />
               </button>
             )}
@@ -271,7 +271,7 @@ export function DeliverableDrawer({ id, onClose }: { id: string | null; onClose:
                 <span className="shrink-0">注册端点：</span>
                 {/^https?:\/\//.test(data.registry_id) ? (
                   <button type="button" onClick={() => { void invoke('shell:openExternal', data.registry_id).catch(() => {}); }}
-                    className="font-mono text-[11px] text-blue-600 hover:underline truncate" title={`在浏览器中打开：${data.registry_id}`}>
+                    className="font-mono text-[11px] text-accent hover:underline truncate" title={`在浏览器中打开：${data.registry_id}`}>
                     {data.registry_id}
                   </button>
                 ) : (
@@ -309,7 +309,7 @@ export function DeliverableDrawer({ id, onClose }: { id: string | null; onClose:
                         {versions.length > 1 && (
                           <button type="button" onClick={() => diffWithPrev(v)} disabled={v.version === versions[0]?.version}
                             title={v.version === versions[0]?.version ? '最早版本无前版可对比' : `对比 v${v.version} 与上一版`}
-                            className="text-[9px] text-blue-500 ml-1 hover:underline disabled:text-gray-300 disabled:no-underline">对比</button>
+                            className="text-[9px] text-accent ml-1 hover:underline disabled:text-gray-300 disabled:no-underline">对比</button>
                         )}
                       </span>
                     ))}
@@ -375,7 +375,7 @@ export function DeliverableDrawer({ id, onClose }: { id: string | null; onClose:
               {data.type !== 'doc' && data.preview_url && (
                 <div className="mt-3">
                   <button type="button" onClick={async () => { try { await invoke('shell:openExternal', data.preview_url); } catch { window.open(data.preview_url!, '_blank'); } }}
-                    className="text-xs px-3 py-1.5 rounded-lg border border-blue-200 text-blue-600 hover:bg-blue-50">
+                    className="text-xs px-3 py-1.5 rounded-lg border border-accent/25 text-accent hover:bg-accent-soft">
                     <FileText className="w-3.5 h-3.5 inline mr-1" />在浏览器中打开
                   </button>
                 </div>

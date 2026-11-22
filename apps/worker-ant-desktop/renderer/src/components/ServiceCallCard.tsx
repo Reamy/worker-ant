@@ -49,9 +49,9 @@ export default function ServiceCallCard({ projectId }: { projectId: string }) {
     <div className="mt-3 bg-white rounded-lg border p-4">
       <div className="flex items-center justify-between mb-2">
         <h3 className="text-sm font-semibold flex items-center gap-1.5 text-gray-700">
-          <Plug className="w-4 h-4 text-blue-500" />外部调用账
+          <Plug className="w-4 h-4 text-accent" />外部调用账
           {report && (
-            <span className="text-[10px] font-normal px-1.5 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+            <span className="text-[10px] font-normal px-1.5 py-0.5 rounded-full bg-accent-soft text-accent border border-accent/25">
               共 {total} 笔 · 成功 {report.ok} / 失败 {report.failed}
             </span>
           )}

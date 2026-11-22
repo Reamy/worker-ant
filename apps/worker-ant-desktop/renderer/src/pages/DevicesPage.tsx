@@ -43,6 +43,8 @@ import { DeviceOnboardingWizard } from '../components/DeviceOnboardingWizard';
 import { TUYA_REGION_LABEL, TUYA_REGIONS } from '../../../src/main/core/providers/tuya-regions.js';
 // 台账行 / 审计行 / 控制结果形状取自 main 侧零依赖语义模块真源（仅类型，打包期擦除）。
 import type { AnsDevice, DeviceActionRow, DeviceControlOutcome, DeviceShadow, TaskRef } from '../../../src/main/core/device-registry.js';
+// zx_20261121_3 M5：页头 / 主按钮 / 三态收进共用原语（只换呈现，判据与请求原样）
+import { PageHeader, Button, EmptyState, ErrorState, Skeleton, Pill } from '../components/ui';
 // zx_20261014_1 批一/批二: "我们叫它什么"（别名优先、回退自述名）——**运行期**取零依赖真源，
 //   与 main 侧同一份实现（若各处自写一份，改名后就会出现"面板叫 A、留痕叫 B"）。
 import { deviceCallName } from '../../../src/main/core/device-name.js';
@@ -226,7 +228,7 @@ function DeviceRow({ dev, onChanged, locked, selected, onToggleSelect }: {
       <div className="flex items-center gap-2 flex-wrap">
         {/* zx_20261029_2 M5: 多选批量指派房间——行内只上报，写口仍只走 `devices:set_room`。 */}
         <input type="checkbox" checked={selected} onChange={onToggleSelect}
-          className="accent-indigo-600" title="选中后可批量指派房间" />
+          className="accent-[var(--color-accent)]" title="选中后可批量指派房间" />
         <Router className="w-4 h-4 text-gray-400" />
         <span className="font-medium text-sm text-gray-800">{callName}</span>
         {/* 别名在场时附一枚"自述名"小字——两件事并陈，读的人分得清哪个是设备自称、哪个是我们的叫法。 */}
@@ -246,17 +248,17 @@ function DeviceRow({ dev, onChanged, locked, selected, onToggleSelect }: {
         <span className="text-[10px] text-gray-400" title={`品类判定依据：${deviceSourceLabel(dev)}`}>来源：{deviceSourceLabel(dev)}</span>
         {/* zx_20261018_1 批三: 房间是**人指派的显式数据**；空 ⇒ 「未分配」，不显示发现提示冒充。 */}
         <button onClick={() => { setRoomDraft(dev.room ?? ''); setEditingRoom(v => !v); }} disabled={busy != null}
-          className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600 hover:bg-indigo-100 inline-flex items-center gap-0.5 disabled:opacity-40"
+          className="text-[10px] px-1.5 py-0.5 rounded bg-accent-soft text-accent hover:bg-accent-soft inline-flex items-center gap-0.5 disabled:opacity-40"
           title={dev.room ? `房间：${dev.room}（点击修改）` : '未分配房间——点击指派（发现提示只填空、不覆盖人设的值）'}>
           <Home className="w-3 h-3" />{dev.room || '未分配'}
         </button>
-        <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-600">{PROTOCOL_LABEL[dev.protocol] ?? dev.protocol}</span>
+        <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent-soft text-accent">{PROTOCOL_LABEL[dev.protocol] ?? dev.protocol}</span>
         <span className="text-[11px] text-gray-500 font-mono">{dev.address}{dev.port ? `:${dev.port}` : ''}</span>
         {/* 自述能力提示（如实呈现字段，非裁决）：可控 / 已授权。 */}
         <span className={`text-[10px] px-1.5 py-0.5 rounded inline-flex items-center gap-0.5 ${dev.controllable ? 'bg-emerald-50 text-emerald-600' : 'bg-gray-100 text-gray-500'}`}>
           {dev.controllable ? <><ShieldCheck className="w-3 h-3" />自述可控</> : <><ShieldOff className="w-3 h-3" />仅只读</>}
         </span>
-        <span className={`text-[10px] px-1.5 py-0.5 rounded ${dev.authorized ? 'bg-blue-50 text-blue-600' : 'bg-gray-100 text-gray-500'}`}>{dev.authorized ? '已授权控制' : '未授权'}</span>
+        <span className={`text-[10px] px-1.5 py-0.5 rounded ${dev.authorized ? 'bg-accent-soft text-accent' : 'bg-gray-100 text-gray-500'}`}>{dev.authorized ? '已授权控制' : '未授权'}</span>
         {/* zx_20261112_2 B3：**本机有没有可用传动**与"自述可控"是两件事——没有传动就明说仅发现。 */}
         {(() => {
           const ch = deviceControlChannel(dev);
@@ -433,7 +435,7 @@ function SourceChip({ a, taskRef, terminalName }: { a: DeviceActionRow; taskRef?
   }
   if (a.actor_kind === 'task') {
     return (
-      <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-50 text-violet-600 shrink-0 inline-flex items-center">
+      <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent-soft text-accent shrink-0 inline-flex items-center">
         {taskRef
           ? <span className="truncate max-w-[16rem]" title={`任务 id：${a.actor_ref}`}>任务「{taskRef.title}」{taskRef.projectName ? ` · 项目「${taskRef.projectName}」` : ''}</span>
           : <span className="font-mono truncate max-w-[8rem]" title={`任务已不在库：${a.actor_ref}`}>任务 {a.actor_ref.slice(0, 8)}</span>}
@@ -1523,7 +1525,15 @@ export default function DevicesPage() {
 
   const discoveryErr = aggregateDiscoveryErrors(discoveryErrors);
 
-  if (q.loading && q.data == null) return <div className="flex justify-center py-12"><div className="animate-spin h-8 w-8 border-2 border-blue-500 border-t-transparent rounded-full" /></div>;
+  if (q.loading && q.data == null) return (
+    <div>
+      <PageHeader eyebrow="设备" title="设备" claim="正在读取设备台账…" />
+      <div className="space-y-2" role="status" aria-live="polite">
+        <span className="sr-only">载入中…</span>
+        {Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-[92px]" />)}
+      </div>
+    </div>
+  );
 
   // zx_20261115_2（维特根斯坦·不要想而要看）: 首读失败 **不是**「台账为空」。
   //   此前 `q.error` 从未被读 ⇒ `devices:list` 一失败，页面就印「台账暂空——点右上「开始发现」」，
@@ -1531,18 +1541,8 @@ export default function DevicesPage() {
   if (data == null && q.error) {
     return (
       <div>
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-xl font-bold">设备</h2>
-          <FreshnessPill q={q} />
-        </div>
-        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3">
-          <div className="text-sm font-medium text-red-800">设备台账没读到——这不是「一台设备都没有」</div>
-          <div className="mt-1 text-xs text-red-700 break-all font-mono">{q.error}</div>
-          <button onClick={() => void q.reload()}
-            className="mt-2 inline-flex items-center gap-1 text-xs px-2.5 py-1 bg-red-600 text-white rounded-lg hover:bg-red-700">
-            <RefreshCw className="w-3.5 h-3.5" />重试
-          </button>
-        </div>
+        <PageHeader eyebrow="设备" title="设备" claim="设备台账没读到——原因与重试见下方" actions={<FreshnessPill q={q} />} />
+        <ErrorState title="设备台账没读到——这不是「一台设备都没有」" reason={q.error} onRetry={() => void q.reload()} />
       </div>
     );
   }
@@ -1596,39 +1596,37 @@ export default function DevicesPage() {
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-4">
-        <h2 className="text-xl font-bold">设备</h2>
-        <div className="flex items-center gap-2">
+      <PageHeader
+        eyebrow="设备"
+        title="设备"
+        claim={`设备 ${devices.length} 台 · 在线 ${onlineDevices.length} · 已授权 ${authorizedDevices.length}`}
+        actions={<>
           <FreshnessPill q={q} />
           {/* 向导对锁定档也开放：进去会如实说明「为什么没有可选渠道」（M6 起渠道归 Pro，提示会说专业版）。 */}
-          <button onClick={() => setWizardOpen(true)}
-            className="inline-flex items-center gap-1 text-xs px-2.5 py-1 bg-slate-700 text-white rounded-lg hover:bg-slate-800">
-            <Plus className="w-3.5 h-3.5" />接入设备
-          </button>
-          <button onClick={() => void toggleDiscovery()} disabled={discovering || discoveryLocked}
-            className={`inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-lg ${data?.discoveryRunning ? 'bg-gray-600 text-white hover:bg-gray-700' : 'bg-blue-600 text-white hover:bg-blue-700'} disabled:opacity-50`}>
-            {data?.discoveryRunning ? <><PowerOff className="w-3.5 h-3.5" />停止发现</> : <><Radar className="w-3.5 h-3.5" />开始发现</>}
-          </button>
+          <Button size="sm" variant="secondary" onClick={() => setWizardOpen(true)} icon={<Plus className="w-3.5 h-3.5" />}>接入设备</Button>
           {/* 「刷新状态」= 立刻直查云/miIO 一次（与 30s 轮询同一入口）；台账刷新仍走右侧按钮/实时事件。 */}
-          <button onClick={() => void refreshStatesNow('manual')}
-            className="text-xs px-2.5 py-1 border border-gray-300 rounded-lg hover:bg-gray-50"
-            title="立即直查云 Provider / miIO 设备状态（MQTT/HA 有实时订阅，不在此列）；逐台结果如实汇总，失败可展开">刷新状态</button>
-          <button onClick={() => void q.reload()} className="p-2 hover:bg-gray-100 rounded-lg"><RefreshCw className="w-4 h-4" /></button>
-        </div>
-      </div>
+          <Button size="sm" variant="ghost" onClick={() => void refreshStatesNow('manual')}
+            title="立即直查云 Provider / miIO 设备状态（MQTT/HA 有实时订阅，不在此列）；逐台结果如实汇总，失败可展开">刷新状态</Button>
+          <Button size="sm" variant="ghost" onClick={() => void q.reload()} icon={<RefreshCw className="w-3.5 h-3.5" />} aria-label="刷新台账">刷新</Button>
+        </>}
+        primaryAction={<Button variant="primary" size="sm" onClick={() => void toggleDiscovery()} disabled={discovering || discoveryLocked}
+          icon={data?.discoveryRunning ? <PowerOff className="w-3.5 h-3.5" /> : <Radar className="w-3.5 h-3.5" />}>
+          {data?.discoveryRunning ? '停止发现' : '开始发现'}
+        </Button>}
+      />
 
       {(discoveryLocked || locked) && (
-        <div className="mb-4 rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-3 space-y-1">
+        <div className="mb-4 rounded-lg border border-accent/25 bg-accent-soft px-4 py-3 space-y-1">
           {discoveryLocked && (
             <>
-              <div className="text-sm font-medium text-indigo-800">「设备发现」属于专业版能力</div>
-              <div className="text-xs text-indigo-700">{discoveryGate!.detail}</div>
+              <div className="text-sm font-medium text-accent">「设备发现」属于专业版能力</div>
+              <div className="text-xs text-accent">{discoveryGate!.detail}</div>
             </>
           )}
           {locked && (
             <>
-              <div className="text-sm font-medium text-indigo-800">「设备控制」属于团队版能力</div>
-              <div className="text-xs text-indigo-700">{gate!.detail}</div>
+              <div className="text-sm font-medium text-accent">「设备控制」属于团队版能力</div>
+              <div className="text-xs text-accent">{gate!.detail}</div>
             </>
           )}
         </div>
@@ -1636,7 +1634,7 @@ export default function DevicesPage() {
 
       {/* zx_20261030_1 M5「限」：容量只拦**新登记**——已用/上限/被挡数如实分开说，旧台账一条不动。 */}
       {data?.capacity && (
-        <div className="mb-2 text-[11px] text-gray-500">
+        <div className="mb-2 text-[11px] text-gray-500 tnum">
           设备登记：已用 {data.capacity.used}/{data.capacity.limit === 0 ? '不限' : data.capacity.limit} 台
           {data.capacityRefusals && data.capacityRefusals.count > 0 && (
             /* zx_20261115_2：`lastAt` 是 main 侧的 UTC 串（不带 `Z`），此处并入 `formatDbTime` 统一转本地时间；
@@ -1705,13 +1703,10 @@ export default function DevicesPage() {
       {/* zx_20261115_2: **台账是第一眼**——标题行直接给四个真数（全部派生自本页已读到的行，不另调接口）。 */}
       <div className="mb-1.5 flex items-center gap-2 flex-wrap">
         <span className="text-sm font-semibold text-gray-700">设备台账</span>
-        <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-600">设备 {devices.length}</span>
-        <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700"
-          title="只算设备明确上报「在」的；未上报可用性的算未知，不并入。">在线 {onlineDevices.length}</span>
-        <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-blue-50 text-blue-700"
-          title="已打开「允许控制」的设备数">已授权 {authorizedDevices.length}</span>
-        <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-indigo-50 text-indigo-700"
-          title="尚未指派房间——按房间的意图无法命中它们">未分房间 {unassignedDevices.length}</span>
+        <Pill tone="neutral">设备 <span className="tnum">{devices.length}</span></Pill>
+        <Pill tone="ok" title="只算设备明确上报「在」的；未上报可用性的算未知，不并入。">在线 <span className="tnum">{onlineDevices.length}</span></Pill>
+        <Pill tone="accent" title="已打开「允许控制」的设备数">已授权 <span className="tnum">{authorizedDevices.length}</span></Pill>
+        <Pill tone="warn" title="尚未指派房间——按房间的意图无法命中它们">未分房间 <span className="tnum">{unassignedDevices.length}</span></Pill>
       </div>
 
       {/* zx_20261029_2 M5 + zx_20261115_2: 房间筛选 / 状态筛选 / 搜索**三者并存可组合**；
@@ -1763,13 +1758,13 @@ export default function DevicesPage() {
             )}
             {selectedIds.size > 0 && (
               <div className="ml-auto flex items-center gap-2 flex-wrap">
-                <span className="text-[11px] text-gray-500">已选 {selectedIds.size} 台</span>
+                <span className="text-[11px] text-gray-500 tnum">已选 {selectedIds.size} 台</span>
                 <input value={batchRoom} onChange={e => setBatchRoom(e.target.value)}
                   onKeyDown={e => { if (e.key === 'Enter') void batchAssignRoom(); }}
                   placeholder="批量指派到房间（如 客厅）"
                   className="text-xs px-2 py-1 rounded border border-gray-300 w-48" />
                 <button onClick={() => void batchAssignRoom()} disabled={batchBusy}
-                  className="text-[11px] px-2.5 py-1 rounded bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50">
+                  className="text-[11px] px-2.5 py-1 rounded bg-accent text-white hover:bg-accent/90 disabled:opacity-50">
                   {batchBusy ? '指派中…' : '批量设房间'}
                 </button>
                 <button onClick={() => setSelectedIds(new Set())} disabled={batchBusy}
@@ -1784,14 +1779,13 @@ export default function DevicesPage() {
       {/* zx_20261115_2: 空态分三种，不混为一谈——读失败已在上面单独成块；
           这里只区分「真的一台都没有」与「筛选后没有匹配」。 */}
       {devices.length === 0
-        ? <p className="text-gray-400 text-center py-8">台账暂空——点右上「开始发现」扫描局域网设备。</p>
+        ? <EmptyState title="台账暂空——点右上「开始发现」扫描局域网设备。" />
         : visibleDevices.length === 0
           ? (
-            <div className="text-center py-8">
-              <p className="text-gray-400">当前筛选下没有匹配的设备（台账里共 {devices.length} 台）。</p>
-              <button onClick={resetFilters}
-                className="mt-2 text-[11px] px-2.5 py-1 border border-gray-300 rounded hover:bg-gray-50">清除筛选</button>
-            </div>
+            <EmptyState
+              title={`当前筛选下没有匹配的设备（台账里共 ${devices.length} 台）。`}
+              action={<Button variant="secondary" size="sm" onClick={resetFilters}>清除筛选</Button>}
+            />
           )
           : <div className="space-y-2 mb-6">{visibleDevices.map(d => (
             <DeviceRow key={d.id} dev={d} onChanged={() => void q.reload()} locked={locked}
@@ -1799,7 +1793,7 @@ export default function DevicesPage() {
           ))}</div>}
 
       <div>
-        <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5 inline-flex items-center gap-1"><Lock className="w-3 h-3" />控制留痕（最近 {actions.length} 条）</p>
+        <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5 inline-flex items-center gap-1 tnum"><Lock className="w-3 h-3" />控制留痕（最近 {actions.length} 条）</p>
         {actions.length === 0
           ? <p className="text-gray-300 text-xs py-2">尚无控制记录。每次控制（**含被拒**）都会留一行。</p>
           : <div className="rounded-lg border bg-white px-3 py-1">{actions.map(a => <AuditRow key={a.id} a={a} dev={deviceById.get(a.device_id)} taskRef={taskRefs[a.task_id]} terminalName={a.actor_kind === 'external' ? terminalRefs[a.actor_ref] : undefined} />)}</div>}

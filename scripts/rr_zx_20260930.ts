@@ -3303,6 +3303,10 @@ function groupIa(): void {
     //   **刻意不带签名**——它要回答的恰是"服务在不在"，而签名需要服务侧先有身份；带签名的探针会把
     //   "服务没起"与"服务起了但不认我"混作一谈，而本模块要分开的正是这两件事。ANS 侧该路由本就不挂 `hmacAuth`。
     `${A}/src/main/core/ans-supervisor.ts`,
+    // zx_20261122_1 补修：运维页 ANS 探活改打真路由 `/api/v1/health`（此前根下 `/health` 恒 404）。
+    //   与 ans-supervisor 同性质：**健康探针刻意不带签名**——它要回答"服务在不在"，而签名需要服务侧先有身份；
+    //   该路由在 ANS 侧本就不挂 `hmacAuth`。纯函数 `ansHealthUrl(baseUrl)` 只拼 URL，不发请求。
+    `${A}/src/main/core/ops-overview.ts`,
   ];
   // zx_20261014_4 新真源值（承 CLAUDE.md「加真源枚举值须穷举全部读取谓词」）：
   //   `core/inbound-gate.ts` 是**我们自己的门**——其中 `/api/v1/*`（`INBOUND_API_PREFIX`/`INBOUND_PAIR_STATUS_PATH`）
@@ -3323,10 +3327,11 @@ function groupIa(): void {
     && !/ansSignedRequest\s*\(/.test(srcsCode.get(f)!)
     && !/getAnsClient\s*\(\s*\)/.test(srcsCode.get(f)!)
     && !/this\.ansClient\.(?:post|get|requestWithRetry)\s*\(/.test(srcsCode.get(f)!));
-  eq(unrouted, NOT_ON_SIGNING_PATH,
+  eq(unrouted, [...NOT_ON_SIGNING_PATH].sort(),
     'I-a-5 ★★完备性：`/api/v1/` 的每个文件都在签名路上；未上路的**恰是点名的豁免**'
     + '（多一个＝有路仍漏头，少一个＝豁免已不必要、应删；`ans-supervisor.ts` 为 zx_20261005 M21 新豁免：'
     + '健康探测不带签名——它要如实分开"服务没起"与"服务起了但不认我"；'
+    + '`ops-overview.ts` 为 zx_20261122_1 新豁免：运维页 ANS 探活同样刻意不带签名；'
     + '`inbound-gate.ts` 为 zx_20261014_4 新豁免：本机**服务端**门路由（外部终端**入**门，凭据+私网闸，非出站签名路）；'
     + 'zx_20261011 起扫**去注释后**的代码：注释提及路径 ≠ 在签名路上）');
   ok(apiFiles.length >= 8, 'I-a-5b 扫面自证：`/api/v1/` 面确有 8 个文件（否则"全在册"是空转）', `${apiFiles.length} 个`);

@@ -42,7 +42,7 @@ interface StopPayload { ok: boolean; status: string; message: string; signal?: s
 
 /** 五态说人话：`leftover` 是**命令已返回、进程组仍在**那种（工蚁最该替用户盯着的一类）。 */
 const BG_STATUS_TEXT: Record<string, { label: string; cls: string }> = {
-  running: { label: '运行中', cls: 'bg-blue-50 text-blue-700 border-blue-200' },
+  running: { label: '运行中', cls: 'bg-accent-soft text-accent border-accent/25' },
   leftover: { label: '残留运行', cls: 'bg-orange-50 text-orange-700 border-orange-200' },
   exited: { label: '已退出', cls: 'bg-gray-50 text-gray-500 border-gray-200' },
   stopped: { label: '已停止', cls: 'bg-green-50 text-green-700 border-green-200' },
@@ -50,8 +50,8 @@ const BG_STATUS_TEXT: Record<string, { label: string; cls: string }> = {
 };
 const BG_STATUS_ORDER = ['running', 'leftover', 'exited', 'stopped', 'unsupported'];
 
-const LEVEL_ICON: Record<string, React.ReactNode> = { error: <XCircle className="w-3.5 h-3.5 text-red-500" />, warn: <MessageSquareText className="w-3.5 h-3.5 text-orange-500" />, info: <CheckCircle2 className="w-3.5 h-3.5 text-blue-500" /> };
-const LEVEL_DOT: Record<string, string> = { error: 'bg-red-500', warn: 'bg-orange-400', info: 'bg-blue-400' };
+const LEVEL_ICON: Record<string, React.ReactNode> = { error: <XCircle className="w-3.5 h-3.5 text-red-500" />, warn: <MessageSquareText className="w-3.5 h-3.5 text-orange-500" />, info: <CheckCircle2 className="w-3.5 h-3.5 text-accent" /> };
+const LEVEL_DOT: Record<string, string> = { error: 'bg-red-500', warn: 'bg-orange-400', info: 'bg-accent' };
 const TIME_OPTS = [{ v: '', l: '全部' }, { v: '1', l: '近1小时' }, { v: '24', l: '近24小时' }, { v: '168', l: '近7天' }];
 const TYPE_OPTS = [
   { v: '', l: '关键事态(默认)' }, { v: 'task.completed', l: '任务完成' }, { v: 'task.failed', l: '任务失败' },
@@ -213,13 +213,13 @@ export default function ActivityPage() {
   return (
     <div>
       <div className="flex items-center justify-between mb-5">
-        <h2 className="text-xl font-bold flex items-center gap-2"><History className="w-5 h-5 text-blue-600"/>活动中心</h2>
+        <h2 className="text-xl font-bold flex items-center gap-2"><History className="w-5 h-5 text-accent"/>活动中心</h2>
         <button onClick={() => { void fetchPage(0); void loadBackground(); }} className="flex items-center gap-1 px-2 py-1 text-xs bg-gray-100 hover:bg-gray-200 rounded text-gray-600"><RefreshCw className="w-3.5 h-3.5"/>刷新</button>
       </div>
       {obj && (
-        <div className="mb-3 flex items-center gap-2 text-sm bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
-          <span className="text-blue-700 font-medium">对象回看：{obj.slice(0, 12)}</span>
-          <button type="button" onClick={() => { params.delete('obj'); setParams(params); }} className="flex items-center gap-1 text-blue-500 hover:text-blue-700 text-xs"><X className="w-3.5 h-3.5"/>清除</button>
+        <div className="mb-3 flex items-center gap-2 text-sm bg-accent-soft border border-accent/25 rounded-lg px-3 py-2">
+          <span className="text-accent font-medium">对象回看：{obj.slice(0, 12)}</span>
+          <button type="button" onClick={() => { params.delete('obj'); setParams(params); }} className="flex items-center gap-1 text-accent hover:text-accent text-xs"><X className="w-3.5 h-3.5"/>清除</button>
         </div>
       )}
 
@@ -319,7 +319,7 @@ export default function ActivityPage() {
               <div className="flex items-center gap-2">
                 <button type="button" onClick={() => setExpanded((p) => ({ ...p, [i]: !p[i] }))} className="text-gray-300 hover:text-gray-500 shrink-0">{isOpen ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}</button>
                 {LEVEL_ICON[it.level]}
-                <button type="button" onClick={() => goObject(it)} className="font-medium text-sm text-gray-800 hover:text-blue-600 hover:underline shrink-0 max-w-[30%] truncate">{it.label}</button>
+                <button type="button" onClick={() => goObject(it)} className="font-medium text-sm text-gray-800 hover:text-accent hover:underline shrink-0 max-w-[30%] truncate">{it.label}</button>
                 {it.object_name && <span className="text-xs text-gray-500 truncate max-w-[24%]">{it.object_name}</span>}
                 {it.text && <span className="text-xs text-gray-500 truncate flex-1 min-w-0">{it.text}</span>}
                 <span className="text-[10px] text-gray-400 shrink-0">{fmtTime(it.occurred_at)}</span>
@@ -330,7 +330,7 @@ export default function ActivityPage() {
         })}
       </div>
       {items.length < total && (
-        <button type="button" disabled={loading} onClick={() => fetchPage(items.length)} className="w-full mt-3 py-2 text-sm text-blue-600 hover:bg-blue-50 rounded disabled:opacity-50">{loading ? '加载中...' : `加载更多（${items.length}/${total}）`}</button>
+        <button type="button" disabled={loading} onClick={() => fetchPage(items.length)} className="w-full mt-3 py-2 text-sm text-accent hover:bg-accent-soft rounded disabled:opacity-50">{loading ? '加载中...' : `加载更多（${items.length}/${total}）`}</button>
       )}
     </div>
   );

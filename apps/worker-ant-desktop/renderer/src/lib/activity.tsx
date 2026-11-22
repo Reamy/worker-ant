@@ -52,6 +52,8 @@ const TITLE_MAP: Record<string, string> = {
   'external.lan_changed': '局域网终端出现',
   'im.message_inbound': 'IM 收到新消息',
   'memory.changed': '记忆已沉淀',
+  // zx_20261121_3 M4：知识待办变化（经验/技能/领域包/提案的决定）——低频，值得在活动页留一行。
+  'knowledge.changed': '知识待办有变',
   // zx_20261004 M4: 节点档位/在场变更（低频、持久化）——活动页可见"谁何时改了档"。
   'node.presence_changed': '节点档位变更',
 };

@@ -21,6 +21,8 @@ import {
   readDomainPackDetail,
   unapplyDomainPack,
 } from '../core/domain-pack.js';
+// zx_20261121_3 M4「见·首」：启用/撤销后发瞬态线（待办中心的候选列表随之刷新）。
+import { emitKnowledgeChanged } from '../core/refresh-events.js';
 
 type IpcFailure = { error: { code: string; message: string } };
 
@@ -81,6 +83,7 @@ export function initPacksIpc(db: Database.Database): void {
       if (r.refusal) return fail('FEATURE_REQUIRED', r.refusal);
       if (r.reason === 'no_such_project') return fail('INVALID_REQUEST', '缺少项目 id');
       if (r.reason === 'no_such_pack') return fail('NO_SUCH_PACK', `领域包不存在：${packId}`);
+      emitKnowledgeChanged('packs.apply', { projectId, packId, applied: r.applied });
       return { data: { applied: r.applied, already: r.reason === 'already_applied' } };
     } catch (e) {
       return fail('INTERNAL', (e as Error)?.message || String(e));
@@ -92,7 +95,9 @@ export function initPacksIpc(db: Database.Database): void {
       const projectId = str(input?.projectId);
       const packId = str(input?.packId);
       if (!projectId || !packId) return fail('INVALID_REQUEST', '缺少项目 id 或领域包 id');
-      return { data: { removed: unapplyDomainPack(db as never, projectId, packId) } };
+      const removed = unapplyDomainPack(db as never, projectId, packId);
+      if (removed) emitKnowledgeChanged('packs.unapply', { projectId, packId });
+      return { data: { removed } };
     } catch (e) {
       return fail('INTERNAL', (e as Error)?.message || String(e));
     }

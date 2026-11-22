@@ -148,9 +148,9 @@ export default function KnowledgePackCard({ projectId, onChanged }: { projectId:
     <div className="mt-3 bg-white rounded-lg border p-4">
       <div className="flex items-center justify-between mb-2">
         <h3 className="text-sm font-semibold flex items-center gap-1.5 text-gray-700">
-          <BookOpen className="w-4 h-4 text-indigo-500" />项目知识包
+          <BookOpen className="w-4 h-4 text-accent" />项目知识包
           {preview && (
-            <span className="text-[10px] font-normal px-1.5 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200">
+            <span className="text-[10px] font-normal px-1.5 py-0.5 rounded-full bg-accent-soft text-accent border border-accent/25">
               注入预算 {preview.budgetTokens} token
             </span>
           )}
@@ -179,7 +179,7 @@ export default function KnowledgePackCard({ projectId, onChanged }: { projectId:
             type="button"
             onClick={() => void doImport()}
             disabled={busy !== null}
-            className="flex items-center gap-1 text-xs px-2 py-1 rounded border text-gray-600 hover:text-indigo-600 hover:border-indigo-300 disabled:opacity-50"
+            className="flex items-center gap-1 text-xs px-2 py-1 rounded border text-gray-600 hover:text-accent hover:border-accent/30 disabled:opacity-50"
           >
             <Upload className="w-3.5 h-3.5" />{busy === 'import' ? '导入中…' : '导入 JSONL'}
           </button>
@@ -187,7 +187,7 @@ export default function KnowledgePackCard({ projectId, onChanged }: { projectId:
             type="button"
             onClick={() => void doExport()}
             disabled={busy !== null}
-            className="flex items-center gap-1 text-xs px-2 py-1 rounded border text-gray-600 hover:text-indigo-600 hover:border-indigo-300 disabled:opacity-50"
+            className="flex items-center gap-1 text-xs px-2 py-1 rounded border text-gray-600 hover:text-accent hover:border-accent/30 disabled:opacity-50"
           >
             <Download className="w-3.5 h-3.5" />{busy === 'export' ? '导出中…' : '导出 JSONL'}
           </button>
@@ -219,7 +219,7 @@ export default function KnowledgePackCard({ projectId, onChanged }: { projectId:
           <ul className="space-y-1">
             {cards.map((c) => (
               <li key={c.id} className="text-[11px] text-gray-600 flex items-start gap-2">
-                <span className="shrink-0 rounded px-1 py-0.5 bg-indigo-50 text-indigo-700 border border-indigo-200 text-[10px]">{c.kindLabel}</span>
+                <span className="shrink-0 rounded px-1 py-0.5 bg-accent-soft text-accent border border-accent/25 text-[10px]">{c.kindLabel}</span>
                 <span className="flex-1 break-words">{c.text}</span>
                 <span className="shrink-0 text-[10px] text-gray-400" title="这张卡被注入的次数 / 注入后任务成功与失败数">
                   注入 {c.injected} · 成 {c.completed} / 败 {c.failed}
@@ -234,7 +234,7 @@ export default function KnowledgePackCard({ projectId, onChanged }: { projectId:
       <div className="mt-2 border-t pt-2">
         <div className="flex items-center justify-between">
           <p className="text-xs font-medium text-gray-600 flex items-center gap-1.5">
-            <UserRound className="w-3.5 h-3.5 text-indigo-400" />项目画像
+            <UserRound className="w-3.5 h-3.5 text-accent" />项目画像
             {profile && (
               <span className="text-[10px] font-normal px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500 border border-gray-200">
                 注入预算 {profile.budgetTokens} token（总预算 400 内，与知识书分摊）
@@ -262,7 +262,7 @@ export default function KnowledgePackCard({ projectId, onChanged }: { projectId:
               onClick={() => void doGenerateProfile()}
               disabled={busy !== null}
               title="确定性派生（同输入同画像）；过期不会自动覆盖，须手动刷新"
-              className="flex items-center gap-1 text-xs px-2 py-1 rounded border text-gray-600 hover:text-indigo-600 hover:border-indigo-300 disabled:opacity-50"
+              className="flex items-center gap-1 text-xs px-2 py-1 rounded border text-gray-600 hover:text-accent hover:border-accent/30 disabled:opacity-50"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${busy === 'profile' ? 'animate-spin' : ''}`} />
               {busy === 'profile' ? '处理中…' : profile?.profile ? '刷新画像' : '生成画像'}

@@ -53,6 +53,12 @@ Deliverables are registered as first-class artifacts. And when you're away from 
   uses two rulers (usable / what it is missing)
 - **Event-sourced engine**: pause / resume / replay, rateable deliverables, full audit trail; the outbound call log
   carries timestamps and probe markers
+- **Model performance & self-reflection**: per-model task counts, success rate, p50/p90 tokens and average cost
+  (insufficient samples say so; suggestions are correlation, not causation); repeated tool denials become rule
+  proposals through a 6-hour scan — never auto-applied, with before/after review
+- **Knowledge inbox**: four groups — lessons awaiting review / skills awaiting approval / domain packs ready to
+  enable / proposals awaiting a decision; read failures never pose as zero
+- **Dark theme**: system / light / dark with no first-paint flash; one token set, not a second skin
 
 ---
 
@@ -60,13 +66,13 @@ Deliverables are registered as first-class artifacts. And when you're away from 
 
 ### Option 1: Installer (macOS / Windows / Linux)
 
-Download the installer for your platform from [GitHub Releases v0.8.0](https://github.com/Reamy/worker-ant/releases/tag/v0.8.0); SHA-256 checksums are on the Release page:
+Download the installer for your platform from [GitHub Releases v0.9.0](https://github.com/Reamy/worker-ant/releases/tag/v0.9.0); SHA-256 checksums are on the Release page:
 
-- **macOS 13+ (Apple Silicon)**: `worker-ant-0.8.0-mac-arm64.dmg` (or `.zip`). Developer ID signed and Apple-notarized, so it opens without right-click workarounds.
-- **Windows 10/11 (x64)**: `worker-ant-0.8.0-win-x64.exe`. **Not code-signed**; SmartScreen may warn about an unknown publisher — choose "More info → Run anyway".
-- **Linux (x86_64)**: `worker-ant-0.8.0-linux-x86_64.AppImage` or `.deb`. **Not signed**; `chmod +x` the AppImage first.
+- **macOS 13+ (Apple Silicon)**: `worker-ant-0.9.0-mac-arm64.dmg` (or `.zip`). Developer ID signed and Apple-notarized, so it opens without right-click workarounds.
+- **Windows 10/11 (x64)**: `worker-ant-0.9.0-win-x64.exe`. **Not code-signed**; SmartScreen may warn about an unknown publisher — choose "More info → Run anyway".
+- **Linux (x86_64)**: `worker-ant-0.9.0-linux-x86_64.AppImage` or `.deb`. **Not signed**; `chmod +x` the AppImage first.
 
-**The v0.2.0 installer crashes on first launch — do not use it.** v0.8.0 adds project-owned experience: project skills stay inside their project (with an explicit "promote to global"), the project page shows scale p50/p90, tool reliability, costly pitfalls, failure causes and injection ROI, and a ≤120-token experience note is injected at task start; external AI terminals now have device scope, rate limits and a linkage permission; device automation rules (state/attribute/daily time → device action) run with cooldown, dry-run and run logs. v0.7.0 already added position capability cards and reassignment, `项目#name` in IM, three-step onboarding, dual deliverable ledgers, bounded relay trees, and position knowledge in the team library. Auto-update is not enabled yet, so users on older builds should download and reinstall manually.
+**The v0.2.0 installer crashes on first launch — do not use it.** v0.9.0 adds checkable model performance: per-model task counts, success rate, p50/p90 tokens and average cost, with "insufficient evidence" instead of a fake 0 and suggestions marked correlation-not-causation; repeated tool denials (20+ in 30 days) become rule proposals through a 6-hour scan and are never auto-applied; system / light / dark themes with no first-paint flash; and four knowledge-inbox groups (lessons / skills / domain packs / proposals, where a read failure never poses as zero). v0.8.0 already added project-owned, measured and usable experience, external-terminal authorization bounds, and device automation rules. v0.7.0 already added position capability cards and reassignment, `项目#name` in IM, three-step onboarding, dual deliverable ledgers, bounded relay trees, and position knowledge in the team library. Auto-update is not enabled yet, so users on older builds should download and reinstall manually.
 
 - Requirements: **macOS 13+ / Apple Silicon (arm64)**, **Windows 10/11 (x64)**, or **Linux (x86_64)**. No Intel Mac build yet.
 - On first launch a **setup wizard** takes you through **three steps** to a first result: connect AI resources (model connection and ANS self-check on one screen) → choose or create a project → run your first task.
@@ -147,7 +153,7 @@ The desktop app has an on-demand auto-start, but **it does not work in source mo
 | **Team (package)**           | ¥599/mo · ¥5990/yr (per package, ≤20 nodes) | 20 local accounts, up to 20 collaboration nodes; device discovery & control, AI terminal intent access, audit view & CSV export, shared team library, project-profile sharing                              |
 | **Enterprise (self-hosted)** | Custom (planned — not yet available)        | Air-gapped deploy + SLA                                                                                                                                                                                    |
 
-> **Buy**: [Mianbaoduo shop](https://mbd.pub/o/author-bW2ZlHFtZg==/work) — Pro monthly / annual / early-bird lifetime; Team package monthly / annual. Enterprise is not on sale yet. Team packages are provisioned manually (collect up to 20 machine fingerprints, then issue; every Team license carries an expiry date). The macOS app is now **Developer ID signed** (Team XRZNWLDU86) **and notarized** by Apple (notarytool `Accepted`, ticket stapled; the app inside the DMG and ZIP reports `accepted / Notarized Developer ID` to `spctl`). **It is now published**: [download v0.8.0](https://github.com/Reamy/worker-ant/releases/tag/v0.8.0) — macOS, Windows, and Linux installers are on that Release, with SHA-256 checksums listed there. The Windows and Linux builds are unsigned, so the OS may warn on first launch; no Intel Mac build yet. A 14-day Team-tier trial ships with the desktop app.
+> **Buy**: [Mianbaoduo shop](https://mbd.pub/o/author-bW2ZlHFtZg==/work) — Pro monthly / annual / early-bird lifetime; Team package monthly / annual. Enterprise is not on sale yet. Team packages are provisioned manually (collect up to 20 machine fingerprints, then issue; every Team license carries an expiry date). The macOS app is now **Developer ID signed** (Team XRZNWLDU86) **and notarized** by Apple (notarytool `Accepted`, ticket stapled; the app inside the DMG and ZIP reports `accepted / Notarized Developer ID` to `spctl`). **It is now published**: [download v0.9.0](https://github.com/Reamy/worker-ant/releases/tag/v0.9.0) — macOS, Windows, and Linux installers are on that Release, with SHA-256 checksums listed there. The Windows and Linux builds are unsigned, so the OS may warn on first launch; no Intel Mac build yet. A 14-day Team-tier trial ships with the desktop app.
 >
 > Every capability above **is available in the desktop app today** (the tier gates ship in this repo and can be verified). Each edition also has seven-dimension capacity caps (registered devices / external terminals / A2A servers / knowledge cards per project / shared team memories / IM channels / task templates): Community 5 / 1 / 1 / 8 / 200 / 2 / 5, Pro 30 / 3 / 3 / 24 / 2000 / 5 / 30, Team 200 / 20 / 10 / 60 / unlimited / unlimited / unlimited — **new additions only; existing records are never removed**. The cloud collaboration service is not released yet and this table will be updated when it is — no unreleased capability is advertised as a selling point. **This repository (desktop + engine) stays open source.** Prices are in CNY (¥).
 

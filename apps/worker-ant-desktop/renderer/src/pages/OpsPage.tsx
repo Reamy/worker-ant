@@ -72,6 +72,9 @@ export default function OpsPage() {
     try { await navigator.clipboard.writeText(text); } catch { setError('复制失败：浏览器未授权剪贴板'); }
   }
 
+  // 无数据时的兜底文案要说真话：真在加载才写「加载中」，已失败就别继续假装在加载
+  // （2026-11-22：IPC 信封缺失曾令八块恒显示「加载中」，错误态同样会退化成这一句）。
+  const emptyLabel = loading ? '加载中' : '读取失败';
   const card = 'bg-white rounded-lg border p-4';
   return (
     <div>
@@ -84,7 +87,7 @@ export default function OpsPage() {
         </div>
         <div className="flex items-center gap-2">
           <button onClick={() => void copyDiagnostics()} disabled={!data} className="flex items-center gap-1 px-3 py-1.5 border rounded-lg text-sm hover:bg-gray-50 disabled:opacity-50"><Copy className="w-3.5 h-3.5" />复制诊断信息</button>
-          <button onClick={() => void load()} disabled={loading} className="flex items-center gap-1 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50"><RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />刷新</button>
+          <button onClick={() => void load()} disabled={loading} className="flex items-center gap-1 px-3 py-1.5 bg-accent text-white rounded-lg text-sm hover:bg-accent/90 disabled:opacity-50"><RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />刷新</button>
         </div>
       </div>
 
@@ -100,9 +103,9 @@ export default function OpsPage() {
               <p>待执行 <b>{data.jobs.value!.pending}</b> · 执行中 <b>{data.jobs.value!.running}</b> · 24h 失败 <b className={data.jobs.value!.failed24h > 0 ? 'text-red-600' : ''}>{data.jobs.value!.failed24h}</b></p>
               <p>最老待执行：{fmtAge(data.jobs.value!.oldestPendingMs)}</p>
               <p className="text-[11px] text-gray-500">按类型：{Object.entries(data.jobs.value!.byType).map(([k, v]) => `${k} ${v}`).join(' · ') || '无作业'}</p>
-              <button onClick={() => navigate('/tasks')} className="text-[11px] text-blue-600 hover:underline">打开任务列表</button>
+              <button onClick={() => navigate('/tasks')} className="text-[11px] text-accent hover:underline">打开任务列表</button>
             </div>
-          ) : <p className="text-[12px] text-gray-400">读不到这块：{data?.jobs.reason ?? '加载中'}</p>}
+          ) : <p className="text-[12px] text-gray-400">读不到这块：{data?.jobs.reason ?? emptyLabel}</p>}
         </div>
 
         <div className={card}>
@@ -111,9 +114,9 @@ export default function OpsPage() {
             <div className="text-[12px] text-gray-700 space-y-1">
               <p>执行中 <b>{data.tasks.value!.executing}</b> · 运行 <b>{data.tasks.value!.running}</b> · 暂停 <b>{data.tasks.value!.paused}</b></p>
               <p className={data.tasks.value!.stale > 0 ? 'text-amber-700' : ''}>无心跳执行态：<b>{data.tasks.value!.stale}</b>{data.tasks.value!.staleOldest ? `（最老 ${data.tasks.value!.staleOldest}）` : ''}</p>
-              <button onClick={() => navigate('/tasks')} className="text-[11px] text-blue-600 hover:underline">去任务列表处置</button>
+              <button onClick={() => navigate('/tasks')} className="text-[11px] text-accent hover:underline">去任务列表处置</button>
             </div>
-          ) : <p className="text-[12px] text-gray-400">读不到这块：{data?.tasks.reason ?? '加载中'}</p>}
+          ) : <p className="text-[12px] text-gray-400">读不到这块：{data?.tasks.reason ?? emptyLabel}</p>}
         </div>
 
         <div className={card}>
@@ -128,7 +131,7 @@ export default function OpsPage() {
               ))}
               <p className="text-[11px] text-gray-400">锁在 30 分钟后自愈；本页只读，不替你释放。</p>
             </div>
-          ) : <p className="text-[12px] text-gray-400">读不到这块：{data?.locks.reason ?? '加载中'}</p>}
+          ) : <p className="text-[12px] text-gray-400">读不到这块：{data?.locks.reason ?? emptyLabel}</p>}
         </div>
 
         <div className={card}>
@@ -139,7 +142,7 @@ export default function OpsPage() {
               <p>WAL <b>{data.db.value!.walBytes == null ? '未记录' : formatBytes(data.db.value!.walBytes)}</b> · SHM <b>{data.db.value!.shmBytes == null ? '未记录' : formatBytes(data.db.value!.shmBytes)}</b></p>
               <p className="text-[11px] text-gray-400">WAL 偏大通常意味着长时间未检查点；本页只读。</p>
             </div>
-          ) : <p className="text-[12px] text-gray-400">读不到这块：{data?.db.reason ?? '加载中'}</p>}
+          ) : <p className="text-[12px] text-gray-400">读不到这块：{data?.db.reason ?? emptyLabel}</p>}
         </div>
 
         <div className={card}>
@@ -147,9 +150,9 @@ export default function OpsPage() {
           {data?.im.ok ? (
             <div className="text-[12px] text-gray-700 space-y-1">
               <p>待补发 <b>{data.im.value!.pending}</b> · 死信 <b className={data.im.value!.dead > 0 ? 'text-red-600' : ''}>{data.im.value!.dead}</b> · 配额阻塞 <b>{data.im.value!.blocked_quota}</b> · 其它 <b>{data.im.value!.other}</b></p>
-              <button onClick={() => navigate('/im')} className="text-[11px] text-blue-600 hover:underline">去 IM 页处理</button>
+              <button onClick={() => navigate('/im')} className="text-[11px] text-accent hover:underline">去 IM 页处理</button>
             </div>
-          ) : <p className="text-[12px] text-gray-400">读不到这块：{data?.im.reason ?? '加载中'}</p>}
+          ) : <p className="text-[12px] text-gray-400">读不到这块：{data?.im.reason ?? emptyLabel}</p>}
         </div>
 
         <div className={card}>
@@ -163,7 +166,7 @@ export default function OpsPage() {
               </p>
               <p className="text-[11px] text-gray-400">阈值 30 分钟（与健康自检同一数）。</p>
             </div>
-          ) : <p className="text-[12px] text-gray-400">读不到这块：{data?.cron.reason ?? '加载中'}</p>}
+          ) : <p className="text-[12px] text-gray-400">读不到这块：{data?.cron.reason ?? emptyLabel}</p>}
         </div>
 
         <div className={card}>
@@ -175,9 +178,9 @@ export default function OpsPage() {
                 {data.ans.value!.reachable == null ? '未探测' : data.ans.value!.reachable ? `可达（${data.ans.value!.latencyMs ?? '?'} ms）` : `不可达：${data.ans.value!.reason || '未提供原因'}`}
               </p>
               <p className="text-[11px] text-gray-400">探活 2 秒有界；失败不代表任务一定跑不动。</p>
-              <button onClick={() => navigate('/settings')} className="text-[11px] text-blue-600 hover:underline">去设置检查</button>
+              <button onClick={() => navigate('/settings')} className="text-[11px] text-accent hover:underline">去设置检查</button>
             </div>
-          ) : <p className="text-[12px] text-gray-400">读不到这块：{data?.ans.reason ?? '加载中'}</p>}
+          ) : <p className="text-[12px] text-gray-400">读不到这块：{data?.ans.reason ?? emptyLabel}</p>}
         </div>
 
         <div className={card}>
@@ -187,7 +190,7 @@ export default function OpsPage() {
               <p>可用 <b className={(data.disk.value!.freeBytes ?? Infinity) < 1024 ** 3 ? 'text-amber-700' : ''}>{data.disk.value!.freeBytes == null ? '未记录' : formatBytes(data.disk.value!.freeBytes)}</b></p>
               <p>总量 {data.disk.value!.totalBytes == null ? '未记录' : formatBytes(data.disk.value!.totalBytes)}</p>
             </div>
-          ) : <p className="text-[12px] text-gray-400">读不到这块：{data?.disk.reason ?? '加载中'}</p>}
+          ) : <p className="text-[12px] text-gray-400">读不到这块：{data?.disk.reason ?? emptyLabel}</p>}
         </div>
       </div>
 

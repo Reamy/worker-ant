@@ -83,7 +83,7 @@ export default function ProjectPositionsCard({ projectId }: { projectId: string 
         <p className="text-sm text-gray-400 py-2">加载中…</p>
       ) : rows.length === 0 ? (
         <p className="text-sm text-gray-400 py-2">
-          还没有岗位——可到 <Link to="/positions" className="text-blue-600 underline">岗位页</Link> 新建。
+          还没有岗位——可到 <Link to="/positions" className="text-accent underline">岗位页</Link> 新建。
         </p>
       ) : (
         <>
@@ -103,7 +103,7 @@ export default function ProjectPositionsCard({ projectId }: { projectId: string 
                 />
                 <span className="font-medium truncate">{r.name}</span>
                 <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 shrink-0">{r.category}</span>
-                {r.builtin && <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-600 shrink-0">内置</span>}
+                {r.builtin && <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent-soft text-accent shrink-0">内置</span>}
                 {!r.enabled && <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-200 text-gray-500 shrink-0">岗位已停用</span>}
                 <span className="ml-auto text-[11px] text-gray-500 shrink-0">
                   任务 {r.taskTotal} · 完成 {r.taskCompleted}

@@ -196,7 +196,7 @@ export function DeviceOnboardingWizard({ devices, onClose, onDone }: DeviceOnboa
               const done = n < step;
               return (
                 <span key={label} className="inline-flex items-center gap-1">
-                  <span className={`text-[11px] px-2 py-0.5 rounded-full ${current ? 'bg-blue-600 text-white' : done ? 'bg-emerald-50 text-emerald-600' : 'bg-gray-100 text-gray-500'}`}>
+                  <span className={`text-[11px] px-2 py-0.5 rounded-full ${current ? 'bg-accent text-white' : done ? 'bg-emerald-50 text-emerald-600' : 'bg-gray-100 text-gray-500'}`}>
                     {done ? <Check className="w-3 h-3 inline" /> : `${n}.`} {label}
                   </span>
                   {i < STEP_LABEL.length - 1 && <ChevronRight className="w-3 h-3 text-gray-300" />}
@@ -212,13 +212,13 @@ export function DeviceOnboardingWizard({ devices, onClose, onDone }: DeviceOnboa
           {step === 1 && (
             <div className="space-y-2">
               {channelsError && (
-                <div className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs text-indigo-700">{channelsError}</div>
+                <div className="rounded-lg border border-accent/25 bg-accent-soft px-3 py-2 text-xs text-accent">{channelsError}</div>
               )}
               {channels.map((c) => {
                 const Icon = KIND_ICON[c.kind];
                 return (
                   <button key={c.id} onClick={() => void chooseChannel(c.id)}
-                    className="w-full text-left rounded-lg border px-3 py-2.5 hover:border-blue-300 hover:bg-blue-50/40 transition-colors">
+                    className="w-full text-left rounded-lg border px-3 py-2.5 hover:border-accent/30 hover:bg-accent-soft/40 transition-colors">
                     <div className="flex items-center gap-2">
                       <Icon className="w-4 h-4 text-gray-400" />
                       <span className="text-sm font-medium text-gray-800">{c.label}</span>
@@ -272,13 +272,13 @@ export function DeviceOnboardingWizard({ devices, onClose, onDone }: DeviceOnboa
 
               {channel.kind === 'cloud' ? (
                 <button onClick={() => void syncCloud()} disabled={busy === 'sync' || !auth?.hasCredentials}
-                  className="inline-flex items-center gap-1 text-xs px-3 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+                  className="inline-flex items-center gap-1 text-xs px-3 py-1.5 bg-accent text-white rounded-lg hover:bg-accent/90 disabled:opacity-50"
                   title={auth?.hasCredentials ? '从厂商云拉取设备清单' : '先完成凭据配置'}>
                   {busy === 'sync' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Cloud className="w-3.5 h-3.5" />}同步云端设备
                 </button>
               ) : (
                 <button onClick={() => void startDiscover()} disabled={discovering || (channel.requires === 'credentials' && !auth?.hasCredentials)}
-                  className="inline-flex items-center gap-1 text-xs px-3 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50">
+                  className="inline-flex items-center gap-1 text-xs px-3 py-1.5 bg-accent text-white rounded-lg hover:bg-accent/90 disabled:opacity-50">
                   {discovering ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Radar className="w-3.5 h-3.5" />}开始发现
                 </button>
               )}
@@ -306,7 +306,7 @@ export function DeviceOnboardingWizard({ devices, onClose, onDone }: DeviceOnboa
                     <span className="text-sm text-gray-800">{d.alias || d.name || d.address}</span>
                     <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">{d.kind}</span>
                     <span className="text-[11px] text-gray-400 font-mono">{d.address}{d.port ? `:${d.port}` : ''}</span>
-                    {d.authorized && <span className="text-[10px] text-blue-600">已授权</span>}
+                    {d.authorized && <span className="text-[10px] text-accent">已授权</span>}
                   </label>
                   {d.protocol === 'miio' && (
                     <div className="mt-1.5 flex items-center gap-2 flex-wrap">
@@ -363,7 +363,7 @@ export function DeviceOnboardingWizard({ devices, onClose, onDone }: DeviceOnboa
             )}
             {step === 3 && (
               <button onClick={() => void finish()} disabled={busy !== ''}
-                className="inline-flex items-center gap-1 text-xs px-2.5 py-1 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50">
+                className="inline-flex items-center gap-1 text-xs px-2.5 py-1 bg-accent text-white rounded-lg hover:bg-accent/90 disabled:opacity-50">
                 {busy === 'finish' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}完成
               </button>
             )}

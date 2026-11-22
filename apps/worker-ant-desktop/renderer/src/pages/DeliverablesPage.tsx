@@ -33,6 +33,8 @@ import { messageOf } from '../lib/action-feedback';
 import LoadFailure from '../components/LoadFailure';
 // zx_20261111_3「显」：第一行的唯一真源在 main 纯模块。
 import NextActionBar from '../components/NextActionBar';
+// zx_20261121_3 M5：页头 / 按钮 / 三态统一走共用原语（一处形状），逻辑与文案保持原样。
+import { PageHeader, Button, EmptyState, Skeleton } from '../components/ui';
 import { nextActionForDeliverables, type NextActionId } from '../../../src/main/core/next-action.js';
 // zx_20260914 M2-1(王阳明·知行合一): 正文「读得动」——本页**两处**预览(版本快照 :535 / 当前内容 :597)
 // 与抽屉、任务详情共用同一渲染器（上轮"能翻开"但只有 `<pre>`，打开≠读得动）。
@@ -55,9 +57,9 @@ interface Deliverable { id: string; project_id: string; project_name?: string; t
   version_count?: number; other_writers?: Array<{ id: string; title: string }>; }
 interface RuntimeInfo { running: boolean; port?: number; endpoint?: string; }
 
-const TYPE_COLORS: Record<string, string> = { mcp: 'bg-blue-100 text-blue-700', a2a: 'bg-green-100 text-green-700', ui: 'bg-purple-100 text-purple-700', doc: 'bg-amber-100 text-amber-700', daemon: 'bg-orange-100 text-orange-700', code: 'bg-slate-100 text-slate-700' };
+const TYPE_COLORS: Record<string, string> = { mcp: 'bg-accent-soft text-accent', a2a: 'bg-green-100 text-green-700', ui: 'bg-accent-soft text-accent', doc: 'bg-amber-100 text-amber-700', daemon: 'bg-orange-100 text-orange-700', code: 'bg-slate-100 text-slate-700' };
 // zx_20260906 批3 (3e): 软退休状态 chip 灰色兜底（重试旧成果）
-const STATUS_CLS: Record<string, string> = { retired: 'bg-gray-200 text-gray-500 line-through', stale: 'bg-yellow-100 text-yellow-600', failed: 'bg-red-100 text-red-600', running: 'bg-green-100 text-green-700', registered: 'bg-blue-100 text-blue-700', stopped: 'bg-orange-100 text-orange-600' };
+const STATUS_CLS: Record<string, string> = { retired: 'bg-gray-200 text-gray-500 line-through', stale: 'bg-yellow-100 text-yellow-600', failed: 'bg-red-100 text-red-600', running: 'bg-green-100 text-green-700', registered: 'bg-accent-soft text-accent', stopped: 'bg-orange-100 text-orange-600' };
 
 /** 任务筛选的"项目级"哨兵值：`task_id IS NULL`（手工成果/项目级成果）也须可选，故不用空串占位。
  *  zx_20261108_1 B6: 字面量真源在 main 侧零依赖模块 `deliverable-types`（服务端 `deliverable-query` 同引），
@@ -592,11 +594,48 @@ export default function DeliverablesPage() {
     if (aid === 'view_tasks') navigate('/tasks');
   }
 
-  if (loading) return <div className="flex justify-center py-12"><div className="animate-spin h-8 w-8 border-2 border-blue-500 border-t-transparent rounded-full" /></div>;
+  // zx_20261121_3 M5：一句主张只用页面已有事实（总产值 / 待核验数 / 验收是否开启），不编数字。
+  const deliverableClaim = loading
+    ? '正在读取产出物列表。'
+    : listErr
+      ? '产出物列表读取失败，可在下方重试。'
+      : attentionErr
+        ? '产出物统计读取失败，可在下方重试。'
+        : attention
+          ? attention.acceptanceEnabled
+            ? `全部产出物共 ${attention.total} 个，${attention.unverified} 条待核验。`
+            : `全部产出物共 ${attention.total} 个（未开启验收核验）。`
+          : '产出物统计暂不可用。';
+
+  const header = (
+    <PageHeader
+      eyebrow="产出物"
+      title="产出物管理"
+      claim={deliverableClaim}
+      primaryAction={
+        <Button variant="primary" icon={<Plus className="w-3.5 h-3.5" />} onClick={openCreate} title="手工新建成果（与 agent 的 create_deliverable 同一落库口径）">新建成果</Button>
+      }
+    />
+  );
+
+  if (loading) {
+    return (
+      <div>
+        {header}
+        <div className="space-y-3">
+          <Skeleton className="h-10 w-full" />
+          {Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} className="h-12 w-full" />)}
+        </div>
+      </div>
+    );
+  }
   return (
     <div>
       {/* Toast */}
       {toast && <div className={`fixed top-4 right-4 z-50 px-4 py-2 rounded shadow-lg text-sm ${toast.type === 'success' ? 'bg-green-600 text-white' : 'bg-red-600 text-white'}`}>{toast.msg}</div>}
+
+      {/* zx_20261121_3 M5：页头先回答「这是哪」，告警与第一行排在其后。 */}
+      {header}
 
       {previewErr && (
         <div className="mb-3 flex items-start gap-2">
@@ -609,10 +648,7 @@ export default function DeliverablesPage() {
 
       {/* zx_20261111_3「显」：第一行——此刻是什么 / 凭什么 / 下一步点哪个 */}
       <div className="mb-3"><NextActionBar action={deliverableNextAction} onAction={handleNextAction} /></div>
-
-      <div className="flex items-center justify-between mb-4">
-        <h2 className="text-xl font-bold">产出物管理</h2>
-        <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 flex-wrap mb-4">
           <div className="relative">
             <Search className="w-3.5 h-3.5 text-gray-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
             <input value={keyword} onChange={e => setKeyword(e.target.value)} placeholder="搜名称/描述/类型/路径（跨项目）"
@@ -660,22 +696,19 @@ export default function DeliverablesPage() {
           {/* zx_20260924_1 M5-b(E-5): 目录树/平铺切换——树与任务详情同源（buildDeliverableTree） */}
           <button onClick={() => setViewMode(v => (v === 'tree' ? 'flat' : 'tree'))}
             title={viewMode === 'tree' ? '当前是目录树（与任务详情同一份实现）——点击切回平铺表' : '点击切到目录树（与任务详情同一份实现）'}
-            className={`text-xs px-2 py-1.5 rounded-lg border ${viewMode === 'tree' ? 'bg-blue-50 text-blue-700 border-blue-200' : 'bg-gray-50 text-gray-400 border-gray-200 hover:bg-gray-100'}`}>
+            className={`text-xs px-2 py-1.5 rounded-lg border ${viewMode === 'tree' ? 'bg-accent-soft text-accent border-accent/25' : 'bg-gray-50 text-gray-400 border-gray-200 hover:bg-gray-100'}`}>
             {viewMode === 'tree' ? '目录树' : '平铺表'}
           </button>
           {/* zx_20260913 M2-7: 按项目分组的开关（默认开）——关掉即回到跨项目的 7 列排序。
               zx_20260924_1 M5-b: 仅平铺表可见——目录树自带层级，再叠一层项目分组只会两套层级打架。 */}
           {viewMode === 'flat' && (
             <button onClick={() => setGroupByProject(v => !v)} title={groupByProject ? '当前按项目分组（点击关闭，回到全表排序）' : '点击按项目分组查看'}
-              className={`text-xs px-2 py-1.5 rounded-lg border ${groupByProject ? 'bg-blue-50 text-blue-700 border-blue-200' : 'bg-gray-50 text-gray-400 border-gray-200 hover:bg-gray-100'}`}>
+              className={`text-xs px-2 py-1.5 rounded-lg border ${groupByProject ? 'bg-accent-soft text-accent border-accent/25' : 'bg-gray-50 text-gray-400 border-gray-200 hover:bg-gray-100'}`}>
               {groupByProject ? '已按项目分组' : '按项目分组'}
             </button>
           )}
-          {/* zx_20260930 M3-c: 新建成果——此前成果只能由 agent 工具产出，人在 GUI 上"在册不能立项" */}
-          <button onClick={openCreate} title="手工新建成果（与 agent 的 create_deliverable 同一落库口径）"
-            className="flex items-center gap-1 text-sm px-3 py-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700">
-            <Plus className="w-3.5 h-3.5" />新建成果
-          </button>
+          {/* zx_20260930 M3-c: 新建成果——此前成果只能由 agent 工具产出，人在 GUI 上"在册不能立项"。
+              zx_20261121_3 M5：该唯一主行动已上移到页头（同一 onClick / 同一落库口径，不新开写口）。 */}
           {/* zx_20261108_1 B6: 按当前筛选导出 CSV（Pro 能力 `deliverable_export`）。
               `exportGate` 只用于**先禁用**并提前给出拒因；真正的闸在 main（`deliverable:exportCsv`）。
               读不到裁定（`null`）时不禁用——不因读档失败把功能藏掉。 */}
@@ -684,39 +717,39 @@ export default function DeliverablesPage() {
             className={`flex items-center gap-1 text-sm px-3 py-1.5 rounded-lg border ${exportGate?.unlocked === false ? 'bg-gray-50 text-gray-400 border-gray-200 cursor-not-allowed' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'} disabled:opacity-60`}>
             <Download className="w-3.5 h-3.5" />{exporting ? '导出中…' : '导出 CSV'}
           </button>
-          <button onClick={load} className="p-2 hover:bg-gray-100 rounded-lg"><RefreshCw className="w-4 h-4" /></button>
-        </div>
+          <button onClick={load} className="p-2 hover:bg-gray-100 rounded-lg" aria-label="刷新产出物列表"><RefreshCw className="w-4 h-4" /></button>
       </div>
 
       {/* zx_20261110_1 B5：读失败 ≠ 没有——列表/「加载更多」/筛选名录各自带因由与重试 */}
       {facetsErr && <div className="mb-3"><LoadFailure what="「筛选名录」" reason={facetsErr} onRetry={() => void loadFacets()} /></div>}
       {listErr && <div className="mb-3"><LoadFailure what="「产出物列表」" reason={listErr} onRetry={() => void (items.length > 0 ? loadMoreItems() : load())} busy={moreBusy} /></div>}
 
+      {/* zx_20261108_1 B6: 服务端已按当前筛选算过全量（`total === 0`），故这里两句是**同一个集合**
+          的两种解释：「库里没有」vs「筛不出来」。已退休提示同尺（`retiredCount` 来自同一 WHERE）。 */}
       {items.length === 0 ? (
         listErr ? null : (
-        <div className="bg-white rounded-lg border p-12 text-center text-gray-400">
-          <Package className="w-12 h-12 mx-auto mb-3 opacity-30" />
-          {/* zx_20261108_1 B6: 服务端已按当前筛选算过全量（`total === 0`），故这里两句话是**同一个集合**
-              的两种解释：「库里没有」vs「筛不出来」。已退休提示同尺（`retiredCount` 来自同一 WHERE）。 */}
-          <p className="text-lg mb-2">
-            {anyFilterActive ? '无匹配产出物' : retiredCount > 0 ? '当前产出物均已退休' : '暂无产出物'}
-          </p>
-          {anyFilterActive
-            ? <p className="text-xs text-gray-300">当前筛选条件下没有结果——试试清空搜索 / 项目 / 类型 / 状态 / 时间 / 任务 / 主成果筛选</p>
+        <EmptyState
+          icon={<Package className="w-10 h-10" />}
+          title={anyFilterActive ? '无匹配产出物' : retiredCount > 0 ? '当前产出物均已退休' : '暂无产出物'}
+          description={anyFilterActive
+            ? '当前筛选条件下没有结果——试试清空搜索 / 项目 / 类型 / 状态 / 时间 / 任务 / 主成果筛选'
             : retiredCount > 0
-              ? <p className="text-xs text-gray-300">全部 {retiredCount} 项产出物均已退休（重试后旧成果）。点击右上角「已退休 {retiredCount} 项」查看。</p>
+              ? <span className="tnum">全部 {retiredCount} 项产出物均已退休（重试后旧成果）。点击右上角「已退休 {retiredCount} 项」查看。</span>
               : null}
-        </div>
+        />
         )
       ) : (
         <div className="bg-white rounded-lg border overflow-hidden">
-          <table className="w-full text-sm">
+          {/* 窄窗（窗口较小时）表格会超出容器：必须给横向滚动，否则右侧列被 overflow-hidden 裁掉、看不见也够不着。
+              滚动只包表格；分页页脚留在外层，不随表横向移动。 */}
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[880px] text-sm tnum">
             <thead className="bg-gray-50 border-b">
               <tr>
                 {([['name','名称'],['project','所属项目'],['type','类型'],['status','状态'],['quality','质量'],['size','大小'],['updated','最近变更'],['created','创建时间']] as Array<[typeof sortBy,string]>).map(([f,label], idx) => (
                   <th key={f} className={`text-left p-3 font-medium ${f==='created'?'hidden md:table-cell':''} ${idx===7?'text-xs text-gray-400':''}`}>
                     <button type="button" onClick={() => toggleSort(f)} title={`按${label}排序`}
-                      className={`uppercase tracking-wide ${f==='created'?'hidden md:table-cell':''} inline-flex items-center gap-1 hover:text-gray-700 ${sortBy===f?'text-blue-600':''}`}>
+                      className={`uppercase tracking-wide ${f==='created'?'hidden md:table-cell':''} inline-flex items-center gap-1 hover:text-gray-700 ${sortBy===f?'text-accent':''}`}>
                       {label}<span className="text-[9px]">{sortBy===f?(sortAsc?'▲':'▼'):'⇅'}</span>
                     </button>
                   </th>
@@ -824,7 +857,7 @@ export default function DeliverablesPage() {
                         <span title={d.project_id || undefined}>{projLabel(d)}</span>
                         {d.task_id && (
                           <button type="button" onClick={(e) => { e.stopPropagation(); navigate(`/tasks/${d.task_id}`); }} title={`打开产出任务：${d.task_title || d.task_id}`}
-                            className="text-left text-[10px] text-blue-500 hover:text-blue-700 hover:underline truncate max-w-[200px]">
+                            className="text-left text-[10px] text-accent hover:text-accent hover:underline truncate max-w-[200px]">
                             ↳ 产出任务：{d.task_title || '未知任务'}
                           </button>
                         )}
@@ -838,7 +871,7 @@ export default function DeliverablesPage() {
                         )}
                         {/* zx_20260906_1 3a: 产出任务状态 chip——区分 任务已完成但成果 retired/进行中/失败 等溯源语义 */}
                         {d.task_id && d.task_status && (
-                          <span title="产出任务当前状态" className={`text-[9px] px-1 rounded shrink-0 ${d.task_status === 'completed' ? 'bg-green-50 text-green-600' : d.task_status === 'running' || d.task_status === 'executing' ? 'bg-blue-50 text-blue-500' : d.task_status === 'paused' ? 'bg-amber-50 text-amber-600' : d.task_status === 'failed' ? 'bg-red-50 text-red-500' : 'bg-gray-100 text-gray-500'}`}>
+                          <span title="产出任务当前状态" className={`text-[9px] px-1 rounded shrink-0 ${d.task_status === 'completed' ? 'bg-green-50 text-green-600' : d.task_status === 'running' || d.task_status === 'executing' ? 'bg-accent-soft text-accent' : d.task_status === 'paused' ? 'bg-amber-50 text-amber-600' : d.task_status === 'failed' ? 'bg-red-50 text-red-500' : 'bg-gray-100 text-gray-500'}`}>
                             {d.task_status === 'completed' ? '任务完成' : d.task_status === 'running' || d.task_status === 'executing' ? '任务进行中' : d.task_status === 'paused' ? '任务已暂停' : d.task_status === 'failed' ? '任务失败' : d.task_status === 'pending' || d.task_status === 'planning' || d.task_status === 'preparing' ? '任务待执行' : d.task_status}
                           </span>
                         )}
@@ -847,7 +880,7 @@ export default function DeliverablesPage() {
                     <td className="p-3"><span className={`text-xs px-2 py-0.5 rounded-full font-medium ${TYPE_COLORS[d.type] || 'bg-gray-100'}`}>{DELIVERABLE_TYPE_LABEL[d.type] || d.type}</span></td>
                     <td className="p-3">
                       <div className="flex items-center gap-1.5">
-                        <span className={`text-xs px-2 py-0.5 rounded-full ${STATUS_CLS[d.status] || (d.status === 'registered' ? 'bg-blue-100 text-blue-700' : d.status === 'running' ? 'bg-green-100 text-green-700' : d.status === 'failed' ? 'bg-red-100 text-red-600' : d.status === 'stopped' ? 'bg-orange-100 text-orange-600' : d.status === 'stale' ? 'bg-yellow-100 text-yellow-600' : 'bg-gray-100')}`}>
+                        <span className={`text-xs px-2 py-0.5 rounded-full ${STATUS_CLS[d.status] || (d.status === 'registered' ? 'bg-accent-soft text-accent' : d.status === 'running' ? 'bg-green-100 text-green-700' : d.status === 'failed' ? 'bg-red-100 text-red-600' : d.status === 'stopped' ? 'bg-orange-100 text-orange-600' : d.status === 'stale' ? 'bg-yellow-100 text-yellow-600' : 'bg-gray-100')}`}>
                           {DELIVERABLE_STATUS_LABEL[d.status] || d.status}
                         </span>
                         {isServiceType && (d.status === 'registered' || d.status === 'running') && (
@@ -897,16 +930,16 @@ export default function DeliverablesPage() {
                             zx_20260913 M2-6(维特根斯坦·名实相符): 旧判据 `type==='doc'` 对无版本的 doc 也亮钮 ⇒
                             点开只见"暂无版本记录"；而对有版本行的 code 却不亮。名实相符者是**版本行数**本身。 */}
                         {Number(d.version_count) > 0 && (
-                          <button onClick={() => { setVersionDelivId(d.id); setVersionName(d.name); setShowVersions(true); loadVersions(d.id); }} className="p-1 hover:bg-blue-50 rounded" title={`版本历史（${d.version_count} 版）`}><History className="w-3.5 h-3.5 text-blue-500" /></button>
+                          <button onClick={() => { setVersionDelivId(d.id); setVersionName(d.name); setShowVersions(true); loadVersions(d.id); }} className="p-1 hover:bg-accent-soft rounded" title={`版本历史（${d.version_count} 版）`}><History className="w-3.5 h-3.5 text-accent" /></button>
                         )}
                         {/* 预览：UI/doc类型 */}
                         {d.type === 'ui' && (
-                          <button onClick={() => handlePreview(d)} className="p-1 hover:bg-blue-50 rounded" title="在浏览器打开"><ExternalLink className="w-3.5 h-3.5 text-blue-500" /></button>
+                          <button onClick={() => handlePreview(d)} className="p-1 hover:bg-accent-soft rounded" title="在浏览器打开"><ExternalLink className="w-3.5 h-3.5 text-accent" /></button>
                         )}
                         {/* zx_20260911_5 M3-2(同一规则): code 与 doc 同门——此前 TYPE_LABELS 有 code 却无预览入口
                             zx_20260913 M2-6: 判据收敛到共享 isPreviewType（与 TaskDetailPage 同一份代码） */}
                         {isPreviewType(d.type) && (
-                          <button onClick={() => handlePreview(d)} className="p-1 hover:bg-blue-50 rounded" title="预览"><Eye className="w-3.5 h-3.5 text-blue-500" /></button>
+                          <button onClick={() => handlePreview(d)} className="p-1 hover:bg-accent-soft rounded" title="预览"><Eye className="w-3.5 h-3.5 text-accent" /></button>
                         )}
                         {d.type === 'ui' && d.file_path && (
                           <button onClick={() => handleCopyLink(d)} className="p-1 hover:bg-gray-50 rounded" title="复制链接"><Copy className="w-3.5 h-3.5 text-gray-400" /></button>
@@ -924,7 +957,7 @@ export default function DeliverablesPage() {
                         {rt?.endpoint && <span className="text-[10px] text-gray-400 truncate max-w-[100px]">{rt.endpoint}</span>}
                         {/* 手动注册到ANS：mcp/a2a 且未注册 */}
                         {['mcp', 'a2a'].includes(d.type) && d.status !== 'registered' && d.status !== 'running' && (
-                          <button onClick={() => handleRegister(d.id, d.name)} className="p-1 hover:bg-blue-50 rounded" title="注册到ANS"><Upload className="w-3.5 h-3.5 text-blue-500" /></button>
+                          <button onClick={() => handleRegister(d.id, d.name)} className="p-1 hover:bg-accent-soft rounded" title="注册到ANS"><Upload className="w-3.5 h-3.5 text-accent" /></button>
                         )}
                         {/* 删除 */}
                         <button onClick={() => handleDelete(d.id, d.name)} className="p-1 hover:bg-red-50 rounded" title="删除"><Trash2 className="w-3.5 h-3.5 text-red-400" /></button>
@@ -934,7 +967,8 @@ export default function DeliverablesPage() {
                 );
               })}
             </tbody>
-          </table>
+            </table>
+          </div>
           {/* zx_20260930 M4-2: 分页页脚——「已加载 K / 共 M」+「加载更多」。
               `M` 取**服务端**总数（与当页明细同集合、同范围真源），**不是**当页长度：本轮的靶心就是
               "计数与明细两个口径"（同上一条 M4-3）。
@@ -1017,7 +1051,7 @@ export default function DeliverablesPage() {
             </div>
             <div className="flex justify-end gap-2 mt-5">
               <button onClick={() => setShowCreate(false)} disabled={cBusy} className="px-3 py-1.5 border rounded-lg text-sm hover:bg-gray-50 disabled:opacity-40">取消</button>
-              <button onClick={submitCreate} disabled={cBusy} className="px-4 py-1.5 rounded-lg text-sm bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50">
+              <button onClick={submitCreate} disabled={cBusy} className="px-4 py-1.5 rounded-lg text-sm bg-accent text-white hover:bg-accent/90 disabled:opacity-50">
                 {cBusy ? '创建中…' : '创建'}
               </button>
             </div>
@@ -1034,7 +1068,7 @@ export default function DeliverablesPage() {
             <p className="text-xs text-gray-500 mb-3">退休后默认不在主列表（可在「显示已退休」中查看），并摘掉 ★；操作留痕。</p>
             <label className="block text-sm font-medium mb-1">理由（必填）</label>
             <textarea value={retireReason} onChange={(e) => setRetireReason(e.target.value)} rows={3} autoFocus
-              className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y"
+              className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent resize-y"
               placeholder="如：一次性探针脚本，不是交付成果" />
             <div className="flex justify-end gap-2 mt-4">
               <button onClick={() => setRetireTarget(null)} disabled={retireBusy} className="px-3 py-1.5 border rounded-lg text-sm hover:bg-gray-50 disabled:opacity-40">取消</button>
@@ -1126,7 +1160,7 @@ export default function DeliverablesPage() {
               <div className="flex items-center gap-2">
                 {preview.filePath && <button onClick={() => { navigator.clipboard.writeText(preview.filePath || ''); showToast('路径已复制', 'success'); }} className="p-1 hover:bg-gray-100 rounded" title="复制路径"><Copy className="w-4 h-4 text-gray-400" /></button>}
                 {isLocalPath(preview.filePath) && <button onClick={() => handleOpen(preview.id, 'reveal')} className="p-1 hover:bg-gray-100 rounded" title="在文件夹中显示"><FolderOpen className="w-4 h-4 text-gray-400" /></button>}
-                {preview.type === 'ui' && preview.filePath && <button onClick={async () => { try { await invoke('shell:openExternal', preview.filePath || ''); } catch {} }} className="p-1 hover:bg-blue-100 rounded" title="在浏览器中打开"><ExternalLink className="w-4 h-4 text-blue-500" /></button>}
+                {preview.type === 'ui' && preview.filePath && <button onClick={async () => { try { await invoke('shell:openExternal', preview.filePath || ''); } catch {} }} className="p-1 hover:bg-accent-soft rounded" title="在浏览器中打开"><ExternalLink className="w-4 h-4 text-accent" /></button>}
                 <button onClick={() => setPreview(null)} className="p-1 hover:bg-gray-100 rounded"><X className="w-5 h-5" /></button>
               </div>
             </div>

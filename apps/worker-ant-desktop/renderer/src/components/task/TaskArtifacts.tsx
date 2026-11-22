@@ -110,7 +110,7 @@ export default function TaskArtifacts({
         <span className={`text-xs px-1.5 py-0.5 rounded-full ${d.status === 'running' ? 'bg-green-100 text-green-700' : 'bg-gray-100'}`}>
           {statusText(DELIVERABLE_STATUS_LABEL, d.status)}
         </span>
-        {isPreviewType(d.type) && <button onClick={() => onPreview(d)} title="预览" className="p-0.5 hover:bg-blue-50 rounded"><Eye className="w-3.5 h-3.5 text-blue-500" /></button>}
+        {isPreviewType(d.type) && <button onClick={() => onPreview(d)} title="预览" className="p-0.5 hover:bg-accent-soft rounded"><Eye className="w-3.5 h-3.5 text-accent" /></button>}
         {isPreviewType(d.type) && drawerEnabled && <button onClick={() => onOpenDrawer(d.id)} title="版本流详情(抽屉)" className="p-0.5 hover:bg-amber-50 rounded"><History className="w-3.5 h-3.5 text-amber-500" /></button>}
       </span>
     </div>
@@ -132,7 +132,7 @@ export default function TaskArtifacts({
     <div className="bg-white rounded-lg border p-4">
       <button type="button" onClick={() => setOpen((v) => !v)} className="w-full text-left font-medium text-sm flex items-center gap-1">
         {open ? <ChevronDown className="w-4 h-4 text-gray-400 shrink-0" /> : <ChevronRight className="w-4 h-4 text-gray-400 shrink-0" />}
-        <PackageIcon className="w-4 h-4 text-purple-500 shrink-0" />产出物
+        <PackageIcon className="w-4 h-4 text-accent shrink-0" />产出物
         {/* 计数取服务端全量口径（`total`）——印 `items.length` 会把"这一批"说成"一共就这些"，与「加载更多」自相矛盾。 */}
         <span className="text-[10px] font-normal text-gray-400">本任务（含子任务）{total} 条</span>
         {claims.length > 0 && (

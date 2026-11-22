@@ -35,11 +35,11 @@ export default function UsersPage() {
   async function handleInvite() { try { const r = await invoke<{url:string;token:string;expires_at:string}>('auth:invite'); setInviteLink(r.url); } catch(e) { alert((e as Error).message); } }
 
   const roleBadge = (r: string) => {
-    const m: Record<string, string> = { super_admin: 'bg-red-100 text-red-700', admin: 'bg-orange-100 text-orange-700', developer: 'bg-blue-100 text-blue-700', viewer: 'bg-gray-100 text-gray-500' };
+    const m: Record<string, string> = { super_admin: 'bg-red-100 text-red-700', admin: 'bg-orange-100 text-orange-700', developer: 'bg-accent-soft text-accent', viewer: 'bg-gray-100 text-gray-500' };
     return m[r] || 'bg-gray-100';
   };
 
-  if (loading) return <div className="flex justify-center py-12"><div className="animate-spin h-8 w-8 border-2 border-blue-500 border-t-transparent rounded-full"/></div>;
+  if (loading) return <div className="flex justify-center py-12"><div className="animate-spin h-8 w-8 border-2 border-accent border-t-transparent rounded-full"/></div>;
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
@@ -51,8 +51,8 @@ export default function UsersPage() {
         </div>
         <div className="flex items-center gap-2">
           <button onClick={load} className="p-2 hover:bg-gray-100 rounded-lg"><RefreshCw className="w-4 h-4"/></button>
-          <button onClick={handleInvite} disabled={seatsFull(seats)} title={seatsFull(seats) ? '本机账号已满：邀请发出也接不进来，升级档位可增加上限' : undefined} className="flex items-center gap-1 px-3 py-1.5 bg-purple-600 text-white rounded-lg text-sm hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed"><Link className="w-3.5 h-3.5"/>邀请用户</button>
-          <button onClick={()=>setShowAdd(true)} disabled={seatsFull(seats)} title={seatsFull(seats) ? '本机账号已满：升级档位可增加上限' : undefined} className="flex items-center gap-1 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"><Plus className="w-3.5 h-3.5"/>添加用户</button>
+          <button onClick={handleInvite} disabled={seatsFull(seats)} title={seatsFull(seats) ? '本机账号已满：邀请发出也接不进来，升级档位可增加上限' : undefined} className="flex items-center gap-1 px-3 py-1.5 bg-accent text-white rounded-lg text-sm hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed"><Link className="w-3.5 h-3.5"/>邀请用户</button>
+          <button onClick={()=>setShowAdd(true)} disabled={seatsFull(seats)} title={seatsFull(seats) ? '本机账号已满：升级档位可增加上限' : undefined} className="flex items-center gap-1 px-3 py-1.5 bg-accent text-white rounded-lg text-sm hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed"><Plus className="w-3.5 h-3.5"/>添加用户</button>
         </div>
       </div>
       {seatsFull(seats) && (
@@ -79,7 +79,7 @@ export default function UsersPage() {
                 <td className="p-3"><span className={`text-xs px-2 py-0.5 rounded-full font-medium ${roleBadge(u.role)}`}>{u.role}</span></td>
                 <td className="p-3 text-gray-400 hidden md:table-cell">{formatDbTime(u.created_at, { dateOnly: true })}</td>
                 <td className="p-3 text-right">
-                  <button onClick={() => { setEditUser(u); setEditRole(u.role); }} className="p-1.5 hover:bg-blue-50 rounded" title="修改角色"><Shield className="w-4 h-4 text-blue-500"/></button>
+                  <button onClick={() => { setEditUser(u); setEditRole(u.role); }} className="p-1.5 hover:bg-accent-soft rounded" title="修改角色"><Shield className="w-4 h-4 text-accent"/></button>
                   <button onClick={() => { setResetPwUser(u); setNewPw(''); }} className="p-1.5 hover:bg-orange-50 rounded" title="重置密码"><Key className="w-4 h-4 text-orange-500"/></button>
                 </td>
               </tr>
@@ -94,7 +94,7 @@ export default function UsersPage() {
           <div className="bg-white rounded-xl shadow-lg p-6 w-full max-w-sm" onClick={e => e.stopPropagation()}>
             <h3 className="text-lg font-bold mb-4">修改角色 — {editUser.email}</h3>
             <select value={editRole} onChange={e => setEditRole(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm mb-4">{ROLES.map(r => <option key={r} value={r}>{r}</option>)}</select>
-            <div className="flex justify-end gap-2"><button onClick={() => setEditUser(null)} className="px-4 py-2 border rounded-lg text-sm">取消</button><button onClick={handleRoleChange} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm">保存</button></div>
+            <div className="flex justify-end gap-2"><button onClick={() => setEditUser(null)} className="px-4 py-2 border rounded-lg text-sm">取消</button><button onClick={handleRoleChange} className="px-4 py-2 bg-accent text-white rounded-lg text-sm">保存</button></div>
           </div>
         </div>
       )}
@@ -110,7 +110,7 @@ export default function UsersPage() {
               <div><label className="text-sm font-medium">姓名</label><input value={addForm.name} onChange={e=>setAddForm({...addForm,name:e.target.value})} className="w-full px-3 py-2 border rounded-lg text-sm mt-1"/></div>
               <div><label className="text-sm font-medium">角色</label><select value={addForm.role} onChange={e=>setAddForm({...addForm,role:e.target.value})} className="w-full px-3 py-2 border rounded-lg text-sm mt-1">{ROLES.map(r=><option key={r} value={r}>{r}</option>)}</select></div>
             </div>
-            <div className="flex justify-end gap-2 mt-6"><button onClick={()=>setShowAdd(false)} className="px-4 py-2 border rounded-lg text-sm">取消</button><button onClick={handleAddUser} disabled={!addForm.email||!addForm.password||seatsFull(seats)} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm disabled:opacity-50">添加</button></div>
+            <div className="flex justify-end gap-2 mt-6"><button onClick={()=>setShowAdd(false)} className="px-4 py-2 border rounded-lg text-sm">取消</button><button onClick={handleAddUser} disabled={!addForm.email||!addForm.password||seatsFull(seats)} className="px-4 py-2 bg-accent text-white rounded-lg text-sm disabled:opacity-50">添加</button></div>
           </div>
         </div>
       )}
@@ -121,7 +121,7 @@ export default function UsersPage() {
           <div className="bg-white rounded-xl shadow-lg p-6 w-full max-w-sm" onClick={e => e.stopPropagation()}>
             <h3 className="text-lg font-bold mb-4">重置密码 — {resetPwUser.email}</h3>
             <div><label className="text-sm font-medium">新密码</label><input type="password" value={newPw} onChange={e=>setNewPw(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm mt-1" placeholder="最小6位"/></div>
-            <div className="flex justify-end gap-2 mt-6"><button onClick={()=>setResetPwUser(null)} className="px-4 py-2 border rounded-lg text-sm">取消</button><button onClick={handleResetPw} disabled={!newPw} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm disabled:opacity-50">重置</button></div>
+            <div className="flex justify-end gap-2 mt-6"><button onClick={()=>setResetPwUser(null)} className="px-4 py-2 border rounded-lg text-sm">取消</button><button onClick={handleResetPw} disabled={!newPw} className="px-4 py-2 bg-accent text-white rounded-lg text-sm disabled:opacity-50">重置</button></div>
           </div>
         </div>
       )}

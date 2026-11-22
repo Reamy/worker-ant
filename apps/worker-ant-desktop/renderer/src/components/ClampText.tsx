@@ -31,7 +31,7 @@ export function ClampText({
         <button
           type="button"
           onClick={() => setExpanded((v) => !v)}
-          className="mt-0.5 text-[11px] text-blue-600 hover:underline"
+          className="mt-0.5 text-[11px] text-accent hover:underline"
         >
           {expanded ? '收起' : `展开全文（共 ${text.length} 字）`}
         </button>

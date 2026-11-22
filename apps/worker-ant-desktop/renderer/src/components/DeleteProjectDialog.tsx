@@ -52,7 +52,7 @@ export default function DeleteProjectDialog({ projectId, projectName, onCancel, 
             type="checkbox"
             checked={removeDataDir}
             onChange={(e) => setRemoveDataDir(e.target.checked)}
-            className="mt-0.5 h-4 w-4 accent-blue-600"
+            className="mt-0.5 h-4 w-4 accent-[var(--color-accent)]"
           />
           <span className="text-sm">
             同时删除项目数据目录

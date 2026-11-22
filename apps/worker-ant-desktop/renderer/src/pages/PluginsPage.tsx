@@ -107,7 +107,7 @@ export default function PluginsPage() {
         <h2 className="text-xl font-bold">插件市场</h2>
         <div className="flex items-center gap-2">
           <button onClick={load} className="p-2 hover:bg-gray-100 rounded-lg" title="刷新"><RefreshCw className="w-4 h-4" /></button>
-          <button onClick={() => setShowMarketplaceForm(true)} className="flex items-center gap-1 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"><Globe className="w-3.5 h-3.5" />添加市场</button>
+          <button onClick={() => setShowMarketplaceForm(true)} className="flex items-center gap-1 px-3 py-1.5 bg-accent text-white rounded-lg text-sm hover:bg-accent/90"><Globe className="w-3.5 h-3.5" />添加市场</button>
         </div>
       </div>
       {error && <p className="text-red-500 text-sm mb-4">错误: {error}</p>}
@@ -120,7 +120,7 @@ export default function PluginsPage() {
 
       {/* 状态切换 */}
       <div className="flex gap-2 mb-3">
-        {[{v:'available',l:'未安装',c:'bg-blue-600'},{v:'installed',l:'已安装',c:'bg-green-600'},{v:'error',l:'错误',c:'bg-red-500'},{v:'all',l:'全部',c:'bg-gray-500'}].map(s => (
+        {[{v:'available',l:'未安装',c:'bg-accent'},{v:'installed',l:'已安装',c:'bg-green-600'},{v:'error',l:'错误',c:'bg-red-500'},{v:'all',l:'全部',c:'bg-gray-500'}].map(s => (
           <button key={s.v} onClick={() => setStateFilter(s.v)} className={`px-3 py-1 rounded-lg text-xs font-medium text-white ${stateFilter === s.v ? s.c : 'bg-gray-300'}`}>{s.l}</button>
         ))}
       </div>
@@ -129,7 +129,7 @@ export default function PluginsPage() {
       <div className="flex gap-2 mb-3 flex-wrap items-center">
         <div className="relative flex-1 max-w-sm">
           <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-          <input value={search} onChange={e => setSearch(e.target.value)} className="w-full pl-9 pr-3 py-1.5 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="搜索插件..." />
+          <input value={search} onChange={e => setSearch(e.target.value)} className="w-full pl-9 pr-3 py-1.5 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" placeholder="搜索插件..." />
         </div>
         <select value={activeMarket} onChange={e => setActiveMarket(e.target.value)} className="px-2 py-1.5 border rounded-lg text-sm bg-white">
           <option value="">全部市场</option>
@@ -144,9 +144,9 @@ export default function PluginsPage() {
 
       {/* 分类筛选 */}
       <div className="flex gap-1.5 mb-4 flex-wrap">
-        <button onClick={() => setActiveCat('')} className={`px-2.5 py-1 rounded text-xs font-medium ${activeCat === '' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>全部</button>
+        <button onClick={() => setActiveCat('')} className={`px-2.5 py-1 rounded text-xs font-medium ${activeCat === '' ? 'bg-accent text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>全部</button>
         {categories.map(c => (
-          <button key={c.category} onClick={() => setActiveCat(c.category)} className={`px-2.5 py-1 rounded text-xs font-medium ${activeCat === c.category ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>{catLabel(c.category)} ({c.count})</button>
+          <button key={c.category} onClick={() => setActiveCat(c.category)} className={`px-2.5 py-1 rounded text-xs font-medium ${activeCat === c.category ? 'bg-accent text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>{catLabel(c.category)} ({c.count})</button>
         ))}
       </div>
 
@@ -157,7 +157,7 @@ export default function PluginsPage() {
           <div className="flex gap-2 flex-wrap">
             {marketplaces.map(m => (
               <div key={m.id} className="flex items-center gap-2 border rounded-lg px-3 py-1.5 text-xs">
-                <Globe className="w-3 h-3 text-blue-500" />
+                <Globe className="w-3 h-3 text-accent" />
                 <span className="font-medium">{m.name}</span>
                 <span className="text-gray-400">{m.source_type}</span>
                 <button onClick={() => handleRefreshMarketplace(m.id)} className="hover:bg-gray-100 rounded p-0.5" title="刷新"><RefreshCw className="w-3 h-3" /></button>
@@ -177,7 +177,7 @@ export default function PluginsPage() {
       )}
 
       {/* 插件列表 */}
-      {loading ? <div className="flex justify-center py-8"><div className="animate-spin h-6 w-6 border-2 border-blue-500 border-t-transparent rounded-full" /></div> : (
+      {loading ? <div className="flex justify-center py-8"><div className="animate-spin h-6 w-6 border-2 border-accent border-t-transparent rounded-full" /></div> : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {filtered.map(p => {
             const stars = Math.round(p.stars || 0);
@@ -202,7 +202,7 @@ export default function PluginsPage() {
                     <span className="text-gray-400">{p.install_count || 0}次安装</span>
                   </div>
                   <div className="flex items-center gap-1">
-                    <button onClick={() => showDetail(p.id)} className="p-1 hover:bg-gray-100 rounded" title="详情"><Eye className="w-3.5 h-3.5 text-blue-500" /></button>
+                    <button onClick={() => showDetail(p.id)} className="p-1 hover:bg-gray-100 rounded" title="详情"><Eye className="w-3.5 h-3.5 text-accent" /></button>
                     {p.state === 'installed' ? (
                       <>
                         {p.enabled === 0
@@ -211,7 +211,7 @@ export default function PluginsPage() {
                         }
                         {(p.category === 'mcp' || p.category === 'a2a') && p.enabled === 1 && (
                           <>
-                            <button onClick={() => handleStart(p.id)} className="text-xs px-2 py-0.5 bg-blue-100 text-blue-700 rounded hover:bg-blue-200" title="启动">▶</button>
+                            <button onClick={() => handleStart(p.id)} className="text-xs px-2 py-0.5 bg-accent-soft text-accent rounded hover:bg-accent-soft" title="启动">▶</button>
                             <button onClick={() => handleStop(p.id)} className="text-xs px-2 py-0.5 bg-orange-100 text-orange-700 rounded hover:bg-orange-200" title="停止">■</button>
                           </>
                         )}
@@ -222,7 +222,7 @@ export default function PluginsPage() {
                     ) : (
                       <button onClick={() => handleInstall(p.id)} disabled={installing.has(p.id) || installLocked}
                         title={installLocked ? installGate!.detail : undefined}
-                        className="flex items-center gap-1 text-xs px-2 py-0.5 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50">
+                        className="flex items-center gap-1 text-xs px-2 py-0.5 bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50">
                         <Download className="w-3 h-3" />{installing.has(p.id) ? '安装中...' : '安装'}
                       </button>
                     )}
@@ -244,7 +244,7 @@ export default function PluginsPage() {
       {!loading && pluginsHasMore && (
         <div className="flex justify-center mt-4">
           <button onClick={loadMore} disabled={loadingMore}
-            className="px-4 py-1.5 border border-blue-300 text-blue-700 rounded-lg text-sm hover:bg-blue-50 disabled:opacity-50">
+            className="px-4 py-1.5 border border-accent/30 text-accent rounded-lg text-sm hover:bg-accent-soft disabled:opacity-50">
             {loadingMore ? '加载中...' : `加载更多（还剩 ${pluginsTotal - plugins.length} 个）`}
           </button>
         </div>
@@ -287,20 +287,20 @@ function MarketplaceDialog({ onClose, onSuccess }: { onClose: () => void; onSucc
           <button onClick={onClose} className="p-1 hover:bg-gray-100 rounded"><X className="w-4 h-4" /></button>
         </div>
         <div className="space-y-3">
-          <div><label className="block text-sm font-medium mb-1">市场名称 *</label><input value={name} onChange={e => setName(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="如 worker-ant-official" /></div>
+          <div><label className="block text-sm font-medium mb-1">市场名称 *</label><input value={name} onChange={e => setName(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" placeholder="如 worker-ant-official" /></div>
           <div><label className="block text-sm font-medium mb-1">来源类型 *</label>
-            <select value={sourceType} onChange={e => setSourceType(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <select value={sourceType} onChange={e => setSourceType(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-accent">
               <option value="github">GitHub</option>
               <option value="gitee">Gitee</option>
               <option value="url">URL</option>
             </select>
           </div>
-          <div><label className="block text-sm font-medium mb-1">来源URL *</label><input value={sourceUrl} onChange={e => setSourceUrl(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder={sourceType === 'github' ? 'owner/repo' : 'https://...'} /></div>
-          <div><label className="block text-sm font-medium mb-1">分支/标签</label><input value={sourceRef} onChange={e => setSourceRef(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="main" /></div>
+          <div><label className="block text-sm font-medium mb-1">来源URL *</label><input value={sourceUrl} onChange={e => setSourceUrl(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" placeholder={sourceType === 'github' ? 'owner/repo' : 'https://...'} /></div>
+          <div><label className="block text-sm font-medium mb-1">分支/标签</label><input value={sourceRef} onChange={e => setSourceRef(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" placeholder="main" /></div>
         </div>
         <div className="flex justify-end gap-2 mt-6">
           <button onClick={onClose} className="px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">取消</button>
-          <button onClick={submit} disabled={!name || !sourceUrl || saving} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50">{saving ? '保存中...' : '保存并刷新'}</button>
+          <button onClick={submit} disabled={!name || !sourceUrl || saving} className="px-4 py-2 bg-accent text-white rounded-lg text-sm hover:bg-accent/90 disabled:opacity-50">{saving ? '保存中...' : '保存并刷新'}</button>
         </div>
       </div>
     </div>
@@ -349,14 +349,14 @@ function PluginDetailDialog({ plugin, onClose, onInstall, onUninstall, onEnable,
             <div className="p-3 bg-gray-50 rounded text-xs text-gray-600">
               {plugin.description}
               {plugin.language === 'en' && !plugin.description_zh && !translatedText && (
-                <button onClick={async ()=>{setTranslating(true);try{const r=await ansProxy.post<{zh?:string}>('/api/v1/plugins/translate',{text:plugin.description||''});if(r&&(r as {zh?:string}).zh){setTranslatedText((r as {zh:string}).zh);}}catch{setTranslatedText('');}setTranslating(false);}} className="ml-2 text-blue-500 hover:text-blue-700 underline text-[10px]">{translating ? '翻译中...' : '翻译'}</button>
+                <button onClick={async ()=>{setTranslating(true);try{const r=await ansProxy.post<{zh?:string}>('/api/v1/plugins/translate',{text:plugin.description||''});if(r&&(r as {zh?:string}).zh){setTranslatedText((r as {zh:string}).zh);}}catch{setTranslatedText('');}setTranslating(false);}} className="ml-2 text-accent hover:text-accent underline text-[10px]">{translating ? '翻译中...' : '翻译'}</button>
               )}
               {translatedText && (
-                <div className="mt-2 pt-2 border-t border-gray-200 text-blue-800">中文: {translatedText}</div>
+                <div className="mt-2 pt-2 border-t border-gray-200 text-accent">中文: {translatedText}</div>
               )}
             </div>
           )}
-          {plugin.description_zh && <div className="p-3 bg-blue-50 rounded text-xs text-blue-800">{plugin.description_zh}</div>}
+          {plugin.description_zh && <div className="p-3 bg-accent-soft rounded text-xs text-accent">{plugin.description_zh}</div>}
           {/* 运行时状态 */}
           {isInstalled && runtimeStatus && (
             <div className="p-3 bg-gray-50 rounded text-xs">
@@ -382,7 +382,7 @@ function PluginDetailDialog({ plugin, onClose, onInstall, onUninstall, onEnable,
               }
               <button onClick={onUninstall} className="px-3 py-1.5 border border-red-300 rounded-lg text-sm text-red-500 hover:bg-red-50"><Trash2 className="w-3 h-3 inline mr-1" />卸载</button>
             </>) : (
-              <button onClick={onInstall} disabled={installing.has(plugin.id) || installLocked} title={installLocked ? installDetail : undefined} className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50"><Download className="w-3 h-3 inline mr-1" />{installing.has(plugin.id) ? '安装中...' : '安装'}</button>
+              <button onClick={onInstall} disabled={installing.has(plugin.id) || installLocked} title={installLocked ? installDetail : undefined} className="px-3 py-1.5 bg-accent text-white rounded-lg text-sm hover:bg-accent/90 disabled:opacity-50"><Download className="w-3 h-3 inline mr-1" />{installing.has(plugin.id) ? '安装中...' : '安装'}</button>
             )}
           </div>
         </div>

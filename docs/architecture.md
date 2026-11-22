@@ -1,6 +1,6 @@
 # 工蚁系统架构文档
 
-> **现行形态（2026-11-21，v0.8.0）**：只有一个应用形态 —— **Electron 桌面端**（整个引擎运行在 main 进程内）+ **ANS**（AI 资源中心，默认 `:27183`）。
+> **现行形态（2026-11-21，v0.9.0）**：只有一个应用形态 —— **Electron 桌面端**（整个引擎运行在 main 进程内）+ **ANS**（AI 资源中心，默认 `:27183`）。
 > 2026-08-08 之前的「浏览器三服务（:9410 Web / :9411 Server / :3001 ANS）」已归档到 `apps/_archive/`，**勿改勿跑**，本文不再描述。
 > 以源码为准。
 
@@ -52,6 +52,16 @@
 | `core/external-calls.ts`                                      | 门内执行点：`/capabilities` 范围过滤、`/invoke`/`/intent` 范围+频率+联动复核                           |
 | `core/device-automation.ts`                                   | 设备联动规则：状态/属性/每日时刻触发，冷却/试运行/运行账；动作仍走 `runDeviceControl`                  |
 | `core/remote-workspace.ts` / `core/ops-overview.ts`           | 跨机只读分析工作区（有界/可清理）；运维一页（只读，读不到写原因）                                      |
+
+### v0.9.0 新增模块（按职责）
+
+| 模块                                                   | 职责                                                                                        |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------- |
+| `core/model-performance.ts`                            | 模型实绩只读派生：单数/成功率/p50·p90 token/均成本；样本 <3 不报成功率、缺数不补 0          |
+| `core/self-evolve-scan.ts`                             | 自省提案生产者：30 天 ≥20 次拒绝归并 `rule` 提案，6h 巡检，只产 pending                     |
+| `core/self-evolve-impact.ts`                           | 批准前后同类拒绝频率复盘（按天归一；证据不足如实说）                                        |
+| `core/knowledge-inbox.ts`                              | 知识待办只读读模型：经验/技能/领域包/提案四组，读不到≠0                                     |
+| `renderer/src/lib/theme.ts` + `renderer/src/index.css` | 界面主题三态（system/light/dark）、`@theme` 浅色 token、`:root.wa-dark` 暗色 token 与兼容层 |
 
 ## 技术栈
 

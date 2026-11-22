@@ -88,6 +88,8 @@ import type {
 import type { KnowledgeProfileView } from '../../../src/main/ipc/knowledge.ipc.js';
 // zx_20261027_3 M6a: 知识卡成效形状同引 main core 真源（仅类型，打包期擦除）。
 import type { KnowledgeCardUsage } from '../../../src/main/core/knowledge-cards.js';
+// zx_20261121_3 M1「用·账」：知识待办读模型（仅类型；打包期擦除）。
+import type { InboxGroup, LessonItem, KnowledgeInbox } from '../../../src/main/core/knowledge-inbox.js';
 // zx_20261021_3 批五: 领域包的资产/注入成效形状同引 main 真源（仅类型，打包期擦除）。
 import type { DomainPackDetail, DomainPackListRow, DomainPackPayload, DomainPackStats } from '../../../src/main/core/domain-pack.js';
 // zx_20261030_1 M6「荐」: 相似项目条目与 main 侧同形（IPC 只传纯数据）。
@@ -374,6 +376,12 @@ export const knowledge = {
   // zx_20261113_4 B2「荐」：首屏业务知识状态（画像 / 已启用包 / 待采纳建议）一次回齐。
   businessStatus: (projectId: string) =>
     ipcCall<KnowledgeBusinessStatus>('knowledge:business-status', { projectId }),
+  // zx_20261121_3 M1「用·账」：四组知识待办（只读；每组各自可失败，读不到 ≠ 0）。
+  inbox: (limit?: number) =>
+    ipcCall<KnowledgeInbox>('knowledge:inbox', { limit }),
+  // 某任务自己的待审经验（任务详情就地决定用）。
+  forTask: (taskId: string, limit?: number) =>
+    ipcCall<InboxGroup<LessonItem>>('knowledge:forTask', { taskId, limit }),
 };
 
 /** 手动吸收回执（与 main 侧 `knowledge:absorb-now` 返回同形；数如实上屏）。 */

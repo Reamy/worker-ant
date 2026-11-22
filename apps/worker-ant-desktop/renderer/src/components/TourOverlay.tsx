@@ -59,7 +59,7 @@ export default function TourOverlay({ onDone, onSkip }: { onDone: () => void; on
     <div className="fixed inset-0 z-[60]">
       {/* 高亮环：`box-shadow` 铺满四周做遮罩，环内即"聚光灯"（无需 SVG 挖洞）。 */}
       {rect ? (
-        <div className="pointer-events-none fixed z-[61] rounded-md ring-2 ring-blue-500 transition-all"
+        <div className="pointer-events-none fixed z-[61] rounded-md ring-2 ring-accent transition-all"
           style={{
             top: rect.top - 4, left: rect.left - 4, width: rect.width + 8, height: rect.height + 8,
             boxShadow: '0 0 0 9999px rgba(0,0,0,0.45)',
@@ -72,7 +72,7 @@ export default function TourOverlay({ onDone, onSkip }: { onDone: () => void; on
         style={{ left: 248, top: cardTop }}>
         <div className="flex items-start justify-between gap-3 mb-2">
           <div className="min-w-0">
-            <p className="text-[11px] font-semibold text-blue-600 uppercase tracking-wider">
+            <p className="text-[11px] font-semibold text-accent uppercase tracking-wider">
               功能导览 · {i + 1}/{STEPS.length}
             </p>
             <h3 className="text-base font-bold text-gray-800 truncate">{step.label}</h3>
@@ -86,7 +86,7 @@ export default function TourOverlay({ onDone, onSkip }: { onDone: () => void; on
         {/* 进度点：一眼看出"走到哪、还剩几步"（不是必需，但没有它用户不知何时结束）。 */}
         <div className="flex items-center gap-1 mb-3">
           {STEPS.map((s, k) => (
-            <span key={s.to} className={`h-1.5 rounded-full transition-all ${k === i ? 'w-4 bg-blue-500' : 'w-1.5 bg-gray-200'}`} />
+            <span key={s.to} className={`h-1.5 rounded-full transition-all ${k === i ? 'w-4 bg-accent' : 'w-1.5 bg-gray-200'}`} />
           ))}
         </div>
 
@@ -98,7 +98,7 @@ export default function TourOverlay({ onDone, onSkip }: { onDone: () => void; on
               <ChevronLeft className="w-3.5 h-3.5" />上一步
             </button>
             <button type="button" onClick={() => (last ? onDone() : setI((v) => v + 1))}
-              className="flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-blue-600 text-white hover:bg-blue-700">
+              className="flex items-center gap-1 px-3 py-1.5 text-sm rounded-md bg-accent text-white hover:bg-accent/90">
               {last ? '开始使用' : '下一步'}<ChevronRight className="w-3.5 h-3.5" />
             </button>
           </div>

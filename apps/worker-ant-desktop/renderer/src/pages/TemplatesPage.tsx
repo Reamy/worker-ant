@@ -76,14 +76,14 @@ export default function TemplatesPage() {
     setTesting(false);
   }
 
-  if (loading) return <div className="flex justify-center py-12"><div className="animate-spin h-8 w-8 border-2 border-blue-500 border-t-transparent rounded-full" /></div>;
+  if (loading) return <div className="flex justify-center py-12"><div className="animate-spin h-8 w-8 border-2 border-accent border-t-transparent rounded-full" /></div>;
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
         <h2 className="text-xl font-bold">任务模板</h2>
         <div className="flex items-center gap-2">
           <button onClick={load} className="p-2 hover:bg-gray-100 rounded-lg" title="刷新"><RefreshCw className="w-4 h-4" /></button>
-          <button onClick={() => { setEditItem(null); setShowForm(true); }} className="flex items-center gap-1 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"><Plus className="w-3.5 h-3.5" />新建模板</button>
+          <button onClick={() => { setEditItem(null); setShowForm(true); }} className="flex items-center gap-1 px-3 py-1.5 bg-accent text-white rounded-lg text-sm hover:bg-accent/90"><Plus className="w-3.5 h-3.5" />新建模板</button>
         </div>
       </div>
       {error && <p className="text-red-500 text-sm mb-4">错误: {error}</p>}
@@ -91,16 +91,16 @@ export default function TemplatesPage() {
       {/* 匹配测试 */}
       <div className="bg-white rounded-lg border p-4 mb-6">
         <div className="flex items-center gap-2 mb-2">
-          <Play className="w-4 h-4 text-blue-500" />
+          <Play className="w-4 h-4 text-accent" />
           <h3 className="text-sm font-semibold text-gray-700">匹配测试（与任务创建同口径：守卫看标题+描述 → 关键词优先 → 语义兜底）</h3>
         </div>
         <div className="space-y-2">
           <input value={testTitle} onChange={e => setTestTitle(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') handleTest(); }}
-            className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="任务标题（关键词命中 ≥2 参与匹配）..." />
+            className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" placeholder="任务标题（关键词命中 ≥2 参与匹配）..." />
           <textarea value={testDesc} onChange={e => setTestDesc(e.target.value)} rows={2}
-            className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y" placeholder="任务描述（可选；关键词命中 ≥3 参与匹配）..." />
+            className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent resize-y" placeholder="任务描述（可选；关键词命中 ≥3 参与匹配）..." />
           <div className="flex justify-end">
-            <button onClick={handleTest} disabled={testing || (!testTitle.trim() && !testDesc.trim())} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50">{testing ? '测试中...' : '测试'}</button>
+            <button onClick={handleTest} disabled={testing || (!testTitle.trim() && !testDesc.trim())} className="px-4 py-2 bg-accent text-white rounded-lg text-sm hover:bg-accent/90 disabled:opacity-50">{testing ? '测试中...' : '测试'}</button>
           </div>
         </div>
         {/* zx_20260924: 结果分三态——**会拆**（走的就是 task:create 那条路）/ **本可命中但守卫不拆** / 未命中。
@@ -123,7 +123,7 @@ export default function TemplatesPage() {
             <span className="text-green-600 font-medium">命中模板：{testResult.name}</span>
             <span className="text-gray-400 ml-2">分类 {testResult.category} · 优先级 {testResult.priority}{testResult.success_rate != null ? ` · 成功率 ${(testResult.success_rate * 100).toFixed(0)}%` : ''}</span>
             {/* B2: 匹配可解释性——展示匹配方式与命中依据 */}
-            <span className={`ml-2 text-xs px-1.5 py-0.5 rounded-full ${testResult.method === 'semantic' ? 'bg-indigo-50 text-indigo-600' : 'bg-blue-50 text-blue-600'}`}>{testResult.method === 'semantic' ? `语义匹配${testResult.similarity != null ? ` 相似度 ${testResult.similarity}` : ''}` : '关键词匹配'}</span>
+            <span className={`ml-2 text-xs px-1.5 py-0.5 rounded-full ${testResult.method === 'semantic' ? 'bg-accent-soft text-accent' : 'bg-accent-soft text-accent'}`}>{testResult.method === 'semantic' ? `语义匹配${testResult.similarity != null ? ` 相似度 ${testResult.similarity}` : ''}` : '关键词匹配'}</span>
             {testResult.field ? <span className="ml-2 text-xs px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-600">命中{testResult.field === 'title' ? '标题' : '描述'}</span> : null}
             {testResult.hitKeywords.length > 0 && <span className="text-gray-500 ml-2">命中关键词: {testResult.hitKeywords.join(', ')}</span>}
             {testResult.hitKeywords.length === 0 && testResult.method === 'semantic' && <span className="text-gray-400 ml-2">（无关键词命中，靠语义兜底命中）</span>}
@@ -137,7 +137,7 @@ export default function TemplatesPage() {
       {/* M10: 自动模板台账——「成功拆解 → 自动模板」为何产出 0、卡在哪一级，直接上屏 */}
       <div className="bg-white rounded-lg border p-4 mb-6">
         <div className="flex items-center gap-2 mb-2 flex-wrap">
-          <Activity className="w-4 h-4 text-purple-500" />
+          <Activity className="w-4 h-4 text-accent" />
           <h3 className="text-sm font-semibold text-gray-700">自动模板台账（成功拆解 → 自动模板）</h3>
           <span className="text-[10px] text-gray-400">同一类任务成功拆解 ≥3 次且成功率 ≥50% 才自动生成（防噪声模板；门槛未放宽）</span>
         </div>
@@ -177,13 +177,13 @@ export default function TemplatesPage() {
             <div key={t.id} className="bg-white rounded-lg border p-4">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3 min-w-0 flex-1">
-                  <LayoutTemplate className="w-5 h-5 text-blue-500 flex-shrink-0" />
+                  <LayoutTemplate className="w-5 h-5 text-accent flex-shrink-0" />
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
                       <h3 className="font-medium">{t.name}</h3>
                       <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${t.status === 'active' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>{t.status === 'active' ? '启用' : '禁用'}</span>
-                      {t.source === 'system' && <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-50 text-purple-600">内置</span>}
-                      {t.source === 'user' && <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-600">自定义</span>}
+                      {t.source === 'system' && <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent-soft text-accent">内置</span>}
+                      {t.source === 'user' && <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent-soft text-accent">自定义</span>}
                     </div>
                     <p className="text-xs text-gray-400 truncate">{t.description || '—'}</p>
                     <div className="flex items-center gap-1.5 mt-1 flex-wrap">
@@ -195,14 +195,14 @@ export default function TemplatesPage() {
                       {t.success_rate != null && (
                         <span className={`text-[10px] px-1.5 py-0.5 rounded ${t.success_rate >= 0.3 ? 'bg-green-50 text-green-600' : 'bg-red-50 text-red-600'}`}>成功率 {(t.success_rate * 100).toFixed(0)}%</span>
                       )}
-                      {t.keywords?.length > 0 && t.keywords.slice(0, 5).map(k => <span key={k} className="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-600">{k}</span>)}
+                      {t.keywords?.length > 0 && t.keywords.slice(0, 5).map(k => <span key={k} className="text-[10px] px-1.5 py-0.5 rounded bg-accent-soft text-accent">{k}</span>)}
                     </div>
                   </div>
                 </div>
                 <div className="flex items-center gap-2 flex-shrink-0">
                   <button onClick={() => setPreviewId(previewId === t.id ? null : t.id)} className="p-1 hover:bg-gray-100 rounded" title="预览子任务">{previewId === t.id ? <ChevronDown className="w-3.5 h-3.5 text-gray-600" /> : <ChevronRight className="w-3.5 h-3.5 text-gray-500" />}</button>
                   <button onClick={() => handleToggle(t)} className={`text-xs px-2 py-0.5 rounded ${t.status === 'active' ? 'bg-gray-100 text-gray-600 hover:bg-gray-200' : 'bg-green-100 text-green-700 hover:bg-green-200'}`}>{t.status === 'active' ? '禁用' : '启用'}</button>
-                  <button onClick={() => { setEditItem(t); setShowForm(true); }} className="p-1 hover:bg-blue-50 rounded" title="编辑"><Pencil className="w-3.5 h-3.5 text-blue-500" /></button>
+                  <button onClick={() => { setEditItem(t); setShowForm(true); }} className="p-1 hover:bg-accent-soft rounded" title="编辑"><Pencil className="w-3.5 h-3.5 text-accent" /></button>
                   <button onClick={() => handleDelete(t)} className="p-1 hover:bg-red-50 rounded" title="删除"><Trash2 className="w-3.5 h-3.5 text-red-400" /></button>
                 </div>
               </div>
@@ -268,24 +268,24 @@ function TemplateDialog({ template, onClose, onSuccess }: { template?: Template 
         </div>
         <div className="space-y-3">
           <div className="grid grid-cols-2 gap-3">
-            <div><label className="block text-sm font-medium mb-1">名称 *</label><input value={name} onChange={e => setName(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="如 mcp_deploy" /></div>
-            <div><label className="block text-sm font-medium mb-1">分类</label><input value={category} onChange={e => setCategory(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="如 deploy" /></div>
+            <div><label className="block text-sm font-medium mb-1">名称 *</label><input value={name} onChange={e => setName(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" placeholder="如 mcp_deploy" /></div>
+            <div><label className="block text-sm font-medium mb-1">分类</label><input value={category} onChange={e => setCategory(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" placeholder="如 deploy" /></div>
           </div>
-          <div><label className="block text-sm font-medium mb-1">描述</label><textarea value={desc} onChange={e => setDesc(e.target.value)} rows={2} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="模板用途描述" /></div>
+          <div><label className="block text-sm font-medium mb-1">描述</label><textarea value={desc} onChange={e => setDesc(e.target.value)} rows={2} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" placeholder="模板用途描述" /></div>
           <div className="grid grid-cols-2 gap-3">
-            <div><label className="block text-sm font-medium mb-1">优先级（大者优先）</label><input type="number" value={priority} onChange={e => setPriority(Number(e.target.value))} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" /></div>
+            <div><label className="block text-sm font-medium mb-1">优先级（大者优先）</label><input type="number" value={priority} onChange={e => setPriority(Number(e.target.value))} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" /></div>
             <div><label className="block text-sm font-medium mb-1">状态</label><select value={status} onChange={e => setStatus(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm bg-white"><option value="active">启用</option><option value="disabled">禁用</option></select></div>
           </div>
-          <div><label className="block text-sm font-medium mb-1">关键词（逗号分隔，命中 ≥2 参与匹配）</label><input value={keywordsStr} onChange={e => setKeywordsStr(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="如 mcp, 部署, 启动" /></div>
+          <div><label className="block text-sm font-medium mb-1">关键词（逗号分隔，命中 ≥2 参与匹配）</label><input value={keywordsStr} onChange={e => setKeywordsStr(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" placeholder="如 mcp, 部署, 启动" /></div>
           <div>
             <label className="block text-sm font-medium mb-1">子任务（JSON 数组：title / description / acceptance_criteria）</label>
-            <textarea value={subtasksJson} onChange={e => setSubtasksJson(e.target.value)} rows={8} className="w-full px-3 py-2 border rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            <textarea value={subtasksJson} onChange={e => setSubtasksJson(e.target.value)} rows={8} className="w-full px-3 py-2 border rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-accent" />
           </div>
         </div>
         {err && <p className="text-red-500 text-sm mt-2">{err}</p>}
         <div className="flex justify-end gap-2 mt-6">
           <button onClick={onClose} className="px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">取消</button>
-          <button onClick={submit} disabled={saving} className="flex items-center gap-1 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50"><Check className="w-3.5 h-3.5" />{saving ? '保存中...' : '保存'}</button>
+          <button onClick={submit} disabled={saving} className="flex items-center gap-1 px-4 py-2 bg-accent text-white rounded-lg text-sm hover:bg-accent/90 disabled:opacity-50"><Check className="w-3.5 h-3.5" />{saving ? '保存中...' : '保存'}</button>
         </div>
       </div>
     </div>

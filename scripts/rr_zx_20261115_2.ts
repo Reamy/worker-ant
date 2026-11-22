@@ -335,7 +335,14 @@ function sectionG(): void {
   ok(/设备台账没读到/.test(dev) && /这不是「一台设备都没有」/.test(dev), 'G12 设备台账首读失败不冒充空台账');
   ok(/refreshStatesNow/.test(dev) && /逐台明细/.test(dev), 'G13 发现/直查失败上屏且可展开');
   ok(/设备台账<\/span>/.test(dev) && dev.indexOf('设备台账</span>') < dev.indexOf('<MqttConfigBlock'), 'G14 台账在配置块之前');
-  ok(/在线 \{onlineDevices.length\}/.test(dev) && /已授权 \{authorizedDevices.length\}/.test(dev), 'G15 标题行四个真数');
+  // zx_20261121_3 M5：四个真数改走 Pill + 等宽数字（同一行）——判据钉更强：四枚都在、数都是真源。
+  ok(
+    /设备 <span className="tnum">\{devices.length\}/.test(dev)
+    && /在线 <span className="tnum">\{onlineDevices.length\}/.test(dev)
+    && /已授权 <span className="tnum">\{authorizedDevices.length\}/.test(dev)
+    && /未分房间 <span className="tnum">\{unassignedDevices.length\}/.test(dev),
+    'G15 标题行四个真数（同一行 Pill + 等宽数字）',
+  );
   ok(!/formatDbTime\([^)]*\)\} UTC/.test(dev), 'G16 去掉「本地时间 + UTC」混标');
   ok(/statusView/.test(dev) && /搜索名称/.test(dev), 'G17 列表补搜索与状态筛选');
 

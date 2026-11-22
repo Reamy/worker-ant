@@ -152,7 +152,7 @@ function KindColumn({ kind, payload, busy, onShare, onImport, onDelete, onPrevie
                   <button
                     onClick={() => onShare(kind, row.localId)}
                     disabled={busy !== null}
-                    className="flex items-center gap-1 text-[11px] px-2 py-1 rounded bg-blue-50 text-blue-700 hover:bg-blue-100 disabled:opacity-50"
+                    className="flex items-center gap-1 text-[11px] px-2 py-1 rounded bg-accent-soft text-accent hover:bg-accent-soft disabled:opacity-50"
                   >
                     <Share2 className="w-3 h-3" />分享
                   </button>
@@ -269,7 +269,7 @@ export default function TeamLibraryPage() {
   }
 
   if (q.loading && q.data == null) {
-    return <div className="flex justify-center py-12"><div className="animate-spin h-8 w-8 border-2 border-blue-500 border-t-transparent rounded-full" /></div>;
+    return <div className="flex justify-center py-12"><div className="animate-spin h-8 w-8 border-2 border-accent border-t-transparent rounded-full" /></div>;
   }
 
   const locked = q.data?.locked === true;
@@ -293,11 +293,11 @@ export default function TeamLibraryPage() {
       </div>
 
       {locked ? (
-        <div className="rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-3">
-          <div className="flex items-center gap-2 text-sm font-medium text-indigo-800 mb-1">
+        <div className="rounded-lg border border-accent/25 bg-accent-soft px-4 py-3">
+          <div className="flex items-center gap-2 text-sm font-medium text-accent mb-1">
             <ShieldCheck className="w-4 h-4" />「团队共享库」属于团队版能力
           </div>
-          <div className="text-xs text-indigo-700">{q.data?.locked ? q.data.message : ''}</div>
+          <div className="text-xs text-accent">{q.data?.locked ? q.data.message : ''}</div>
         </div>
       ) : (
         <>
@@ -330,7 +330,7 @@ export default function TeamLibraryPage() {
 
           {payload && (
             <div className="mb-3 flex flex-wrap items-center gap-2 text-xs text-gray-600">
-              <UserRound className="w-3.5 h-3.5 text-indigo-400" />
+              <UserRound className="w-3.5 h-3.5 text-accent" />
               <span>项目画像导入到：</span>
               <select
                 value={targetProjectId}

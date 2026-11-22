@@ -5,7 +5,11 @@ import App from './App';
 import { ActivityProvider } from './lib/activity';
 import ToastProvider from './lib/toast';
 import ErrorBoundary from './components/ErrorBoundary';
+import { initTheme } from './lib/theme';
 import './index.css';
+
+// zx_20261122_1 M5「夜·度」：渲染前先定主题（同步读 localStorage；DB 校正异步，不阻塞首屏）。
+initTheme();
 
 // zx_20260904_7 白屏排查：全局未捕获错误/未处理 Promise → 上报 main(diag:renderError 落库)
 function reportRenderError(err: unknown, url?: string): void {

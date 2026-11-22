@@ -248,7 +248,7 @@ export default function SetupPage() {
     } finally { setBusy(false); }
   };
 
-  const inputCls = 'w-full px-3 py-2 border rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500';
+  const inputCls = 'w-full px-3 py-2 border rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-accent';
   const modelsLine = probeModelsLine(probe);
   // 本页答的是"这台机器跑起来没有" ⇒ 绿只认"有可用 chat 模型"（zx_20261010 M3：`ok` 取 `hasChat`）。
   const canRun = probe.reachable && probe.hasChat;
@@ -278,7 +278,7 @@ export default function SetupPage() {
         <div className="flex items-center gap-2 mt-8 mb-6">
           {STEPS.map((s, i) => (
             <div key={s} className="flex-1 flex items-center gap-2">
-              <div className={`flex items-center justify-center w-6 h-6 shrink-0 rounded-full text-xs font-semibold ${i < step ? 'bg-green-500 text-white' : i === step ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-500'}`}>
+              <div className={`flex items-center justify-center w-6 h-6 shrink-0 rounded-full text-xs font-semibold ${i < step ? 'bg-green-500 text-white' : i === step ? 'bg-accent text-white' : 'bg-gray-200 text-gray-500'}`}>
                 {i < step ? <Check className="w-3.5 h-3.5" /> : i + 1}
               </div>
               <span className={`text-xs truncate ${i === step ? 'text-gray-900 font-medium' : 'text-gray-400'}`}>{s}</span>
@@ -324,7 +324,7 @@ export default function SetupPage() {
                   <input type="password" value={epKey} onChange={(e) => setEpKey(e.target.value)} placeholder="API Key" className={inputCls} />
                   {epErr && <p className="text-xs text-red-600">{epErr}</p>}
                   <div className="flex justify-end">
-                    <button onClick={saveEndpoint} disabled={epBusy} className="flex items-center gap-1 px-4 py-1.5 bg-blue-600 text-white rounded-lg text-xs hover:bg-blue-700 disabled:opacity-50">
+                    <button onClick={saveEndpoint} disabled={epBusy} className="flex items-center gap-1 px-4 py-1.5 bg-accent text-white rounded-lg text-xs hover:bg-accent/90 disabled:opacity-50">
                       {epBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plug className="w-3.5 h-3.5" />}保存并重探
                     </button>
                   </div>
@@ -335,13 +335,13 @@ export default function SetupPage() {
                   <>
                     <button onClick={runProbe} className="px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">重新自检</button>
                     {/* 自检未过仍可继续——但如实标注"可能跑不出结果"，不假装通过（承「缺失即如实」纪律）。 */}
-                    <button onClick={goProjects} className={`px-5 py-2 rounded-lg text-sm text-white ${canRun ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-400 hover:bg-gray-500'}`}>
+                    <button onClick={goProjects} className={`px-5 py-2 rounded-lg text-sm text-white ${canRun ? 'bg-accent hover:bg-accent/90' : 'bg-gray-400 hover:bg-gray-500'}`}>
                       {canRun ? '下一步' : '仍要继续'}
                     </button>
                   </>
                 )}
                 {probe.phase !== 'done' && (
-                  <button onClick={saveAndProbe} disabled={saving} className="flex items-center gap-1 px-5 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50">
+                  <button onClick={saveAndProbe} disabled={saving} className="flex items-center gap-1 px-5 py-2 bg-accent text-white rounded-lg text-sm hover:bg-accent/90 disabled:opacity-50">
                     {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <ChevronRight className="w-4 h-4" />}保存并自检
                   </button>
                 )}
@@ -355,7 +355,7 @@ export default function SetupPage() {
               {projects.length > 0 && (
                 <div className="space-y-1 max-h-48 overflow-y-auto">
                   {projects.map((p) => (
-                    <label key={p.id} className={`flex items-center gap-2 px-3 py-2 rounded-lg border cursor-pointer ${picked === p.id ? 'border-blue-500 bg-blue-50' : 'hover:bg-gray-50'}`}>
+                    <label key={p.id} className={`flex items-center gap-2 px-3 py-2 rounded-lg border cursor-pointer ${picked === p.id ? 'border-accent bg-accent-soft' : 'hover:bg-gray-50'}`}>
                       <input type="radio" name="proj" checked={picked === p.id} onChange={() => setPicked(p.id)} />
                       <span className="text-sm">{p.name}</span>
                     </label>
@@ -365,12 +365,12 @@ export default function SetupPage() {
               <div><label className="block text-sm font-medium mb-1">新建项目</label>
                 <div className="flex gap-2">
                   <input value={newProjectName} onChange={(e) => setNewProjectName(e.target.value)} placeholder="例如：我的第一个项目" className={inputCls} />
-                  <button onClick={createProject} disabled={busy} className="shrink-0 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50">创建</button>
+                  <button onClick={createProject} disabled={busy} className="shrink-0 px-4 py-2 bg-accent text-white rounded-lg text-sm hover:bg-accent/90 disabled:opacity-50">创建</button>
                 </div>
               </div>
               <div className="flex justify-between">
                 <button onClick={() => setStep(0)} className="px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">上一步</button>
-                <button onClick={() => goTemplates()} disabled={!picked} className="px-5 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50">下一步</button>
+                <button onClick={() => goTemplates()} disabled={!picked} className="px-5 py-2 bg-accent text-white rounded-lg text-sm hover:bg-accent/90 disabled:opacity-50">下一步</button>
               </div>
             </div>
           )}
@@ -381,7 +381,7 @@ export default function SetupPage() {
               <p className="text-xs text-gray-500">选一个开箱模板，工蚁会自动拆解并执行——这是你的第一个成果。</p>
               <div className="space-y-1 max-h-64 overflow-y-auto">
                 {templates.map((t) => (
-                  <label key={t.id} className={`flex items-start gap-2 px-3 py-2 rounded-lg border cursor-pointer ${pickedTpl === t.id ? 'border-blue-500 bg-blue-50' : 'hover:bg-gray-50'}`}>
+                  <label key={t.id} className={`flex items-start gap-2 px-3 py-2 rounded-lg border cursor-pointer ${pickedTpl === t.id ? 'border-accent bg-accent-soft' : 'hover:bg-gray-50'}`}>
                     <input type="radio" name="tpl" className="mt-1" checked={pickedTpl === t.id} onChange={() => setPickedTpl(t.id)} />
                     <span><span className="text-sm font-medium">{t.name}</span><span className="block text-xs text-gray-500">{t.description}</span></span>
                   </label>
@@ -398,7 +398,7 @@ export default function SetupPage() {
               )}
               <div className="flex justify-between">
                 <button onClick={() => setStep(1)} className="px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">上一步</button>
-                <button onClick={runFirstTask} disabled={busy || !pickedTpl} className="flex items-center gap-1 px-5 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50">
+                <button onClick={runFirstTask} disabled={busy || !pickedTpl} className="flex items-center gap-1 px-5 py-2 bg-accent text-white rounded-lg text-sm hover:bg-accent/90 disabled:opacity-50">
                   {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Rocket className="w-4 h-4" />}创建并开始
                 </button>
               </div>

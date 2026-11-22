@@ -32,8 +32,8 @@ function ResultBadge({ result }: { result: string }) {
 
 function SourceBadge({ source }: { source: AuditSource }) {
   const cls = source === 'device' ? 'bg-sky-50 text-sky-700'
-    : source === 'terminal' ? 'bg-violet-50 text-violet-700'
-    : source === 'node' ? 'bg-indigo-50 text-indigo-700'
+    : source === 'terminal' ? 'bg-accent-soft text-accent'
+    : source === 'node' ? 'bg-accent-soft text-accent'
     : 'bg-gray-100 text-gray-600';
   return <span className={`text-[10px] px-1.5 py-0.5 rounded ${cls}`}>{AUDIT_SOURCE_LABEL[source]}</span>;
 }
@@ -69,7 +69,7 @@ function Row({ row }: { row: AuditEventRow }) {
         {detail ? (
           <button onClick={() => setOpen((v) => !v)} className="text-left hover:underline" title={open ? '收起' : '展开完整明细'}>
             <span className={open ? 'whitespace-pre-wrap break-all block max-w-[560px]' : 'block truncate'}>{detail}</span>
-            <span className="text-[10px] text-blue-600">{open ? '收起' : '展开'}</span>
+            <span className="text-[10px] text-accent">{open ? '收起' : '展开'}</span>
           </button>
         ) : '—'}
       </td>
@@ -122,7 +122,7 @@ export default function AuditPage() {
   });
 
   if (q.loading && q.data == null) {
-    return <div className="flex justify-center py-12"><div className="animate-spin h-8 w-8 border-2 border-blue-500 border-t-transparent rounded-full" /></div>;
+    return <div className="flex justify-center py-12"><div className="animate-spin h-8 w-8 border-2 border-accent border-t-transparent rounded-full" /></div>;
   }
 
   const locked = q.data?.locked === true;
@@ -155,11 +155,11 @@ export default function AuditPage() {
       </div>
 
       {locked ? (
-        <div className="rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-3">
-          <div className="flex items-center gap-2 text-sm font-medium text-indigo-800 mb-1">
+        <div className="rounded-lg border border-accent/25 bg-accent-soft px-4 py-3">
+          <div className="flex items-center gap-2 text-sm font-medium text-accent mb-1">
             <ShieldCheck className="w-4 h-4" />「审计视图」属于团队版能力
           </div>
-          <div className="text-xs text-indigo-700">{q.data?.locked ? q.data.message : ''}</div>
+          <div className="text-xs text-accent">{q.data?.locked ? q.data.message : ''}</div>
         </div>
       ) : (
         <>
@@ -212,7 +212,7 @@ export default function AuditPage() {
               <div className="mt-3 flex items-center gap-3 text-[12px] text-gray-500">
                 <span>已显示 {events.length} 条</span>
                 {events.length >= limit && limit < 500 && (
-                  <button onClick={() => setLimit(Math.min(500, limit + 200))} className="underline text-blue-600">加载更多</button>
+                  <button onClick={() => setLimit(Math.min(500, limit + 200))} className="underline text-accent">加载更多</button>
                 )}
                 {events.length >= 500 && (
                   <span className="text-amber-600">已达单页上限 500 条；更早的记录请用来源筛选或「导出 CSV」查看。</span>

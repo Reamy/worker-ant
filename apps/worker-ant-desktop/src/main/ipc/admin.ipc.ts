@@ -34,6 +34,10 @@ import { utcSql } from '../core/sql-time.js';
 // zx_20261016_3 批四（M34）：自产提案的人工闸。**核心零依赖**（只 import better-sqlite3/crypto）
 //   ⇒ 判断逻辑全在 core，本层只转发——面板与回归同引那一份（第二落点会漂）。
 import { listProposals, decideProposal, PROPOSAL_DECISIONS } from '../core/self-evolve.js';
+// zx_20261122_1 M1「省·账」：模型实绩的只读出口（本文件只做壳；聚合在 core）。
+import { collectModelPerformance } from '../core/model-performance.js';
+// zx_20261121_3 M4「见·首」：提案决定后发瞬态线（待办中心/铃铛随之刷新）。
+import { emitKnowledgeChanged } from '../core/refresh-events.js';
 // zx_20260930 M14-3（观卦·观国之光）：真健康自检。此前 `admin:health` 只数行数、用
 //   `runningTasks > 0` **猜**一个 status——名字叫健康检查、看的却是业务量。
 import { runHealthCheck, type HealthReport } from '../core/health-check.js';
@@ -831,6 +835,7 @@ export function initAdminIpc(db: Database.Database, healthDeps: AdminHealthDeps 
       }
       const r = decideProposal(db, { id: String(payload?.id ?? ''), decision: payload.decision, by: payload?.by });
       if (!r.ok) return { error: { code: 'DECIDE_REJECTED', message: r.detail || r.reason || '未生效' } };
+      emitKnowledgeChanged('self_evolve.decide', { id: payload.id, decision: payload.decision });
       return { data: { id: payload.id, status: r.status, detail: r.detail ?? '' } };
     } catch (err) { return { error: { code: 'INTERNAL', message: (err as Error).message } }; }
   });
@@ -1049,6 +1054,15 @@ export function initMemoryIpc(db: Database.Database, memory: MemoryManager): voi
       const projectId = typeof input?.projectId === 'string' && input.projectId ? input.projectId : undefined;
       const limit = typeof input?.limit === 'number' ? input.limit : undefined;
       return { data: injectionRoi(db, db, projectId, { limit }) };
+    } catch (err) { return { error: { code: 'INTERNAL', message: (err as Error).message } }; }
+  });
+
+  // zx_20261122_1 M1「省·账」：模型实绩（只读、无闸）——从既有 last_model/执行账派生，不新增表。
+  ipcMain.handle('models:performance', async (_event, input?: { projectId?: unknown; windowDays?: unknown }) => {
+    try {
+      const projectId = typeof input?.projectId === 'string' && input.projectId ? input.projectId : null;
+      const windowDays = typeof input?.windowDays === 'number' ? input.windowDays : undefined;
+      return { data: collectModelPerformance(db, { projectId, windowDays }) };
     } catch (err) { return { error: { code: 'INTERNAL', message: (err as Error).message } }; }
   });
 

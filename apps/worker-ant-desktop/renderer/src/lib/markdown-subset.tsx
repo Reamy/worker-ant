@@ -250,7 +250,7 @@ function renderInline(text: string, keyPrefix: string): React.ReactNode[] {
       case 'em':
         return <em key={key}>{f.text}</em>;
       case 'link':
-        return <a key={key} href={f.href} target="_blank" rel="noreferrer noopener" className="text-blue-600 underline break-all">{f.text}</a>;
+        return <a key={key} href={f.href} target="_blank" rel="noreferrer noopener" className="text-accent underline break-all">{f.text}</a>;
       default:
         return <React.Fragment key={key}>{f.text}</React.Fragment>;
     }

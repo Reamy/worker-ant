@@ -4,6 +4,8 @@ import { useLiveQuery } from '../lib/useLiveQuery';
 import { FreshnessPill } from '../components/FreshnessPill';
 import { Brain, RefreshCw, Star, Trash2, Search, ThumbsDown, Plus, X, Pencil, FileText } from 'lucide-react';
 import { formatDbTime } from '../lib/deliverable-view';
+// zx_20261121_3 M5：页头 / 按钮 / 三态统一走共用原语（一处形状），逻辑与文案保持原样。
+import { PageHeader, Button, EmptyState, ErrorState, Skeleton } from '../components/ui';
 // zx_20260920_1 M7: 星号阈值引真源（同 ProjectDetailPage）——基线抬到 0.6 后 `> 0.5` 会让每条新记忆默认亮星。
 import { MEM_IMPORTANCE_DEFAULT } from '../../../src/main/core/memory-constants.js';
 // zx_20260930 M8: 哨兵取值（归档/墓碑）的中文名**不在这里手抄**——分级词表唯一真源在 core/memory-lifecycle.ts。
@@ -234,7 +236,7 @@ export default function MemoriesPage() {
   const SENTINEL_LABEL: Record<string, string> = Object.fromEntries(MEM_GRADES.map(g => [g.grade, g.label]));
   const typeLabel = (t: string) => MEM_TYPE_LABEL[t] || SENTINEL_LABEL[t] || t;
   // zx_20260930 M8: 归档/墓碑的颜色（**颜色是表现层的事**，不进领域模块）——沿用分级词表的 grade 键，名字从那边取。
-  const typeColors: Record<string, string> = { episodic:'bg-blue-100 text-blue-700', semantic:'bg-green-100 text-green-700', procedural:'bg-purple-100 text-purple-700', preference:'bg-yellow-100 text-yellow-700', prospective:'bg-cyan-100 text-cyan-700', retrospective:'bg-indigo-100 text-indigo-700', limiting_belief:'bg-rose-100 text-rose-700', failure_knowledge:'bg-red-100 text-red-700', subagent_experience:'bg-teal-100 text-teal-700', acceptance_failure:'bg-orange-100 text-orange-700', archetype_correction:'bg-violet-100 text-violet-700', panorama:'bg-sky-100 text-sky-700', negative:'bg-red-100 text-red-700', unknown:'bg-gray-100 text-gray-600', archived:'bg-gray-100 text-gray-500', deleted:'bg-stone-200 text-stone-600' };
+  const typeColors: Record<string, string> = { episodic:'bg-accent-soft text-accent', semantic:'bg-green-100 text-green-700', procedural:'bg-accent-soft text-accent', preference:'bg-yellow-100 text-yellow-700', prospective:'bg-cyan-100 text-cyan-700', retrospective:'bg-accent-soft text-accent', limiting_belief:'bg-rose-100 text-rose-700', failure_knowledge:'bg-red-100 text-red-700', subagent_experience:'bg-teal-100 text-teal-700', acceptance_failure:'bg-orange-100 text-orange-700', archetype_correction:'bg-accent-soft text-accent', panorama:'bg-sky-100 text-sky-700', negative:'bg-red-100 text-red-700', unknown:'bg-gray-100 text-gray-600', archived:'bg-gray-100 text-gray-500', deleted:'bg-stone-200 text-stone-600' };
   const valenceLabel = (v: string|undefined) => v === 'positive' ? '✓正' : v === 'negative' ? '✗负' : '';
   const valenceColor = (v: string|undefined) => v === 'positive' ? 'text-green-500' : v === 'negative' ? 'text-red-500' : 'text-gray-300';
   /** 墓碑/归档是 `memory_type` 列上的**哨兵取值**，与 `episodic` 等类型挤在一列 ⇒ 名字从分级词表取，不手抄。 */
@@ -250,17 +252,56 @@ export default function MemoriesPage() {
     await q.reload(); await loadHealth();
   };
 
-  if (q.loading && q.data == null) return <div className="flex justify-center py-12"><div className="animate-spin h-8 w-8 border-2 border-blue-500 border-t-transparent rounded-full"/></div>;
-  return (
-    <div>
-      <div className="flex items-center justify-between mb-6">
-        <h2 className="text-xl font-bold">系统记忆</h2>
-        <div className="flex items-center gap-2">
-          <button onClick={() => setAddOpen(true)} className="flex items-center gap-1 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs hover:bg-blue-700"><Plus className="w-3.5 h-3.5"/>新增记忆</button>
+  // zx_20261121_3 M5：一句主张只用页面已有事实（总条数 / 冲突条数 / 当前筛选），不编数字。
+  const loadingFirst = q.loading && q.data == null;
+  const memoryClaim = loadingFirst
+    ? '正在读取记忆列表。'
+    : q.error
+      ? '记忆列表读取失败，可在下方重试。'
+      : hasFilters
+        ? `当前筛选命中 ${total} 条记忆。`
+        : health && health.conflictCount > 0
+          ? `共 ${total} 条记忆，其中 ${health.conflictCount} 条冲突待处理。`
+          : `共 ${total} 条记忆。`;
+
+  const header = (
+    <PageHeader
+      eyebrow="记忆"
+      title="系统记忆"
+      claim={memoryClaim}
+      actions={
+        <>
           <FreshnessPill q={q} />
-          <button onClick={() => { void q.reload(); void loadHealth(); void loadDrafts(); if (capacity) void loadCapacity(); }} className="p-2 hover:bg-gray-100 rounded-lg"><RefreshCw className="w-4 h-4"/></button>
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-label="刷新记忆列表"
+            title="刷新"
+            icon={<RefreshCw className="w-4 h-4" />}
+            onClick={() => { void q.reload(); void loadHealth(); void loadDrafts(); if (capacity) void loadCapacity(); }}
+          />
+        </>
+      }
+      primaryAction={<Button variant="primary" icon={<Plus className="w-3.5 h-3.5" />} onClick={() => setAddOpen(true)}>新增记忆</Button>}
+    />
+  );
+
+  if (loadingFirst) {
+    return (
+      <div>
+        {header}
+        <div className="grid grid-cols-4 gap-3 mb-4">
+          {Array.from({ length: 8 }).map((_, i) => <Skeleton key={i} className="h-16 w-full" />)}
+        </div>
+        <div className="space-y-2">
+          {Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-24 w-full" />)}
         </div>
       </div>
+    );
+  }
+  return (
+    <div>
+      {header}
 
       {/* zx_20261108_1 B4: 写口结果**当面上屏**（成功/失败都不静默）。 */}
       {notice && (
@@ -271,22 +312,23 @@ export default function MemoriesPage() {
       )}
 
       {/* Phase C (2026-08-28 zx_1): 记忆健康度概览（元认知监控——让系统记忆质量可见） */}
+      {/* zx_20261121_3 M5：指标卡一处形状——纸面 + 线；数字等宽，颜色只表语义。 */}
       {health && (
         <div className="grid grid-cols-4 gap-3 mb-4">
-          <div className="bg-white rounded-lg border p-3"><p className="text-lg font-bold text-gray-800">{health.total}</p><p className="text-[10px] text-gray-400">总记忆</p></div>
-          <div className="bg-white rounded-lg border p-3"><p className="text-lg font-bold text-blue-600">{health.avgConfidence}%</p><p className="text-[10px] text-gray-400">平均可信度</p></div>
-          <div className="bg-white rounded-lg border p-3"><p className={`text-lg font-bold ${health.conflictCount>0?'text-red-600':'text-gray-800'}`}>{health.conflictCount}</p><p className="text-[10px] text-gray-400">冲突记忆</p></div>
-          <div className="bg-white rounded-lg border p-3"><p className="text-lg font-bold text-yellow-600">{health.exemplarCount}</p><p className="text-[10px] text-gray-400">通用智慧样例</p></div>
-          <div className="bg-white rounded-lg border p-3"><p className="text-lg font-bold text-purple-600">{health.prospectCount}</p><p className="text-[10px] text-gray-400">前瞻记忆</p></div>
-          <div className="bg-white rounded-lg border p-3"><p className="text-lg font-bold text-emerald-600">{health.tripleCount}</p><p className="text-[10px] text-gray-400">知识图谱三元组</p></div>
-          <div className="bg-white rounded-lg border p-3"><p className="text-lg font-bold text-cyan-600">{health.draftCount}</p><p className="text-[10px] text-gray-400">待审批技能草案</p></div>
-          <div className="bg-white rounded-lg border p-3"><p className="text-lg font-bold text-gray-500">{Object.keys(health.typeCounts).length}</p><p className="text-[10px] text-gray-400">记忆类型数</p></div>
+          <div className="rounded-card border border-line bg-surface p-3"><p className="font-mono text-lg font-medium tnum text-ink">{health.total}</p><p className="text-[11px] text-ink-mute">总记忆</p></div>
+          <div className="rounded-card border border-line bg-surface p-3"><p className="font-mono text-lg font-medium tnum text-accent">{health.avgConfidence}%</p><p className="text-[11px] text-ink-mute">平均可信度</p></div>
+          <div className="rounded-card border border-line bg-surface p-3"><p className={`font-mono text-lg font-medium tnum ${health.conflictCount>0?'text-bad':'text-ink'}`}>{health.conflictCount}</p><p className="text-[11px] text-ink-mute">冲突记忆</p></div>
+          <div className="rounded-card border border-line bg-surface p-3"><p className="font-mono text-lg font-medium tnum text-warn">{health.exemplarCount}</p><p className="text-[11px] text-ink-mute">通用智慧样例</p></div>
+          <div className="rounded-card border border-line bg-surface p-3"><p className="font-mono text-lg font-medium tnum text-ink">{health.prospectCount}</p><p className="text-[11px] text-ink-mute">前瞻记忆</p></div>
+          <div className="rounded-card border border-line bg-surface p-3"><p className="font-mono text-lg font-medium tnum text-ok">{health.tripleCount}</p><p className="text-[11px] text-ink-mute">知识图谱三元组</p></div>
+          <div className="rounded-card border border-line bg-surface p-3"><p className="font-mono text-lg font-medium tnum text-accent">{health.draftCount}</p><p className="text-[11px] text-ink-mute">待审批技能草案</p></div>
+          <div className="rounded-card border border-line bg-surface p-3"><p className="font-mono text-lg font-medium tnum text-ink-mute">{Object.keys(health.typeCounts).length}</p><p className="text-[11px] text-ink-mute">记忆类型数</p></div>
         </div>
       )}
 
       {/* zx_20261018_3 批一: 注入账（`wa_context_injections` 的读者）——注入与主动引用**分账**，不再混为一谈。 */}
       {injStats && (
-        <div className="bg-white rounded-lg border px-3 py-2 mb-4 flex items-center gap-4 flex-wrap text-xs">
+        <div className="tnum bg-white rounded-lg border px-3 py-2 mb-4 flex items-center gap-4 flex-wrap text-xs">
           <span className="font-medium text-gray-700">记忆注入账{projFilter ? '（当前项目）' : '（全部项目）'}</span>
           <span className="text-gray-500">注入 <b className="text-gray-800">{injStats.injected}</b> 次</span>
           <span className="text-gray-500">覆盖 <b className="text-gray-800">{injStats.distinctMemories}</b> 条</span>
@@ -310,7 +352,7 @@ export default function MemoriesPage() {
             <span className="text-[10px] text-gray-400">只读：不自动降权、不删记忆</span>
           </div>
           <div className="overflow-x-auto">
-            <table className="w-full text-[11px]">
+            <table className="w-full text-[11px] tnum">
               <thead>
                 <tr className="text-gray-400 text-left">
                   <th className="py-1 pr-3 font-normal">来源</th>
@@ -406,7 +448,7 @@ export default function MemoriesPage() {
       <div className="flex gap-2 mb-2 flex-wrap items-center">
         <div className="relative w-56">
           <Search className="w-3.5 h-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-gray-400" />
-          <input value={search} onChange={e=>setSearch(e.target.value)} className="w-full pl-7 pr-2 py-1.5 border rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="搜索记忆内容（全库）..." />
+          <input value={search} onChange={e=>setSearch(e.target.value)} className="w-full pl-7 pr-2 py-1.5 border rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-accent" placeholder="搜索记忆内容（全库）..." />
         </div>
         <select value={projFilter} onChange={e => setProjFilter(e.target.value)} className="px-2 py-1.5 border rounded-lg text-xs bg-white">
           <option value="">全部项目</option>
@@ -423,17 +465,17 @@ export default function MemoriesPage() {
         <label className="text-[11px] text-gray-400 flex items-center gap-1">至
           <input type="date" value={timeTo} onChange={e=>setTimeTo(e.target.value)} className="px-1.5 py-1 border rounded-lg text-xs" />
         </label>
-        {hasFilters && <button onClick={() => { setProjFilter(''); setSourceFilter(''); setTimeFrom(''); setTimeTo(''); setSearch(''); }} className="text-[11px] text-blue-600 hover:underline">清除筛选</button>}
-        <span className="text-[11px] text-gray-400 ml-auto">共 {total} 条{debouncedSearch ? `（搜索：全库）` : ''}</span>
+        {hasFilters && <button onClick={() => { setProjFilter(''); setSourceFilter(''); setTimeFrom(''); setTimeTo(''); setSearch(''); }} className="text-[11px] text-accent hover:underline">清除筛选</button>}
+        <span className="tnum text-[11px] text-gray-400 ml-auto">共 {total} 条{debouncedSearch ? `（搜索：全库）` : ''}</span>
       </div>
       {debouncedSearch && keywordMode === 'like' && (
         <p className="text-[10px] text-amber-600 mb-2">全文索引不可用，已按「内容包含」匹配（LIKE）——结果可能少于全文检索。</p>
       )}
 
       <div className="flex gap-2 mb-4 flex-wrap items-center">
-        <button onClick={() => setTypeFilter('')} className={`px-3 py-1 rounded-lg text-xs font-medium ${typeFilter === '' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>全部{typeFilter === '' ? ` (${total})` : ''}</button>
+        <button onClick={() => setTypeFilter('')} className={`px-3 py-1 rounded-lg text-xs font-medium ${typeFilter === '' ? 'bg-accent text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>全部{typeFilter === '' ? ` (${total})` : ''}</button>
         {counts.map(c => (
-          <button key={c.memory_type} onClick={() => setTypeFilter(c.memory_type)} className={`px-3 py-1 rounded-lg text-xs font-medium ${typeFilter === c.memory_type ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
+          <button key={c.memory_type} onClick={() => setTypeFilter(c.memory_type)} className={`px-3 py-1 rounded-lg text-xs font-medium ${typeFilter === c.memory_type ? 'bg-accent text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
             {typeLabel(c.memory_type)} ({c.cnt})
           </button>
         ))}
@@ -449,40 +491,37 @@ export default function MemoriesPage() {
         </div>
       )}
       {q.error ? (
-        <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-6 text-center text-[13px] text-red-700">
-          记忆列表读取失败：{String(q.error)}
-          <button onClick={() => void q.reload()} className="ml-2 underline">重试</button>
-        </div>
-      ) : items.length===0?<p className="text-gray-400 text-center py-12">{hasFilters ? '没有匹配的记忆' : '暂无记忆'}</p>:<div className="space-y-2">{items.map(m=>{const tomb=isTombstone(m);const s=signals(m);return (
+        <ErrorState title="记忆列表读取失败" reason={String(q.error)} onRetry={() => void q.reload()} />
+      ) : items.length===0?<EmptyState title={hasFilters ? '没有匹配的记忆' : '暂无记忆'} />:<div className="space-y-2">{items.map(m=>{const tomb=isTombstone(m);const s=signals(m);return (
         <div key={m.id} className={`rounded-lg border p-4 ${tomb?'bg-stone-50 border-stone-200':'bg-white'}`}>
           <div className="flex items-start justify-between mb-1">
-            <div className="flex items-center gap-2 flex-wrap">
-              <Brain className={`w-4 h-4 ${tomb?'text-stone-400':'text-purple-500'}`}/>
+            <div className="tnum flex items-center gap-2 flex-wrap">
+              <Brain className={`w-4 h-4 ${tomb?'text-stone-400':'text-accent'}`}/>
               <span className={`text-[10px] px-1.5 py-0.5 rounded ${typeColors[m.memory_type||''] || 'bg-gray-100'}`}>{typeLabel(m.memory_type||'')}</span>
               {m.project_name ? <span className="text-xs text-gray-400">{m.project_name}</span> : (!tomb && m.cross_project ? <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-50 text-sky-600">跨项目经验</span> : null)}
               {!tomb&&<span className="text-xs text-gray-500" title={m.source}>{m.source_label || '未知来源'}</span>}
               {/* 墓碑只在审计面出现：只留 时刻/缘由/指纹，不再显示来源、评分与各类信号（正文已清空，它们无所依附）。 */}
-              {!tomb&&<>{s.conflict&&<span className="text-[10px] px-1.5 py-0.5 rounded bg-red-100 text-red-600 font-medium">冲突</span>}{s.deep&&<span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-600">深加工</span>}{s.verified&&<span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-600">已验证</span>}{s.volatile&&<span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-600">易变</span>}{s.sublated&&<span className="text-[10px] px-1.5 py-0.5 rounded bg-teal-100 text-teal-700">已扬弃</span>}{m.is_exemplar?<span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow-100 text-yellow-700">★样例</span>:null}<span className={`text-[10px] ${valenceColor(m.valence)}`}>{valenceLabel(m.valence)}</span><div className="flex items-center gap-1"><Star className={`w-3 h-3 ${(m.importance||0)>MEM_IMPORTANCE_DEFAULT?'text-yellow-500 fill-yellow-500':'text-gray-300'}`}/><span className="text-xs text-gray-400">{m.importance?.toFixed(1)}</span></div>{(m.injected_count||0)>0&&<span className="text-[10px] text-gray-400">注入{m.injected_count}次</span>}{(m.use_count||0)>0&&<span className="text-[10px] text-gray-400">引用{m.use_count}次</span>}{((m.success_count||0)+(m.failure_count||0))>0&&<span className="text-[10px] text-gray-400">实践{m.success_count||0}成/{m.failure_count||0}败</span>}</>}
+              {!tomb&&<>{s.conflict&&<span className="text-[10px] px-1.5 py-0.5 rounded bg-red-100 text-red-600 font-medium">冲突</span>}{s.deep&&<span className="text-[10px] px-1.5 py-0.5 rounded bg-accent-soft text-accent">深加工</span>}{s.verified&&<span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-600">已验证</span>}{s.volatile&&<span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-600">易变</span>}{s.sublated&&<span className="text-[10px] px-1.5 py-0.5 rounded bg-teal-100 text-teal-700">已扬弃</span>}{m.is_exemplar?<span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow-100 text-yellow-700">★样例</span>:null}<span className={`text-[10px] ${valenceColor(m.valence)}`}>{valenceLabel(m.valence)}</span><div className="flex items-center gap-1"><Star className={`w-3 h-3 ${(m.importance||0)>MEM_IMPORTANCE_DEFAULT?'text-yellow-500 fill-yellow-500':'text-gray-300'}`}/><span className="text-xs text-gray-400">{m.importance?.toFixed(1)}</span></div>{(m.injected_count||0)>0&&<span className="text-[10px] text-gray-400">注入{m.injected_count}次</span>}{(m.use_count||0)>0&&<span className="text-[10px] text-gray-400">引用{m.use_count}次</span>}{((m.success_count||0)+(m.failure_count||0))>0&&<span className="text-[10px] text-gray-400">实践{m.success_count||0}成/{m.failure_count||0}败</span>}</>}
             </div>
             <div className="flex gap-1 shrink-0">
-              <button onClick={()=>void openDetail(m.id)} title="详情（来源 / 注入历史 / 改账）" className="p-1 hover:bg-blue-50 rounded"><FileText className="w-3.5 h-3.5 text-blue-400"/></button>
+              <button onClick={()=>void openDetail(m.id)} title="详情（来源 / 注入历史 / 改账）" className="p-1 hover:bg-accent-soft rounded"><FileText className="w-3.5 h-3.5 text-accent"/></button>
               {!tomb&&<><button onClick={()=>handleMarkExemplar(m.id)} title="标记为通用智慧样例" className="p-1 hover:bg-yellow-50 rounded"><Star className="w-3.5 h-3.5 text-yellow-400"/></button><button onClick={()=>handleDownweight(m.id)} title="降权（降低可信度）" className="p-1 hover:bg-orange-50 rounded"><ThumbsDown className="w-3.5 h-3.5 text-orange-400"/></button><button onClick={()=>handleDelete(m.id)} title="遗忘（落墓碑，可审计）" className="p-1 hover:bg-red-50 rounded"><Trash2 className="w-3.5 h-3.5 text-red-400"/></button></>}
             </div>
           </div>
           {tomb
             ? <div className="text-xs text-stone-600 flex items-center gap-2 flex-wrap"><span className="font-medium">正文已清除</span><span className="px-1.5 py-0.5 rounded bg-stone-200 text-stone-700">{m.deleted_reason||'（缘由未记）'}</span><span className="text-[10px] text-stone-400">删除于 {formatDbTime(m.deleted_at||m.created_at)}</span></div>
             : <p className="text-sm text-gray-700">{m.content?.slice(0,300)}{(m.content?.length||0)>300?'...':''}</p>}
-          <div className="flex items-center gap-3 mt-1 flex-wrap">
+          <div className="tnum flex items-center gap-3 mt-1 flex-wrap">
             {!tomb&&<p className="text-xs text-gray-400">{formatDbTime(m.created_at)}</p>}
             {!tomb&&m.last_used_at&&<span className="text-[10px] text-gray-300">最近访问:{formatDbTime(m.last_used_at)}</span>}
-            {!tomb&&m.similar_to&&(()=>{try{const sim=JSON.parse(m.similar_to)as string[];return sim.length>0?<span className="text-[10px] text-blue-400">关联{sim.length}条相似记忆</span>:null;}catch{return null;}})()}
+            {!tomb&&m.similar_to&&(()=>{try{const sim=JSON.parse(m.similar_to)as string[];return sim.length>0?<span className="text-[10px] text-accent">关联{sim.length}条相似记忆</span>:null;}catch{return null;}})()}
           </div>
         </div>);})}</div>}
       {/* 分页（总数取服务端筛选后的 total，与列表同一套 WHERE） */}
       {total > PAGE_SIZE && (
         <div className="flex items-center justify-center gap-3 mt-4 text-sm">
           <button onClick={() => setPage(Math.max(0, page - 1))} disabled={page === 0} className="px-3 py-1 border rounded hover:bg-gray-50 disabled:opacity-40">上一页</button>
-          <span className="text-gray-500">第 {page + 1} / {Math.ceil(total / PAGE_SIZE)} 页（共 {total} 条）</span>
+          <span className="tnum text-gray-500">第 {page + 1} / {Math.ceil(total / PAGE_SIZE)} 页（共 {total} 条）</span>
           <button onClick={() => setPage(Math.min(Math.ceil(total / PAGE_SIZE) - 1, page + 1))} disabled={page >= Math.ceil(total / PAGE_SIZE) - 1} className="px-3 py-1 border rounded hover:bg-gray-50 disabled:opacity-40">下一页</button>
         </div>
       )}
@@ -499,7 +538,7 @@ export default function MemoriesPage() {
         {!capacity ? (
           <p className="text-[11px] text-gray-400 mt-2">展开后读取…</p>
         ) : (
-          <div className="mt-3 space-y-3 text-[11px] text-gray-600">
+          <div className="tnum mt-3 space-y-3 text-[11px] text-gray-600">
             <div className="flex items-center gap-4 flex-wrap">
               <span>总记忆 <b className="text-gray-800">{capacity.total}</b></span>
               <span>活记忆 <b className="text-gray-800">{capacity.live}</b></span>
@@ -619,7 +658,7 @@ export default function MemoriesPage() {
                 {detail.memory.memory_type !== MEM_TYPE_DELETED && (
                   <div className="border-t pt-3">
                     <p className="text-gray-500 mb-1 flex items-center gap-1"><Pencil className="w-3 h-3"/>修订</p>
-                    <textarea value={editContent} onChange={(e)=>setEditContent(e.target.value)} rows={5} className="w-full border rounded-lg p-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                    <textarea value={editContent} onChange={(e)=>setEditContent(e.target.value)} rows={5} className="w-full border rounded-lg p-2 text-xs focus:outline-none focus:ring-2 focus:ring-accent" />
                     <p className="text-[10px] text-gray-400 mt-1">改正文即视为「{MEM_SOURCE_LABEL.user_correction}」（来源将记为 {MEM_SOURCE_LABEL.user_correction}）；只改类型/重要度不动来源。</p>
                     <div className="flex items-center gap-2 mt-2 flex-wrap">
                       <select value={editType} onChange={(e)=>setEditType(e.target.value)} className="px-2 py-1 border rounded-lg text-xs bg-white">
@@ -628,7 +667,7 @@ export default function MemoriesPage() {
                       <label className="text-[11px] text-gray-500 flex items-center gap-1">重要度
                         <input type="number" step="0.1" min="0" max="1" value={editImportance} onChange={(e)=>setEditImportance(e.target.value)} className="w-20 px-2 py-1 border rounded-lg text-xs" />
                       </label>
-                      <button onClick={() => void handleRevise()} disabled={saving} className="px-3 py-1 bg-blue-600 text-white rounded-lg text-xs hover:bg-blue-700 disabled:opacity-50">保存修订</button>
+                      <button onClick={() => void handleRevise()} disabled={saving} className="px-3 py-1 bg-accent text-white rounded-lg text-xs hover:bg-accent/90 disabled:opacity-50">保存修订</button>
                       <button onClick={() => void handleDelete(detail.memory.id)} className="px-3 py-1 bg-red-50 text-red-600 rounded-lg text-xs hover:bg-red-100">遗忘此记忆</button>
                     </div>
                   </div>
@@ -648,7 +687,7 @@ export default function MemoriesPage() {
               <button onClick={() => setAddOpen(false)} className="p-1 hover:bg-gray-100 rounded"><X className="w-4 h-4"/></button>
             </div>
             <div className="space-y-2">
-              <textarea value={addContent} onChange={(e)=>setAddContent(e.target.value)} rows={5} placeholder="要记住的内容…" className="w-full border rounded-lg p-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500" />
+              <textarea value={addContent} onChange={(e)=>setAddContent(e.target.value)} rows={5} placeholder="要记住的内容…" className="w-full border rounded-lg p-2 text-xs focus:outline-none focus:ring-2 focus:ring-accent" />
               <div className="flex items-center gap-2 flex-wrap">
                 <select value={addProject} onChange={(e)=>setAddProject(e.target.value)} className="px-2 py-1 border rounded-lg text-xs bg-white">
                   <option value="">跨项目（无项目归属）</option>
@@ -665,7 +704,7 @@ export default function MemoriesPage() {
               {notice?.kind === 'err' && <p className="text-[11px] text-red-600">{notice.text}</p>}
               <div className="flex justify-end gap-2 pt-1">
                 <button onClick={() => setAddOpen(false)} className="px-3 py-1.5 border rounded-lg text-xs hover:bg-gray-50">取消</button>
-                <button onClick={() => void handleAdd()} disabled={saving} className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs hover:bg-blue-700 disabled:opacity-50">保存</button>
+                <button onClick={() => void handleAdd()} disabled={saving} className="px-3 py-1.5 bg-accent text-white rounded-lg text-xs hover:bg-accent/90 disabled:opacity-50">保存</button>
               </div>
             </div>
           </div>

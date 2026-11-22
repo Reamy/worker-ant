@@ -10,6 +10,8 @@ import { PROJECT_STATUS_LABEL, statusText } from '../lib/status-view';
 // zx_20261107_1 B9: token 展示与详情页同尺
 import { formatTokens } from '../lib/format';
 import { Plus, Edit, Trash2, Play, Pause, Check, Archive, FolderKanban, Copy, Brain, Search } from 'lucide-react';
+// zx_20261121_3 M5：页头 / 按钮 / 三态统一走共用原语（一处形状），逻辑与文案保持原样。
+import { PageHeader, Button, EmptyState, ErrorState, Skeleton } from '../components/ui';
 
 interface Project {
   id: string; name: string; description: string; status: string;
@@ -176,40 +178,68 @@ export default function ProjectsPage() {
   }
 
   const statusBadge = (s: string) => {
-    const map: Record<string, string> = { active: 'bg-green-100 text-green-700', paused: 'bg-yellow-100 text-yellow-700', completed: 'bg-blue-100 text-blue-700', archived: 'bg-gray-100 text-gray-500' };
+    const map: Record<string, string> = { active: 'bg-green-100 text-green-700', paused: 'bg-yellow-100 text-yellow-700', completed: 'bg-accent-soft text-accent', archived: 'bg-gray-100 text-gray-500' };
     return `text-xs px-2 py-0.5 rounded-full font-medium ${map[s] || 'bg-gray-100'}`;
   };
 
-  if (q.loading && q.data == null) return <div className="flex items-center justify-center h-64"><div className="animate-spin h-8 w-8 border-2 border-blue-500 border-t-transparent rounded-full" /></div>;
-
-  // 分页：先搜索过滤，再分页
+  // zx_20261121_3 M5：首屏三态同形（载入骨架 / 读失败可重试 / 空态给出口），读不到不冒充"没有项目"。
+  const loadingFirst = q.loading && q.data == null;
+  // 分页：先搜索过滤，再分页（主张里的命中数与此处同一个过滤，不另写第二份判据）
   const filteredList = search ? list.filter(p => (p.name + (p.description || '')).toLowerCase().includes(search.toLowerCase())) : list;
+  const activeCount = list.filter((p) => p.status === 'active').length;
+  // 一句主张只用页面已有事实：条数、进行中数、搜索命中数；未载入 / 读失败时说清此刻状态，不编数字。
+  const projectClaim = loadingFirst
+    ? '正在读取项目列表。'
+    : q.error
+      ? '项目列表读取失败，可在下方重试。'
+      : list.length === 0
+        ? '还没有项目——新建后会出现在这里。'
+        : search
+          ? `共 ${list.length} 个项目，搜索命中 ${filteredList.length} 个。`
+          : `共 ${list.length} 个项目，其中 ${activeCount} 个进行中。`;
+
+  const header = (
+    <PageHeader
+      eyebrow="项目"
+      title="项目管理"
+      claim={projectClaim}
+      actions={
+        <>
+          {/* zx_20261022_3 批九: 项目数用量——达到档位上限时转黄（语义色 warn），与下方横幅同源。 */}
+          {usage && (
+            <span className={`tnum text-xs ${atProjectLimit ? 'font-medium text-warn' : 'text-ink-mute'}`}>
+              项目 {projectLimit === 0 ? `${usage.projects.used}（不限）` : `${usage.projects.used}/${projectLimit}`}
+            </span>
+          )}
+          <FreshnessPill q={q} />
+        </>
+      }
+      primaryAction={<Button variant="primary" icon={<Plus className="w-4 h-4" />} onClick={openCreate}>新建项目</Button>}
+    />
+  );
+
+  if (loadingFirst) {
+    return (
+      <div>
+        {header}
+        <div className="space-y-3">
+          {Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-24 w-full" />)}
+        </div>
+      </div>
+    );
+  }
+
   const totalPages = Math.max(1, Math.ceil(filteredList.length / PAGE_SIZE));
   const paginatedList = filteredList.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-6">
-        <h2 className="text-xl font-bold">项目管理</h2>
-        <div className="flex items-center gap-2">
-          {/* zx_20261022_3 批九: 项目数用量——达到档位上限时转黄，与下方横幅同源。 */}
-          {usage && (
-            <span className={`text-xs ${atProjectLimit ? 'font-medium text-amber-600' : 'text-gray-500'}`}>
-              项目 {projectLimit === 0 ? `${usage.projects.used}（不限）` : `${usage.projects.used}/${projectLimit}`}
-            </span>
-          )}
-          <FreshnessPill q={q} />
-          <button onClick={openCreate}
-            className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 transition-colors">
-            <Plus className="w-4 h-4" />新建项目
-          </button>
-        </div>
-      </div>
+      {header}
 
       {/* zx_20261022_3 批九: 已达项目上限时把**真实**升级差异摆出来（能力名取自 tier-catalog，
           上限取自 TIER_LIMITS，不另写卖点）。未达上限不占版面。 */}
       {atProjectLimit && usage && (
-        <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+        <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700 tnum">
           项目已用 {usage.projects.used}/{projectLimit}（{usage.tierLabel}上限）。
           {usage.upgrade.toLabel && upgradeGains.length > 0
             ? <>升级{usage.upgrade.toLabel}可获得：{upgradeGains.join('、')}。</>
@@ -217,7 +247,9 @@ export default function ProjectsPage() {
         </div>
       )}
 
-      {(error || q.error) && <p className="text-red-500 text-sm mb-4">{error || q.error}</p>}
+      {/* zx_20261121_3 M5：读失败走 ErrorState（带原因为原文 + 重试）；写失败如实标「操作失败」，不冒充读失败。 */}
+      {q.error && <div className="mb-4"><ErrorState reason={String(q.error)} onRetry={() => { void q.reload(); }} /></div>}
+      {error && <div className="mb-4"><ErrorState title="操作失败" reason={error} /></div>}
       {notice && (
         <div className="mb-4 rounded-lg border border-cyan-200 bg-cyan-50 px-3 py-2 text-xs text-cyan-800 flex items-start justify-between gap-3">
           <span>{notice}</span>
@@ -227,15 +259,18 @@ export default function ProjectsPage() {
 
       <div className="relative mb-4 w-64">
         <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"/>
-        <input value={search} onChange={e=>setSearch(e.target.value)} className="w-full pl-9 pr-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="搜索项目名称或描述..."/>
+        <input value={search} onChange={e=>setSearch(e.target.value)} className="w-full pl-9 pr-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" placeholder="搜索项目名称或描述..."/>
       </div>
 
+      {/* zx_20261121_3 M5：读失败已在上方如实上屏，这里不再拿空态冒充"没有项目"。 */}
       {paginatedList.length === 0 ? (
-        <div className="bg-white rounded-lg border p-12 text-center text-gray-400">
-          <FolderKanban className="w-12 h-12 mx-auto mb-3 opacity-30" />
-          <p className="text-lg mb-2">暂无项目</p>
-          <p className="text-sm">点击"新建项目"创建第一个项目</p>
-        </div>
+        q.error ? null : (
+          <EmptyState
+            icon={<FolderKanban className="w-10 h-10" />}
+            title="暂无项目"
+            description={'点击"新建项目"创建第一个项目'}
+          />
+        )
       ) : (
         <div className="space-y-3">
           {paginatedList.map(p => (
@@ -243,7 +278,7 @@ export default function ProjectsPage() {
               <div className="flex items-start justify-between">
                 <div className="flex-1 cursor-pointer" onClick={() => navigate(`/projects/${p.id}`)}>
                   <div className="flex items-center gap-2 mb-1">
-                    <h3 className="font-semibold text-gray-900 hover:text-blue-600">{p.name}</h3>
+                    <h3 className="font-semibold text-gray-900 hover:text-accent">{p.name}</h3>
                     {p.is_sample === 1 && <span className="px-1.5 py-0.5 rounded text-[10px] bg-amber-100 text-amber-700 border border-amber-200">示例</span>}
                     <span className={statusBadge(p.status)}>{statusText(PROJECT_STATUS_LABEL, p.status)}</span>
                     {p.staleness === 'stale' && <span className="text-xs text-orange-500">● 长时间未更新</span>}
@@ -252,12 +287,12 @@ export default function ProjectsPage() {
                   <div className="flex items-center gap-4 text-xs text-gray-400 flex-wrap">
                     {p.taskStatsUnavailable
                       ? <span className="text-orange-500" title="任务统计取数失败——不是「没有任务」">统计不可用</span>
-                      : <span>任务 {p.taskStats?.total||0}(✅{p.taskStats?.completed||0})</span>}
-                    {p.deliverableStats?.total ? <span>产出物 {p.deliverableStats.total} (MCP:{p.deliverableStats.mcp||0} A2A:{p.deliverableStats.a2a||0})</span> : null}
-                    {p.tokenStats?.total_tokens ? <span>Token {formatTokens(p.tokenStats.total_tokens)}</span> : null}
+                      : <span className="tnum">任务 {p.taskStats?.total||0}(✅{p.taskStats?.completed||0})</span>}
+                    {p.deliverableStats?.total ? <span className="tnum">产出物 {p.deliverableStats.total} (MCP:{p.deliverableStats.mcp||0} A2A:{p.deliverableStats.a2a||0})</span> : null}
+                    {p.tokenStats?.total_tokens ? <span className="tnum">Token {formatTokens(p.tokenStats.total_tokens)}</span> : null}
                     {p.cron_schedule && <span className="font-mono">⏰ {p.cron_schedule}</span>}
-                    {p.budget?.max_tokens_per_task ? <span title="任务Token预算">💰 {formatTokens(p.budget.max_tokens_per_task)}</span> : null}
-                    {p.rhythm && (p.rhythm.activeHourStart!=null || p.rhythm.activeHourEnd!=null) && <span title={`活跃时间 ${p.rhythm.activeHourStart??''}-${p.rhythm.activeHourEnd??''}点`}>🕐 {p.rhythm.activeHourStart??0}-{p.rhythm.activeHourEnd??24}点</span>}
+                    {p.budget?.max_tokens_per_task ? <span className="tnum" title="任务Token预算">💰 {formatTokens(p.budget.max_tokens_per_task)}</span> : null}
+                    {p.rhythm && (p.rhythm.activeHourStart!=null || p.rhythm.activeHourEnd!=null) && <span className="tnum" title={`活跃时间 ${p.rhythm.activeHourStart??''}-${p.rhythm.activeHourEnd??''}点`}>🕐 {p.rhythm.activeHourStart??0}-{p.rhythm.activeHourEnd??24}点</span>}
                     {p.staleness==='stale' && <span className="text-orange-500">● 低活跃</span>}
                     {p.staleness==='dormant' && <span className="text-red-400">● 不活跃</span>}
                   </div>
@@ -265,10 +300,10 @@ export default function ProjectsPage() {
                 <div className="flex items-center gap-1 ml-4">
                   {p.status === 'active' && <button onClick={() => handleStatus(p.id, 'paused')} title="暂停" className="p-1.5 hover:bg-yellow-50 rounded"><Pause className="w-4 h-4 text-yellow-600" /></button>}
                   {p.status === 'paused' && <button onClick={() => handleStatus(p.id, 'active')} title="恢复" className="p-1.5 hover:bg-green-50 rounded"><Play className="w-4 h-4 text-green-600" /></button>}
-                  {(p.status === 'active' || p.status === 'paused') && <button onClick={() => handleStatus(p.id, 'completed')} title="完成" className="p-1.5 hover:bg-blue-50 rounded"><Check className="w-4 h-4 text-blue-600" /></button>}
+                  {(p.status === 'active' || p.status === 'paused') && <button onClick={() => handleStatus(p.id, 'completed')} title="完成" className="p-1.5 hover:bg-accent-soft rounded"><Check className="w-4 h-4 text-accent" /></button>}
                   {p.status === 'completed' && <button onClick={() => handleStatus(p.id, 'archived')} title="归档" className="p-1.5 hover:bg-gray-100 rounded"><Archive className="w-4 h-4 text-gray-500" /></button>}
                   <button onClick={() => openEdit(p)} title="编辑" className="p-1.5 hover:bg-gray-100 rounded"><Edit className="w-4 h-4 text-gray-500" /></button>
-                  <button onClick={() => handleClone(p.id)} title="克隆" className="p-1.5 hover:bg-purple-50 rounded"><Copy className="w-4 h-4 text-purple-500" /></button>
+                  <button onClick={() => handleClone(p.id)} title="克隆" className="p-1.5 hover:bg-accent/90 rounded"><Copy className="w-4 h-4 text-accent" /></button>
                   <button onClick={() => navigate(`/projects/${p.id}/memories`)} title="项目记忆" className="p-1.5 hover:bg-green-50 rounded"><Brain className="w-4 h-4 text-green-500" /></button>
                   <button onClick={() => setPendingDelete({ id: p.id, name: p.name })} title="删除" className="p-1.5 hover:bg-red-50 rounded"><Trash2 className="w-4 h-4 text-red-500" /></button>
                 </div>
@@ -282,7 +317,7 @@ export default function ProjectsPage() {
       {filteredList.length > PAGE_SIZE && (
         <div className="flex items-center justify-center gap-3 mt-4 text-sm">
           <button onClick={() => setPage(Math.max(0, page - 1))} disabled={page === 0} className="px-3 py-1 border rounded hover:bg-gray-50 disabled:opacity-40">上一页</button>
-          <span className="text-gray-500">第 {page + 1} / {totalPages} 页（共 {filteredList.length} 个）</span>
+          <span className="tnum text-gray-500">第 {page + 1} / {totalPages} 页（共 {filteredList.length} 个）</span>
           <button onClick={() => setPage(Math.min(totalPages - 1, page + 1))} disabled={page >= totalPages - 1} className="px-3 py-1 border rounded hover:bg-gray-50 disabled:opacity-40">下一页</button>
         </div>
       )}
@@ -303,25 +338,25 @@ export default function ProjectsPage() {
           <div className="bg-white rounded-xl shadow-lg p-6 w-full max-w-4xl max-h-[85vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
             <h3 className="text-lg font-bold mb-4">{editing ? '编辑项目' : '新建项目'}</h3>
             <div className="space-y-3">
-              <div><label className="block text-sm font-medium mb-1">名称 *</label><input value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="项目名称" /></div>
-              <div><label className="block text-sm font-medium mb-1">描述</label><textarea value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" rows={2} placeholder="项目描述（可选）" /></div>
-              <div><label className="block text-sm font-medium mb-1">定时调度 (cron)</label><div className="flex flex-wrap gap-1.5 mb-2">{CRON_PRESETS.map(p => <button key={p.expr} type="button" onClick={() => setForm({ ...form, cron_schedule: form.cron_schedule === p.expr ? '' : p.expr })} className={`px-2 py-1 rounded text-xs border ${form.cron_schedule === p.expr ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'}`}>{p.label}</button>)}</div><input value={form.cron_schedule} onChange={e => setForm({ ...form, cron_schedule: e.target.value })} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono" placeholder="或手动输入: 分 时 日 月 周（可选）" /></div>
+              <div><label className="block text-sm font-medium mb-1">名称 *</label><input value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" placeholder="项目名称" /></div>
+              <div><label className="block text-sm font-medium mb-1">描述</label><textarea value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" rows={2} placeholder="项目描述（可选）" /></div>
+              <div><label className="block text-sm font-medium mb-1">定时调度 (cron)</label><div className="flex flex-wrap gap-1.5 mb-2">{CRON_PRESETS.map(p => <button key={p.expr} type="button" onClick={() => setForm({ ...form, cron_schedule: form.cron_schedule === p.expr ? '' : p.expr })} className={`px-2 py-1 rounded text-xs border ${form.cron_schedule === p.expr ? 'bg-accent text-white border-accent' : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'}`}>{p.label}</button>)}</div><input value={form.cron_schedule} onChange={e => setForm({ ...form, cron_schedule: e.target.value })} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent font-mono" placeholder="或手动输入: 分 时 日 月 周（可选）" /></div>
               {form.cron_schedule && <>
-                <div><label className="block text-sm font-medium mb-1">时区</label><select value={form.cron_timezone} onChange={e => setForm({ ...form, cron_timezone: e.target.value })} className="w-full px-3 py-2 border rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500">{COMMON_TIMEZONES.map(tz => <option key={tz} value={tz}>{tz}</option>)}</select></div>
-                <div><label className="block text-sm font-medium mb-1">定时任务标题（可选，设置后 cron 自动创建该任务）</label><input value={form.cron_task_title} onChange={e => setForm({ ...form, cron_task_title: e.target.value })} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="如：定时刷新最新数据" /></div>
-                {form.cron_task_title && <div><label className="block text-sm font-medium mb-1">定时任务描述</label><textarea value={form.cron_task_desc} onChange={e => setForm({ ...form, cron_task_desc: e.target.value })} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" rows={2} placeholder="任务详细描述，AI Agent 据此执行" /></div>}
-                <div><label className="block text-sm font-medium mb-1">定时执行命令（可选，设置后直接执行 shell 命令绕过 AI）</label><input value={form.cron_run_command} onChange={e => setForm({ ...form, cron_run_command: e.target.value })} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-xs" placeholder="cd scripts && python3 run.py" /></div>
+                <div><label className="block text-sm font-medium mb-1">时区</label><select value={form.cron_timezone} onChange={e => setForm({ ...form, cron_timezone: e.target.value })} className="w-full px-3 py-2 border rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-accent">{COMMON_TIMEZONES.map(tz => <option key={tz} value={tz}>{tz}</option>)}</select></div>
+                <div><label className="block text-sm font-medium mb-1">定时任务标题（可选，设置后 cron 自动创建该任务）</label><input value={form.cron_task_title} onChange={e => setForm({ ...form, cron_task_title: e.target.value })} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" placeholder="如：定时刷新最新数据" /></div>
+                {form.cron_task_title && <div><label className="block text-sm font-medium mb-1">定时任务描述</label><textarea value={form.cron_task_desc} onChange={e => setForm({ ...form, cron_task_desc: e.target.value })} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" rows={2} placeholder="任务详细描述，AI Agent 据此执行" /></div>}
+                <div><label className="block text-sm font-medium mb-1">定时执行命令（可选，设置后直接执行 shell 命令绕过 AI）</label><input value={form.cron_run_command} onChange={e => setForm({ ...form, cron_run_command: e.target.value })} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent font-mono text-xs" placeholder="cd scripts && python3 run.py" /></div>
               </>}
-              <div><label className="block text-sm font-medium mb-1">工作目录</label><input value={form.working_dir} onChange={e => setForm({ ...form, working_dir: e.target.value })} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-xs" placeholder="留空自动创建（可选）" /></div>
-              <div><label className="block text-sm font-medium mb-1">安全沙箱</label><select value={form.sandbox_mode} onChange={e => setForm({ ...form, sandbox_mode: e.target.value })} className="w-full px-3 py-2 border rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"><option value="workspace">工作区读写（默认）</option><option value="strict">严格只读</option><option value="off">无限制</option></select></div>
+              <div><label className="block text-sm font-medium mb-1">工作目录</label><input value={form.working_dir} onChange={e => setForm({ ...form, working_dir: e.target.value })} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent font-mono text-xs" placeholder="留空自动创建（可选）" /></div>
+              <div><label className="block text-sm font-medium mb-1">安全沙箱</label><select value={form.sandbox_mode} onChange={e => setForm({ ...form, sandbox_mode: e.target.value })} className="w-full px-3 py-2 border rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-accent"><option value="workspace">工作区读写（默认）</option><option value="strict">严格只读</option><option value="off">无限制</option></select></div>
               <div><label className="block text-sm font-medium mb-1">资源节奏</label><div className="flex items-center gap-2 text-sm"><span>活跃</span><input type="number" value={form.rhythm_start} onChange={e => setForm({ ...form, rhythm_start: e.target.value })} className="w-16 px-2 py-1 border rounded-lg text-sm" /> 时 - <input type="number" value={form.rhythm_end} onChange={e => setForm({ ...form, rhythm_end: e.target.value })} className="w-16 px-2 py-1 border rounded-lg text-sm" /> 时 <span className="ml-2">最大并行</span><input type="number" value={form.rhythm_conc} onChange={e => setForm({ ...form, rhythm_conc: e.target.value })} className="w-16 px-2 py-1 border rounded-lg text-sm" /></div><p className="text-[10px] text-gray-400 mt-1">默认全天活跃/最大2并行</p></div>
-              <div><label className="block text-sm font-medium mb-1">Token 预算</label><div className="flex gap-2"><input value={form.budget_tokens} onChange={e => setForm({ ...form, budget_tokens: e.target.value })} className="flex-1 px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="单任务Token上限(如400000)" /><input value={form.budget_cost} onChange={e => setForm({ ...form, budget_cost: e.target.value })} className="flex-1 px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="单任务费用上限¥(如3.6)" /></div><p className="text-[10px] text-gray-400 mt-1">费用上限留空 = 不设金额闸（任务仅按 Token 预算收敛）；金额闸只在填写后生效，系统不再自动兜底一个默认金额</p></div>
-              <div><label className="block text-sm font-medium mb-1">自治模式</label><select value={form.autonomous_mode} onChange={e => setForm({ ...form, autonomous_mode: e.target.value })} className="w-full px-3 py-2 border rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"><option value="off">关闭（仅人工）</option><option value="supervised">半自动（自动创建需确认）</option><option value="auto">全自动（自动创建并执行）</option></select></div>
-              {form.autonomous_mode !== 'off' && <div><label className="block text-sm font-medium mb-1">待办列表 (backlog)</label><textarea value={form.backlog} onChange={e => setForm({ ...form, backlog: e.target.value })} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" rows={3} placeholder="每行一项待办任务" /></div>}
+              <div><label className="block text-sm font-medium mb-1">Token 预算</label><div className="flex gap-2"><input value={form.budget_tokens} onChange={e => setForm({ ...form, budget_tokens: e.target.value })} className="flex-1 px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" placeholder="单任务Token上限(如400000)" /><input value={form.budget_cost} onChange={e => setForm({ ...form, budget_cost: e.target.value })} className="flex-1 px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" placeholder="单任务费用上限¥(如3.6)" /></div><p className="text-[10px] text-gray-400 mt-1">费用上限留空 = 不设金额闸（任务仅按 Token 预算收敛）；金额闸只在填写后生效，系统不再自动兜底一个默认金额</p></div>
+              <div><label className="block text-sm font-medium mb-1">自治模式</label><select value={form.autonomous_mode} onChange={e => setForm({ ...form, autonomous_mode: e.target.value })} className="w-full px-3 py-2 border rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-accent"><option value="off">关闭（仅人工）</option><option value="supervised">半自动（自动创建需确认）</option><option value="auto">全自动（自动创建并执行）</option></select></div>
+              {form.autonomous_mode !== 'off' && <div><label className="block text-sm font-medium mb-1">待办列表 (backlog)</label><textarea value={form.backlog} onChange={e => setForm({ ...form, backlog: e.target.value })} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" rows={3} placeholder="每行一项待办任务" /></div>}
             </div>
             <div className="flex justify-end gap-2 mt-6">
               <button onClick={() => setShowModal(false)} className="px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">取消</button>
-              <button onClick={handleSave} disabled={!form.name} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50">保存</button>
+              <button onClick={handleSave} disabled={!form.name} className="px-4 py-2 bg-accent text-white rounded-lg text-sm hover:bg-accent/90 disabled:opacity-50">保存</button>
             </div>
           </div>
         </div>

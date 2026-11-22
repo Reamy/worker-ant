@@ -16,7 +16,7 @@ export function FreshnessPill<T>({ q, className = '', onReload }: {
 }): React.ReactElement | null {
   if (q.loading && q.data == null) {
     return (
-      <span className={`inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-gray-100 text-gray-400 ${className}`} title="正在加载">
+      <span className={`inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full border border-line bg-paper text-ink-mute ${className}`} title="正在加载">
         <RotateCw className="w-3 h-3 animate-spin" />加载中
       </span>
     );
@@ -29,7 +29,7 @@ export function FreshnessPill<T>({ q, className = '', onReload }: {
       <button
         type="button"
         onClick={() => { void q.reload(); onReload?.(); }}
-        className={`inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-red-50 text-red-600 hover:bg-red-100 cursor-pointer ${className}`}
+        className={`inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full border border-bad/20 bg-bad-soft text-bad hover:bg-bad-soft/80 cursor-pointer ${className}`}
         title={q.error}
       >
         <RotateCw className="w-3 h-3" />未读到 · 重试
@@ -49,25 +49,25 @@ export function FreshnessPill<T>({ q, className = '', onReload }: {
       <button
         type="button"
         onClick={() => { void q.reload(); onReload?.(); }}
-        className={`inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 hover:bg-amber-200 cursor-pointer ${className}`}
+        className={`inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full border border-warn/20 bg-warn-soft text-warn hover:bg-warn-soft/80 cursor-pointer ${className}`}
         title={`数据可能已过期（更新于 ${fmt(q.updatedAt)}），点击刷新`}
       >
-        <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />数据可能已过期·刷新
+        <span className="w-1.5 h-1.5 rounded-full bg-warn animate-pulse" />数据可能已过期·刷新
       </button>
     );
   }
 
   if (q.isLive && !q.stale) {
     return (
-      <span className={`inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-green-50 text-green-700 ${className}`} title={`事件驱动自动刷新 · 更新于 ${fmt(q.updatedAt)}`}>
-        <span className="w-1.5 h-1.5 rounded-full bg-green-500" />实时 {fmt(q.updatedAt)}
+      <span className={`inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full border border-ok/20 bg-ok-soft text-ok ${className}`} title={`事件驱动自动刷新 · 更新于 ${fmt(q.updatedAt)}`}>
+        <span className="w-1.5 h-1.5 rounded-full bg-ok" />实时 <span className="tnum">{fmt(q.updatedAt)}</span>
       </span>
     );
   }
 
   return (
-    <span className={`inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-gray-100 text-gray-500 ${className}`} title="手动刷新 · 距最近一次加载">
-      <RotateCw className="w-3 h-3" />更新于 {fmt(q.updatedAt)}
+    <span className={`inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full border border-line bg-paper text-ink-mute ${className}`} title="手动刷新 · 距最近一次加载">
+      <RotateCw className="w-3 h-3" />更新于 <span className="tnum">{fmt(q.updatedAt)}</span>
     </span>
   );
 }

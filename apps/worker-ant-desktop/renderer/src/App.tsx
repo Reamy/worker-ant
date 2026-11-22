@@ -51,7 +51,7 @@ const SettingsPage = lazy(() => import('./pages/SettingsPage'));
 function PageLoader() {
   return (
     <div className="flex items-center justify-center h-64">
-      <div className="animate-spin h-8 w-8 border-2 border-blue-500 border-t-transparent rounded-full" />
+      <div className="animate-spin h-8 w-8 border-2 border-accent border-t-transparent rounded-full" />
     </div>
   );
 }
@@ -135,7 +135,7 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
         <div className="text-center">
-          <div className="animate-spin h-8 w-8 border-2 border-blue-500 border-t-transparent rounded-full mx-auto mb-3" />
+          <div className="animate-spin h-8 w-8 border-2 border-accent border-t-transparent rounded-full mx-auto mb-3" />
           <p className="text-gray-500 text-sm">工蚁系统启动中...</p>
         </div>
       </div>

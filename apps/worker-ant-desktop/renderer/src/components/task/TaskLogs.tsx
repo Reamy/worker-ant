@@ -21,12 +21,12 @@ export default function TaskLogs({ stepStream }: { stepStream: Array<Record<stri
     <>
       {/* Phase A: 实时执行流（D2: 逐步展示耗时/token增量/工具成败） */}
       <div className="bg-white rounded-lg border p-4">
-        <h4 className="font-medium mb-2 text-sm flex items-center gap-1"><Activity className="w-4 h-4 text-blue-500" />实时执行流 ({stepStream.length})</h4>
+        <h4 className="font-medium mb-2 text-sm flex items-center gap-1"><Activity className="w-4 h-4 text-accent" />实时执行流 ({stepStream.length})</h4>
         <div ref={streamRef} className="space-y-2 max-h-80 overflow-y-auto">
           {stepStream.map((s, i) => (
-            <div key={i} className="border-l-2 border-blue-200 pl-3 py-1">
+            <div key={i} className="border-l-2 border-accent/25 pl-3 py-1">
               <div className="flex items-center gap-2 text-xs text-gray-400 mb-1 flex-wrap">
-                <span className="font-medium text-blue-600">第 {String(s.step)} 步</span>
+                <span className="font-medium text-accent">第 {String(s.step)} 步</span>
                 {s.duration_ms != null && <span className="shrink-0" title="本步骤耗时">⏱ {formatDuration(Number(s.duration_ms))}</span>}
                 {s.toolCalls ? <span className="truncate flex-1 min-w-0" title={String(s.toolCalls)}>{String(s.toolCalls).slice(0, 80)}</span> : null}
                 {s.toolCalls ? <span className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded-full font-medium ${s.toolOk ? 'bg-green-50 text-green-600' : 'bg-red-50 text-red-600'}`} title={s.toolOk ? '工具调用成功' : '工具调用出现错误'}>{s.toolOk ? '✓ 工具成功' : '✗ 工具出错'}</span> : null}

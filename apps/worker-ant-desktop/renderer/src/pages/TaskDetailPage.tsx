@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef, Fragment, type ReactElement } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { tasks, projects, admin, nodes, invoke, IpcError, newClientRequestId, positions as positionsApi, type DispatchReasonView } from '../lib/ipc';
+import { tasks, projects, admin, nodes, invoke, IpcError, newClientRequestId, positions as positionsApi, knowledge as knowledgeApi, type DispatchReasonView } from '../lib/ipc';
+// zx_20261121_3 M2「用·地」：本任务自己的待审经验（读模型真源在 main；此处只消费类型）。
+import type { InboxGroup, LessonItem } from '../../../src/main/core/knowledge-inbox.js';
 // zx_20261120_3 M2「职·见」：岗位来源词表（纯常量，渲染层可直引）。
 import { TASK_POSITION_SOURCE_LABEL } from '../../../src/main/core/positions.js';
 import { useSettings } from '../lib/settingsStore';
@@ -46,6 +48,8 @@ import { TASK_STATUS_LABEL, statusText, taskStatusPill } from '../lib/status-vie
 import { execBadge, execStateLine, ageMsOf } from '../lib/exec-view';
 // zx_20261111_3「显」：第一行的唯一真源在 main 纯模块（页面只说事实，不自己排优先级）。
 import NextActionBar from '../components/NextActionBar';
+// zx_20261121_3 M5：共用原语（按钮一处形状）。
+import { Button } from '../components/ui';
 import { nextActionForTask, resolveNextActionRoute, type NextActionId } from '../../../src/main/core/next-action.js';
 // zx_20261107_1 B9: 格式化单源——本页此前的 `formatToken`/`formatTime`/`formatDuration` 与看板/列表各写一份且已漂开
 import { formatTokens, formatTimeOrRaw, formatMoney } from '../lib/format';
@@ -223,8 +227,8 @@ const ACTION_ICON: Record<TaskActionKey, ReactElement> = {
 const PRIMARY_TONE: Partial<Record<TaskActionKey, string>> = {
   execute: 'bg-green-600 hover:bg-green-700',
   pause: 'bg-orange-500 hover:bg-orange-600',
-  resume: 'bg-blue-600 hover:bg-blue-700',
-  retry: 'bg-indigo-600 hover:bg-indigo-700',
+  resume: 'bg-accent hover:bg-accent/90',
+  retry: 'bg-accent hover:bg-accent/90',
   requeue: 'bg-amber-600 hover:bg-amber-700',
   inject: 'bg-cyan-600 hover:bg-cyan-700',
 };
@@ -314,6 +318,11 @@ export default function TaskDetailPage() {
   const [positionView, setPositionView] = useState<{ id: string; name: string; enabled: boolean; missing?: boolean } | null>(null);
   // zx_20261120_3 M2：来源（无岗位也有：none/legacy/remote）。
   const [positionSource, setPositionSource] = useState<{ source: string; parentTaskId?: string } | null>(null);
+  // zx_20261121_3 M2「用·地」：本任务自己的待审岗位经验——**只在确有本任务候选时出现**；
+  //   读失败如实显示（不当作 0）。
+  const [pendingLessons, setPendingLessons] = useState<InboxGroup<LessonItem> | null>(null);
+  const [lessonBusy, setLessonBusy] = useState('');
+  const [lessonNotice, setLessonNotice] = useState('');
   // zx_20261115_4 M1「岗」：补派/改派——本项目可用岗位候选 + 正在保存。
   //   此前只能建单时选一次，"当时没选"就永远补不上（真库 362 单只有 1 单带岗位）。
   const [posOptions, setPosOptions] = useState<Array<{ id: string; name: string }>>([]);
@@ -869,6 +878,35 @@ export default function TaskDetailPage() {
     setChildrenAfterCompletion(typeof after === 'number' ? after : 0);
   }
 
+  // zx_20261121_3 M2「用·地」：只读本任务的待审经验；失败如实置 error（不冒充「没有」）。
+  async function loadPendingLessons(taskId: string): Promise<void> {
+    const tid = String(taskId || '').trim();
+    if (!tid) { setPendingLessons(null); return; }
+    try {
+      setPendingLessons(await knowledgeApi.forTask(tid));
+    } catch (e) {
+      setPendingLessons({ status: 'error', error: (e as Error)?.message || String(e) });
+    }
+  }
+
+  // 采纳 / 忽略：只调既有写口（`positions:decideLesson`）；成功后重取，失败如实报。
+  async function decideTaskLesson(lessonId: string, decision: 'accepted' | 'rejected'): Promise<void> {
+    if (!task) return;
+    setLessonBusy(lessonId);
+    setLessonNotice('');
+    try {
+      await positionsApi.decideLesson(lessonId, decision);
+      setLessonNotice(decision === 'accepted'
+        ? '已采纳——后续任务会注入这条经验。'
+        : '已忽略——不会注入；本次任务结果不受影响。');
+      await loadPendingLessons(task.id);
+    } catch (e) {
+      reportAction(e);
+    } finally {
+      setLessonBusy('');
+    }
+  }
+
   async function loadProject() {
     try {
       // zx_20260916_2 M4: **只在没有数据时**才置 loading。
@@ -902,6 +940,7 @@ export default function TaskDetailPage() {
         setRetiredCount(Number(taskData.retiredCount) || 0);
         setRetrospective(taskData.retrospective || []);
         setSelectedId(taskData.task.id);
+        void loadPendingLessons(taskData.task.id);
         // Phase A: 从 context_json 恢复任务目标（刷新后仍可见，不依赖实时事件）
         try {
           const tctx = JSON.parse(taskData.task.context_json || '{}');
@@ -959,6 +998,7 @@ export default function TaskDetailPage() {
       // zx_20260930 M4-2: 与 `loadProject` 同尺——切任务也是取第 0 页 + 服务端总数
       const data = await tasks.get(taskId, { convLimit: LIST_PAGE_SIZE, convOffset: 0, delivLimit: LIST_PAGE_SIZE, delivOffset: 0 }) as unknown as { task: TaskItem; conversations: ConvItem[]; conversationsTotal?: number; deliverables: DelivItem[]; deliverablesTotal?: number; retiredCount?: number; archivedSnapshot?: ArchivedSnapshotView | null; archiveReason?: string | null; archivedAt?: string | null; runtimeEvidence?: RuntimeEvidenceView[]; suggestedCriteria?: string[]; modelSelection?: ModelSelection | null; execState?: { state: string; reason: string } | null; lastProgressAt?: string | null; stuckMs?: number | null; pendingJobAgeMs?: number | null; position?: { id: string; name: string; enabled: boolean } | null; positionSource?: { source: string; parentTaskId?: string } | null; dispatchDecision?: { attempted: boolean; ok: boolean; reason: string; label: string; nodeId?: string; mode?: 'readonly-remote'; repoUrl?: string; repoRef?: string; at: string } | null; autoResume?: AutoResumeBannerView | null };
       setTask({ ...data.task, autoResume: data.autoResume ?? null }); setModelSelection(data.modelSelection ?? null); setDispatchDecision(data.dispatchDecision ?? null); setPositionView(data.position ?? null); setPositionSource(data.positionSource ?? null); setConvs(data.conversations||[]); setDelivs(data.deliverables||[]); setRetiredCount(Number(data.retiredCount)||0);
+      void loadPendingLessons(taskId);
       applyClaimedArtifacts(data as unknown as { claimedArtifacts?: typeof claimedArtifacts; artifactsNote?: string });
       applyContextLedger(data as unknown as Parameters<typeof applyContextLedger>[0]);
       applyExecState(data);
@@ -1542,9 +1582,16 @@ export default function TaskDetailPage() {
     execState: execState?.state ?? null,
     progressAgeMs: ageMsOf(lastProgressAt, nowTick),
     pauseReason: pauseReasonText || pauseNote || null,
+    // zx_20261121_3 M2：读不到给 null（不当作 0），首行据此只对「确实有待审经验」改口。
+    pendingLessonCount: pendingLessons?.status === 'ok' ? pendingLessons.count : null,
   });
   function handleTaskNextAction(aid: NextActionId): void {
     if (!task) return;
+    // zx_20261121_3 M2「用·地」：经验卡就在本页——滚过去即可，不跳外链、不新开模态。
+    if (aid === 'review_lesson') {
+      document.getElementById('task-lesson-card')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return;
+    }
     // zx_20261116_1 M4「接」：按状态分流，不再把 pending 的「开始执行」接到 task:resume
     //   （那条通道只接受 paused/failed/completed，pending 会被 INVALID_STATUS 拒）。
     const route = resolveNextActionRoute(aid, task.status);
@@ -1616,7 +1663,7 @@ export default function TaskDetailPage() {
   };
 
   // 所有 hook 均已在上方执行完毕，此后可安全提前返回（防"加载后 hook 数量变化"白页）
-  if (loading) return <div className="flex justify-center py-12"><div className="animate-spin h-8 w-8 border-2 border-blue-500 border-t-transparent rounded-full"/></div>;
+  if (loading) return <div className="flex justify-center py-12"><div className="animate-spin h-8 w-8 border-2 border-accent border-t-transparent rounded-full"/></div>;
   if (!task) {
     // zx_20261110_1 B5: 一读失败 ≠ 真不存在——给「重试」；「返回列表」保留原路。
     return (
@@ -1625,7 +1672,7 @@ export default function TaskDetailPage() {
         {error && <p className="text-red-500 text-xs mb-3 break-words">{error}</p>}
         <div className="flex items-center justify-center gap-2">
           <button onClick={() => navigate('/tasks')} className="px-4 py-2 border border-gray-200 text-gray-600 rounded-lg text-sm hover:bg-gray-50">返回任务列表</button>
-          <button onClick={() => void loadProject()} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700">重试</button>
+          <button onClick={() => void loadProject()} className="px-4 py-2 bg-accent text-white rounded-lg text-sm hover:bg-accent/90">重试</button>
         </div>
       </div>
     );
@@ -1649,10 +1696,10 @@ export default function TaskDetailPage() {
     <div className="bg-white rounded-lg border p-4">
       <button type="button" onClick={() => setShowMem((v) => !v)} className="w-full text-left font-medium text-sm flex items-center gap-1">
         {showMem ? <ChevronDown className="w-4 h-4 text-gray-400 shrink-0" /> : <ChevronRight className="w-4 h-4 text-gray-400 shrink-0" />}
-        <Brain className="w-4 h-4 text-violet-500 shrink-0" />记忆注入
+        <Brain className="w-4 h-4 text-accent shrink-0" />记忆注入
         <span className="text-[10px] font-normal text-gray-400">（{memoryInjection.length} 条）</span>
       </button>
-      {showMem && <div className="space-y-1.5 max-h-72 overflow-y-auto mt-2">{memoryInjection.map((m,i)=>(<div key={i} className="flex items-start justify-between gap-2 text-sm py-1.5 px-2 hover:bg-gray-50 rounded border-b last:border-0"><div className="flex-1 min-w-0"><div className="flex items-center gap-1.5 flex-wrap"><span className="text-xs px-1.5 py-0.5 rounded bg-violet-50 text-violet-600">{String(m.type)}</span><span className="text-xs text-gray-400">可信度 {Number(m.confidence)}%</span>{m.tag ? <span className="text-[10px] text-gray-400">{String(m.tag).slice(0, 40)}</span> : null}{m.reason ? <span className="text-[10px] text-blue-500 max-w-[40%] truncate" title={String(m.reason)}>召回:{String(m.reason).slice(0, 30)}</span> : null}</div><p className="text-xs text-gray-600 truncate mt-0.5" title={String(m.content)}>{String(m.content)}</p></div><div className="flex gap-1 shrink-0"><button onClick={()=>handleDownweightMemory(String(m.id))} className="text-[10px] px-1.5 py-0.5 bg-gray-100 rounded hover:bg-gray-200 text-gray-600">降权</button><button onClick={()=>handleDeleteMemory(String(m.id))} className="text-[10px] px-1.5 py-0.5 bg-red-50 rounded hover:bg-red-100 text-red-500">删除</button></div></div>))}</div>}
+      {showMem && <div className="space-y-1.5 max-h-72 overflow-y-auto mt-2">{memoryInjection.map((m,i)=>(<div key={i} className="flex items-start justify-between gap-2 text-sm py-1.5 px-2 hover:bg-gray-50 rounded border-b last:border-0"><div className="flex-1 min-w-0"><div className="flex items-center gap-1.5 flex-wrap"><span className="text-xs px-1.5 py-0.5 rounded bg-accent-soft text-accent">{String(m.type)}</span><span className="text-xs text-gray-400">可信度 {Number(m.confidence)}%</span>{m.tag ? <span className="text-[10px] text-gray-400">{String(m.tag).slice(0, 40)}</span> : null}{m.reason ? <span className="text-[10px] text-accent max-w-[40%] truncate" title={String(m.reason)}>召回:{String(m.reason).slice(0, 30)}</span> : null}</div><p className="text-xs text-gray-600 truncate mt-0.5" title={String(m.content)}>{String(m.content)}</p></div><div className="flex gap-1 shrink-0"><button onClick={()=>handleDownweightMemory(String(m.id))} className="text-[10px] px-1.5 py-0.5 bg-gray-100 rounded hover:bg-gray-200 text-gray-600">降权</button><button onClick={()=>handleDeleteMemory(String(m.id))} className="text-[10px] px-1.5 py-0.5 bg-red-50 rounded hover:bg-red-100 text-red-500">删除</button></div></div>))}</div>}
     </div>
   );
 
@@ -1734,11 +1781,11 @@ export default function TaskDetailPage() {
               value={archivePrompt.reason}
               onChange={(e) => setArchivePrompt((p) => (p ? { ...p, reason: e.target.value } : p))}
               placeholder="例如：判据与任务目标无关，已由人工新开任务重做"
-              className="w-full border rounded-lg p-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-200"
+              className="w-full border rounded-lg p-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-accent/30"
             />
             <div className="flex justify-end gap-2">
               <button type="button" onClick={() => setArchivePrompt(null)} className="px-3 py-1.5 text-sm border rounded-lg text-gray-600 hover:bg-gray-50">取消</button>
-              <button type="button" onClick={() => void confirmArchivePrompt()} disabled={!archivePrompt.reason.trim()} className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50">确认归档</button>
+              <button type="button" onClick={() => void confirmArchivePrompt()} disabled={!archivePrompt.reason.trim()} className="px-3 py-1.5 text-sm bg-accent text-white rounded-lg hover:bg-accent/90 disabled:opacity-50">确认归档</button>
             </div>
           </div>
         </div>
@@ -1749,7 +1796,7 @@ export default function TaskDetailPage() {
         <span className="text-sm text-gray-400">· {taskList.length} 个任务</span>
         <div className="flex-1"/>
         <button onClick={loadProject} className="p-1.5 hover:bg-gray-100 rounded"><RefreshCw className="w-4 h-4"/></button>
-        <button onClick={() => { setCreateCtx({ mode: 'child' }); setNewTask({ title: '', description: '', acceptance_criteria: '', planTaskId: '' }); setShowCreate(true); }} title="为当前任务新建子任务" className="flex items-center gap-1 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"><Plus className="w-3.5 h-3.5"/>新建子任务</button>
+        <button onClick={() => { setCreateCtx({ mode: 'child' }); setNewTask({ title: '', description: '', acceptance_criteria: '', planTaskId: '' }); setShowCreate(true); }} title="为当前任务新建子任务" className="flex items-center gap-1 px-3 py-1.5 bg-accent text-white rounded-lg text-sm hover:bg-accent/90"><Plus className="w-3.5 h-3.5"/>新建子任务</button>
       </div>
       {error && <p className="text-red-500 text-sm mb-4">{error}</p>}
       {/* G2 (2026-09-04_2 整改): 动作"两态"回执——被拒原因显式透出（乐观先行 + 真实回执/失败原因） */}
@@ -1767,7 +1814,7 @@ export default function TaskDetailPage() {
             <>
               {/* zx_20260904_4 T1 (2026-09-04): 需求理解卡 chip（zx_20260906 批3/3a 起常驻——完成/历史任务亦可复盘"本次理解"；执行中仍可折叠即时纠偏） */}
               {(ctx as unknown as { requirement_card?: string }).requirement_card && (
-                <details className="mb-3 bg-indigo-50 border border-indigo-100 rounded-lg px-3 py-2 text-xs text-indigo-800">
+                <details className="mb-3 bg-accent-soft border border-accent/25 rounded-lg px-3 py-2 text-xs text-accent">
                   <summary className="cursor-pointer font-medium">📋 需求理解卡</summary>
                   <pre className="mt-1 whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed">{(ctx as unknown as { requirement_card?: string }).requirement_card}</pre>
                 </details>
@@ -1776,21 +1823,59 @@ export default function TaskDetailPage() {
               {showSuggest && (
                 <div className="mb-3 p-2 bg-gray-50 border border-gray-200 rounded-lg flex flex-wrap items-center gap-2">
                   <span className="text-xs text-gray-600 flex-1 min-w-0">{suggestText}</span>
-                  {task?.status === 'failed' && <button type="button" onClick={() => handleResume(task!.id)} disabled={actionLocked} className="text-xs px-2 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">恢复（保留对话）</button>}
+                  {task?.status === 'failed' && <button type="button" onClick={() => handleResume(task!.id)} disabled={actionLocked} className="text-xs px-2 py-1 bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed">恢复（保留对话）</button>}
                   {/* zx_20261112_1 B4「诊」: 失败块直达运行证据；无证据行时滚到「本次运行未留证据」，不假装有。 */}
                   {task?.status === 'failed' && <button type="button" onClick={() => { setShowRunEvidence(true); document.getElementById('run-evidence')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }} className="text-xs px-2 py-1 bg-slate-600 text-white rounded hover:bg-slate-700">查看运行证据</button>}
-                  <button type="button" onClick={() => handleRetry(task!.id)} disabled={actionLocked} className="text-xs px-2 py-1 bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed">重试（清空重跑）</button>
+                  <button type="button" onClick={() => handleRetry(task!.id)} disabled={actionLocked} className="text-xs px-2 py-1 bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed">重试（清空重跑）</button>
                 </div>
               )}
               {/* 任务头部 + 统计卡片 */}
               <div className="bg-white rounded-lg border p-4">
                 {/* zx_20261111_3「显」：第一行——此刻是什么 / 凭什么 / 下一步点哪个 */}
                 <div className="mb-3"><NextActionBar action={taskNextAction} onAction={handleTaskNextAction} /></div>
+                {/* zx_20261121_3 M2「用·地」：本任务沉淀的岗位经验就地看/批——决定发生在它产生的地方。
+                    读失败如实显示（不当作「没有经验」）；无候选则整块不渲染。 */}
+                {pendingLessons && (pendingLessons.status === 'error' || pendingLessons.count > 0) && (
+                  <div id="task-lesson-card" className="mb-3 rounded-card border border-accent/25 bg-accent-soft p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <h4 className="font-display text-sm font-semibold text-ink">这次任务沉淀的岗位经验</h4>
+                      <span className="text-xs text-ink-soft tnum">
+                        {pendingLessons.status === 'ok' ? `${pendingLessons.count} 条待确认` : '读取失败'}
+                      </span>
+                    </div>
+                    {pendingLessons.status === 'error' ? (
+                      <p className="mt-1 text-xs text-bad">读取失败：{pendingLessons.error}（不当作「没有经验」，可稍后重试）</p>
+                    ) : (
+                      <ul className="mt-2 space-y-2">
+                        {pendingLessons.items.map((l) => (
+                          <li key={l.id} className="rounded-control border border-line bg-surface p-2">
+                            <p className="text-sm leading-relaxed text-ink whitespace-pre-wrap break-words">{l.content}</p>
+                            <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11px] text-ink-soft">
+                              <span>{l.positionName}</span>
+                              {l.reusable
+                                ? <span className="rounded-full bg-accent-soft px-1.5 py-0.5 text-accent">可迁移</span>
+                                : <span className="rounded-full bg-paper px-1.5 py-0.5 text-ink-mute">仅本单</span>}
+                              <span className="font-mono text-[11px]">{l.id}</span>
+                              <span className="ml-auto flex gap-1.5">
+                                <Button size="sm" variant="primary" loading={lessonBusy === l.id}
+                                  onClick={() => void decideTaskLesson(l.id, 'accepted')}>采纳</Button>
+                                <Button size="sm" variant="secondary" disabled={lessonBusy === l.id}
+                                  onClick={() => void decideTaskLesson(l.id, 'rejected')}>忽略</Button>
+                                <Button size="sm" variant="ghost" onClick={() => navigate('/positions')}>编辑后再采纳</Button>
+                              </span>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {lessonNotice && <p className="mt-1.5 text-xs text-ink-soft">{lessonNotice}</p>}
+                  </div>
+                )}
                 {completionOverride && (
-                  <div className="mb-3 p-2 bg-indigo-50 border border-indigo-200 rounded-lg text-xs text-indigo-800">
+                  <div className="mb-3 p-2 bg-accent-soft border border-accent/25 rounded-lg text-xs text-accent">
                     <span className="font-medium">覆盖完成</span>
                     {completionOverride.reason ? `：${completionOverride.reason}` : '：未填覆盖原因'}
-                    <span className="text-indigo-500">
+                    <span className="text-accent">
                       （原验收 {completionOverride.previous_acceptance?.passed_total ?? 0}/{completionOverride.previous_acceptance?.criteria_total ?? 0}，未重判）
                     </span>
                   </div>
@@ -1815,7 +1900,7 @@ export default function TaskDetailPage() {
                 {/* zx_20260915 P0-1(§10.3-5 renderer 是词表第二落点): 暂停横幅按 `pause_reason` **分型**——
                     先前只有一句话「执行已挂起，可恢复继续」，而「收口无产出证据」是**事实**判定（不是可
                     随手续跑的挂起），用户据此无从知道该补产出还是该点完成。 */}
-                {task.status==='paused' && !awaitingInput && <div className="p-2 mb-3 bg-orange-50 border border-orange-300 rounded-lg"><div className="flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-orange-500 animate-pulse"/><span className="text-sm text-orange-800 font-medium">{pausedBannerHeadline({ reason: pauseReasonCode, reasonLabel: pauseReasonText, failed: (acceptanceCheck?.failed ?? []).length, total: acceptanceCheck?.criteria_total ?? 0, autoResume: task.autoResume ?? null })}</span><span className="text-xs text-orange-600">{pausedBannerHint(pauseReasonCode, task.autoResume ?? null)}</span>{acceptanceFailed && <button type="button" onClick={() => document.getElementById('acceptance-check')?.scrollIntoView({ behavior: 'smooth', block: 'start' })} className="text-xs px-2 py-1 bg-white border border-orange-300 text-orange-700 rounded hover:bg-orange-100">查看验收块</button>}<button onClick={()=>handleResume(task.id)} disabled={actionLocked} className="ml-auto flex items-center gap-1 px-2 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"><RotateCcw className="w-3 h-3"/>{task.autoResume?.due ? '立即恢复（接管）' : '恢复'}</button></div>
+                {task.status==='paused' && !awaitingInput && <div className="p-2 mb-3 bg-orange-50 border border-orange-300 rounded-lg"><div className="flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-orange-500 animate-pulse"/><span className="text-sm text-orange-800 font-medium">{pausedBannerHeadline({ reason: pauseReasonCode, reasonLabel: pauseReasonText, failed: (acceptanceCheck?.failed ?? []).length, total: acceptanceCheck?.criteria_total ?? 0, autoResume: task.autoResume ?? null })}</span><span className="text-xs text-orange-600">{pausedBannerHint(pauseReasonCode, task.autoResume ?? null)}</span>{acceptanceFailed && <button type="button" onClick={() => document.getElementById('acceptance-check')?.scrollIntoView({ behavior: 'smooth', block: 'start' })} className="text-xs px-2 py-1 bg-white border border-orange-300 text-orange-700 rounded hover:bg-orange-100">查看验收块</button>}<button onClick={()=>handleResume(task.id)} disabled={actionLocked} className="ml-auto flex items-center gap-1 px-2 py-1 bg-accent text-white rounded text-xs hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed"><RotateCcw className="w-3 h-3"/>{task.autoResume?.due ? '立即恢复（接管）' : '恢复'}</button></div>
                   {/* zx_20260923 M7-c（G15）: 横幅内联附言——承 G15 口径订正，「附言」此前只在动作栏那处模态框可达，
                       本批补的是**横幅里这一处缺口**。走的是既有的那个恢复方法，后端零改动。 */}
                   {/* zx_20261028_1 M5「停」：暂停附注（停摆说明含逐子停因与三条处置）——有才显示，原样换行。 */}
@@ -1823,7 +1908,7 @@ export default function TaskDetailPage() {
                   <div className="flex items-center gap-2 mt-2"><input value={bannerReply} onChange={e=>setBannerReply(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')handleResumeWithNote(task.id);}} className="flex-1 px-2 py-1 border border-orange-200 rounded text-xs bg-white" placeholder="附言（可选）：告诉它恢复后要注意什么，随本次恢复注入执行"/><button onClick={()=>handleResumeWithNote(task.id)} disabled={!bannerReply.trim()||actionLocked} className="shrink-0 px-2 py-1 bg-teal-600 text-white rounded text-xs hover:bg-teal-700 disabled:opacity-50 disabled:cursor-not-allowed">附言并恢复</button></div></div>}
                 <div className="flex items-start justify-between mb-3">
                   <div>
-                    <div className="flex items-center gap-2 mb-1 flex-wrap"><h3 className="font-semibold text-lg">{task.title}</h3><button type="button" onClick={(e) => { e.stopPropagation(); navigate(`/activity?obj=${task.id}`); }} title="该任务活动时间线" className="shrink-0 p-0.5 text-gray-400 hover:text-blue-500"><History className="w-4 h-4" /></button>{ctx.verification_fix ? (<button type="button" onClick={(e) => { e.stopPropagation(); const src = String(ctx.verification_fix_of || ''); if (src) navigate(`/tasks/${src}`); }} title={ctx.verification_fix_of_title ? `引擎验收发现问题后自动立项的修复任务——修复自：${String(ctx.verification_fix_of_title)}（点击跳到来源任务）` : '引擎验收发现问题后自动立项的修复任务（来源任务标题未记录）'} className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full border border-cyan-200 bg-cyan-50 text-cyan-700 hover:bg-cyan-100">修复自：{ctx.verification_fix_of_title ? `${String(ctx.verification_fix_of_title).slice(0, 18)}${String(ctx.verification_fix_of_title).length > 18 ? '…' : ''}` : String(ctx.verification_fix_of || '').slice(0, 8)}</button>) : null}{positionView ? (positionView.missing ? <span title={`原指派岗位 ${positionView.id} 已被删除——执行时不注入岗位知识与经验`} className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full border border-red-200 bg-red-50 text-red-600">岗位：已删除</span> : <span title={positionView.enabled ? `指派岗位：${positionView.name}` : '岗位已停用——执行时不注入岗位知识与经验，重新启用后恢复'} className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded-full border ${positionView.enabled ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-gray-300 bg-gray-50 text-gray-500'}`}>岗位：{positionView.name}{positionView.enabled ? '' : '（已停用）'}</span>) : <span title="该任务未指派岗位——执行时不注入岗位知识与经验" className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full border border-dashed border-gray-300 bg-white text-gray-400">未指派岗位</span>}{ownMs[0]?<button type="button" onClick={(e)=>{e.stopPropagation();navigate(`/tasks/${String(ownMs[0].plan_task_id)}`);}} className="text-[10px] px-1.5 py-0.5 rounded bg-teal-50 text-teal-700 hover:bg-teal-100 shrink-0" title={`所属方案里程碑 ${ownMs[0].milestone}：${ownMs[0].status}`}>方案 {ownMs[0].milestone}: {ownMs[0].status==='done'?'已落地':ownMs[0].status==='doing'?'进行中':'待实施'}</button>:null}<span className={`text-xs px-2 py-0.5 rounded-full ${taskStatusPill(task.status)}`}>{statusText(TASK_STATUS_LABEL, task.status)}</span>{execBadgeView && <span title={`执行态由引擎按「状态词 + 是否有真执行体 + 排队作业」派生${execState?.reason ? `：${execState.reason}` : ''}`} className={`cursor-help text-[10px] px-1.5 py-0.5 rounded-full border font-medium ${execBadgeView.tone}`}>{execBadgeView.label}</span>}{execLine && <span className="text-[11px] text-gray-500">{execLine}</span>}{execState?.state === 'ghost' && <button type="button" disabled={submitting || actionCooldown} onClick={() => void handleReleaseAndRequeue(task.id)} title="状态写着在跑、实则无执行体——先真断再放回待执行队列" className="text-[10px] px-1.5 py-0.5 rounded border border-red-300 bg-white text-red-600 hover:bg-red-50 disabled:opacity-50">释放并重排</button>}{acceptanceFailed && <span title={`账上验收有 ${(acceptanceCheck!.failed ?? []).filter(f => (f as { waived?: boolean }).waived !== true).length} 条判据未达成（共 ${acceptanceCheck!.criteria_total ?? 0} 条）——「已完成」不等于「已验收」，详见下方验收块`} className="cursor-help text-[10px] px-1.5 py-0.5 rounded-full border border-red-200 bg-red-50 text-red-600 font-medium">✗ 验收 {(acceptanceCheck!.failed ?? []).filter(f => (f as { waived?: boolean }).waived !== true).length} 条未达</span>}{acceptanceWaivedCount > 0 && <span title={`用户已逐条豁免 ${acceptanceWaivedCount} 条未达验收（理由见下方验收块）`} className="cursor-help text-[10px] px-1.5 py-0.5 rounded-full border border-amber-200 bg-amber-50 text-amber-700 font-medium">⚑ 豁免 {acceptanceWaivedCount} 条</span>}{archetypeLabel&&<span className="text-xs px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600 cursor-help" title={[`形态：${archetypeLabel}`, archetypeSourceLabel&&`来源：${archetypeSourceLabel}`, archetypeReason&&`依据：${archetypeReason}`].filter(Boolean).join('\n')}>形态：{archetypeLabel}{archetypeSourceLabel?` · ${archetypeSourceLabel}`:''}</span>}{deferredItems.length>0&&<span title={deferredItems.map((s,i)=>`${i+1}. ${s}`).join('\n')} className="cursor-help text-[10px] px-1.5 py-0.5 rounded-full border border-amber-200 bg-amber-50 text-amber-700 font-medium">未落地 {deferredItems.length} 条</span>}{childrenAfterCompletion>0&&<span title={`父任务已完成；这 ${childrenAfterCompletion} 个子任务在父任务完成之后才创建——父的验收结论不会因此重算`} className="cursor-help text-[10px] px-1.5 py-0.5 rounded-full border border-slate-300 bg-slate-50 text-slate-600 font-medium">后补子任务 {childrenAfterCompletion} 个 · 父结论未重算</span>}{archetypeSource === 'fallback' && (task.status === 'paused' || task.status === 'failed') && <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700">形态由长度兜底判定，可能偏窄<button type="button" onClick={() => setShowContext(true)} className="ml-1 underline text-blue-600">切换任务形态</button><span className="text-amber-500/80">（仅影响后续运行，不改历史账）</span></span>}{taskEstimate?.basedOn ? <span title={`基于 ${taskEstimate.basedOn} 个相似历史任务预估`} className="text-xs px-1.5 py-0.5 rounded-full bg-cyan-50 text-cyan-600">预估 {formatTokens(taskEstimate.tokens)} / {taskEstimate.steps}步</span> : null}{PRIORITY_LABEL[task.priority] && <span className="text-xs text-orange-500 font-medium">{PRIORITY_LABEL[task.priority]}</span>}{completionQuality&&<span title={(snapshotActive ? '归档时快照 · ' : '') + (completionQuality.feedback||'') + (completionVia === 'finalize_task' ? ' · 自评：未跑引擎六维评估' : '')} className={`cursor-help text-xs px-1.5 py-0.5 rounded-full font-medium ${(completionQuality.score||0)>=80?'bg-green-100 text-green-700':(completionQuality.score||0)>=60?'bg-yellow-100 text-yellow-700':(completionQuality.score||0)>=40?'bg-orange-100 text-orange-700':'bg-red-100 text-red-600'}`}>★{completionQuality.score}分{completionVia === 'finalize_task' ? '（自评）' : ''}</span>}{denialSummary && Number(denialSummary.total) > 0 && <span title={`本轮工具被拒 ${denialSummary.total} 次：${Object.entries(denialSummary.byKind || {}).map(([k, n]) => `${k} ${n}`).join(' / ')}`} className="cursor-help text-[10px] px-1.5 py-0.5 rounded-full border border-orange-200 bg-orange-50 text-orange-700">工具拒绝 {denialSummary.total} 次</span>}{stepsLedger && <span title={`本轮步数 ${stepsLedger.used}${stepsLedger.estimate ? `（估算 ${stepsLedger.estimate}）` : ''}${stepsLedger.grants ? `，续额 ${stepsLedger.grants} 次` : ''}`} className="cursor-help text-[10px] px-1.5 py-0.5 rounded-full border border-slate-200 bg-slate-50 text-slate-600">步数 {stepsLedger.used}{stepsLedger.estimate ? `/${stepsLedger.estimate}` : ''}</span>}{autoCompletedNoOutput && <span title="该任务被直接标记完成但未产出真实成果（update_task_status 工具），未经 finalize 成果门禁——请人工复核" className="cursor-help text-[10px] px-1.5 py-0.5 rounded-full border border-red-200 bg-red-50 text-red-600 font-medium">⚠ 未达成果门禁</span>}{budgetUsage!=null&&<span className={`text-xs px-1.5 py-0.5 rounded-full ${budgetUsage>=0.95?'bg-red-100 text-red-700':budgetUsage>=0.7?'bg-yellow-100 text-yellow-700':'bg-blue-100 text-blue-700'}`}>{Math.round(budgetUsage*100)}%预算</span>}{costEstimate?.cost!=null&&<span title={`本次执行成本估算（¥）${costEstimate.cost>0?'':'· 所选模型单价为 0/未计费'}${costEstimate.model?` · 模型 ${costEstimate.model}`:''}`} className="text-xs text-gray-500">💰{costEstimate.cost>0?formatMoney(costEstimate.cost,{digits:4}):`${formatMoney(0,{digits:0})}${costEstimate.model?`(${costEstimate.model})`:''}`}</span>}</div>
+                    <div className="flex items-center gap-2 mb-1 flex-wrap"><h3 className="font-display font-semibold text-lg">{task.title}</h3><button type="button" onClick={(e) => { e.stopPropagation(); navigate(`/activity?obj=${task.id}`); }} title="该任务活动时间线" className="shrink-0 p-0.5 text-gray-400 hover:text-accent"><History className="w-4 h-4" /></button>{ctx.verification_fix ? (<button type="button" onClick={(e) => { e.stopPropagation(); const src = String(ctx.verification_fix_of || ''); if (src) navigate(`/tasks/${src}`); }} title={ctx.verification_fix_of_title ? `引擎验收发现问题后自动立项的修复任务——修复自：${String(ctx.verification_fix_of_title)}（点击跳到来源任务）` : '引擎验收发现问题后自动立项的修复任务（来源任务标题未记录）'} className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full border border-cyan-200 bg-cyan-50 text-cyan-700 hover:bg-cyan-100">修复自：{ctx.verification_fix_of_title ? `${String(ctx.verification_fix_of_title).slice(0, 18)}${String(ctx.verification_fix_of_title).length > 18 ? '…' : ''}` : String(ctx.verification_fix_of || '').slice(0, 8)}</button>) : null}{positionView ? (positionView.missing ? <span title={`原指派岗位 ${positionView.id} 已被删除——执行时不注入岗位知识与经验`} className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full border border-red-200 bg-red-50 text-red-600">岗位：已删除</span> : <span title={positionView.enabled ? `指派岗位：${positionView.name}` : '岗位已停用——执行时不注入岗位知识与经验，重新启用后恢复'} className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded-full border ${positionView.enabled ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-gray-300 bg-gray-50 text-gray-500'}`}>岗位：{positionView.name}{positionView.enabled ? '' : '（已停用）'}</span>) : <span title="该任务未指派岗位——执行时不注入岗位知识与经验" className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full border border-dashed border-gray-300 bg-white text-gray-400">未指派岗位</span>}{ownMs[0]?<button type="button" onClick={(e)=>{e.stopPropagation();navigate(`/tasks/${String(ownMs[0].plan_task_id)}`);}} className="text-[10px] px-1.5 py-0.5 rounded bg-teal-50 text-teal-700 hover:bg-teal-100 shrink-0" title={`所属方案里程碑 ${ownMs[0].milestone}：${ownMs[0].status}`}>方案 {ownMs[0].milestone}: {ownMs[0].status==='done'?'已落地':ownMs[0].status==='doing'?'进行中':'待实施'}</button>:null}<span className={`text-xs px-2 py-0.5 rounded-full ${taskStatusPill(task.status)}`}>{statusText(TASK_STATUS_LABEL, task.status)}</span>{execBadgeView && <span title={`执行态由引擎按「状态词 + 是否有真执行体 + 排队作业」派生${execState?.reason ? `：${execState.reason}` : ''}`} className={`cursor-help text-[10px] px-1.5 py-0.5 rounded-full border font-medium ${execBadgeView.tone}`}>{execBadgeView.label}</span>}{execLine && <span className="text-[11px] text-gray-500">{execLine}</span>}{execState?.state === 'ghost' && <button type="button" disabled={submitting || actionCooldown} onClick={() => void handleReleaseAndRequeue(task.id)} title="状态写着在跑、实则无执行体——先真断再放回待执行队列" className="text-[10px] px-1.5 py-0.5 rounded border border-red-300 bg-white text-red-600 hover:bg-red-50 disabled:opacity-50">释放并重排</button>}{acceptanceFailed && <span title={`账上验收有 ${(acceptanceCheck!.failed ?? []).filter(f => (f as { waived?: boolean }).waived !== true).length} 条判据未达成（共 ${acceptanceCheck!.criteria_total ?? 0} 条）——「已完成」不等于「已验收」，详见下方验收块`} className="cursor-help text-[10px] px-1.5 py-0.5 rounded-full border border-red-200 bg-red-50 text-red-600 font-medium">✗ 验收 {(acceptanceCheck!.failed ?? []).filter(f => (f as { waived?: boolean }).waived !== true).length} 条未达</span>}{acceptanceWaivedCount > 0 && <span title={`用户已逐条豁免 ${acceptanceWaivedCount} 条未达验收（理由见下方验收块）`} className="cursor-help text-[10px] px-1.5 py-0.5 rounded-full border border-amber-200 bg-amber-50 text-amber-700 font-medium">⚑ 豁免 {acceptanceWaivedCount} 条</span>}{archetypeLabel&&<span className="text-xs px-1.5 py-0.5 rounded bg-accent-soft text-accent cursor-help" title={[`形态：${archetypeLabel}`, archetypeSourceLabel&&`来源：${archetypeSourceLabel}`, archetypeReason&&`依据：${archetypeReason}`].filter(Boolean).join('\n')}>形态：{archetypeLabel}{archetypeSourceLabel?` · ${archetypeSourceLabel}`:''}</span>}{deferredItems.length>0&&<span title={deferredItems.map((s,i)=>`${i+1}. ${s}`).join('\n')} className="cursor-help text-[10px] px-1.5 py-0.5 rounded-full border border-amber-200 bg-amber-50 text-amber-700 font-medium">未落地 {deferredItems.length} 条</span>}{childrenAfterCompletion>0&&<span title={`父任务已完成；这 ${childrenAfterCompletion} 个子任务在父任务完成之后才创建——父的验收结论不会因此重算`} className="cursor-help text-[10px] px-1.5 py-0.5 rounded-full border border-slate-300 bg-slate-50 text-slate-600 font-medium">后补子任务 {childrenAfterCompletion} 个 · 父结论未重算</span>}{archetypeSource === 'fallback' && (task.status === 'paused' || task.status === 'failed') && <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700">形态由长度兜底判定，可能偏窄<button type="button" onClick={() => setShowContext(true)} className="ml-1 underline text-accent">切换任务形态</button><span className="text-amber-500/80">（仅影响后续运行，不改历史账）</span></span>}{taskEstimate?.basedOn ? <span title={`基于 ${taskEstimate.basedOn} 个相似历史任务预估`} className="text-xs px-1.5 py-0.5 rounded-full bg-cyan-50 text-cyan-600">预估 {formatTokens(taskEstimate.tokens)} / {taskEstimate.steps}步</span> : null}{PRIORITY_LABEL[task.priority] && <span className="text-xs text-orange-500 font-medium">{PRIORITY_LABEL[task.priority]}</span>}{completionQuality&&<span title={(snapshotActive ? '归档时快照 · ' : '') + (completionQuality.feedback||'') + (completionVia === 'finalize_task' ? ' · 自评：未跑引擎六维评估' : '')} className={`cursor-help text-xs px-1.5 py-0.5 rounded-full font-medium ${(completionQuality.score||0)>=80?'bg-green-100 text-green-700':(completionQuality.score||0)>=60?'bg-yellow-100 text-yellow-700':(completionQuality.score||0)>=40?'bg-orange-100 text-orange-700':'bg-red-100 text-red-600'}`}>★{completionQuality.score}分{completionVia === 'finalize_task' ? '（自评）' : ''}</span>}{denialSummary && Number(denialSummary.total) > 0 && <span title={`本轮工具被拒 ${denialSummary.total} 次：${Object.entries(denialSummary.byKind || {}).map(([k, n]) => `${k} ${n}`).join(' / ')}`} className="cursor-help text-[10px] px-1.5 py-0.5 rounded-full border border-orange-200 bg-orange-50 text-orange-700">工具拒绝 {denialSummary.total} 次</span>}{stepsLedger && <span title={`本轮步数 ${stepsLedger.used}${stepsLedger.estimate ? `（估算 ${stepsLedger.estimate}）` : ''}${stepsLedger.grants ? `，续额 ${stepsLedger.grants} 次` : ''}`} className="cursor-help text-[10px] px-1.5 py-0.5 rounded-full border border-slate-200 bg-slate-50 text-slate-600">步数 {stepsLedger.used}{stepsLedger.estimate ? `/${stepsLedger.estimate}` : ''}</span>}{autoCompletedNoOutput && <span title="该任务被直接标记完成但未产出真实成果（update_task_status 工具），未经 finalize 成果门禁——请人工复核" className="cursor-help text-[10px] px-1.5 py-0.5 rounded-full border border-red-200 bg-red-50 text-red-600 font-medium">⚠ 未达成果门禁</span>}{budgetUsage!=null&&<span className={`text-xs px-1.5 py-0.5 rounded-full ${budgetUsage>=0.95?'bg-red-100 text-red-700':budgetUsage>=0.7?'bg-yellow-100 text-yellow-700':'bg-accent-soft text-accent'}`}>{Math.round(budgetUsage*100)}%预算</span>}{costEstimate?.cost!=null&&<span title={`本次执行成本估算（¥）${costEstimate.cost>0?'':'· 所选模型单价为 0/未计费'}${costEstimate.model?` · 模型 ${costEstimate.model}`:''}`} className="text-xs text-gray-500">💰{costEstimate.cost>0?formatMoney(costEstimate.cost,{digits:4}):`${formatMoney(0,{digits:0})}${costEstimate.model?`(${costEstimate.model})`:''}`}</span>}</div>
                     {/* zx_20261105_1 M9: 归档不是黑洞——理由与时刻在头部副标题如实可见；
                         没有理由就写「未填写理由」，不编造一句看起来像理由的话。 */}
                     {task.status === 'archived' && (
@@ -1836,9 +1921,9 @@ export default function TaskDetailPage() {
                       </p>
                     )}
                     {/* B2: 模板匹配依据——为什么套用了这个模板拆解 */}
-                    {matchedInfo && <p className="text-[11px] text-indigo-600 mb-1 flex items-center gap-1.5 flex-wrap"><span className="font-medium">🧩 模板拆解</span><span className="text-gray-400">模板 {matchedInfo.tpl}</span>{matchedInfo.method === 'semantic' ? <span className="px-1.5 py-0.5 rounded-full bg-indigo-50 text-indigo-600">语义匹配{matchedInfo.sim != null ? ` 相似度 ${matchedInfo.sim}` : ''}</span> : <span className="px-1.5 py-0.5 rounded-full bg-blue-50 text-blue-600">关键词匹配</span>}{matchedInfo.field ? <span className="px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-600">命中{matchedInfo.field === 'title' ? '标题' : '描述'}</span> : null}{matchedInfo.kw.length > 0 && <span className="text-gray-500">命中: {matchedInfo.kw.join('、')}</span>}</p>}
+                    {matchedInfo && <p className="text-[11px] text-accent mb-1 flex items-center gap-1.5 flex-wrap"><span className="font-medium">🧩 模板拆解</span><span className="text-gray-400">模板 {matchedInfo.tpl}</span>{matchedInfo.method === 'semantic' ? <span className="px-1.5 py-0.5 rounded-full bg-accent-soft text-accent">语义匹配{matchedInfo.sim != null ? ` 相似度 ${matchedInfo.sim}` : ''}</span> : <span className="px-1.5 py-0.5 rounded-full bg-accent-soft text-accent">关键词匹配</span>}{matchedInfo.field ? <span className="px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-600">命中{matchedInfo.field === 'title' ? '标题' : '描述'}</span> : null}{matchedInfo.kw.length > 0 && <span className="text-gray-500">命中: {matchedInfo.kw.join('、')}</span>}</p>}
                     {/* zx_20261002 M7: 引擎路拆解溯源——无模板者由"引擎自动拆解"补上，不再恒隐藏（依据见会话流 [智能拆解]） */}
-                    {engineDecomposed && <p className="text-[11px] text-indigo-600 mb-1 flex items-center gap-1.5 flex-wrap"><span className="font-medium">🧩 引擎自动拆解</span><span className="px-1.5 py-0.5 rounded-full bg-indigo-50 text-indigo-600">无匹配模板 · 按任务复杂度自动拆分</span><span className="text-gray-500">共 {engineDecomposed.count} 个子任务，拆解依据见会话流 [智能拆解] 记录</span></p>}
+                    {engineDecomposed && <p className="text-[11px] text-accent mb-1 flex items-center gap-1.5 flex-wrap"><span className="font-medium">🧩 引擎自动拆解</span><span className="px-1.5 py-0.5 rounded-full bg-accent-soft text-accent">无匹配模板 · 按任务复杂度自动拆分</span><span className="text-gray-500">共 {engineDecomposed.count} 个子任务，拆解依据见会话流 [智能拆解] 记录</span></p>}
                     {task.description && <p className="text-sm text-gray-500">{task.description}</p>}
 {completionQuality?.feedback && <p className="text-xs text-gray-400 mt-1">{completionQuality.feedback}</p>}
                     {/* zx_20261018_1 批七「账」: 七源分账与裁剪数上屏（中文标签，renderer 是词表第二落点） */}
@@ -1846,11 +1931,11 @@ export default function TaskDetailPage() {
                       <span className="font-medium text-gray-600">Token 分账</span>
                       <span className="px-1.5 py-0.5 rounded-full bg-gray-100">系统 {formatTokens(tokenBreakdown.system)}</span>
                       <span className="px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-700">记忆 {formatTokens(tokenBreakdown.memory)}</span>
-                      <span className="px-1.5 py-0.5 rounded-full bg-indigo-50 text-indigo-700">知识 {formatTokens(tokenBreakdown.knowledge)}</span>
+                      <span className="px-1.5 py-0.5 rounded-full bg-accent-soft text-accent">知识 {formatTokens(tokenBreakdown.knowledge)}</span>
                       <span className="px-1.5 py-0.5 rounded-full bg-sky-50 text-sky-700">历史 {formatTokens(tokenBreakdown.history)}</span>
                       <span className="px-1.5 py-0.5 rounded-full bg-gray-100">工具 {formatTokens(tokenBreakdown.tools)}</span>
                       <span className="px-1.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700">用户 {formatTokens(tokenBreakdown.user)}</span>
-                      <span className="px-1.5 py-0.5 rounded-full bg-purple-50 text-purple-700">产出 {formatTokens(tokenBreakdown.output)}</span>
+                      <span className="px-1.5 py-0.5 rounded-full bg-accent-soft text-accent">产出 {formatTokens(tokenBreakdown.output)}</span>
                       <span className="font-medium text-gray-600">合计 {formatTokens(tokenBreakdown.total)}</span>
                       {tokenBreakdown.budget > 0 && <span>预算 {formatTokens(tokenBreakdown.budget)}</span>}
                       <span>{tokenBreakdown.trimmedTotal > 0 ? `已裁剪 ${tokenBreakdown.trimmedTotal} 字符` : '未裁剪'}</span>
@@ -1861,9 +1946,9 @@ export default function TaskDetailPage() {
                     {(preludeTokens!=null || (sideTokensCe!=null && sideTokensCe>0) || (bgReviewTokens!=null && bgReviewTokens>0)) && (
                       <p className="text-[11px] text-gray-500 mt-0.5 flex items-center gap-1.5 flex-wrap" title="执行外 token 记账明细（与上方上下文分账口径不同，各记账于其侧）">
                         <span className="font-medium text-gray-600">记账明细</span>
-                        {preludeTokens!=null&&<span className="text-purple-400" title="任务开始前的需求理解预读消耗（主要矛盾+立志+需求卡「三调合一」单次预读），不计入步进 token"> · 预读~{formatTokens(preludeTokens)}</span>}
+                        {preludeTokens!=null&&<span className="text-accent" title="任务开始前的需求理解预读消耗（主要矛盾+立志+需求卡「三调合一」单次预读），不计入步进 token"> · 预读~{formatTokens(preludeTokens)}</span>}
                         {sideTokensCe!=null&&sideTokensCe>0&&<span className="text-amber-500" title="本次执行内旁路子 LLM（验收/内容校验/目标偏离核对）的估算 token，已并入上方总 token（账实相符）"> · 旁路~{formatTokens(sideTokensCe)}</span>}
-                        {bgReviewTokens!=null&&bgReviewTokens>0&&<span className="text-purple-300" title="任务完成后后台复盘（background-review：三元组+记忆提取+复盘+行动转化）的估算 token，独立于执行预算"> · 复盘~{formatTokens(bgReviewTokens)}</span>}
+                        {bgReviewTokens!=null&&bgReviewTokens>0&&<span className="text-accent" title="任务完成后后台复盘（background-review：三元组+记忆提取+复盘+行动转化）的估算 token，独立于执行预算"> · 复盘~{formatTokens(bgReviewTokens)}</span>}
                       </p>
                     )}
                     {/* zx_20261107_1 B6「信」: **为什么选它**——结构化选型记录（main 洗形后回传），
@@ -1900,7 +1985,7 @@ export default function TaskDetailPage() {
                     {/* B2 收口 checks 逐条着色——**renderer 是这份前缀词表的第二个落点**：main 侧新增一个前缀值
                         （zx_20260922_1 M5 加 `[INFO]`：世界模型审计的"未做判定"如实说明），此处必须**显式**列一档，
                         否则它会落进末尾的兜底灰、与"不认识的前缀"混同（`zx_20260912` G9 的老病）。 */}
-                    {finalizeChecks && finalizeChecks.length > 0 && <div className="mt-2 space-y-0.5">{finalizeChecks.map((c, i) => <p key={i} className={`text-xs ${c.startsWith('[PASS]')?'text-green-600':c.startsWith('[WARN]')?'text-yellow-600':c.startsWith('[FAIL]')?'text-red-600':c.startsWith('[INFO]')?'text-blue-600':'text-gray-500'}`}>{c}</p>)}</div>}
+                    {finalizeChecks && finalizeChecks.length > 0 && <div className="mt-2 space-y-0.5">{finalizeChecks.map((c, i) => <p key={i} className={`text-xs ${c.startsWith('[PASS]')?'text-green-600':c.startsWith('[WARN]')?'text-yellow-600':c.startsWith('[FAIL]')?'text-red-600':c.startsWith('[INFO]')?'text-accent':'text-gray-500'}`}>{c}</p>)}</div>}
                     {/* zx_20260924_1 M9-c: 里程碑缺口**升格**（原来是 finalize_checks 里的一句 [WARN]，条数不明、易被当过场）
                         ——「登记在板」≠「已执行」。⚠ **只显示，不拦截完成**（V-8 已裁定：本轮不动完成决定）。 */}
                     {milestonesWithoutChildTasks.length > 0 && <p className="mt-2 px-2 py-1 rounded bg-amber-50 border border-amber-200 text-xs text-amber-700">⚠️ {milestonesWithoutChildTasks.length} 个里程碑尚无对应子任务：{milestonesWithoutChildTasks.join('、')}（"登记在板上" ≠ "已执行"；本提示只报不拦，不影响完成判定）</p>}
@@ -1966,7 +2051,7 @@ export default function TaskDetailPage() {
                       if (!pv) return <span className="px-1.5 py-0.5 rounded bg-gray-50 text-gray-500">对方尚未上报进度</span>;
                       return (
                         <>
-                          <span className={`px-1.5 py-0.5 rounded ${pv.stale ? 'bg-amber-50 text-amber-700' : 'bg-blue-50 text-blue-600'}`}>
+                          <span className={`px-1.5 py-0.5 rounded ${pv.stale ? 'bg-amber-50 text-amber-700' : 'bg-accent-soft text-accent'}`}>
                             {pv.stepText} · {pv.ago}{pv.stale ? ' · 可能失联' : ''}
                           </span>
                           {pv.note && <span className="px-1.5 py-0.5 rounded bg-gray-50 text-gray-500 truncate max-w-[24rem]" title={pv.note}>{pv.note}</span>}
@@ -1982,7 +2067,7 @@ export default function TaskDetailPage() {
                   {actionLayout?.primary && (() => {
                     const k = actionLayout.primary;
                     return (
-                      <button type="button" data-task-action="primary" onClick={() => runTaskAction(k)} disabled={actionLocked} title={actionTitle(k, task.status)} className={`flex items-center gap-1 px-3 py-1 text-white rounded text-xs disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap ${PRIMARY_TONE[k] ?? 'bg-blue-600 hover:bg-blue-700'}`}>
+                      <button type="button" data-task-action="primary" onClick={() => runTaskAction(k)} disabled={actionLocked} title={actionTitle(k, task.status)} className={`flex items-center gap-1 px-3 py-1 text-white rounded text-xs disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap ${PRIMARY_TONE[k] ?? 'bg-accent hover:bg-accent/90'}`}>
                         {ACTION_ICON[k]}{ACTION_LABEL[k]}
                       </button>
                     );
@@ -2043,13 +2128,13 @@ export default function TaskDetailPage() {
                       <p className={`text-lg font-bold ${(completionQuality?.score ?? 0)>=60?'text-emerald-700':'text-orange-600'}`}>{completionQuality?.score ?? '-'}</p>
                       <p className="text-[10px] text-emerald-600">完成质量分</p>
                     </div>
-                    <div className="bg-purple-50 rounded-lg p-2">
-                      <p className="text-lg font-bold text-purple-700">{delivTotal}</p>
-                      <p className="text-[10px] text-purple-600" title="本任务及子任务产出（task:get 子树聚合）">本任务（含子任务）{outputValidations ? ` · ${outputValidations.filter(v=>v.sufficient).length}/${outputValidations.length}通过` : ''}</p>
+                    <div className="bg-accent-soft rounded-lg p-2">
+                      <p className="text-lg font-bold text-accent">{delivTotal}</p>
+                      <p className="text-[10px] text-accent" title="本任务及子任务产出（task:get 子树聚合）">本任务（含子任务）{outputValidations ? ` · ${outputValidations.filter(v=>v.sufficient).length}/${outputValidations.length}通过` : ''}</p>
                     </div>
-                    <div className="bg-indigo-50 rounded-lg p-2">
-                      <p className="text-lg font-bold text-indigo-700">{retrospective.length}</p>
-                      <p className="text-[10px] text-indigo-600">复盘教训</p>
+                    <div className="bg-accent-soft rounded-lg p-2">
+                      <p className="text-lg font-bold text-accent">{retrospective.length}</p>
+                      <p className="text-[10px] text-accent">复盘教训</p>
                     </div>
                     <div className="bg-amber-50 rounded-lg p-2">
                       <p className="text-lg font-bold text-amber-700">{finalizeChecks ? finalizeChecks.filter(c=>c.startsWith('[WARN]')||c.startsWith('[FAIL]')).length : 0}</p>
@@ -2113,7 +2198,7 @@ export default function TaskDetailPage() {
               {/* Phase A (2026-08-28 zx_1): 任务目标显性化（核心目标/成功标准/待调查项/主要矛盾） */}
               {goalInfo && (goalInfo.goal || goalInfo.principalContradiction) && (
                 <div className="bg-white rounded-lg border p-4">
-                  <h4 className="font-medium mb-2 text-sm flex items-center gap-1"><Target className="w-4 h-4 text-emerald-500"/>任务目标<button onClick={() => { setGoalEditText(goalInfo?.goal || ''); setShowGoalEdit(v => !v); }} className="ml-auto text-xs text-blue-500 hover:text-blue-700" title="纠正目标（回写 context_json.task_goal，重启/恢复后生效）"><Edit className="w-3.5 h-3.5 inline"/> 纠正</button></h4>
+                  <h4 className="font-medium mb-2 text-sm flex items-center gap-1"><Target className="w-4 h-4 text-emerald-500"/>任务目标<button onClick={() => { setGoalEditText(goalInfo?.goal || ''); setShowGoalEdit(v => !v); }} className="ml-auto text-xs text-accent hover:text-accent" title="纠正目标（回写 context_json.task_goal，重启/恢复后生效）"><Edit className="w-3.5 h-3.5 inline"/> 纠正</button></h4>
                   {goalInfo.goal && <p className="text-sm text-gray-700 mb-1"><span className="text-xs text-gray-400">核心目标：</span>{goalInfo.goal}</p>}
                   {goalInfo.success_criteria && <p className="text-sm text-gray-700 mb-1"><span className="text-xs text-gray-400">成功标准：</span>{goalInfo.success_criteria}</p>}
                   {goalInfo.principalContradiction && <p className="text-sm text-gray-700 mb-1"><span className="text-xs text-gray-400">主要矛盾：</span>{goalInfo.principalContradiction}</p>}
@@ -2168,18 +2253,18 @@ export default function TaskDetailPage() {
               {outputValidations && outputValidations.length>0 && (
                 <details className="bg-white rounded-lg border">
                   <summary className="px-4 py-3 cursor-pointer select-none">
-                    <h4 className="font-medium text-sm flex items-center gap-1"><Check className="w-4 h-4 text-emerald-500"/>产出物验证 ({outputValidations.length})</h4>
+                    <h4 className="font-medium text-sm flex items-center gap-1"><Check className="w-4 h-4 text-ok"/>产出物验证 ({outputValidations.length})</h4>
                   </summary>
                   <div className="px-4 pb-4 space-y-1.5">
                     {outputValidations.map((v,i) => (
-                      <div key={i} className={`border-l-2 pl-3 py-1 ${v.sufficient ? 'border-emerald-200 bg-emerald-50/50' : 'border-red-200 bg-red-50/50'}`}>
+                      <div key={i} className={`border-l-2 pl-3 py-1 ${v.sufficient ? 'border-ok/30 bg-ok-soft/50' : 'border-bad/30 bg-bad-soft/50'}`}>
                         <div className="flex items-center gap-2 text-xs flex-wrap">
-                          <span className={`shrink-0 ${v.sufficient ? 'text-emerald-600' : 'text-red-600'}`}>{v.sufficient ? '✓ 充分' : '✗ 不充分'}</span>
-                          <span className="font-mono text-gray-500 truncate flex-1" title={v.file}>{v.file}</span>
-                          {v.confidence != null && <span className="text-gray-400 shrink-0">置信 {Math.round(v.confidence*100)}%</span>}
+                          <span className={`shrink-0 ${v.sufficient ? 'text-ok' : 'text-bad'}`}>{v.sufficient ? '✓ 充分' : '✗ 不充分'}</span>
+                          <span className="font-mono text-ink-soft truncate flex-1" title={v.file}>{v.file}</span>
+                          {v.confidence != null && <span className="text-ink-mute shrink-0">置信 {Math.round(v.confidence*100)}%</span>}
                         </div>
-                        {v.missingAspects && v.missingAspects.length>0 && <p className="text-xs text-orange-600 mt-0.5">缺失: {v.missingAspects.join('、')}</p>}
-                        {v.suggestion && <p className="text-xs text-gray-500 mt-0.5">建议: {v.suggestion}</p>}
+                        {v.missingAspects && v.missingAspects.length>0 && <p className="text-xs text-warn mt-0.5">缺失: {v.missingAspects.join('、')}</p>}
+                        {v.suggestion && <p className="text-xs text-ink-soft mt-0.5">建议: {v.suggestion}</p>}
                       </div>
                     ))}
                   </div>
@@ -2191,7 +2276,7 @@ export default function TaskDetailPage() {
                   (此前恒空=无法区分"没跑到"与"没标准"，正是本轮 G1 的病象) */}
               {acceptanceVisible && acceptanceCheck && (
                 <div id="acceptance-check" className="bg-white rounded-lg border p-4">
-                  <h4 className="font-medium mb-2 text-sm flex items-center gap-1"><Target className="w-4 h-4 text-blue-500"/>验收标准核对 {acceptanceFromSnapshot && <span className="text-gray-400 font-normal">· 归档时快照</span>} {acceptanceCheck.verified === false
+                  <h4 className="font-medium mb-2 text-sm flex items-center gap-1"><Target className="w-4 h-4 text-accent"/>验收标准核对 {acceptanceFromSnapshot && <span className="text-gray-400 font-normal">· 归档时快照</span>} {acceptanceCheck.verified === false
                     ? <span className="text-xs text-amber-600 font-normal">{acceptanceCheck.reason === 'no_criteria' ? '(未设验收标准 · 未验收)'
                       : acceptanceCheck.reason === 'no_user_criteria' ? `(引擎代拟 ${(acceptanceCheck.proposed ?? []).length} 条 · 未验收)`
                       // zx_20260920_1 M3（面二）: 此前这里是一句**不查词表的硬话术**（"未核验 · 尝试于 X"）——
@@ -2370,7 +2455,7 @@ export default function TaskDetailPage() {
               {retrospective.length>0 && (
                 <details className="bg-white rounded-lg border">
                   <summary className="px-4 py-3 cursor-pointer select-none">
-                    <h4 className="font-medium text-sm flex items-center gap-1"><History className="w-4 h-4 text-indigo-500"/>任务复盘</h4>
+                    <h4 className="font-medium text-sm flex items-center gap-1"><History className="w-4 h-4 text-accent"/>任务复盘</h4>
                   </summary>
                   <div className="px-4 pb-4 space-y-1.5">
                     {retrospective.map((r,i) => {
@@ -2387,10 +2472,10 @@ export default function TaskDetailPage() {
                             return idx > 0 ? { label: s.slice(0, idx).replace(/^\[复盘\]\s*/, ''), value: s.slice(idx + 1) } : null;
                           }).filter((x): x is { label: string; value: string } => !!x);
                       return (
-                        <div key={i} className="border-l-2 border-indigo-200 pl-3 py-1 space-y-1">
+                        <div key={i} className="border-l-2 border-accent/25 pl-3 py-1 space-y-1">
                           {items.map((it, j) => (
                             <p key={j} className="text-xs text-gray-700">
-                              <span className="text-indigo-600 font-medium mr-1.5">{it.label}</span>{it.value}
+                              <span className="text-accent font-medium mr-1.5">{it.label}</span>{it.value}
                             </p>
                           ))}
                           <p className="text-[10px] text-gray-400">{formatTimeOrRaw(r.created_at)}</p>
@@ -2411,12 +2496,12 @@ export default function TaskDetailPage() {
                     {planMilestones.map((x,i)=>(
                       <div key={i} className="flex items-center gap-2 text-xs py-1 px-2 rounded bg-gray-50">
                         <span className="font-mono font-semibold text-gray-700 w-10">{x.milestone}</span>
-                        <span className={`px-1.5 py-0.5 rounded-full shrink-0 ${x.status==='done'?'bg-green-100 text-green-700':x.status==='doing'?'bg-blue-100 text-blue-700':'bg-gray-200 text-gray-500'}`}>{x.status==='done'?'已落地':x.status==='doing'?'进行中':'待实施'}</span>
+                        <span className={`px-1.5 py-0.5 rounded-full shrink-0 ${x.status==='done'?'bg-green-100 text-green-700':x.status==='doing'?'bg-accent-soft text-accent':'bg-gray-200 text-gray-500'}`}>{x.status==='done'?'已落地':x.status==='doing'?'进行中':'待实施'}</span>
                         {x.implemented_by_task_id ? (
-                          <button type="button" onClick={()=>navigate(`/tasks/${String(x.implemented_by_task_id)}`)} className="shrink-0 text-blue-600 hover:underline truncate max-w-[40%]" title={x.implemented_title||''}>落地: {x.implemented_title || String(x.implemented_by_task_id).slice(0,8)}</button>
+                          <button type="button" onClick={()=>navigate(`/tasks/${String(x.implemented_by_task_id)}`)} className="shrink-0 text-accent hover:underline truncate max-w-[40%]" title={x.implemented_title||''}>落地: {x.implemented_title || String(x.implemented_by_task_id).slice(0,8)}</button>
                         ) : x.status!=='done' ? (
                           <span className="flex gap-1 ml-auto shrink-0">
-                            {x.status!=='doing' && <button type="button" onClick={()=>setMilestone(x.milestone,'doing')} className="text-[10px] px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded hover:bg-blue-200">开始</button>}
+                            {x.status!=='doing' && <button type="button" onClick={()=>setMilestone(x.milestone,'doing')} className="text-[10px] px-1.5 py-0.5 bg-accent-soft text-accent rounded hover:bg-accent-soft">开始</button>}
                             <button type="button" onClick={()=>setMilestone(x.milestone,'done')} className="text-[10px] px-1.5 py-0.5 bg-green-100 text-green-700 rounded hover:bg-green-200">完成</button>
                           </span>
                         ) : <button type="button" onClick={()=>setMilestone(x.milestone,'pending')} className="text-[10px] px-1.5 py-0.5 bg-gray-100 text-gray-500 rounded hover:bg-gray-200 ml-auto shrink-0">重开</button>}
@@ -2460,8 +2545,8 @@ export default function TaskDetailPage() {
                 <div className="bg-white rounded-lg border p-4">
                   {/* B2 (2026-09-04_2): 子任务推进中实时带（父页不静默） */}
                   {childProg && (
-                    <div className="mb-2 flex items-center gap-2 text-xs bg-indigo-50 border border-indigo-100 rounded px-2 py-1.5 text-indigo-700">
-                      <span className="relative flex h-2 w-2 shrink-0"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75" /><span className="relative inline-flex rounded-full h-2 w-2 bg-indigo-500" /></span>
+                    <div className="mb-2 flex items-center gap-2 text-xs bg-accent-soft border border-accent/25 rounded px-2 py-1.5 text-accent">
+                      <span className="relative flex h-2 w-2 shrink-0"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-accent opacity-75" /><span className="relative inline-flex rounded-full h-2 w-2 bg-accent" /></span>
                       <span className="truncate min-w-0">子任务推进中：{childProg.title}{childProg.step ? ` · 第 ${childProg.step} 步` : ''}{childProg.text ? ` · ${childProg.text}` : ''}</span>
                     </div>
                   )}
@@ -2470,7 +2555,7 @@ export default function TaskDetailPage() {
                   <div className="flex items-center gap-2 mb-2 flex-wrap">
                     <h4 className="font-medium text-sm">📋 子任务族验收（{famProgress.total}）</h4>
                     <span className="text-[11px] text-gray-500">完成 {famProgress.done} / {famProgress.total}</span>
-                    {famProgress.running > 0 && <span className="text-[11px] text-blue-600">运行中 {famProgress.running}</span>}
+                    {famProgress.running > 0 && <span className="text-[11px] text-accent">运行中 {famProgress.running}</span>}
                     {famProgress.waiting > 0 && <span className="text-[11px] text-amber-600">等你处理 {famProgress.waiting}</span>}
                   </div>
                   <div className="space-y-1">
@@ -2491,7 +2576,7 @@ export default function TaskDetailPage() {
                           {c.remote && (
                             <button type="button" onClick={()=>setOpenRemote(openRemote===c.id?null:c.id)}
                               title={c.remote.summary || '查看远端回传'}
-                              className="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700 hover:bg-indigo-200">
+                              className="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-accent-soft text-accent hover:bg-accent/15">
                               {orchestrationLabel(c.remote, c.status, remoteNameOf)}
                             </button>
                           )}
@@ -2517,13 +2602,13 @@ export default function TaskDetailPage() {
                           {score!=null && <span className={`shrink-0 font-medium ${score>=60?'text-green-600':'text-red-600'}`}>{score}分</span>}
                           {typeof c.tokens==='number' && c.tokens>0 && <span className="shrink-0 text-gray-400">{formatTokens(c.tokens)}t</span>}
                           {pend && <>
-                            <button type="button" onClick={()=>childResume(c.id)} className="text-[10px] px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded hover:bg-blue-200 shrink-0">恢复</button>
+                            <button type="button" onClick={()=>childResume(c.id)} className="text-[10px] px-1.5 py-0.5 bg-accent-soft text-accent rounded hover:bg-accent-soft shrink-0">恢复</button>
                             <button type="button" onClick={()=>childStatus(c.id,'completed')} className="text-[10px] px-1.5 py-0.5 bg-green-100 text-green-700 rounded hover:bg-green-200 shrink-0">标记完成</button>
                             {/* zx_20261012_2 批二: 子任务族卡的「放弃」改走**归档**态（此前标成 `failed` ⇒
                                 被 `failedChildren` 当成失败子挡住父收口——用户明明已处置过它） */}
                             <button type="button" onClick={()=>void childArchive(c.id)} className="text-[10px] px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded hover:bg-gray-200 shrink-0">放弃</button>
                           </>}
-                          <button type="button" title="打开子任务" onClick={()=>navigate(`/tasks/${c.id}`)} className="shrink-0 text-gray-400 hover:text-blue-600">↗</button>
+                          <button type="button" title="打开子任务" onClick={()=>navigate(`/tasks/${c.id}`)} className="shrink-0 text-gray-400 hover:text-accent">↗</button>
                         </div>
                         {/* zx_20261105_1 M9: 归档子的因由与时刻——同一读点回传；无理由如实写「未填写理由」。 */}
                         {c.status === 'archived' && (
@@ -2561,9 +2646,9 @@ export default function TaskDetailPage() {
                         {c.remote && openRemote===c.id && (() => {
                           const receipt = remoteReceiptOf(c.remote.result);
                           const noteCls = receipt?.verdict === 'verified' ? 'text-emerald-700'
-                            : receipt?.verdict === 'failed' ? 'text-red-600' : 'text-indigo-700';
+                            : receipt?.verdict === 'failed' ? 'text-red-600' : 'text-accent';
                           return (
-                            <div className="text-[11px] text-gray-500 bg-indigo-50/60 border border-indigo-100 rounded px-2 py-1 ml-2 mb-1">
+                            <div className="text-[11px] text-gray-500 bg-accent-soft/60 border border-accent/25 rounded px-2 py-1 ml-2 mb-1">
                               {/* zx_20261101_2 M4：改派史（首派 + 换过谁）——只在外派记录 >1 时出现 */}
                               {c.remote.attempts && c.remote.attempts.length > 1 && (
                                 <div className="mb-0.5">外派记录：{remoteAttemptsLabel(c.remote.attempts, remoteNameOf)}</div>
@@ -2583,7 +2668,7 @@ export default function TaskDetailPage() {
                     })}
                   </div>
                   {familyDigest && (
-                    <p className="text-[11px] text-indigo-600 mt-2">族扬弃小结：{digestLineText({ status: familyDigest.failed > 0 ? 'failed' : 'completed', steps: familyDigest.steps, deviations: familyDigest.deviations, signals: familyDigest.signals, memoryInjections: familyDigest.memoryInjections, failed: familyDigest.failed })}{familyDigest.lowQuality > 0 ? `（含低质 <60 子项 ${familyDigest.lowQuality}）` : ''}</p>
+                    <p className="text-[11px] text-accent mt-2">族扬弃小结：{digestLineText({ status: familyDigest.failed > 0 ? 'failed' : 'completed', steps: familyDigest.steps, deviations: familyDigest.deviations, signals: familyDigest.signals, memoryInjections: familyDigest.memoryInjections, failed: familyDigest.failed })}{familyDigest.lowQuality > 0 ? `（含低质 <60 子项 ${familyDigest.lowQuality}）` : ''}</p>
                   )}
                   {familyChildren.every(c=>['completed','failed'].includes(c.status)) ? (
                     <p className={`text-xs mt-2 ${familyChildren.some(c=>c.status==='failed'||(c.status==='completed'&&typeof c.score==='number'&&c.score<60))?'text-orange-600':'text-green-600'}`}>
@@ -2606,7 +2691,7 @@ export default function TaskDetailPage() {
                   （见 `memBlock`）。此处不再就地渲染——同一块只保留**一个**落点。 */}
 
               {/* 文件变更（Phase 1 实时流；zx_20261118_1 「回」：终态由事件日志回放，不新增存储） */}
-              {fileStream.length>0 && <div className="bg-white rounded-lg border p-4"><h4 className="font-medium mb-2 text-sm flex items-center gap-1"><FileText className="w-4 h-4 text-blue-500"/>{executingNow ? '实时文件变更' : '文件变更'} ({Math.max(fileStream.length, fileTotal)})</h4>{fileTotal>fileStream.length && <div className="text-[10px] text-gray-400 mb-1">共 {fileTotal} 条，显示最近 {fileStream.length} 条</div>}<div className="space-y-2 max-h-80 overflow-y-auto">{fileStream.map((f,i)=>(<FileChangeItem key={i} f={f}/>))}</div></div>}
+              {fileStream.length>0 && <div className="bg-white rounded-lg border p-4"><h4 className="font-medium mb-2 text-sm flex items-center gap-1"><FileText className="w-4 h-4 text-accent"/>{executingNow ? '实时文件变更' : '文件变更'} ({Math.max(fileStream.length, fileTotal)})</h4>{fileTotal>fileStream.length && <div className="text-[10px] text-gray-400 mb-1">共 {fileTotal} 条，显示最近 {fileStream.length} 条</div>}<div className="space-y-2 max-h-80 overflow-y-auto">{fileStream.map((f,i)=>(<FileChangeItem key={i} f={f}/>))}</div></div>}
 
               {/* 任务预算 + 上下文（zx_20261107_1 B9：摆法与编辑表单见 `TaskCost`，数字与判据仍在本页） */}
               <TaskCost
@@ -2639,7 +2724,7 @@ export default function TaskDetailPage() {
               {(
                 <details className="bg-white rounded-lg border">
                   <summary className="px-4 py-3 cursor-pointer select-none">
-                    <h4 className="font-medium text-sm flex items-center gap-1"><GitBranch className="w-4 h-4 text-purple-500"/>任务依赖关系</h4>
+                    <h4 className="font-medium text-sm flex items-center gap-1"><GitBranch className="w-4 h-4 text-accent"/>任务依赖关系</h4>
                   </summary>
                   <div className="px-4 pb-4 space-y-1 text-sm">
                     {task.depends_on && (
@@ -2648,25 +2733,25 @@ export default function TaskDetailPage() {
                           {depInfo.state === 'met' ? '前置已满足' : depInfo.state === 'dead' ? '前置永不可满足' : depInfo.state === 'unresolved' ? '前置不存在' : `等待前置（还差 ${depInfo.remaining} 个）`}
                         </span>
                         {depIds.map((did) => (
-                          <button key={did} type="button" onClick={() => navigate(`/tasks/${did}`)} title={`跳转前置任务：${taskNameOf(did)}`} className="text-xs text-blue-600 hover:text-blue-800 hover:underline">{taskNameOf(did)}</button>
+                          <button key={did} type="button" onClick={() => navigate(`/tasks/${did}`)} title={`跳转前置任务：${taskNameOf(did)}`} className="text-xs text-accent hover:text-accent hover:underline">{taskNameOf(did)}</button>
                         ))}
                         {pausedDep && (
-                          <button type="button" onClick={() => void handleResume(pausedDep)} title="恢复暂停的前置任务，使其继续推进" className="text-[10px] px-1.5 py-0.5 rounded border border-blue-300 text-blue-700 hover:bg-blue-50">恢复前置</button>
+                          <button type="button" onClick={() => void handleResume(pausedDep)} title="恢复暂停的前置任务，使其继续推进" className="text-[10px] px-1.5 py-0.5 rounded border border-accent/30 text-accent hover:bg-accent-soft">恢复前置</button>
                         )}
                         <button type="button" disabled={depSaving} onClick={() => saveDeps(depIds.filter((x) => x !== depIds[0]))} title="移除第一个前置（逐条移除）" className="text-[10px] text-gray-400 hover:text-red-600 disabled:opacity-50">移除首个</button>
                         <span className="text-xs text-gray-600 basis-full">{depInfo.text}</span>
                       </div>
                     )}
                     {task.parent_task_id && (
-                      <div className="flex items-center gap-2 p-2 bg-blue-50 rounded">
-                        <span className="text-xs text-blue-600 font-medium">父任务</span>
-                        <button type="button" onClick={() => navigate(`/tasks/${task.parent_task_id}`)} title="跳转父任务" className="text-xs text-blue-600 hover:text-blue-800 hover:underline">{taskNameOf(task.parent_task_id)}</button>
+                      <div className="flex items-center gap-2 p-2 bg-accent-soft rounded">
+                        <span className="text-xs text-accent font-medium">父任务</span>
+                        <button type="button" onClick={() => navigate(`/tasks/${task.parent_task_id}`)} title="跳转父任务" className="text-xs text-accent hover:text-accent hover:underline">{taskNameOf(task.parent_task_id)}</button>
                       </div>
                     )}
                     {/* M3-4: 前置可编辑（此前只能创建时带一次） */}
                     <div className="flex items-center gap-2 pt-1 flex-wrap">
                       {task.status !== 'completed' && task.status !== 'archived' && (
-                        <button type="button" onClick={() => { setDepPickerOpen((v) => !v); setDepPickId(''); }} className="text-xs text-purple-600 hover:text-purple-800">＋ 添加前置</button>
+                        <button type="button" onClick={() => { setDepPickerOpen((v) => !v); setDepPickId(''); }} className="text-xs text-accent hover:text-accent">＋ 添加前置</button>
                       )}
                       {depPickerOpen && (
                         <>
@@ -2674,7 +2759,7 @@ export default function TaskDetailPage() {
                             <option value="">选择同项目任务…</option>
                             {depCandidates.map((t) => <option key={t.id} value={t.id}>{t.title}</option>)}
                           </select>
-                          <button type="button" disabled={!depPickId || depSaving} onClick={() => saveDeps([...depIds, depPickId])} className="text-xs px-2 py-0.5 bg-purple-600 text-white rounded hover:bg-purple-700 disabled:opacity-50">确定</button>
+                          <button type="button" disabled={!depPickId || depSaving} onClick={() => saveDeps([...depIds, depPickId])} className="text-xs px-2 py-0.5 bg-accent text-white rounded hover:bg-accent disabled:opacity-50">确定</button>
                           <button type="button" onClick={() => { setDepPickerOpen(false); setDepPickId(''); }} className="text-xs text-gray-500 hover:text-gray-700">取消</button>
                           {depCandidates.length === 0 && <span className="text-xs text-gray-400">（暂无可加的同项目任务）</span>}
                         </>
@@ -2699,7 +2784,7 @@ export default function TaskDetailPage() {
                             {posOptions.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
                             {positionView?.missing && <option value={positionView.id}>{positionView.name}（已删除）</option>}
                           </select>
-                          {posSaving && <span className="text-xs text-blue-500">保存中…</span>}
+                          {posSaving && <span className="text-xs text-accent">保存中…</span>}
                           {posOptions.length === 0 && <span className="text-xs text-gray-400">（本项目没有已启用的岗位——可到「岗位」页启用并绑定本项目）</span>}
                           {!positionView && posOptions.length > 0 && !posSaving && <span className="text-xs text-gray-400">不指派也能干活，但这单不会沉淀岗位经验</span>}
                         </>
@@ -2720,14 +2805,14 @@ export default function TaskDetailPage() {
               {similarTasks.length > 0 && (
                 <details className="bg-white rounded-lg border">
                   <summary className="px-4 py-3 cursor-pointer select-none">
-                    <h4 className="font-medium text-sm flex items-center gap-1"><TrendingUp className="w-4 h-4 text-indigo-500"/>相似任务 ({similarTasks.length})</h4>
+                    <h4 className="font-medium text-sm flex items-center gap-1"><TrendingUp className="w-4 h-4 text-accent"/>相似任务 ({similarTasks.length})</h4>
                   </summary>
                   <div className="px-4 pb-4 space-y-1">
                     {similarTasks.map((s: Record<string, unknown>, i: number) => (
                       <div key={i} className="flex items-center justify-between text-sm py-1.5 border-b last:border-0">
                         <span className="text-xs truncate flex-1">{s.title as string}</span>
                         <span className="text-xs text-gray-400 mx-2">{s.status as string}</span>
-                        <span className="text-xs text-indigo-600 font-medium">{(Number(s.similarity) * 100).toFixed(0)}%</span>
+                        <span className="text-xs text-accent font-medium">{(Number(s.similarity) * 100).toFixed(0)}%</span>
                       </div>
                     ))}
                   </div>
@@ -2780,7 +2865,7 @@ export default function TaskDetailPage() {
                       return (
                         <div key={i} className="flex items-start gap-2 text-xs py-1">
                           <span className="text-gray-400 flex-shrink-0 w-32">{formatTimeOrRaw(e.occurred_at as string)}</span>
-                          <span className={`px-1.5 py-0.5 rounded-full text-[10px] flex-shrink-0 ${(e.event_type as string)?.includes('completed') ? 'bg-green-100 text-green-700' : (e.event_type as string)?.includes('failed') ? 'bg-red-100 text-red-600' : 'bg-blue-100 text-blue-700'}`}>{e.event_type as string}</span>
+                          <span className={`px-1.5 py-0.5 rounded-full text-[10px] flex-shrink-0 ${(e.event_type as string)?.includes('completed') ? 'bg-green-100 text-green-700' : (e.event_type as string)?.includes('failed') ? 'bg-red-100 text-red-600' : 'bg-accent-soft text-accent'}`}>{e.event_type as string}</span>
                           <span className="text-gray-500 truncate">{JSON.stringify(payload).slice(0, 80)}</span>
                         </div>
                       );
@@ -2801,7 +2886,7 @@ export default function TaskDetailPage() {
                     return (
                     // zx_20260916_3 M5（O-F）：引擎代拟的 `user` 行**不再冒充用户**——标签印「引擎」。
                     // 判据取真函数（不是"内容里有没有某个词"的就地正则），故 M5 之后新增的代拟首标自动跟上。
-                    <div key={c.id} className={`p-3 rounded-lg text-sm ${isEngineDraftedTurn(c.content)?'bg-slate-50 ml-4 border border-dashed border-slate-200':c.role==='user'?'bg-blue-50 ml-4':c.role==='assistant'?'bg-gray-50 mr-4':c.role==='system'?'bg-yellow-50 mx-4 text-xs':''}`}>
+                    <div key={c.id} className={`p-3 rounded-lg text-sm ${isEngineDraftedTurn(c.content)?'bg-slate-50 ml-4 border border-dashed border-slate-200':c.role==='user'?'bg-accent-soft ml-4':c.role==='assistant'?'bg-gray-50 mr-4':c.role==='system'?'bg-yellow-50 mx-4 text-xs':''}`}>
                       <div className="flex items-center gap-2 mb-1"><span className="text-xs font-medium text-gray-400">{isEngineDraftedTurn(c.content) ? '引擎' : c.role}</span>{c.token_count?<span className="text-xs text-gray-300">{formatTokens(c.token_count)} tokens</span>:null}<span className="text-xs text-gray-300">{formatTimeOrRaw(c.created_at)}</span></div>
                       {isToolCallRow(c) ? (
                         // zx_20261030_2 M7: `[工具调用] …` 系统行默认折叠为一行摘要，展开看全文（只动展示，不动数据）
@@ -2824,7 +2909,7 @@ export default function TaskDetailPage() {
                       ) : (
                         <p className="whitespace-pre-wrap text-gray-700">{c.content?.slice(0,3000)}{(c.content?.length||0)>3000?'...':''}</p>
                       )}
-                      {c.tool_calls && <details className="mt-1"><summary className="text-xs text-blue-500 cursor-pointer font-mono">🔧 工具调用</summary><pre className="text-xs text-blue-600 mt-1 bg-blue-50 p-2 rounded overflow-x-auto">{c.tool_calls.slice(0,500)}</pre></details>}
+                      {c.tool_calls && <details className="mt-1"><summary className="text-xs text-accent cursor-pointer font-mono">🔧 工具调用</summary><pre className="text-xs text-accent mt-1 bg-accent-soft p-2 rounded overflow-x-auto">{c.tool_calls.slice(0,500)}</pre></details>}
                     </div>
                     );
                   })}
@@ -2854,9 +2939,9 @@ export default function TaskDetailPage() {
                 原任务始终 `archived`（终态不可覆写），此处只是另起一单。 */}
             {createCtx.mode === 'archive'
               ? <div className="flex items-center gap-2 px-3 py-2 bg-sky-50 rounded"><GitBranch className="w-3.5 h-3.5 text-sky-500"/><span className="text-xs text-sky-700">原父级：{createCtx.parentTitle || '（项目根级）'} · 取自归档任务「{task?.title || ''}」，原任务仍为已归档</span></div>
-              : <div className="flex items-center gap-2 px-3 py-2 bg-blue-50 rounded"><GitBranch className="w-3.5 h-3.5 text-blue-500"/><span className="text-xs text-blue-700">父任务（当前）：{task?.title || ''}</span></div>}
-            <div className="space-y-3"><div><label className="block text-sm font-medium mb-1">标题*</label><input value={newTask.title} onChange={e=>setNewTask({...newTask,title:e.target.value})} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="子任务标题"/></div><div><label className="block text-sm font-medium mb-1">描述</label><textarea value={newTask.description} onChange={e=>setNewTask({...newTask,description:e.target.value})} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 leading-relaxed resize-y" rows={7}/></div><div><label className="block text-sm font-medium mb-1">验收标准</label><textarea value={newTask.acceptance_criteria} onChange={e=>setNewTask({...newTask,acceptance_criteria:e.target.value})} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 leading-relaxed resize-y" rows={5} placeholder="完成标准（可选，finalize 前会逐条核对）"/>{createSuggestions.length>0&&<div className="mt-2 rounded-lg border border-sky-200 bg-sky-50/50 px-3 py-2"><div className="flex items-center justify-between gap-2"><span className="text-xs text-sky-800">判据候选（点击「采用」才写入；不采用则照常记为未设验收标准）</span><button type="button" onClick={()=>adoptCreateCriteria(createSuggestions)} className="shrink-0 text-xs px-2 py-0.5 rounded bg-sky-600 text-white hover:bg-sky-700">全部采用</button></div><ul className="mt-1.5 space-y-1">{createSuggestions.map(c=><li key={c} className="flex items-center gap-2 text-xs text-sky-900"><span className="flex-1 break-all">{c}</span><button type="button" onClick={()=>adoptCreateCriteria([c])} className="shrink-0 px-2 py-0.5 rounded border border-sky-300 text-sky-700 hover:bg-sky-100">采用</button></li>)}</ul></div>}</div>{/* zx_20260909_1 M4(Z1): 新建子任务即选"关联方案"——选中一步落 scheme_ref 先于自动动工; 空=继承父方案(默认) */}{linkOnZ && projPlans.length>0 && <div><label className="block text-sm font-medium mb-1">🔗 关联方案（规划）</label><select value={newTask.planTaskId} onChange={e=>setNewTask({...newTask,planTaskId:e.target.value})} className="w-full px-3 py-2 border rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"><option value="">继承父方案（默认）</option>{projPlans.map(pl=><option key={pl.id} value={pl.id}>{pl.title}（{statusText(TASK_STATUS_LABEL, pl.status)}）</option>)}</select></div>}</div>
-            <div className="flex justify-end gap-2 mt-6"><button onClick={()=>setShowCreate(false)} className="px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">取消</button><button onClick={handleCreate} disabled={!newTask.title || creating} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50">{creating ? '创建中…' : createCtx.mode === 'archive' ? '创建任务' : '创建子任务'}</button></div>
+              : <div className="flex items-center gap-2 px-3 py-2 bg-accent-soft rounded"><GitBranch className="w-3.5 h-3.5 text-accent"/><span className="text-xs text-accent">父任务（当前）：{task?.title || ''}</span></div>}
+            <div className="space-y-3"><div><label className="block text-sm font-medium mb-1">标题*</label><input value={newTask.title} onChange={e=>setNewTask({...newTask,title:e.target.value})} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" placeholder="子任务标题"/></div><div><label className="block text-sm font-medium mb-1">描述</label><textarea value={newTask.description} onChange={e=>setNewTask({...newTask,description:e.target.value})} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent leading-relaxed resize-y" rows={7}/></div><div><label className="block text-sm font-medium mb-1">验收标准</label><textarea value={newTask.acceptance_criteria} onChange={e=>setNewTask({...newTask,acceptance_criteria:e.target.value})} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent leading-relaxed resize-y" rows={5} placeholder="完成标准（可选，finalize 前会逐条核对）"/>{createSuggestions.length>0&&<div className="mt-2 rounded-lg border border-sky-200 bg-sky-50/50 px-3 py-2"><div className="flex items-center justify-between gap-2"><span className="text-xs text-sky-800">判据候选（点击「采用」才写入；不采用则照常记为未设验收标准）</span><button type="button" onClick={()=>adoptCreateCriteria(createSuggestions)} className="shrink-0 text-xs px-2 py-0.5 rounded bg-sky-600 text-white hover:bg-sky-700">全部采用</button></div><ul className="mt-1.5 space-y-1">{createSuggestions.map(c=><li key={c} className="flex items-center gap-2 text-xs text-sky-900"><span className="flex-1 break-all">{c}</span><button type="button" onClick={()=>adoptCreateCriteria([c])} className="shrink-0 px-2 py-0.5 rounded border border-sky-300 text-sky-700 hover:bg-sky-100">采用</button></li>)}</ul></div>}</div>{/* zx_20260909_1 M4(Z1): 新建子任务即选"关联方案"——选中一步落 scheme_ref 先于自动动工; 空=继承父方案(默认) */}{linkOnZ && projPlans.length>0 && <div><label className="block text-sm font-medium mb-1">🔗 关联方案（规划）</label><select value={newTask.planTaskId} onChange={e=>setNewTask({...newTask,planTaskId:e.target.value})} className="w-full px-3 py-2 border rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-accent"><option value="">继承父方案（默认）</option>{projPlans.map(pl=><option key={pl.id} value={pl.id}>{pl.title}（{statusText(TASK_STATUS_LABEL, pl.status)}）</option>)}</select></div>}</div>
+            <div className="flex justify-end gap-2 mt-6"><button onClick={()=>setShowCreate(false)} className="px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">取消</button><button onClick={handleCreate} disabled={!newTask.title || creating} className="px-4 py-2 bg-accent text-white rounded-lg text-sm hover:bg-accent/90 disabled:opacity-50">{creating ? '创建中…' : createCtx.mode === 'archive' ? '创建任务' : '创建子任务'}</button></div>
           </div>
         </div>
       )}
@@ -2865,8 +2950,8 @@ export default function TaskDetailPage() {
         <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50" onClick={() => setShowReply(false)}>
           <div className="bg-white rounded-xl shadow-lg p-6 w-full max-w-md" onClick={e => e.stopPropagation()}>
             <h3 className="text-lg font-bold mb-4">回复任务</h3>
-            <div className="space-y-3"><div><label className="block text-sm font-medium mb-1">回复内容</label><textarea value={replyText} onChange={e=>setReplyText(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" rows={3} placeholder="输入回复内容后点击恢复即可继续任务" /></div></div>
-            <div className="flex justify-end gap-2 mt-6"><button onClick={()=>setShowReply(false)} className="px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">取消</button><button onClick={()=>handleReply(task!.id)} disabled={!replyText.trim() || actionLocked} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">回复并恢复</button></div>
+            <div className="space-y-3"><div><label className="block text-sm font-medium mb-1">回复内容</label><textarea value={replyText} onChange={e=>setReplyText(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" rows={3} placeholder="输入回复内容后点击恢复即可继续任务" /></div></div>
+            <div className="flex justify-end gap-2 mt-6"><button onClick={()=>setShowReply(false)} className="px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">取消</button><button onClick={()=>handleReply(task!.id)} disabled={!replyText.trim() || actionLocked} className="px-4 py-2 bg-accent text-white rounded-lg text-sm hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed">回复并恢复</button></div>
           </div>
         </div>
       )}
@@ -2936,7 +3021,7 @@ function FileChangeItem({ f }: { f: Record<string, unknown> }) {
   const fileName = filePath.split('/').pop() || filePath;
 
   const ACTION_LABEL: Record<string, string> = { created: '创建', updated: '修改', edited: '编辑' };
-  const ACTION_COLOR: Record<string, string> = { created: 'bg-green-100 text-green-700', updated: 'bg-blue-100 text-blue-700', edited: 'bg-purple-100 text-purple-700' };
+  const ACTION_COLOR: Record<string, string> = { created: 'bg-green-100 text-green-700', updated: 'bg-accent-soft text-accent', edited: 'bg-accent-soft text-accent' };
 
   return (
     <div className="border rounded-lg overflow-hidden">

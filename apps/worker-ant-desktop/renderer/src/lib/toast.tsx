@@ -69,7 +69,7 @@ export default function ToastProvider({ children }: { children: React.ReactNode 
 
   const dismiss = (id: string) => setToasts((prev) => prev.filter((x) => x.id !== id));
 
-  const iconOf = (t: ToastItem) => t.type === 'im.message_inbound' ? <MessageSquareText className="w-4 h-4 text-blue-500" /> : t.level === 'error' ? <XCircle className="w-4 h-4 text-red-500" /> : t.level === 'warn' ? <MessageSquareText className="w-4 h-4 text-orange-500" /> : <CheckCircle2 className="w-4 h-4 text-green-500" />;
+  const iconOf = (t: ToastItem) => t.type === 'im.message_inbound' ? <MessageSquareText className="w-4 h-4 text-accent" /> : t.level === 'error' ? <XCircle className="w-4 h-4 text-red-500" /> : t.level === 'warn' ? <MessageSquareText className="w-4 h-4 text-orange-500" /> : <CheckCircle2 className="w-4 h-4 text-green-500" />;
 
   return (
     <>

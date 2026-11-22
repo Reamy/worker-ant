@@ -24,7 +24,9 @@ export type EventType = 'task.completed' | 'task.failed' | 'task.remote_redispat
   //   进不可变事件日志只会洪泛（同 `channel.status_changed` 的取舍）。
   | 'deliverable.runtime_changed' | 'external.status_changed' | 'external.call_recorded'
   // zx_20261023_5 批四：局域网里**看见**一台 AI 终端（内存待接入列表变了）——同样是瞬态投影，不进事件日志。
-  | 'external.lan_changed';
+  | 'external.lan_changed'
+  // zx_20261121_3 M4「见·首」：知识待办的决定（经验/技能/领域包/提案）——瞬态，真相在四张真源表。
+  | 'knowledge.changed';
 
 export interface AppEvent {
   type: EventType;

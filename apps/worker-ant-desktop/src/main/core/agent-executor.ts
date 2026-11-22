@@ -2170,7 +2170,7 @@ export async function executeTask(
       // zx_20261119_1 「循」——完成留迹 + 模板块循意 + 父子不重工 + 工具不撞墙。**只改这一处**。
       // zx_20261119_2 「核」——派生修复有名有据 + 开局改动跨仓有账 + 父收口机检 + 子仓路径可认 + 工具少空转 + 同仓构建有序。**只改这一处**。
       const prefixFp = fingerprintMessages(messages, stablePrefixEnd);
-      const feats ={ requirementCard: true, contextWatermark: true, historySummaryOnly: true, readListOnResume: true, goalRestartCap: true, build: 'zx_20261121_2',
+      const feats ={ requirementCard: true, contextWatermark: true, historySummaryOnly: true, readListOnResume: true, goalRestartCap: true, build: 'zx_20261122_1',
         archetype_source: decision.source,
         ctx_prefix_hash: prefixFp.hash, ctx_prefix_chars: prefixFp.chars, ctx_prefix_end: prefixFp.end };
       // zx_20260916_1 M5 (#6): 读**恢复账总数**（用户介入 + 系统自动），不再单读 `resume_count`——

@@ -110,35 +110,35 @@ export default function LoginPage() {
           {mode === 'register' && (
             <div>
               <label className="block text-sm font-medium mb-1">昵称</label>
-              <input type="text" value={name} onChange={e => setName(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="你的昵称" />
+              <input type="text" value={name} onChange={e => setName(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" placeholder="你的昵称" />
             </div>
           )}
           <div>
             <label className="block text-sm font-medium mb-1">邮箱</label>
-            <input type="email" value={email} onChange={e => setEmail(e.target.value)} required className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder={mode === 'login' ? 'admin@worker-ant.local' : 'your@email.com'} />
+            <input type="email" value={email} onChange={e => setEmail(e.target.value)} required className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" placeholder={mode === 'login' ? 'admin@worker-ant.local' : 'your@email.com'} />
           </div>
           <div>
             <label className="block text-sm font-medium mb-1">密码</label>
-            <input type="password" value={password} onChange={e => setPassword(e.target.value)} required className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="••••••" />
+            <input type="password" value={password} onChange={e => setPassword(e.target.value)} required className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" placeholder="••••••" />
           </div>
 
           {mode === 'login' && (
             <label className="flex items-center gap-2 cursor-pointer select-none">
               <input type="checkbox" checked={remember} onChange={e => setRemember(e.target.checked)}
-                className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+                className="w-4 h-4 rounded border-gray-300 text-accent focus:ring-accent" />
               <span className="text-sm text-gray-500">记住账号密码</span>
             </label>
           )}
 
           {error && <p className="text-sm text-red-500">{error}</p>}
-          <button type="submit" disabled={loading} className="w-full py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors">
+          <button type="submit" disabled={loading} className="w-full py-2 bg-accent text-white rounded-lg text-sm font-medium hover:bg-accent/90 disabled:opacity-50 transition-colors">
             {loading ? '处理中...' : mode === 'login' ? '登录' : '注册'}
           </button>
         </form>
 
         <p className="text-center text-sm text-gray-500">
           {mode === 'login' ? '没有账号？' : '已有账号？'}
-          <button onClick={() => { setMode(mode === 'login' ? 'register' : 'login'); setError(''); }} className="text-blue-600 hover:underline ml-1">
+          <button onClick={() => { setMode(mode === 'login' ? 'register' : 'login'); setError(''); }} className="text-accent hover:underline ml-1">
             {mode === 'login' ? '立即注册' : '去登录'}
           </button>
         </p>

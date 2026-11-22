@@ -1,1 +1,515 @@
 @import "tailwindcss";
+
+/*
+ * zx_20261121_3 M5-a「墨与纸」——视觉 token 的唯一真源。
+ *
+ * 纪律（改视觉先改这里，页面不再散写色值）：
+ *   · 颜色只表达语义：墨/纸/线是骨，主色 = 可行动，朱砂只表危险/最高优先，ok/warn/bad 只表结果。
+ *   · 一处形状：圆角两档、阴影一档、字体三栈（正文黑体 / 标题宋体 / 数字等宽）。
+ *   · 不用渐变、不用玻璃拟态、不叠阴影、不引网络字体（全部系统栈，离线可用）。
+ */
+@theme {
+  /* 纸与墨 */
+  --color-paper: #faf9f5;
+  --color-surface: #ffffff;
+  /* 侧栏是「墨面」，不随正文 token 反转（暗色下仍须是深底浅字）。 */
+  --color-sidebar: #171614;
+  --color-sidebar-ink: #faf9f5;
+  --color-ink: #171614;
+  --color-ink-soft: #4a4740;
+  --color-ink-mute: #6b675e;
+  --color-line: #e4e0d6;
+  --color-line-strong: #cfc9ba;
+
+  /* 主色 = 可行动（墨蓝） */
+  --color-accent: #2e5a73;
+  --color-accent-soft: #e8eff3;
+
+  /* 朱砂 = 危险 / 最高优先 */
+  --color-cinnabar: #b4462f;
+  --color-cinnabar-soft: #f6e7e2;
+
+  /* 结果语义：ok / warn / bad（各带一层极淡底，供徽标与三态使用） */
+  --color-ok: #3f6b4a;
+  --color-ok-soft: #e9f0ea;
+  --color-warn: #8a5a1e;
+  --color-warn-soft: #f7eede;
+  --color-bad: #9b3a2c;
+  --color-bad-soft: #f7e8e4;
+
+  /* 一处形状：圆角 / 阴影 / 过渡时长 */
+  --radius-card: 10px;
+  --radius-control: 8px;
+  --shadow-card: 0 1px 2px rgba(23, 22, 20, 0.04), 0 8px 24px rgba(23, 22, 20, 0.03);
+  --default-transition-duration: 120ms;
+
+  /* 三档字体栈（系统字体，不引网络字体；关键层级靠字号/字重，不把可读性押在字体是否存在） */
+  --font-sans: "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Microsoft YaHei", system-ui, sans-serif;
+  --font-display: "Songti SC", "STSong", "Noto Serif CJK SC", "Source Han Serif SC", "SimSun", Georgia, serif;
+  --font-mono: "SF Mono", "JetBrains Mono", "Cascadia Code", ui-monospace, monospace;
+}
+
+@layer base {
+  html {
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* 纸底墨字；中文行高 1.65（英文/数字不与中文抢行高） */
+  body {
+    margin: 0;
+    background-color: var(--color-paper);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    line-height: 1.65;
+    text-rendering: optimizeLegibility;
+  }
+
+  ::selection {
+    background-color: var(--color-accent-soft);
+    color: var(--color-ink);
+  }
+
+  /* 焦点环全局统一：2px 环、向外偏移 2px，键盘可达（只增强，不删既有 aria 语义） */
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+
+  /* 暖色细滚动条（Firefox + WebKit 两路） */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-line-strong) transparent;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background-color: var(--color-line-strong);
+    border: 3px solid transparent;
+    border-radius: 999px;
+    background-clip: content-box;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: var(--color-ink-mute);
+    background-clip: content-box;
+  }
+
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+}
+
+/* 等宽数字：token / 耗时 / 计数 / 金额一律用 .tnum（字形宽度不跳） */
+@utility tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 正文栏宽：≤ 42 个汉字（一句主张、空态说明等长文本用） */
+@utility measure {
+  max-width: 42em;
+}
+
+/*
+ * 动效只两档：rise（页面进入 180ms，位移 4px + 淡入）与 hover/active（120ms，见 --default-transition-duration）。
+ * 不加持续动画；prefers-reduced-motion 下全关。
+ */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@utility animate-rise {
+  animation: rise 180ms ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms;
+    animation-iteration-count: 1;
+    transition-duration: 0.001ms;
+    scroll-behavior: auto;
+  }
+}
+
+/*
+ * 历史类名迁移（zx_20261121_3 M5，**只减不增**）：
+ *   旧页面里的 blue-*/indigo-* 已在源码层一次性换成 token（bg-accent / text-accent / bg-accent-soft…）。
+ *   新代码请直接用 token，不要再写 blue-*；本文件不再保留类名覆盖层（避免与 utilities 争层序）。
+ */
+
+/*
+ * zx_20261122_1 M5「夜·度」——暗色 token（**只改值，不改名**）。
+ *
+ * 纪律：暗色不是第二套皮：同一 token、同一语义，只是重新验相邻对比
+ *   （暖墨底、冷纸字；状态色在暗底上保可读；不发光、不霓虹、不加玻璃）。
+ *   本块为**无层 CSS**（unlayered），在 Tailwind 的 @layer theme 之后生效，
+ *   故普通选择器即可覆盖 `:root` 的变量，无需 !important。
+ */
+
+
+/*
+ * zx_20261122_1 M5「夜·度」——暗色旧类兼容层（**只在 html.wa-dark 作用域**，不碰浅色）。
+ *
+ * 缘由：上轮 blue/indigo 已在源码层换成 token，但页面里仍散着 gray/slate/stone 骨架色与
+ *   amber/red/green/sky… 语义色。暗色下逐个改页面结构风险高（承 D9），故在此做一层**只读映射**：
+ *   骨架色 → 纸/面/墨/线；语义 -50/100 底 → 对应 -soft；-600/700 字 → 对应语义色。
+ * 特异性：作用域属性选择器 + 类选择器（0,2,0）高于单一 utility（0,1,0），且本块无层，直接覆盖。
+ * 新代码仍请用 token；本层是给存量页面的兜底，不鼓励新增。
+ */
+
+/* —— 面 / 底 —— */
+html.wa-dark .bg-white { background-color: var(--color-surface); }
+/* ⚠ `bg-white` 与 Tailwind 的 `.bg-white` utility 会在压缩阶段被合并掉（实测唯一漏网的一类）：
+ *   改用属性选择器，保证暗色下卡片不是白底浅字。 */
+html.wa-dark [class~="bg-white"] { background-color: var(--color-surface); }
+/* 暗色下主色/朱砂/结果色是**浅底**：原来的白字对比不足，统一改深墨字（只改「彩色底 + 白字」这一对）。 */
+html.wa-dark [class~="bg-accent"][class~="text-white"],
+html.wa-dark [class~="bg-cinnabar"][class~="text-white"],
+html.wa-dark [class~="bg-ok"][class~="text-white"],
+html.wa-dark [class~="bg-warn"][class~="text-white"],
+html.wa-dark [class~="bg-bad"][class~="text-white"] { color: var(--color-paper); }
+html.wa-dark .bg-gray-50 { background-color: var(--color-paper); }
+/* 透明度变体（`bg-gray-50/60` 等）不匹配上面的类选择器——用属性选择器兜住。 */
+html.wa-dark [class~="bg-gray-50/60"],
+html.wa-dark [class~="bg-gray-50/70"],
+html.wa-dark [class~="bg-gray-50/80"] { background-color: color-mix(in srgb, var(--color-paper) 60%, transparent); }
+html.wa-dark [class~="bg-white/60"],
+html.wa-dark [class~="bg-white/70"] { background-color: color-mix(in srgb, var(--color-surface) 70%, transparent); }
+html.wa-dark .bg-gray-100 { background-color: #24221c; }
+html.wa-dark .bg-gray-800 { background-color: #1a1813; }
+html.wa-dark .bg-gray-900 { background-color: #0e0d0a; }
+html.wa-dark .bg-slate-50 { background-color: var(--color-paper); }
+html.wa-dark .bg-slate-100 { background-color: #24221c; }
+html.wa-dark .bg-stone-100 { background-color: #24221c; }
+html.wa-dark .bg-stone-200 { background-color: #24221c; }
+
+/* —— 字 —— */
+html.wa-dark .text-gray-900,
+html.wa-dark .text-gray-800 { color: var(--color-ink); }
+html.wa-dark .text-gray-700,
+html.wa-dark .text-gray-600 { color: var(--color-ink-soft); }
+html.wa-dark .text-gray-500,
+html.wa-dark .text-gray-400 { color: var(--color-ink-mute); }
+html.wa-dark .text-gray-300 { color: var(--color-ink-soft); }
+html.wa-dark .text-slate-600,
+html.wa-dark .text-slate-700 { color: var(--color-ink-soft); }
+html.wa-dark .text-stone-300,
+html.wa-dark .text-stone-400,
+html.wa-dark .text-stone-500,
+html.wa-dark .text-stone-600,
+html.wa-dark .text-stone-700 { color: var(--color-ink-mute); }
+
+/* —— 线 —— */
+html.wa-dark .border-gray-100,
+html.wa-dark .border-gray-200 { border-color: var(--color-line); }
+html.wa-dark .border-gray-300 { border-color: var(--color-line-strong); }
+html.wa-dark .divide-gray-100 > :not([hidden]) ~ :not([hidden]),
+html.wa-dark .divide-gray-200 > :not([hidden]) ~ :not([hidden]) { border-color: var(--color-line); }
+
+/* —— hover 抬升 —— */
+html.wa-dark .hover\:bg-gray-50:hover,
+html.wa-dark .hover\:bg-gray-100:hover { background-color: #24221c; }
+html.wa-dark .hover\:bg-gray-800:hover { background-color: #1a1813; }
+
+/* —— 语义底（-50/100）：warn —— */
+html.wa-dark .bg-amber-50,
+html.wa-dark .bg-amber-100,
+html.wa-dark .bg-yellow-50,
+html.wa-dark .bg-yellow-100,
+html.wa-dark .bg-orange-50,
+html.wa-dark .bg-orange-100 { background-color: var(--color-warn-soft); }
+html.wa-dark .text-amber-600,
+html.wa-dark .text-amber-700,
+html.wa-dark .text-amber-800,
+html.wa-dark .text-yellow-600,
+html.wa-dark .text-yellow-700,
+html.wa-dark .text-orange-600,
+html.wa-dark .text-orange-700 { color: var(--color-warn); }
+
+/* —— 语义底/字：bad —— */
+html.wa-dark .bg-red-50,
+html.wa-dark .bg-red-100,
+html.wa-dark .bg-rose-50,
+html.wa-dark .bg-rose-100 { background-color: var(--color-bad-soft); }
+html.wa-dark .text-red-500,
+html.wa-dark .text-red-600,
+html.wa-dark .text-red-700,
+html.wa-dark .text-red-800,
+html.wa-dark .text-rose-600,
+html.wa-dark .text-rose-700 { color: var(--color-bad); }
+
+/* —— 语义底/字：ok —— */
+html.wa-dark .bg-green-50,
+html.wa-dark .bg-green-100,
+html.wa-dark .bg-emerald-50,
+html.wa-dark .bg-emerald-100,
+html.wa-dark .bg-teal-50,
+html.wa-dark .bg-teal-100 { background-color: var(--color-ok-soft); }
+html.wa-dark .text-green-600,
+html.wa-dark .text-green-700,
+html.wa-dark .text-emerald-600,
+html.wa-dark .text-emerald-700,
+html.wa-dark .text-teal-700 { color: var(--color-ok); }
+
+/* —— 语义底/字：accent（sky/cyan；purple/violet 兜底防遗漏） —— */
+html.wa-dark .bg-sky-50,
+html.wa-dark .bg-sky-100,
+html.wa-dark .bg-cyan-50,
+html.wa-dark .bg-cyan-100,
+html.wa-dark .bg-purple-50,
+html.wa-dark .bg-purple-100,
+html.wa-dark .bg-purple-200,
+html.wa-dark .bg-violet-50,
+html.wa-dark .bg-violet-100,
+html.wa-dark .bg-violet-200 { background-color: var(--color-accent-soft); }
+html.wa-dark .text-sky-600,
+html.wa-dark .text-sky-700,
+html.wa-dark .text-cyan-600,
+html.wa-dark .text-cyan-700,
+html.wa-dark .text-purple-300,
+html.wa-dark .text-purple-400,
+html.wa-dark .text-purple-500,
+html.wa-dark .text-purple-600,
+html.wa-dark .text-purple-700,
+html.wa-dark .text-purple-800,
+html.wa-dark .text-violet-400,
+html.wa-dark .text-violet-500,
+html.wa-dark .text-violet-600,
+html.wa-dark .text-violet-700 { color: var(--color-accent); }
+
+/* —— 语义底：-50 透明度变体（存量页面大量使用；不映射会留下浅底暗字） —— */
+html.wa-dark [class~="bg-emerald-50/50"],
+html.wa-dark [class~="bg-emerald-50/40"],
+html.wa-dark [class~="bg-green-50/50"],
+html.wa-dark [class~="bg-teal-50/60"] { background-color: color-mix(in srgb, var(--color-ok-soft) 85%, transparent); }
+html.wa-dark [class~="bg-red-50/50"],
+html.wa-dark [class~="bg-rose-50/50"] { background-color: color-mix(in srgb, var(--color-bad-soft) 85%, transparent); }
+html.wa-dark [class~="bg-amber-50/50"],
+html.wa-dark [class~="bg-amber-50/60"],
+html.wa-dark [class~="bg-yellow-50/50"],
+html.wa-dark [class~="bg-orange-50/40"],
+html.wa-dark [class~="bg-orange-100/60"],
+html.wa-dark [class~="bg-amber-200/60"],
+html.wa-dark [class~="bg-amber-200/70"] { background-color: color-mix(in srgb, var(--color-warn-soft) 85%, transparent); }
+html.wa-dark [class~="bg-sky-50/50"],
+html.wa-dark [class~="bg-sky-50/60"],
+html.wa-dark [class~="bg-cyan-50/50"],
+html.wa-dark [class~="bg-indigo-50/50"] { background-color: color-mix(in srgb, var(--color-accent-soft) 85%, transparent); }
+
+/* —— 语义底：-200（更强的结果高亮） —— */
+html.wa-dark .bg-green-200,
+html.wa-dark .bg-emerald-200,
+html.wa-dark .bg-teal-200 { background-color: var(--color-ok-soft); }
+html.wa-dark .bg-red-200,
+html.wa-dark .bg-rose-200 { background-color: var(--color-bad-soft); }
+html.wa-dark .bg-amber-200,
+html.wa-dark .bg-yellow-200,
+html.wa-dark .bg-orange-200 { background-color: var(--color-warn-soft); }
+html.wa-dark .bg-sky-200,
+html.wa-dark .bg-cyan-200 { background-color: var(--color-accent-soft); }
+
+/* —— 语义边框：-100/200/300/400 —— */
+html.wa-dark .border-green-100,
+html.wa-dark .border-green-200,
+html.wa-dark .border-green-300,
+html.wa-dark .border-green-400,
+html.wa-dark .border-emerald-100,
+html.wa-dark .border-emerald-200,
+html.wa-dark .border-emerald-300,
+html.wa-dark .border-emerald-400,
+html.wa-dark .border-teal-100,
+html.wa-dark .border-teal-200,
+html.wa-dark .border-teal-300 { border-color: color-mix(in srgb, var(--color-ok) 35%, transparent); }
+html.wa-dark .border-red-100,
+html.wa-dark .border-red-200,
+html.wa-dark .border-red-300,
+html.wa-dark .border-red-400,
+html.wa-dark .border-rose-100,
+html.wa-dark .border-rose-200,
+html.wa-dark .border-rose-300 { border-color: color-mix(in srgb, var(--color-bad) 35%, transparent); }
+html.wa-dark .border-amber-100,
+html.wa-dark .border-amber-200,
+html.wa-dark .border-amber-300,
+html.wa-dark .border-amber-400,
+html.wa-dark .border-yellow-200,
+html.wa-dark .border-yellow-300,
+html.wa-dark .border-orange-200,
+html.wa-dark .border-orange-300 { border-color: color-mix(in srgb, var(--color-warn) 35%, transparent); }
+html.wa-dark .border-sky-200,
+html.wa-dark .border-sky-300,
+html.wa-dark .border-cyan-200,
+html.wa-dark .border-fuchsia-200,
+html.wa-dark .border-fuchsia-300,
+html.wa-dark .border-fuchsia-400 { border-color: color-mix(in srgb, var(--color-accent) 35%, transparent); }
+html.wa-dark .border-slate-200,
+html.wa-dark .border-slate-300,
+html.wa-dark .border-slate-400,
+html.wa-dark .border-stone-200 { border-color: var(--color-line-strong); }
+
+/* —— 语义字：-400/500/800/900 —— */
+html.wa-dark .text-green-500,
+html.wa-dark .text-green-800,
+html.wa-dark .text-green-900,
+html.wa-dark .text-emerald-400,
+html.wa-dark .text-emerald-500,
+html.wa-dark .text-emerald-800,
+html.wa-dark .text-emerald-900,
+html.wa-dark .text-teal-400,
+html.wa-dark .text-teal-500,
+html.wa-dark .text-teal-800,
+html.wa-dark .text-teal-900 { color: var(--color-ok); }
+html.wa-dark .text-red-400,
+html.wa-dark .text-red-800,
+html.wa-dark .text-red-900,
+html.wa-dark .text-rose-400,
+html.wa-dark .text-rose-500,
+html.wa-dark .text-rose-800 { color: var(--color-bad); }
+html.wa-dark .text-amber-400,
+html.wa-dark .text-amber-500,
+html.wa-dark .text-amber-900,
+html.wa-dark .text-yellow-400,
+html.wa-dark .text-yellow-500,
+html.wa-dark .text-yellow-600,
+html.wa-dark .text-orange-400,
+html.wa-dark .text-orange-500,
+html.wa-dark .text-orange-800,
+html.wa-dark .text-orange-900 { color: var(--color-warn); }
+html.wa-dark .text-sky-400,
+html.wa-dark .text-sky-500,
+html.wa-dark .text-sky-800,
+html.wa-dark .text-sky-900,
+html.wa-dark .text-cyan-400,
+html.wa-dark .text-cyan-500,
+html.wa-dark .text-cyan-800,
+html.wa-dark .text-cyan-900,
+html.wa-dark .text-fuchsia-600,
+html.wa-dark .text-fuchsia-700,
+html.wa-dark .text-fuchsia-800,
+html.wa-dark .text-pink-600 { color: var(--color-accent); }
+html.wa-dark .text-slate-400,
+html.wa-dark .text-slate-500 { color: var(--color-ink-mute); }
+
+/* —— 中性灰/石板中间层：-200/-300 等（暗色下不做「亮底 + 亮字」） —— */
+html.wa-dark .bg-gray-200,
+html.wa-dark .bg-slate-200 { background-color: #2a2721; }
+html.wa-dark .bg-gray-300,
+html.wa-dark .bg-slate-300 { background-color: #332f28; }
+html.wa-dark .bg-gray-400,
+html.wa-dark .bg-slate-400 { background-color: #3d382f; }
+html.wa-dark .bg-gray-500 { background-color: #4a463c; }
+html.wa-dark .bg-gray-600 { background-color: #514c41; }
+html.wa-dark .bg-gray-700 { background-color: #5a5448; }
+html.wa-dark .bg-stone-50 { background-color: var(--color-paper); }
+
+/* —— hover 浅底：中性/语义（只在悬停时生效，避免亮底亮字） —— */
+html.wa-dark .hover\:bg-gray-200:hover,
+html.wa-dark .hover\:bg-slate-200:hover { background-color: #2a2721; }
+html.wa-dark .hover\:bg-gray-500:hover { background-color: #4a463c; }
+html.wa-dark .hover\:bg-gray-700:hover,
+html.wa-dark .hover\:bg-slate-700:hover { background-color: #5a5448; }
+html.wa-dark .hover\:bg-red-50:hover,
+html.wa-dark .hover\:bg-red-100:hover,
+html.wa-dark .hover\:bg-rose-100:hover { background-color: var(--color-bad-soft); }
+html.wa-dark .hover\:bg-green-50:hover,
+html.wa-dark .hover\:bg-green-100:hover,
+html.wa-dark .hover\:bg-green-200:hover,
+html.wa-dark .hover\:bg-emerald-50:hover,
+html.wa-dark .hover\:bg-emerald-100:hover,
+html.wa-dark .hover\:bg-emerald-200:hover,
+html.wa-dark .hover\:bg-teal-100:hover { background-color: var(--color-ok-soft); }
+html.wa-dark .hover\:bg-amber-50:hover,
+html.wa-dark .hover\:bg-amber-100:hover,
+html.wa-dark .hover\:bg-amber-200:hover,
+html.wa-dark .hover\:bg-amber-300:hover,
+html.wa-dark .hover\:bg-yellow-50:hover,
+html.wa-dark .hover\:bg-yellow-200:hover,
+html.wa-dark .hover\:bg-orange-50:hover,
+html.wa-dark .hover\:bg-orange-100:hover,
+html.wa-dark .hover\:bg-orange-200:hover { background-color: var(--color-warn-soft); }
+html.wa-dark .hover\:bg-sky-50:hover,
+html.wa-dark .hover\:bg-sky-100:hover,
+html.wa-dark .hover\:bg-cyan-100:hover,
+html.wa-dark .hover\:bg-fuchsia-100:hover,
+html.wa-dark .hover\:bg-teal-50\/30:hover { background-color: var(--color-accent-soft); }
+html.wa-dark .hover\:bg-slate-100:hover { background-color: #24221c; }
+
+/* —— 补：零散浅底 / 透明度字 / hover 字与边 —— */
+html.wa-dark .bg-fuchsia-50,
+html.wa-dark .bg-fuchsia-200 { background-color: var(--color-accent-soft); }
+html.wa-dark [class~="bg-slate-50/60"] { background-color: color-mix(in srgb, var(--color-paper) 60%, transparent); }
+html.wa-dark .border-gray-50 { border-color: var(--color-line); }
+html.wa-dark .border-gray-800 { border-color: var(--color-line-strong); }
+html.wa-dark [class~="text-gray-400/80"] { color: var(--color-ink-mute); }
+html.wa-dark [class~="text-amber-500/80"] { color: var(--color-warn); }
+html.wa-dark .text-teal-600 { color: var(--color-ok); }
+html.wa-dark .ring-amber-300,
+html.wa-dark .focus\:ring-amber-500:focus { --tw-ring-color: var(--color-warn); }
+html.wa-dark .hover\:text-gray-500:hover,
+html.wa-dark .hover\:text-gray-600:hover { color: var(--color-ink-mute); }
+html.wa-dark .hover\:text-gray-700:hover,
+html.wa-dark .hover\:text-gray-800:hover { color: var(--color-ink); }
+html.wa-dark .hover\:text-red-600:hover,
+html.wa-dark .hover\:text-red-800:hover { color: var(--color-bad); }
+html.wa-dark .hover\:text-amber-600:hover,
+html.wa-dark .hover\:text-amber-900:hover { color: var(--color-warn); }
+html.wa-dark .hover\:text-teal-500:hover,
+html.wa-dark .hover\:text-teal-600:hover,
+html.wa-dark .hover\:text-teal-700:hover,
+html.wa-dark .hover\:text-teal-800:hover { color: var(--color-ok); }
+html.wa-dark .hover\:text-cyan-800:hover { color: var(--color-accent); }
+html.wa-dark .hover\:border-gray-300:hover { border-color: var(--color-line-strong); }
+html.wa-dark .hover\:border-red-300:hover { border-color: color-mix(in srgb, var(--color-bad) 50%, transparent); }
+html.wa-dark .hover\:border-teal-300:hover { border-color: color-mix(in srgb, var(--color-ok) 50%, transparent); }
+
+:root.wa-dark {
+  color-scheme: dark;
+  /* 纸与墨：暖墨底、冷纸字。
+   * 选择器用 `:root.wa-dark`（0,2,0）：高于 Tailwind `@theme` 的 `:root`（0,1,0），
+   * 故无论产物里谁先谁后，暗色值都稳定生效；不再依赖 `!important`。 */
+  --color-paper: #14130f;
+  --color-surface: #1c1a15;
+  --color-sidebar: #0e0d0a;
+  --color-sidebar-ink: #f2eee4;
+  --color-ink: #f2eee4;
+  --color-ink-soft: #c9c2b3;
+  --color-ink-mute: #948e80;
+  --color-line: #2e2b24;
+  --color-line-strong: #4a463c;
+
+  /* 主色 = 可行动（暗底提亮一档，保对比） */
+  --color-accent: #8fb3c7;
+  --color-accent-soft: #1e2c33;
+
+  /* 朱砂 = 危险 / 最高优先 */
+  --color-cinnabar: #d9775e;
+  --color-cinnabar-soft: #3a211b;
+
+  /* 结果语义：ok / warn / bad（暗底浅一档，配深底 -soft） */
+  --color-ok: #93b89b;
+  --color-ok-soft: #1e2a20;
+  --color-warn: #d6a96b;
+  --color-warn-soft: #2e2619;
+  --color-bad: #e08a78;
+  --color-bad-soft: #331f1b;
+
+  /* 阴影改暗底版本：靠边线+极淡黑晕，不靠高光 */
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.32);
+}

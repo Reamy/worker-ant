@@ -24,12 +24,12 @@ export interface InjectionSummaryRow {
 
 const SOURCE_META: Array<{ key: string; label: string; tone: string }> = [
   { key: 'system', label: '系统骨架', tone: 'bg-slate-400' },
-  { key: 'memory', label: '记忆', tone: 'bg-violet-400' },
+  { key: 'memory', label: '记忆', tone: 'bg-accent' },
   { key: 'knowledge', label: '知识', tone: 'bg-sky-400' },
   { key: 'tools', label: '工具面', tone: 'bg-amber-400' },
   { key: 'history', label: '历史', tone: 'bg-emerald-400' },
   { key: 'user', label: '用户输入', tone: 'bg-rose-400' },
-  { key: 'output', label: '模型产出', tone: 'bg-indigo-400' },
+  { key: 'output', label: '模型产出', tone: 'bg-accent' },
 ];
 
 /** 被裁字符的人话名（与上方分账同一组标签；只列真裁过的源）。 */

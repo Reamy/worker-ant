@@ -44,7 +44,7 @@ import {
   sourceRoiRows, roiCapsProposal, applyRoiAwareBudget, roiBudgetCheckLine, readRoiBudgetSwitch,
   type SourceRoiRow,
 } from '../apps/worker-ant-desktop/src/main/core/context-roi.js';
-import { buildOpsOverview } from '../apps/worker-ant-desktop/src/main/core/ops-overview.js';
+import { buildOpsOverview, ansHealthUrl } from '../apps/worker-ant-desktop/src/main/core/ops-overview.js';
 
 let pass = 0;
 let fail = 0;
@@ -266,6 +266,14 @@ let iTestDone: Promise<void> = Promise.resolve();
     const ipc = stripKeepingLines(fs.readFileSync(path.join(root, A, 'src/main/ipc/positions.ipc.ts'), 'utf-8')).join('\n');
     for (const ch of ['list', 'create', 'update', 'delete', 'runNow', 'suggestions', 'board']) {
       ok(new RegExp(`positionRoutine:${ch}`).test(ipc), `C2 IPC 出口在册：positionRoutine:${ch}`);
+    }
+    // 信封：七个出口的成功返回都须是 `{ data }`（渲染层 `ipcCall` 只认此形）。按每个 handler 的语句
+    // 区间分别断言——只查通道名存在挡不住裸返回（2026-11-22 运维页即此漏网）。
+    for (const ch of ['list', 'create', 'update', 'delete', 'runNow', 'suggestions', 'board']) {
+      const start = ipc.indexOf(`positionRoutine:${ch}'`);
+      const next = ipc.indexOf('ipcMain.handle(', start + 1);
+      const blockText = ipc.slice(start, next < 0 ? undefined : next);
+      ok(/return\s*\{\s*data\b/.test(blockText), `C2 ${ch} 出口以 { data } 信封交出`);
     }
     const page = stripKeepingLines(fs.readFileSync(path.join(root, A, 'renderer/src/pages/PositionsPage.tsx'), 'utf-8')).join('\n');
     ok(/positionRoutines as routinesIpc/.test(page), 'C2 页面经共享 IPC 客户端调用');
@@ -598,12 +606,24 @@ let iTestDone: Promise<void> = Promise.resolve();
     eq(o.ans.value!.latencyMs, 12, 'I2 延迟如实');
     db.close();
   }
+
+  // I4 ANS 探活 URL 走真路由 `/api/v1/health`（曾打根下 `/health` ⇒ 运维页恒报「不可达：http_404」）。
+  //   纯函数断言，不起网络：探针的实际 URL 由 `ansHealthUrl` 一处给出。
+  {
+    eq(ansHealthUrl('http://localhost:27183'), 'http://localhost:27183/api/v1/health', 'I4 探活 URL 拼 /api/v1/health');
+    eq(ansHealthUrl('http://localhost:27183/'), 'http://localhost:27183/api/v1/health', 'I4 尾斜杠不产生双斜杠');
+    ok(ansHealthUrl('http://localhost:27183') !== 'http://localhost:27183/health', 'I4 不再用根下 /health');
+  }
   })();
 
   // I3 接线扫面：IPC 只读、页面八块、导航独立项
   {
     const ipc = stripKeepingLines(fs.readFileSync(path.join(root, A, 'src/main/ipc/ops.ipc.ts'), 'utf-8')).join('\n');
     ok(/ops:overview/.test(ipc) && !/ipcMain\.handle\('ops:(?!overview)/.test(ipc), 'I3 运维 IPC 只有只读出口');
+    // 信封契约（2026-11-22 修）：渲染层 `ipcCall` 只认 `{ data } | { error }`。裸返回会被解成
+    // `undefined`，「运维」页八块因此恒显示「加载中」——按语句形状钉死，不靠人工目视。
+    ok(/return\s*\{\s*data\b/.test(ipc), 'I3 运维 IPC 以 { data } 信封交出（渲染层只认此形）');
+    ok(!/return\s+buildOpsOverview\s*\(/.test(ipc), 'I3 运维 IPC 不裸返回读模型（否则渲染层解成 undefined）');
     const page = stripKeepingLines(fs.readFileSync(path.join(root, A, 'renderer/src/pages/OpsPage.tsx'), 'utf-8')).join('\n');
     for (const t of ['调度队列', '任务态', '构建锁', '数据库文件', 'IM 补发', 'cron 心跳', 'ANS', '磁盘']) {
       ok(page.includes(t), `I3 页面含「${t}」块`);

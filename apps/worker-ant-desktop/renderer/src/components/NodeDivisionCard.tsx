@@ -117,9 +117,9 @@ export default function NodeDivisionCard({ projectId }: { projectId: string }) {
     <div className="mt-3 bg-white rounded-lg border p-4">
       <div className="flex items-center justify-between mb-2 gap-2">
         <h3 className="text-sm font-semibold flex items-center gap-1.5 text-gray-700">
-          <Network className="w-4 h-4 text-indigo-500" />节点分工
+          <Network className="w-4 h-4 text-accent" />节点分工
           {payload?.configured && (
-            <span className="text-[10px] font-normal px-1.5 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200">
+            <span className="text-[10px] font-normal px-1.5 py-0.5 rounded-full bg-accent-soft text-accent border border-accent/25">
               已登记显式分工
             </span>
           )}
@@ -130,10 +130,10 @@ export default function NodeDivisionCard({ projectId }: { projectId: string }) {
       </div>
 
       {locked && (
-        <div className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 mb-2">
-          <div className="text-xs font-medium text-indigo-800 mb-0.5">「多机协同」是团队版旗舰能力</div>
-          <div className="text-[11px] text-indigo-700">{gate?.detail}</div>
-          <div className="text-[11px] text-indigo-700 mt-1">
+        <div className="rounded-lg border border-accent/25 bg-accent-soft px-3 py-2 mb-2">
+          <div className="text-xs font-medium text-accent mb-0.5">「多机协同」是团队版旗舰能力</div>
+          <div className="text-[11px] text-accent">{gate?.detail}</div>
+          <div className="text-[11px] text-accent mt-1">
             专业版仍为单机（并发与项目照常，不跨机派活）；团队授权包覆盖最多 20 台协同节点。
           </div>
         </div>
@@ -255,7 +255,7 @@ export default function NodeDivisionCard({ projectId }: { projectId: string }) {
               type="button"
               onClick={() => void save()}
               disabled={saving}
-              className="text-xs px-2.5 py-1 rounded bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50"
+              className="text-xs px-2.5 py-1 rounded bg-accent text-white hover:bg-accent/90 disabled:opacity-50"
             >
               {saving ? '保存中…' : '保存分工'}
             </button>

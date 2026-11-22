@@ -38,8 +38,12 @@ import { MACHINE_CONCURRENCY_SETTING_KEY } from '../../../src/main/core/settings
 import { POLICY_OVERRIDES } from '../../../src/main/core/policy-keys.js';
 // zx_20261023_4: 首启设密码卡片也在设置页挂一次——用户软跳过向导后仍可设自己的密码。
 import LocalOwnerPasswordCard from '../components/LocalOwnerPasswordCard';
+// zx_20261121_3 M5：页头 / 主按钮 / 三态收进共用原语（只换呈现，判据与请求原样）
+import { PageHeader, Button, EmptyState, SkeletonText } from '../components/ui';
 // zx_20261108_1 B5：动作路径的**可见结果**——写失败不再静默吞掉（本地显示回滚 + 红条说明原因）。
 import { ActionFeedback, useActionFeedback } from '../lib/action-feedback';
+// zx_20261122_1 M5「夜·度」：界面主题（只影响本机显示；DB 真源 `ui.theme`）。
+import { applyTheme, getThemeChoice, setTheme, THEME_SETTING_KEY, type ThemeChoice } from '../lib/theme';
 // zx_20261108_1 B5：缺省关键的三写法解析（'true'/'1'/'on'）与 main 侧同一份，面板不再手抄。
 import { parseTriState } from '../../../src/main/core/settings-bool.js';
 
@@ -58,13 +62,13 @@ function UsageBar({ label, used, limit }: { label: string; used: number; limit: 
     <div>
       <div className="flex justify-between text-xs">
         <span className="text-gray-500">{label}</span>
-        <span className={reached ? 'font-medium text-red-600' : 'text-gray-700'}>
+        <span className={`tnum ${reached ? 'font-medium text-red-600' : 'text-gray-700'}`}>
           {unlimited ? `${used}（不限）` : `${used}/${limit}`}
         </span>
       </div>
       {!unlimited && (
         <div className="h-1.5 bg-gray-100 rounded mt-1 overflow-hidden">
-          <div className={`h-full rounded ${reached ? 'bg-red-400' : 'bg-blue-400'}`} style={{ width: `${pct}%` }} />
+          <div className={`h-full rounded ${reached ? 'bg-red-400' : 'bg-accent'}`} style={{ width: `${pct}%` }} />
         </div>
       )}
     </div>
@@ -93,6 +97,13 @@ const DELIV_OPTS: Array<{ key: string; label: string; desc: string; mainConsumed
 const IM_OPTS: Array<{ key: string; label: string; desc: string }> = [
   { key: 'notify_to_creator', label: '关键通知只发给任务创建人', desc: '完成/失败通知投给任务创建人（无 IM 来源的任务回落最近 1:1 私聊）。关=回落旧「全渠道广播」（多渠道部署会把通知发给非创建人）。' },
   { key: 'notify_pause_needed', label: '需人工介入暂停时通知', desc: 'agent 判定需人介入的暂停（硬暂停/无进展/内容不充分/partial 悬置）推 ⚠️ 给创建人；用户主动暂停（GUI/托盘）不推。' },
+];
+
+// zx_20261122_1 M5：主题三选一（默认跟随系统；只影响本机界面，不改任何配置与数据）。
+const THEME_OPTIONS: Array<{ value: ThemeChoice; label: string; desc: string }> = [
+  { value: 'system', label: '跟随系统', desc: '随系统的浅色/深色设置自动切换' },
+  { value: 'light', label: '浅色', desc: '墨与纸（浅）' },
+  { value: 'dark', label: '深色', desc: '夜·度（暗）' },
 ];
 
 const EXPOSED_BOOL_KEYS: readonly string[] = [
@@ -181,6 +192,7 @@ const ADVANCED_BOOL_LABELS: Record<string, string> = {
 
 // 搜索：分区关键词（卡片级过滤）——中文分词做不到，就按"用户会打的词"列在这里。
 const SECTION_KEYWORDS: Record<string, string> = {
+  theme: '界面 主题 深色 暗色 浅色 暗夜 夜间 跟随系统 显示',
   'local-owner': '本机密码 所有者 账号',
   tour: '新手引导 导览 重看 第一次',
   password: '修改密码 账号 登录',
@@ -210,6 +222,8 @@ export default function SettingsPage() {
   const navigate = useNavigate();
   // zx_20261115_4 M6「启」：重看新手导览——只清一次性标记，不碰任何配置（真源仍是 `onboarding.tour_done`）。
   const [tourMsg, setTourMsg] = useState('');
+  // zx_20261122_1 M5：界面主题。初值取 localStorage 快照；DB `ui.theme` 随后校正单选态（视觉已由 initTheme 应用）。
+  const [themeChoice, setThemeChoice] = useState<ThemeChoice>(() => getThemeChoice());
   const resetTour = async (): Promise<void> => {
     try {
       await invoke('settings:set', 'onboarding.tour_done', '0');
@@ -229,6 +243,27 @@ export default function SettingsPage() {
       fb.fail(`「${what}」未保存`, e);
     }
   };
+  // zx_20261122_1 M5：切主题——立即生效，DB 写失败则回滚视觉并如实提示（不弹 alert）。
+  const changeTheme = async (next: ThemeChoice): Promise<void> => {
+    const prev = themeChoice;
+    setThemeChoice(next);
+    try {
+      await setTheme(next);
+    } catch (e) {
+      setThemeChoice(prev);
+      applyTheme(prev);
+      fb.fail('「界面主题」未保存', e);
+    }
+  };
+  // M5：单选态跟随 DB 真源（首屏视觉已由 initTheme 应用；这里只纠正按钮选中）。
+  useEffect(() => {
+    void (async () => {
+      try {
+        const v = await invoke<string | null>('settings:get', THEME_SETTING_KEY);
+        if (v === 'system' || v === 'light' || v === 'dark') setThemeChoice(v);
+      } catch { /* 读不到就保持快照值 */ }
+    })();
+  }, []);
   const [checking, setChecking] = useState(false);
   const [updateMsg, setUpdateMsg] = useState('');
   const [pwForm, setPwForm] = useState({ oldPassword: '', newPassword: '' });
@@ -621,7 +656,7 @@ export default function SettingsPage() {
     await saveSetting('机器并发上限', MACHINE_CONCURRENCY_SETTING_KEY, v, () => setMachineMaxConcurrency(prev));
   };
   const Switch = ({ on, onToggle }: { on: boolean; onToggle: (v: boolean) => void }) => (
-    <button type="button" role="switch" aria-checked={on} onClick={() => onToggle(!on)} className={`relative w-9 h-5 shrink-0 rounded-full transition-colors ${on ? 'bg-blue-600' : 'bg-gray-300'}`}>
+    <button type="button" role="switch" aria-checked={on} onClick={() => onToggle(!on)} className={`relative w-9 h-5 shrink-0 rounded-full transition-colors ${on ? 'bg-accent' : 'bg-gray-300'}`}>
       <span className={`absolute top-0.5 left-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform ${on ? 'translate-x-4' : ''}`} />
     </button>
   );
@@ -727,6 +762,7 @@ export default function SettingsPage() {
   //   命中一行即展开所在节（节本就全展开，这里只决定显隐）。
   const q = settingsQuery.trim().toLowerCase();
   const ROW_KEYWORDS: Record<string, string[]> = {
+    theme: ['界面 主题 深色 暗色 浅色 夜间 跟随系统 ui.theme 显示'],
     deliverable: DELIV_OPTS.map((o) => `${o.label} ${o.desc} deliverable.${o.key}`),
     im: IM_OPTS.map((o) => `${o.label} ${o.desc} im.${o.key}`),
     policy: POLICY_OVERRIDES.map((o) => `${o.key} ${POLICY_NUM_LABELS[o.key]?.label ?? ''} ${POLICY_NUM_LABELS[o.key]?.desc ?? ''}`),
@@ -779,8 +815,16 @@ export default function SettingsPage() {
     if (aid === 'open_settings') document.getElementById('settings-ans')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
+  // zx_20261121_3 M5：页头一句主张——只由已读到的 ANS / 模型状态派生（未读到时说"正在读取"）。
+  const settingsClaim = ansStatus == null
+    ? '正在读取 ANS 与模型配置…'
+    : ansStatus.configured
+      ? `ANS 已配置${modelReadOk && defaultModel ? ` · 默认模型 ${defaultModel.slice(0, 24)}` : ''}`
+      : 'ANS 未配置——先填凭据；其余开关照常可用';
+
   return (
-    <div><h2 className="text-xl font-bold mb-6">设置</h2>
+    <div>
+      <PageHeader eyebrow="设置" title="设置" claim={settingsClaim} />
       {/* zx_20261108_1 B5：任一写口失败在此如实上屏（含原因），不再静默吞掉 */}
       <ActionFeedback note={fb.note} onClose={() => fb.setNote(null)} />
       {/* zx_20261111_3「显」：第一行——此刻是什么 / 凭什么 / 下一步点哪个 */}
@@ -790,9 +834,35 @@ export default function SettingsPage() {
           value={settingsQuery}
           onChange={(e) => setSettingsQuery(e.target.value)}
           placeholder="搜索设置（如：通知 / 模型 / 并发 / 记忆）"
-          className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent"
         />
-        {noMatch && <p className="text-sm text-gray-400">没有匹配的设置项。</p>}
+        {noMatch && <EmptyState compact title="没有匹配的设置项。" />}
+        {/* zx_20261122_1 M5「夜·度」：界面主题——只影响本机显示，不改任何配置与数据。 */}
+        <div className={cardCls('theme')}>
+          <h3 className="font-semibold mb-2 flex items-center gap-2"><Monitor className="w-4 h-4"/>界面 · 主题</h3>
+          <p className="text-xs text-gray-500 mb-3">只影响本机界面显示，不改任何配置与数据。跟随系统时随系统的浅色/深色自动切换。</p>
+          <div className="flex flex-wrap gap-2" role="group" aria-label="界面主题">
+            {THEME_OPTIONS.map((o) => {
+              const active = themeChoice === o.value;
+              return (
+                <button
+                  key={o.value}
+                  type="button"
+                  onClick={() => void changeTheme(o.value)}
+                  aria-pressed={active}
+                  title={o.desc}
+                  className={`px-3 py-1.5 rounded-lg border text-sm transition-colors ${
+                    active
+                      ? 'border-accent bg-accent-soft text-accent font-medium'
+                      : 'border-line bg-surface text-ink-soft hover:bg-paper'
+                  }`}
+                >
+                  {o.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
         <div className={wrapCls('local-owner')}>
           <LocalOwnerPasswordCard />
         </div>
@@ -803,36 +873,36 @@ export default function SettingsPage() {
           <h3 className="font-semibold mb-2 flex items-center gap-2"><Compass className="w-4 h-4"/>新手引导</h3>
           <p className="text-xs text-gray-500 mb-3">导览只自动弹一次。想再看一遍就重置它——不影响任何配置、许可与项目数据。</p>
           <div className="flex items-center gap-2">
-            <button onClick={resetTour} className="px-3 py-1.5 rounded-lg text-sm border border-gray-300 hover:bg-gray-50">重置并回到首页</button>
+            <Button variant="secondary" size="sm" onClick={resetTour}>重置并回到首页</Button>
             {tourMsg && <span className="text-xs text-gray-500">{tourMsg}</span>}
           </div>
         </div>
         <div className={cardCls('password')}>
           <h3 className="font-semibold mb-4 flex items-center gap-2"><Lock className="w-4 h-4"/>修改密码</h3>
           <form onSubmit={handleChangePassword} className="space-y-3">
-            <div><label className="block text-sm font-medium mb-1">当前密码</label><input type="password" value={pwForm.oldPassword} onChange={e => setPwForm({...pwForm,oldPassword:e.target.value})} required className="w-full max-w-xs px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"/></div>
-            <div><label className="block text-sm font-medium mb-1">新密码</label><input type="password" value={pwForm.newPassword} onChange={e => setPwForm({...pwForm,newPassword:e.target.value})} required className="w-full max-w-xs px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"/></div>
+            <div><label className="block text-sm font-medium mb-1">当前密码</label><input type="password" value={pwForm.oldPassword} onChange={e => setPwForm({...pwForm,oldPassword:e.target.value})} required className="w-full max-w-xs px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent"/></div>
+            <div><label className="block text-sm font-medium mb-1">新密码</label><input type="password" value={pwForm.newPassword} onChange={e => setPwForm({...pwForm,newPassword:e.target.value})} required className="w-full max-w-xs px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent"/></div>
             {pwMsg && <p className={`text-sm ${pwOk?'text-green-600':'text-red-500'}`}>{pwMsg}</p>}
-            <button type="submit" className={`flex items-center gap-1 px-4 py-2 rounded-lg text-sm text-white transition-colors ${pwOk?'bg-green-600':'bg-blue-600 hover:bg-blue-700'}`}>{pwOk?<><Check className="w-3.5 h-3.5"/>已修改</>:'修改密码'}</button>
+            <Button type="submit" variant="secondary" icon={pwOk ? <Check className="w-3.5 h-3.5" /> : undefined}>{pwOk ? '已修改' : '修改密码'}</Button>
           </form>
         </div>
         {/* ANS 服务配置 */}
         <div className={cardCls('ans')} id="settings-ans">
           <h3 className="font-semibold mb-4 flex items-center gap-2"><Globe className="w-4 h-4"/>ANS 服务配置</h3>
-          {!ansLoaded ? <p className="text-sm text-gray-400">加载中...</p> : <div className="space-y-3">
+          {!ansLoaded ? <SkeletonText lines={4} /> : <div className="space-y-3">
             {/* zx_20261005 M16: 凭据三态如实上屏——未配置是**生产首启的正常态**，须引导而非沉默 */}
             {ansStatus && (ansStatus.configured
               ? null
               : (ansStatus.isDev
                 ? <p className="text-xs text-gray-400">开发构建：未配置时使用内置开发凭据（dev-key / dev-secret，仅本机 ANS）。</p>
                 : <p className="text-sm text-amber-600 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">尚未配置 ANS 凭据，无法连接 ANS 资源服务。请填写下方 API Key 与 Secret Key（发布构建不使用内置开发凭据）。</p>))}
-            <div><label className="block text-sm font-medium mb-1">服务地址</label><input value={ansConfig.ans_server_url} onChange={e=>setAnsConfig({...ansConfig,ans_server_url:e.target.value})} className="w-full max-w-md px-3 py-2 border rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder={ansDefaultUrl || 'http://localhost:27183'}/></div>
-            <div><label className="block text-sm font-medium mb-1">API Key</label><input value={ansConfig.ans_api_key} onChange={e=>setAnsConfig({...ansConfig,ans_api_key:e.target.value})} placeholder={ansSecretSet.apiKey ? '已配置（留空不修改）' : '未配置'} className="w-full max-w-md px-3 py-2 border rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"/></div>
-            <div><label className="block text-sm font-medium mb-1">Secret Key</label><div className="flex items-center gap-2"><input type={showSecret?'text':'password'} value={ansConfig.ans_secret_key} onChange={e=>setAnsConfig({...ansConfig,ans_secret_key:e.target.value})} placeholder={ansSecretSet.secretKey ? '已配置（留空不修改）' : '未配置'} className="w-full max-w-md px-3 py-2 border rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"/><button onClick={()=>setShowSecret(!showSecret)} className="text-xs text-gray-400 hover:text-gray-600">{showSecret?'隐藏':'显示'}</button></div></div>
+            <div><label className="block text-sm font-medium mb-1">服务地址</label><input value={ansConfig.ans_server_url} onChange={e=>setAnsConfig({...ansConfig,ans_server_url:e.target.value})} className="w-full max-w-md px-3 py-2 border rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-accent" placeholder={ansDefaultUrl || 'http://localhost:27183'}/></div>
+            <div><label className="block text-sm font-medium mb-1">API Key</label><input value={ansConfig.ans_api_key} onChange={e=>setAnsConfig({...ansConfig,ans_api_key:e.target.value})} placeholder={ansSecretSet.apiKey ? '已配置（留空不修改）' : '未配置'} className="w-full max-w-md px-3 py-2 border rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-accent"/></div>
+            <div><label className="block text-sm font-medium mb-1">Secret Key</label><div className="flex items-center gap-2"><input type={showSecret?'text':'password'} value={ansConfig.ans_secret_key} onChange={e=>setAnsConfig({...ansConfig,ans_secret_key:e.target.value})} placeholder={ansSecretSet.secretKey ? '已配置（留空不修改）' : '未配置'} className="w-full max-w-md px-3 py-2 border rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-accent"/><button onClick={()=>setShowSecret(!showSecret)} className="text-xs text-gray-400 hover:text-gray-600">{showSecret?'隐藏':'显示'}</button></div></div>
             <div className="flex items-center gap-2 flex-wrap">
-              <button onClick={handleSaveAns} className={`flex items-center gap-1 px-4 py-2 rounded-lg text-sm text-white transition-colors ${ansSaved?'bg-green-600':'bg-blue-600 hover:bg-blue-700'}`}>{ansSaved?<><Check className="w-3.5 h-3.5"/>已保存（即时生效）</>:'保存配置'}</button>
+              <Button variant="primary" onClick={handleSaveAns} icon={ansSaved ? <Check className="w-3.5 h-3.5" /> : undefined}>{ansSaved ? '已保存（即时生效）' : '保存配置'}</Button>
               {/* zx_20261112_1 B4「诊」：连得上没有，点一下就有真答案（受保护请求 + 三态 + 依据） */}
-              <button onClick={handleTestAns} disabled={ansTestBusy} data-ans-test className="px-4 py-2 rounded-lg text-sm border border-blue-200 text-blue-600 hover:bg-blue-50 disabled:opacity-50">{ansTestBusy?'测试中...':'测试连接'}</button>
+              <Button variant="secondary" data-ans-test onClick={handleTestAns} loading={ansTestBusy} loadingText="测试中...">测试连接</Button>
               {ansTest && <span data-ans-test-result className={`text-xs ${ansTest.ok?'text-green-600':'text-red-500'}`}>{ansTest.text}</span>}
             </div>
             <p className="text-xs text-gray-400">修改后立即生效，所有 ANS 资源页面将使用新配置重连。</p>
@@ -1182,7 +1252,7 @@ export default function SettingsPage() {
                 <button
                   onClick={() => void refreshCloudEntitlement()}
                   disabled={cloudBusy}
-                  className="ml-2 text-blue-600 hover:underline disabled:text-gray-400 disabled:no-underline"
+                  className="ml-2 text-accent hover:underline disabled:text-gray-400 disabled:no-underline"
                 >{cloudBusy ? '同步中…' : '重新同步'}</button>
               </span>
             </div>
@@ -1203,7 +1273,7 @@ export default function SettingsPage() {
                 {lic?.fingerprint && (
                   <button
                     onClick={() => { navigator.clipboard?.writeText(lic.fingerprint).then(() => setLicMsg('已复制本机指纹')).catch(() => {}); }}
-                    className="text-blue-600 hover:underline"
+                    className="text-accent hover:underline"
                   >复制</button>
                 )}
               </span>
@@ -1214,7 +1284,7 @@ export default function SettingsPage() {
             <p className="text-xs text-gray-400/80">指纹取自本机硬件标识，换网络、改机器名不会变；仅在本机读不到硬件标识时才退回合成指纹。</p>
             <div className="flex justify-between"><span className="text-gray-500">购买 / 升级</span>
               {pricing?.purchaseUrl
-                ? <a href={pricing.purchaseUrl} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">前往购买</a>
+                ? <a href={pricing.purchaseUrl} target="_blank" rel="noreferrer" className="text-accent hover:underline">前往购买</a>
                 : <span className="text-gray-400">购买渠道筹备中（入口即将开放）</span>}
             </div>
 
@@ -1275,9 +1345,9 @@ export default function SettingsPage() {
                     const basePrice = t.priceMonthlyCny === 0 ? '免费' : t.priceYearlyCny > 0 ? `¥${t.priceMonthlyCny}/月 · ¥${t.priceYearlyCny}/年` : `¥${t.priceMonthlyCny}/月`;
                     const price = t.priceNote ? `${basePrice}（${t.priceNote}）` : basePrice;
                     return (
-                      <div key={t.tier} className={`rounded-lg border px-3 py-2 ${isCurrent ? 'border-blue-300 bg-blue-50' : ''}`}>
+                      <div key={t.tier} className={`rounded-lg border px-3 py-2 ${isCurrent ? 'border-accent/30 bg-accent-soft' : ''}`}>
                         <div className="flex justify-between items-center">
-                          <span className="text-sm font-medium">{t.label}{isCurrent && <span className="ml-1 text-[10px] text-blue-600">当前</span>}</span>
+                          <span className="text-sm font-medium">{t.label}{isCurrent && <span className="ml-1 text-[10px] text-accent">当前</span>}</span>
                           <span className="text-sm text-gray-700">{price}</span>
                         </div>
                         <p className="text-[11px] text-gray-500 mt-0.5">能力上限：{t.capability}</p>
@@ -1351,7 +1421,7 @@ export default function SettingsPage() {
                 className="w-full px-2 py-1 border rounded text-xs font-mono"
               />
               <div className="flex items-center gap-2 mt-2">
-                <button onClick={handleActivateLicense} disabled={licBusy} className="px-3 py-1.5 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:opacity-50">{licBusy ? '激活中…' : '激活'}</button>
+                <Button variant="secondary" size="sm" onClick={handleActivateLicense} loading={licBusy} loadingText="激活中…">激活</Button>
                 {licMsg && <span className="text-xs text-gray-500">{licMsg}</span>}
               </div>
             </div>
@@ -1360,23 +1430,23 @@ export default function SettingsPage() {
         <div className={cardCls('sample')}><h3 className="font-semibold mb-4 flex items-center gap-2"><Package className="w-4 h-4"/>示例项目</h3>
           <p className="text-sm text-gray-500 mb-3">一键载入一份示例（项目 / 任务 / 产出物 / 记忆），用于快速了解工蚁。示例带「示例」徽标，与你的真实数据隔离，可随时一键删除。</p>
           <div className="flex items-center gap-2">
-            <button onClick={handleInstallSample} disabled={sampleBusy} className="px-3 py-1.5 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:opacity-50">载入示例项目</button>
-            <button onClick={handleRemoveSample} disabled={sampleBusy} className="px-3 py-1.5 border border-red-200 text-red-600 rounded text-sm hover:bg-red-50 disabled:opacity-50">删除示例项目</button>
+            <Button variant="secondary" size="sm" onClick={handleInstallSample} loading={sampleBusy} loadingText="处理中…">载入示例项目</Button>
+            <Button variant="danger" size="sm" onClick={handleRemoveSample} disabled={sampleBusy}>删除示例项目</Button>
           </div>
           {sampleMsg && <p className="text-xs text-gray-500 mt-2">{sampleMsg}</p>}
         </div>
         <div className={cardCls('sysinfo')}><h3 className="font-semibold mb-4 flex items-center gap-2"><Monitor className="w-4 h-4"/>系统信息</h3>
           <div className="space-y-2 text-sm">
             <div className="flex justify-between"><span className="text-gray-500">应用版本</span><span className="font-mono">{appVersion || '—'}</span></div>
-            <div className="flex justify-between"><span className="text-gray-500">架构模式</span><span className="text-blue-600 font-medium">单进程 Electron + IPC</span></div>
+            <div className="flex justify-between"><span className="text-gray-500">架构模式</span><span className="text-accent font-medium">单进程 Electron + IPC</span></div>
             <div className="flex justify-between"><span className="text-gray-500">前端框架</span><span>Vite 6 + React 19 + Tailwind CSS v4</span></div>
             <div className="flex justify-between"><span className="text-gray-500">数据库</span><span>better-sqlite3 (WAL)</span></div>
             <div className="flex justify-between"><span className="text-gray-500">平台</span><span className="font-mono">{window.electronAPI?.platform||'browser'}</span></div>
-            <div className="flex justify-between"><span className="text-gray-500">开源许可</span><a href="https://github.com/Reamy/worker-ant" target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">AGPL-3.0-only</a></div>
+            <div className="flex justify-between"><span className="text-gray-500">开源许可</span><a href="https://github.com/Reamy/worker-ant" target="_blank" rel="noreferrer" className="text-accent hover:underline">AGPL-3.0-only</a></div>
           </div>
         </div>
         <div className={cardCls('update')}><h3 className="font-semibold mb-4 flex items-center gap-2"><RefreshCw className="w-4 h-4"/>自动更新</h3>
-          <button onClick={handleCheckUpdate} disabled={checking} className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50"><RefreshCw className={`w-4 h-4 ${checking?'animate-spin':''}`}/>{checking?'检查中...':'检查更新'}</button>
+          <Button variant="secondary" onClick={handleCheckUpdate} loading={checking} loadingText="检查中..." icon={<RefreshCw className="w-4 h-4" />}>检查更新</Button>
           {updateMsg && <p className="text-sm text-gray-500 mt-2">{updateMsg}</p>}
         </div>
         <div className={cardCls('stack')}><h3 className="font-semibold mb-4 flex items-center gap-2"><Cpu className="w-4 h-4"/>技术栈</h3>
@@ -1393,7 +1463,7 @@ export default function SettingsPage() {
               <div className="space-y-3">{advancedList.map(advRow)}</div>
             ) : (
               <details className="mt-1">
-                <summary className="text-sm text-blue-600 cursor-pointer select-none">展开高级开关（{ADVANCED_BOOL_KEYS.length} 项）</summary>
+                <summary className="text-sm text-accent cursor-pointer select-none">展开高级开关（{ADVANCED_BOOL_KEYS.length} 项）</summary>
                 <div className="mt-3 space-y-4">
                   {ADVANCED_GROUPS.filter((g) => ADVANCED_BOOL_KEYS.some((k) => advancedGroupOf(k) === g.label)).map((g) => (
                     <div key={g.label}>

@@ -154,7 +154,7 @@ function DigestRowItem({ r, navigate }: { r: DigestRow; navigate: (p: string) =>
     <li className="flex items-center gap-2 text-sm bg-gray-50 rounded px-2 py-1 hover:bg-gray-100">
       {r.is_primary && <Star className="w-3.5 h-3.5 text-amber-500 fill-amber-400 shrink-0" />}
       {String(r.type || '') === 'doc' && !r.is_primary && <FileText className="w-3.5 h-3.5 text-gray-400 shrink-0" />}
-      <button type="button" onClick={openRow} title={r.name} className="truncate text-left hover:text-blue-600 hover:underline">{r.name}</button>
+      <button type="button" onClick={openRow} title={r.name} className="truncate text-left hover:text-accent hover:underline">{r.name}</button>
       <span className="text-[10px] px-1 rounded bg-white text-gray-400 shrink-0">{typeLabel}</span>
       {acc && (
         <span title={`验收 ${accP}/${accT} 通过 · 核验于 ${acc.checked_at}`} className={`text-[9px] px-1.5 py-0.5 rounded-full font-medium shrink-0 ${accAllPass ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
@@ -164,7 +164,7 @@ function DigestRowItem({ r, navigate }: { r: DigestRow; navigate: (p: string) =>
       {/* zx_20260911_2 M4b(Q9 名实相符): 此 quality 是**任务级** quality_score（digest 行上挂的是任务分），紧邻成果名易被读成成果自身质量——标签冠「任务」+ title 明示 */}
       {r.quality != null && <span title={`任务级质量分 ${r.quality}（该成果所属任务 finalize 的评分，非本成果自身质量）`} className={`text-[9px] px-1 py-0.5 rounded-full font-medium shrink-0 ${r.quality >= 80 ? 'bg-green-100 text-green-700' : r.quality >= 60 ? 'bg-yellow-100 text-yellow-700' : 'bg-red-100 text-red-600'}`}>任务★{r.quality}</span>}
       {r.task_id ? (
-        <button type="button" onClick={() => navigate(`/tasks/${r.task_id}`)} title={r.task_title || '打开产出任务'} className="ml-auto text-[10px] text-blue-500 hover:underline shrink-0 truncate max-w-[160px]">↳ {r.task_title || r.task_id.slice(0, 8)}</button>
+        <button type="button" onClick={() => navigate(`/tasks/${r.task_id}`)} title={r.task_title || '打开产出任务'} className="ml-auto text-[10px] text-accent hover:underline shrink-0 truncate max-w-[160px]">↳ {r.task_title || r.task_id.slice(0, 8)}</button>
       ) : <span className="ml-auto text-[10px] text-gray-300 shrink-0">{formatDbTime(r.updated_at)}</span>}
     </li>
   );

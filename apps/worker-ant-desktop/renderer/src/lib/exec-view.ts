@@ -26,7 +26,7 @@ export const EXEC_STATE_LABEL: Record<ExecState, string> = {
 /** 徽标色调（Tailwind 片段；与仓库其它徽标同风格——浅底 + 深字 + 细边）。 */
 export const EXEC_STATE_TONE: Record<ExecState, string> = {
   live: 'bg-green-50 text-green-700 border-green-200',
-  queued: 'bg-blue-50 text-blue-700 border-blue-200',
+  queued: 'bg-accent-soft text-accent border-accent/25',
   ghost: 'bg-red-50 text-red-700 border-red-200',
   idle: 'bg-gray-50 text-gray-600 border-gray-200',
   terminal: 'bg-gray-50 text-gray-500 border-gray-200',

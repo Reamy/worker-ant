@@ -31,6 +31,18 @@ export function emitDeliverableRuntimeChanged(
   }).catch(() => { /* 广播失败不影响已落库的事实 */ });
 }
 
+/**
+ * zx_20261121_3 M4「见·首」：**知识待办**变了（采纳/忽略经验、批/驳技能、启用/忽略领域包、批/驳提案）。
+ * 只发瞬态：真相仍在四张真源表里；铃铛与待办中心订阅即刷，轮询仅兜底。
+ */
+export function emitKnowledgeChanged(via: string, extra: Record<string, unknown> = {}): void {
+  void eventBus.emitTransient('knowledge.changed', {
+    via,
+    ts: new Date().toISOString(),
+    ...extra,
+  }).catch(() => { /* 广播失败不影响已落库的事实 */ });
+}
+
 /** 「门」的状态变了（开关 / 新待批 / 批准 / 拒绝 / 吊销）——人侧 IPC 与入站配对处发。 */
 export function emitExternalStatusChanged(via: string, extra: Record<string, unknown> = {}): void {
   void eventBus.emitTransient('external.status_changed', {

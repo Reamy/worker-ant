@@ -1389,6 +1389,8 @@ app.whenReady().then(async () => {
   // zx_20260911_2 M3: 出站对称转发——此前只有入站可见，工蚁回了什么/补发是否成功在界面上不可见
   eventBus.on('im.message_outbound', async (e) => { forwardToRenderer('im.message_outbound', e.data as Record<string, unknown>); });
   eventBus.on('memory.changed', async (e) => { forwardToRenderer('memory.changed', e.data as Record<string, unknown>); });
+  // zx_20261121_3 M4「见·首」：知识待办变化（低频；只发瞬态，不入事件日志）。
+  eventBus.on('knowledge.changed', async (e) => { forwardToRenderer('knowledge.changed', e.data as Record<string, unknown>); });
   // zx_20261004 M4: 协同面板实时——档位变更（持久化事件）与心跳（瞬态）各走一条转发。
   //   面板订阅 `node.presence_changed`（useLiveQuery），心跳那条供"本机忙闲即时刷"。
   eventBus.on('node.presence_changed', async (e) => { forwardToRenderer('node.presence_changed', e.data as Record<string, unknown>); });

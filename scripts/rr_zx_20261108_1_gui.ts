@@ -85,6 +85,8 @@ const VISIBLE = /fb\.fail|reportAction|reportLoad|setErr\(|setError\(|set[A-Z]\w
 /** 只读路径空 catch 的认领表（写动作的 try 一律不得空 catch）。 */
 const READ_MARKERS: Array<{ name: string; test: (s: CatchSite) => boolean }> = [
   { name: '设置页-许可状态读', test: (s) => s.tryBody.includes('licenseApi.status()') },
+  // zx_20261122_1 M5：主题 DB 读是**可选校正**——读不到就保持 localStorage 快照，不打断界面。
+  { name: '设置页-主题读(可选，保持缓存值)', test: (s) => s.tryBody.includes("'settings:get', THEME_SETTING_KEY") },
   { name: '设置页-挂载读(保持空态)', test: (s) => /^\}\s*finally\s*\{\s*setAnsLoaded\(true\)/.test(s.after.trimStart()) },
   { name: '模型页-推荐清单读(可选)', test: (s) => s.tryBody.includes("getRaw<RecEnvelope>('/api/v1/models/recommended')") },
   { name: '模型页-默认模型读(可选)', test: (s) => s.tryBody.includes("invoke<string | null>('settings:get', 'model.default_model')") },

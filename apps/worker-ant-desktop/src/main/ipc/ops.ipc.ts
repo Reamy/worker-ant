@@ -11,14 +11,21 @@ import { resolveAnsCreds } from '../core/ans-signed-request.js';
 
 export function initOpsIpc(db: Database.Database, opts: { dataDir: string; dbPath?: string }): void {
   ipcMain.handle('ops:overview', async () => {
-    let baseUrl = '';
-    try { baseUrl = String(resolveAnsCreds(db).baseUrl || ''); } catch { baseUrl = ''; }
-    return buildOpsOverview({
-      db,
-      dataDir: opts.dataDir,
-      dbPath: opts.dbPath ?? path.join(opts.dataDir, 'worker-ant-server.db'),
-      ansBaseUrl: baseUrl,
-    });
+    // ⚠ 必须回 `{ data }` / `{ error }` 信封：渲染层 `ipcCall` 只认这一形，裸返回会被解成
+    //   `undefined`，「运维」页八块因此恒显示「加载中」（2026-11-22 修）。
+    try {
+      let baseUrl = '';
+      try { baseUrl = String(resolveAnsCreds(db).baseUrl || ''); } catch { baseUrl = ''; }
+      const data = await buildOpsOverview({
+        db,
+        dataDir: opts.dataDir,
+        dbPath: opts.dbPath ?? path.join(opts.dataDir, 'worker-ant-server.db'),
+        ansBaseUrl: baseUrl,
+      });
+      return { data };
+    } catch (e) {
+      return { error: { code: 'INTERNAL', message: (e as Error)?.message || String(e) } };
+    }
   });
   console.log('[IPC] Ops handlers registered');
 }

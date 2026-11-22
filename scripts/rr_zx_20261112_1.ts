@@ -861,7 +861,9 @@ function sectionD(): void {
   const settingsSrc = readSrc(SETTINGS);
   ok(settingsSrc.includes('adminApi.health') && settingsSrc.includes('HEALTH_LEVEL_LABEL'),
     'D-46 设置页「测试连接」复用健康自检探针与三态词表');
-  ok(settingsSrc.includes('data-ans-test') && settingsSrc.includes("'测试连接'") && settingsSrc.includes('ansTest'),
+  // zx_20261121_3 M5：按钮改走共用 Button（文案在 JSX 文本节点，不再包引号）——判据钉更强的形状：
+  //   数据钩子 + 文案 + 结果状态三件齐，仍防「弹 alert」。
+  ok(settingsSrc.includes('data-ans-test') && settingsSrc.includes('测试连接') && settingsSrc.includes('ansTest'),
     'D-47 设置页结果就地显示（不弹 alert，失败留原因）');
   const ipcSrc = codeOf(PROJECT_IPC);
   ok(ipcSrc.includes('collectDescendants(') && ipcSrc.includes('t.parent_task_id') && ipcSrc.includes('LEFT JOIN wa_positions'),

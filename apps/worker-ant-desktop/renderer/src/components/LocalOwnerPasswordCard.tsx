@@ -65,17 +65,17 @@ export default function LocalOwnerPasswordCard() {
           <div>
             <label className="block text-sm font-medium mb-1">新密码</label>
             <input type="password" value={next} onChange={(e) => setNext(e.target.value)} placeholder="至少 6 位"
-              className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+              className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" />
           </div>
           <div>
             <label className="block text-sm font-medium mb-1">确认新密码</label>
             <input type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} placeholder="再输入一次"
-              className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+              className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" />
           </div>
         </div>
         {err && <p className="text-sm text-red-500">{err}</p>}
         <button type="submit" disabled={busy}
-          className="flex items-center gap-1 px-4 py-2 rounded-lg text-sm text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50">
+          className="flex items-center gap-1 px-4 py-2 rounded-lg text-sm text-white bg-accent hover:bg-accent/90 disabled:opacity-50">
           <Lock className="w-3.5 h-3.5" />{busy ? '设置中...' : '设置密码'}
         </button>
       </form>

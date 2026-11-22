@@ -37,6 +37,8 @@ import { TOUR_SETTING_KEY, parseTourDone, shouldShowTour } from '../lib/tourGate
 import { skipOnboarding, isOnboardingSkipped } from '../lib/onboardingSkip';
 import TourOverlay from '../components/TourOverlay';
 import type { ModelProbe } from '../../../src/main/core/model-availability.js';
+// zx_20261121_3 M5：页头与三态收进共用原语（只换呈现，不碰本页任何判据/请求）
+import { PageHeader, Button, ErrorState } from '../components/ui';
 
 // zx_20260930 M14-4: `report` 是 M14-3 的**真健康自检**结果（五面 × 三态 × 一句依据），
 //   由 `admin:health` 一并下发——界面若只读 `status` 一个词，五面的**依据**就全丢了。
@@ -124,7 +126,7 @@ const TAB_ITEMS = [
 export default function DashboardPage() {
   const navigate = useNavigate();
   // zx_20260906 批3 (3d): 项目大盘产出物 chip 配色（admin:overview projectOutcomes）；文案取共享词表
-  const OUT_TYPE_CLS: Record<string, string> = { mcp: 'bg-blue-100 text-blue-700', a2a: 'bg-green-100 text-green-700', ui: 'bg-purple-100 text-purple-700', doc: 'bg-amber-100 text-amber-700', daemon: 'bg-orange-100 text-orange-700', code: 'bg-slate-100 text-slate-700' };
+  const OUT_TYPE_CLS: Record<string, string> = { mcp: 'bg-accent-soft text-accent', a2a: 'bg-green-100 text-green-700', ui: 'bg-accent-soft text-accent', doc: 'bg-amber-100 text-amber-700', daemon: 'bg-orange-100 text-orange-700', code: 'bg-slate-100 text-slate-700' };
   const [health, setHealth] = useState<HealthData | null>(null);
   const [stats, setStats] = useState<StatsData | null>(null);
   const [events, setEvents] = useState<EventItem[]>([]);
@@ -314,18 +316,34 @@ export default function DashboardPage() {
   // 叠加会双计且长单步期间 DB 无新对话行则其值本不变 → 不加"实时 token 增量"；改为执行中任务「心跳在线」副行(计数+最长时长，随 heartbeat 每~20s 跳动)诚实表达推进、不虚增账
   const liveRunCount = Object.keys(heartbeats).length;
   const liveMaxSec = Object.values(heartbeats).reduce((a, h) => Math.max(a, Number(h.elapsedSec) || 0), 0);
-  const eventIcon = (t: string) => t.includes('completed')?<CheckCircle className="w-4 h-4 text-green-500"/>:t.includes('failed')?<XCircle className="w-4 h-4 text-red-500"/>:t.includes('warning')?<AlertTriangle className="w-4 h-4 text-yellow-500"/>:<Clock className="w-4 h-4 text-blue-400"/>;
+  const eventIcon = (t: string) => t.includes('completed')?<CheckCircle className="w-4 h-4 text-green-500"/>:t.includes('failed')?<XCircle className="w-4 h-4 text-red-500"/>:t.includes('warning')?<AlertTriangle className="w-4 h-4 text-yellow-500"/>:<Clock className="w-4 h-4 text-accent"/>;
   // zx_20261011_5: 模型未就绪的诚实说明（文案真源与向导②同一句）。
   const modelsLine = modelProbe ? probeModelsLine(modelProbe) : null;
+  // zx_20261121_3 M5：页头一句主张——只由本页**已读到**的数派生；未读到时说"正在读取"，不编数。
+  const dashClaim = error
+    ? '本机状态读取失败，原因与重试见下方'
+    : health
+      ? `共 ${health.projects} 个项目 · ${health.tasks} 个任务，${health.runningTasks} 个在执行${mainIssueTotal > 0 ? ` · ${mainIssueTotal} 项待你介入` : ''}`
+      : '正在读取本机引擎状态（项目 / 任务 / 健康自检）';
 
   return (
     <div>
       {/* zx_20261013_1 批三: 首启**一次性**导览浮层（非阻塞、可跳过）——只在 Dashboard 首访弹一次。 */}
       {tour && <TourOverlay onDone={finishTour} onSkip={skipTour} />}
-      <div className="flex items-center justify-between mb-6"><h2 className="text-xl font-bold">运维看板</h2><div className="flex items-center gap-2">
-        <FreshnessPill q={{ loading: healthUpdatedAt == null, data: null, error: null, updatedAt: healthUpdatedAt, stale: healthStale, isLive: !healthStale && healthUpdatedAt != null, reload: loadAll as () => Promise<void> }} />
-        <button onClick={()=>setAutoRefresh(!autoRefresh)} className={`text-xs px-2 py-1 rounded ${autoRefresh?'bg-green-100 text-green-700':'bg-gray-100 text-gray-500'}`}>{autoRefresh?'⏱ 30s自动刷新':'手动刷新'}</button><button onClick={loadAll} className="p-2 hover:bg-gray-100 rounded-lg"><RefreshCw className="w-4 h-4"/></button></div></div>
-      {error && <p className="text-red-500 text-sm mb-4">{error}</p>}
+      <PageHeader
+        eyebrow="总览"
+        title="运维看板"
+        claim={dashClaim}
+        actions={<>
+          <FreshnessPill q={{ loading: healthUpdatedAt == null, data: null, error: null, updatedAt: healthUpdatedAt, stale: healthStale, isLive: !healthStale && healthUpdatedAt != null, reload: loadAll as () => Promise<void> }} />
+          <Button size="sm" variant="ghost" onClick={() => setAutoRefresh(!autoRefresh)}>{autoRefresh ? '自动刷新：开' : '自动刷新：关'}</Button>
+          {mainIssue && <Button size="sm" variant="ghost" onClick={loadAll} icon={<RefreshCw className="w-3.5 h-3.5" />} aria-label="刷新">刷新</Button>}
+        </>}
+        primaryAction={mainIssue
+          ? <Button variant="primary" size="sm" onClick={() => navigate(`/tasks/${mainIssue.taskId}`)}>前往处理</Button>
+          : <Button variant="primary" size="sm" onClick={loadAll} icon={<RefreshCw className="w-3.5 h-3.5" />}>刷新</Button>}
+      />
+      {error && <div className="mb-4"><ErrorState reason={error} onRetry={() => void loadAll()} /></div>}
 
       {/* F1 (2026-09-04_2): 全局此刻最需你介入（矛盾论·抓主要矛盾实时化） */}
       {mainIssue && (
@@ -336,8 +354,8 @@ export default function DashboardPage() {
             <p className="text-xs text-gray-600">{mainIssue.reason}{mainIssueTotal > 1 ? `（另有 ${mainIssueTotal - 1} 项次要待处理）` : ''}</p>
           </div>
           <div className="flex items-center gap-1 shrink-0">
-            {mainIssue.kind === 'failed' && <button type="button" onClick={async () => { try { await invoke('task:resume', { id: mainIssue.taskId }); setError(''); } catch (e) { setError(`恢复失败：${(e as Error).message}`); } await loadAll(); }} className="text-xs px-2 py-1 bg-green-600 text-white rounded hover:bg-green-700">恢复</button>}
-            <button type="button" onClick={() => navigate(`/tasks/${mainIssue.taskId}`)} className="text-xs px-2 py-1 bg-blue-600 text-white rounded hover:bg-blue-700">前往处理</button>
+            {mainIssue.kind === 'failed' && <Button size="sm" variant="secondary" onClick={async () => { try { await invoke('task:resume', { id: mainIssue.taskId }); setError(''); } catch (e) { setError(`恢复失败：${(e as Error).message}`); } await loadAll(); }}>恢复</Button>}
+            <Button size="sm" variant="secondary" onClick={() => navigate(`/tasks/${mainIssue.taskId}`)}>前往处理</Button>
           </div>
         </div>
       )}
@@ -353,27 +371,28 @@ export default function DashboardPage() {
             <p className="text-xs text-gray-600">{modelsLine.text}</p>
           </div>
           {modelProbe?.read === 'ok' && (
-            <button type="button" onClick={() => navigate('/models')} className="text-xs px-2 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 shrink-0">去配置模型</button>
+            <Button size="sm" variant="secondary" onClick={() => navigate('/models')} className="shrink-0">去配置模型</Button>
           )}
         </div>
       )}
 
       {/* 统计卡片 */}
       <div className="grid grid-cols-4 gap-4 mb-6">
+        {/* zx_20261121_3 M5：指标卡统一纸面 + 语义色（不再四色铺底；颜色只表语义）。 */}
         {[
-          {label:'项目数',value:health?.projects??'—',color:'bg-green-50 text-green-700'},
-          {label:'总任务',value:health?.tasks??'—',color:'bg-blue-50 text-blue-700'},
-          {label:'活跃任务',value:health?.runningTasks??'—',color:'bg-yellow-50 text-yellow-700',animate:!!health?.runningTasks},
-          { label:'Token消耗', value:formatTokens(stats?.totalTokens), color:'bg-purple-50 text-purple-700',
+          {label:'项目数',value:health?.projects??'—',tone:'text-ink'},
+          {label:'总任务',value:health?.tasks??'—',tone:'text-ink'},
+          {label:'活跃任务',value:health?.runningTasks??'—',tone:(health?.runningTasks ?? 0) > 0 ? 'text-warn' : 'text-ink',animate:!!health?.runningTasks},
+          { label:'Token消耗', value:formatTokens(stats?.totalTokens), tone:'text-accent',
             sub: liveRunCount > 0 ? `⏳ 执行中 ${liveRunCount} 项 · 最长 ${liveMaxSec >= 60 ? `${Math.floor(liveMaxSec / 60)}m${liveMaxSec % 60}s` : `${liveMaxSec}s`} 心跳在线` : undefined,
             animate: liveRunCount > 0 }
-        ].map(({label,value,color,animate,sub})=>(
-          <div key={label} className={`${color} rounded-lg p-4`}><p className="text-sm opacity-75">{label}</p><p className={`text-2xl font-bold mt-1 ${animate?'animate-pulse':''}`}>{value}</p>{sub ? <p className="text-[11px] opacity-80 mt-1 truncate" title="长单步期间由 task.heartbeat(每~20s)驱动跳动——已入账总额不重复叠加心跳 token(同源于对话 token_count)">{sub}</p> : null}</div>
+        ].map(({label,value,tone,animate,sub})=>(
+          <div key={label} className="rounded-card border border-line bg-surface p-4"><p className="text-xs text-ink-mute">{label}</p><p className={`mt-1 font-mono text-2xl font-medium tnum ${tone} ${animate?'animate-pulse':''}`}>{value}</p>{sub ? <p className="mt-1 truncate text-[11px] text-ink-mute" title="长单步期间由 task.heartbeat(每~20s)驱动跳动——已入账总额不重复叠加心跳 token(同源于对话 token_count)">{sub}</p> : null}</div>
         ))}
       </div>
       <div className="grid grid-cols-4 gap-4 mb-6">
         {[{label:'已启用渠道',value:health?.enabledChannels??'—'},{label:'系统记忆',value:stats?.totalMemories??'—'},{label:'产出物',value:stats?.totalDeliverables??'—'},{label:'运行时间',value:health?formatUptime(health.uptime):'—'}].map(({label,value})=>(
-          <div key={label} className="bg-white rounded-lg border p-4"><p className="text-xs text-gray-400">{label}</p><p className="text-xl font-bold mt-1">{value}</p></div>
+          <div key={label} className="bg-white rounded-lg border p-4"><p className="text-xs text-gray-400">{label}</p><p className="text-xl font-bold mt-1 tnum">{value}</p></div>
         ))}
       </div>
 
@@ -381,7 +400,7 @@ export default function DashboardPage() {
       <div className="flex gap-2 mb-4 flex-wrap">
         {TAB_ITEMS.map(item => (
           <button key={item.key} onClick={() => setTab(item.key)}
-            className={`px-4 py-1.5 rounded-lg text-sm font-medium ${tab === item.key ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
+            className={`px-4 py-1.5 rounded-lg text-sm font-medium ${tab === item.key ? 'bg-accent text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
             {item.label}
           </button>
         ))}
@@ -392,14 +411,14 @@ export default function DashboardPage() {
           {/* D1 (2026-09-04_2): 长任务心跳——离开详情页仍"知天下"（克制陪伴） */}
           {Object.keys(heartbeats).length > 0 && (
             <div className="bg-white rounded-lg border p-4">
-              <h3 className="font-semibold mb-2 text-sm flex items-center gap-1"><Server className="w-4 h-4 text-blue-500"/>执行中任务（长任务心跳 · 仍在推进）</h3>
+              <h3 className="font-semibold mb-2 text-sm flex items-center gap-1"><Server className="w-4 h-4 text-accent"/>执行中任务（长任务心跳 · 仍在推进）</h3>
               <div className="space-y-1">
                 {Object.entries(heartbeats).map(([tid, h]) => (
-                  <button key={tid} type="button" onClick={() => navigate(`/tasks/${tid}`)} className="w-full flex items-center gap-2 text-xs px-2 py-1.5 rounded bg-blue-50 hover:bg-blue-100 text-left">
-                    <span className="relative flex h-2 w-2 shrink-0"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" /><span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" /></span>
+                  <button key={tid} type="button" onClick={() => navigate(`/tasks/${tid}`)} className="w-full flex items-center gap-2 text-xs px-2 py-1.5 rounded bg-accent-soft hover:bg-accent-soft text-left">
+                    <span className="relative flex h-2 w-2 shrink-0"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-accent opacity-75" /><span className="relative inline-flex rounded-full h-2 w-2 bg-accent" /></span>
                     <span className="flex-1 min-w-0 truncate text-gray-700">{h.title || tid.slice(0, 8)}</span>
-                    <span className="shrink-0 text-blue-600 font-medium">{formatTokens(h.tokens)} tokens</span>
-                    <span className="shrink-0 text-gray-400">{h.elapsedSec >= 60 ? `${Math.floor(h.elapsedSec / 60)}m${h.elapsedSec % 60}s` : `${h.elapsedSec}s`}</span>
+                    <span className="shrink-0 text-accent font-medium tnum">{formatTokens(h.tokens)} tokens</span>
+                    <span className="shrink-0 text-gray-400 tnum">{h.elapsedSec >= 60 ? `${Math.floor(h.elapsedSec / 60)}m${h.elapsedSec % 60}s` : `${h.elapsedSec}s`}</span>
                   </button>
                 ))}
               </div>
@@ -446,10 +465,10 @@ export default function DashboardPage() {
 
           {/* A1 (2026-09-03_1): 调度/队列只读状态 */}
           <div className="bg-white rounded-lg border p-4">
-            <h3 className="font-semibold mb-3 flex items-center gap-2"><Server className="w-4 h-4 text-indigo-500"/>调度/队列</h3>
+            <h3 className="font-semibold mb-3 flex items-center gap-2"><Server className="w-4 h-4 text-accent"/>调度/队列</h3>
             <div className="grid grid-cols-4 gap-3 mb-3">
-              {[{ k: 'running', c: scheduler.counts.running || 0, cls: 'text-blue-600' }, { k: 'pending', c: scheduler.counts.pending || 0, cls: 'text-amber-600' }, { k: 'done', c: scheduler.counts.done || 0, cls: 'text-green-600' }, { k: 'failed', c: scheduler.counts.failed || 0, cls: 'text-red-600' }].map(x => (
-                <div key={x.k} className="p-2 bg-gray-50 rounded text-center"><p className={`text-xl font-bold ${x.cls}`}>{x.c}</p><p className="text-[10px] text-gray-400">{JOB_STATUS_LABEL[x.k] ?? x.k}</p></div>
+              {[{ k: 'running', c: scheduler.counts.running || 0, cls: 'text-accent' }, { k: 'pending', c: scheduler.counts.pending || 0, cls: 'text-amber-600' }, { k: 'done', c: scheduler.counts.done || 0, cls: 'text-green-600' }, { k: 'failed', c: scheduler.counts.failed || 0, cls: 'text-red-600' }].map(x => (
+                <div key={x.k} className="p-2 bg-gray-50 rounded text-center"><p className={`text-xl font-bold tnum ${x.cls}`}>{x.c}</p><p className="text-[10px] text-gray-400">{JOB_STATUS_LABEL[x.k] ?? x.k}</p></div>
               ))}
             </div>
             {scheduler.recent.length > 0 && (
@@ -457,7 +476,7 @@ export default function DashboardPage() {
                 {scheduler.recent.map((j, i) => (
                   <div key={i} className="flex items-center justify-between gap-2 text-xs py-1 px-2 rounded bg-gray-50">
                     <span className="font-mono text-gray-600 truncate min-w-0" title={String(j.type)}>{String(j.type)}</span>
-                    <span className={`shrink-0 ${j.status === 'failed' ? 'text-red-600' : j.status === 'running' ? 'text-blue-600' : j.status === 'pending' ? 'text-amber-600' : 'text-gray-400'}`}>{String(j.status)}</span>
+                    <span className={`shrink-0 ${j.status === 'failed' ? 'text-red-600' : j.status === 'running' ? 'text-accent' : j.status === 'pending' ? 'text-amber-600' : 'text-gray-400'}`}>{String(j.status)}</span>
                     {j.status === 'failed' && j.error ? <span className="shrink-0 text-red-400 truncate max-w-[40%]" title={String(j.error)}>{String(j.error).slice(0, 40)}</span> : null}
                   </div>
                 ))}
@@ -480,7 +499,7 @@ export default function DashboardPage() {
                       <div className="flex items-center gap-2 flex-wrap mb-1.5">
                         <span className="font-medium text-sm text-gray-800">{String(po.projectName)}</span>
                         {q.avg != null && <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${q.avg >= 80 ? 'bg-green-100 text-green-700' : q.avg >= 60 ? 'bg-yellow-100 text-yellow-700' : 'bg-red-100 text-red-700'}`}>平均质量 {q.avg}</span>}
-                        {(q.count || 0) > 0 && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700">评定 {q.count} 项{q.low ? ` · 低质 ${q.low}` : ''}</span>}
+                        {(q.count || 0) > 0 && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-accent-soft text-accent">评定 {q.count} 项{q.low ? ` · 低质 ${q.low}` : ''}</span>}
                         <span className="ml-auto text-xs text-gray-300 hover:text-teal-500">进入项目 →</span>
                       </div>
                       {/* zx_20260906_1 3e: 大盘 M 里程碑结构化——含 impl 可点进落地任务（量变质变；原纯文本 milestoneLine 为兜底） */}
@@ -491,14 +510,14 @@ export default function DashboardPage() {
                             const target = m.impl ? String(m.impl) : (m.plan_id ? String(m.plan_id) : '');
                             return (
                               <span key={String(m.ms)} role="button" tabIndex={0} onClick={(e) => { e.stopPropagation(); if (target) navigate(`/tasks/${target}`); }}
-                                className={`text-[10px] px-1.5 py-0.5 rounded font-mono cursor-pointer hover:ring-1 hover:ring-blue-400 ${st === 'done' ? 'bg-green-100 text-green-700' : st === 'doing' ? 'bg-amber-100 text-amber-700 ring-1 ring-amber-300' : 'bg-gray-100 text-gray-500'}`}
+                                className={`text-[10px] px-1.5 py-0.5 rounded font-mono cursor-pointer hover:ring-1 hover:ring-accent/40 ${st === 'done' ? 'bg-green-100 text-green-700' : st === 'doing' ? 'bg-amber-100 text-amber-700 ring-1 ring-amber-300' : 'bg-gray-100 text-gray-500'}`}
                                 title={`${String(m.ms)} · ${st === 'done' ? '已落地' : st === 'doing' ? '进行中' : '待实施'}${target ? ' · 点击打开任务' : ''}`}>
                                 {String(m.ms)}{st === 'done' ? '✓' : st === 'doing' ? '●' : '○'}
                               </span>
                             );
                           })}
                         </div>
-                      ) : hasM ? <p className="text-xs text-indigo-600 bg-indigo-50 rounded px-2 py-1 mb-1.5">{String(po.milestoneLine)}</p> : null}
+                      ) : hasM ? <p className="text-xs text-accent bg-accent-soft rounded px-2 py-1 mb-1.5">{String(po.milestoneLine)}</p> : null}
                       {recs.length > 0 && (
                         <div className="flex items-center gap-1.5 flex-wrap">
                           {recs.map((r: Record<string, unknown>, j: number) => (
@@ -533,7 +552,7 @@ export default function DashboardPage() {
           {/* 资源使用热图 */}
           {overview.resourceSummary.length > 0 && (
             <div className="bg-white rounded-lg border p-4">
-              <h3 className="font-semibold mb-3 flex items-center gap-2"><Activity className="w-4 h-4 text-blue-500"/>项目资源使用</h3>
+              <h3 className="font-semibold mb-3 flex items-center gap-2"><Activity className="w-4 h-4 text-accent"/>项目资源使用</h3>
               <div className="space-y-2">
                 {overview.resourceSummary.map((r:Record<string,unknown>,i:number) => {
                   const tokens = (r.totalTokens as number) || 0;
@@ -543,9 +562,9 @@ export default function DashboardPage() {
                     <div key={i} className="flex items-center gap-2 text-sm">
                       <span className="w-28 text-xs text-gray-500 truncate">{r.projectName as string}</span>
                       <div className="flex-1 bg-gray-100 rounded-full h-4">
-                        <div className="bg-blue-500 rounded-full h-4" style={{width:`${pct}%`}}/>
+                        <div className="bg-accent rounded-full h-4" style={{width:`${pct}%`}}/>
                       </div>
-                      <span className="w-24 text-right text-xs text-gray-500">{formatTokens(tokens)} tokens | {r.taskCount as number}任务</span>
+                      <span className="w-24 text-right text-xs text-gray-500 tnum">{formatTokens(tokens)} tokens | {r.taskCount as number}任务</span>
                     </div>
                   );
                 })}
@@ -572,7 +591,7 @@ export default function DashboardPage() {
           {/* 任务依赖 DAG */}
           {overview.projectDeps.some((p: Record<string, unknown>) => ((p.tasks as Array<Record<string, unknown>>) || []).some((t: Record<string, unknown>) => t.depends_on || t.parent_task_id)) && (
             <div className="bg-white rounded-lg border p-4">
-              <h3 className="font-semibold mb-3 flex items-center gap-2"><GitBranch className="w-4 h-4 text-purple-500"/>任务依赖 DAG</h3>
+              <h3 className="font-semibold mb-3 flex items-center gap-2"><GitBranch className="w-4 h-4 text-accent"/>任务依赖 DAG</h3>
               <div className="space-y-3">
                 {overview.projectDeps.map((p: Record<string, unknown>, i: number) => {
                   const tasks = (p.tasks as Array<Record<string, unknown>>) || [];
@@ -587,7 +606,7 @@ export default function DashboardPage() {
                             <span className="text-gray-500 font-mono w-16 truncate">{String(t.depends_on || t.parent_task_id || '').slice(0, 8)}</span>
                             <span className="text-gray-300">→</span>
                             <span className="truncate flex-1">{t.title as string}</span>
-                            <span className={`px-1.5 py-0.5 rounded ${t.status === 'paused' ? 'bg-orange-100 text-orange-600' : 'bg-blue-100 text-blue-600'}`}>{t.status as string}</span>
+                            <span className={`px-1.5 py-0.5 rounded ${t.status === 'paused' ? 'bg-orange-100 text-orange-600' : 'bg-accent-soft text-accent'}`}>{t.status as string}</span>
                           </div>
                         ))}
                       </div>
@@ -611,9 +630,9 @@ export default function DashboardPage() {
       ) : tab==='stats' ? (
         <div className="space-y-4">
           {/* 使用趋势 */}
-          {trends.length>0 && <div className="bg-white rounded-lg border p-4"><h3 className="font-semibold mb-3 flex items-center gap-2"><TrendingUp className="w-4 h-4"/>Token 使用趋势 (近30天·自然日·ANS记账)</h3><div className="flex gap-0.5 h-32">{trends.map((t,i)=>{const maxT=Math.max(...trends.map(x=>x.tokens));const barPx=maxT>0?(t.tokens>0?Math.max(2,Math.round(t.tokens/maxT*112)):0):0;return <div key={i} className="flex-1 h-full min-w-0 flex flex-col justify-end items-center" title={`${t.date}: ${formatTokens(t.tokens)}`}><div className={`w-full rounded-t transition-colors ${barPx>0?'bg-blue-400 hover:bg-blue-600':''}`} style={{height:`${barPx}px`}}/><span className="text-[8px] text-gray-400 leading-4 whitespace-nowrap overflow-hidden w-full text-center hidden sm:block">{t.date.slice(5)}</span></div>;})}</div></div>}
+          {trends.length>0 && <div className="bg-white rounded-lg border p-4"><h3 className="font-semibold mb-3 flex items-center gap-2"><TrendingUp className="w-4 h-4"/>Token 使用趋势 (近30天·自然日·ANS记账)</h3><div className="flex gap-0.5 h-32">{trends.map((t,i)=>{const maxT=Math.max(...trends.map(x=>x.tokens));const barPx=maxT>0?(t.tokens>0?Math.max(2,Math.round(t.tokens/maxT*112)):0):0;return <div key={i} className="flex-1 h-full min-w-0 flex flex-col justify-end items-center" title={`${t.date}: ${formatTokens(t.tokens)}`}><div className={`w-full rounded-t transition-colors ${barPx>0?'bg-accent hover:bg-accent':''}`} style={{height:`${barPx}px`}}/><span className="text-[8px] text-gray-400 leading-4 whitespace-nowrap overflow-hidden w-full text-center hidden sm:block">{t.date.slice(5)}</span></div>;})}</div></div>}
           {/* Token 消耗按模型 */}
-          {billing.length>0 && <div className="bg-white rounded-lg border p-4"><h3 className="font-semibold mb-3 flex items-center gap-2"><BarChart3 className="w-4 h-4"/>Token 消耗 (按模型·近30×24h·ANS记账)</h3><div className="space-y-2">{billing.slice(0,8).map((b,i)=>{const total=b.total_tokens_in+b.total_tokens_out;const max=Math.max(...billing.map(x=>x.total_tokens_in+x.total_tokens_out));return(<div key={i} className="flex items-center gap-2 text-sm"><span className="w-32 text-xs text-gray-500 truncate">{b.model_name||b.model_id?.slice(0,20)||'unknown'}</span><div className="flex-1 bg-gray-100 rounded-full h-4"><div className="bg-blue-500 rounded-full h-4" style={{width:`${max>0?(total/max*100):0}%`}}/></div><span className="w-20 text-right text-xs text-gray-500">{formatTokens(total)}</span></div>);})}</div></div>}
+          {billing.length>0 && <div className="bg-white rounded-lg border p-4"><h3 className="font-semibold mb-3 flex items-center gap-2"><BarChart3 className="w-4 h-4"/>Token 消耗 (按模型·近30×24h·ANS记账)</h3><div className="space-y-2">{billing.slice(0,8).map((b,i)=>{const total=b.total_tokens_in+b.total_tokens_out;const max=Math.max(...billing.map(x=>x.total_tokens_in+x.total_tokens_out));return(<div key={i} className="flex items-center gap-2 text-sm"><span className="w-32 text-xs text-gray-500 truncate">{b.model_name||b.model_id?.slice(0,20)||'unknown'}</span><div className="flex-1 bg-gray-100 rounded-full h-4"><div className="bg-accent rounded-full h-4" style={{width:`${max>0?(total/max*100):0}%`}}/></div><span className="w-20 text-right text-xs text-gray-500">{formatTokens(total)}</span></div>);})}</div></div>}
           {/* 工具调用统计 */}
           {toolStats.length>0 && <div className="bg-white rounded-lg border p-4"><h3 className="font-semibold mb-3 flex items-center gap-2"><Wrench className="w-4 h-4"/>工具调用 (Top 10)</h3><div className="space-y-2">{toolStats.map((t,i)=>{const total=t.call_count+t.error_count;const max=Math.max(...toolStats.map(x=>x.call_count+x.error_count));const errRate=total>0?(t.error_count/total*100):0;return(<div key={i} className="flex items-center gap-2 text-sm"><span className="w-36 text-xs text-gray-500 truncate">{t.tool_name}</span><div className="flex-1 bg-gray-100 rounded-full h-4"><div className={`rounded-full h-4 ${errRate>20?'bg-red-500':errRate>5?'bg-yellow-500':'bg-green-500'}`} style={{width:`${max>0?(total/max*100):0}%`}}/></div><span className="w-24 text-right text-xs text-gray-500">{total}次{errRate>0?` (${errRate.toFixed(0)}%错)`:''}</span></div>);})}</div></div>}
         </div>
@@ -623,7 +642,7 @@ export default function DashboardPage() {
               此前 `admin:health` 只被用来显示"整体状态"一个词，`report` 里的五面依据全丢；
               于是"哪一面降级了、凭什么这么判"在界面上一概看不见（只能看日志）。 */}
           <div className="bg-white rounded-lg border p-4">
-            <h3 className="font-semibold mb-3 flex items-center gap-2"><Activity className="w-4 h-4 text-blue-500"/>系统健康自检
+            <h3 className="font-semibold mb-3 flex items-center gap-2"><Activity className="w-4 h-4 text-accent"/>系统健康自检
               {(() => { const lvl = healthLevelOf(health); return lvl ? <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${HEALTH_LEVEL_CLASS[lvl]}`}>{HEALTH_LEVEL_LABEL[lvl]}</span> : null; })()}
               {health?.report ? <span className="ml-auto text-[10px] font-normal text-gray-400">检查时刻(UTC)：{(health.report.checkedAt || '').slice(0, 19)}</span> : null}
             </h3>
@@ -643,8 +662,8 @@ export default function DashboardPage() {
             )}
           </div>
           <div className="bg-white rounded-lg border p-4">
-            <h3 className="font-semibold mb-3 flex items-center gap-2"><Activity className="w-4 h-4 text-blue-500"/>架构不变量自检 ({diagnostics.invariants.length})</h3>
-            {diagMsg ? <div className="mb-2 px-2 py-1 rounded text-xs bg-blue-50 text-blue-700">{diagMsg}</div> : null}
+            <h3 className="font-semibold mb-3 flex items-center gap-2"><Activity className="w-4 h-4 text-accent"/>架构不变量自检 ({diagnostics.invariants.length})</h3>
+            {diagMsg ? <div className="mb-2 px-2 py-1 rounded text-xs bg-accent-soft text-accent">{diagMsg}</div> : null}
             {diagnostics.invariants.length === 0 ? <p className="text-gray-400 text-center py-6">暂无诊断数据</p> : (
               <div className="space-y-2">
                 {diagnostics.invariants.map((inv: Record<string,unknown>, i:number) => (
@@ -687,7 +706,7 @@ export default function DashboardPage() {
                           >全选</button>
                           <button
                             type="button"
-                            className="text-xs px-2 py-1 rounded border border-blue-200 bg-blue-50 text-blue-600 hover:bg-blue-100 whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed"
+                            className="text-xs px-2 py-1 rounded border border-accent/25 bg-accent-soft text-accent hover:bg-accent-soft whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed"
                             disabled={auditPicks.length === 0}
                             onClick={() => handleRepairSelected(inv.name as string, String((inv.remediation as Record<string,unknown>).guidance ?? ''), auditPicks)}
                           >修复所选（{auditPicks.length}）</button>
@@ -695,7 +714,7 @@ export default function DashboardPage() {
                       ) : (
                         <button
                           type="button"
-                          className="shrink-0 text-xs px-2 py-1 rounded border border-blue-200 bg-blue-50 text-blue-600 hover:bg-blue-100 whitespace-nowrap"
+                          className="shrink-0 text-xs px-2 py-1 rounded border border-accent/25 bg-accent-soft text-accent hover:bg-accent-soft whitespace-nowrap"
                           onClick={() => handleRepairInvariant(inv.name as string, String((inv.remediation as Record<string,unknown>).guidance ?? ''))}
                         >修复</button>
                       )
@@ -770,7 +789,7 @@ export default function DashboardPage() {
               红线：目标落在源码树（apps/ packages/ scripts/ .github/）**一律不落账、也批不动**；
               生效过的可**回滚**（旧值存于 rollback_point），且回滚只改状态、不删记录。 */}
           <div className="bg-white rounded-lg border p-4">
-            <h3 className="font-semibold mb-3 flex items-center gap-2"><GitBranch className="w-4 h-4 text-purple-500"/>自产提案 ({diagnostics.proposals.length})<span className="ml-auto text-[10px] font-normal text-gray-400">须人工批准才生效 · 时间为 UTC</span></h3>
+            <h3 className="font-semibold mb-3 flex items-center gap-2"><GitBranch className="w-4 h-4 text-accent"/>自产提案 ({diagnostics.proposals.length})<span className="ml-auto text-[10px] font-normal text-gray-400">须人工批准才生效 · 时间为 UTC</span></h3>
             {diagnostics.proposals.length === 0 ? <p className="text-gray-400 text-center py-4">暂无提案（自愈熔断反复命中时才会产生）</p> : (
               <div className="space-y-1">{diagnostics.proposals.map((p) => {
                 const st = proposalStatusMeta(p.status);
@@ -822,7 +841,7 @@ export default function DashboardPage() {
       ) : (
         <div className="bg-white rounded-lg border p-4">
           <h3 className="font-semibold mb-4 flex items-center gap-2"><BarChart3 className="w-4 h-4"/>事件时间线<span className="ml-auto text-[10px] font-normal text-gray-400">时间为 UTC</span></h3>
-          {events.length===0?<p className="text-gray-400 text-center py-8">暂无事件（执行任务操作后将自动记录事件）</p>:<div className="space-y-1">{events.map((e,i)=>(<div key={i} className="flex items-start gap-3 py-2 border-b last:border-0 text-sm"><div className="mt-0.5">{eventIcon(e.event_type)}</div><div className="flex-1 min-w-0"><div className="flex items-center gap-2"><span className="font-medium text-xs text-blue-600">{e.event_type}</span><span className="text-xs text-gray-400">{e.aggregate_type}</span></div><p className="text-xs text-gray-500 font-mono mt-0.5">{e.occurred_at?.slice(0,19)}</p></div></div>))}</div>}
+          {events.length===0?<p className="text-gray-400 text-center py-8">暂无事件（执行任务操作后将自动记录事件）</p>:<div className="space-y-1">{events.map((e,i)=>(<div key={i} className="flex items-start gap-3 py-2 border-b last:border-0 text-sm"><div className="mt-0.5">{eventIcon(e.event_type)}</div><div className="flex-1 min-w-0"><div className="flex items-center gap-2"><span className="font-medium text-xs text-accent">{e.event_type}</span><span className="text-xs text-gray-400">{e.aggregate_type}</span></div><p className="text-xs text-gray-500 font-mono mt-0.5">{e.occurred_at?.slice(0,19)}</p></div></div>))}</div>}
         </div>
       )}
     </div>

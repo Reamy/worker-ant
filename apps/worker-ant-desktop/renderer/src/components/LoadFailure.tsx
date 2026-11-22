@@ -5,8 +5,11 @@
  *   「暂无成员 / 暂无数据」——把"没取到"说成"没有"，界面与库分家。
  *
  * 治法：失败时卡片内显示失败因由 + 重试；有理据的空态仍由各页自己写。
+ *
+ * zx_20261121_3 M5-b：形状收进统一 `ErrorState`（一处形状），文案逐字不变：
+ *   `<what>加载失败：<reason>`；重试走统一 Button。本组件只做参数转接，零判据。
  */
-import { AlertTriangle, RefreshCw } from 'lucide-react';
+import { ErrorState } from './ui';
 
 export default function LoadFailure({
   what,
@@ -19,23 +22,5 @@ export default function LoadFailure({
   onRetry?: () => void;
   busy?: boolean;
 }) {
-  return (
-    <div className="text-sm p-2 bg-red-50 border border-red-100 rounded">
-      <p className="text-red-700 flex items-start gap-1.5">
-        <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-        <span>{what}加载失败：{reason}</span>
-      </p>
-      {onRetry && (
-        <button
-          type="button"
-          onClick={onRetry}
-          disabled={busy}
-          className="mt-1.5 inline-flex items-center gap-1 px-2 py-1 border border-red-200 rounded-lg text-xs text-gray-600 hover:bg-white disabled:opacity-50"
-        >
-          <RefreshCw className={`w-3 h-3 ${busy ? 'animate-spin' : ''}`} />
-          重试
-        </button>
-      )}
-    </div>
-  );
+  return <ErrorState compact title={`${what}加载失败`} reason={reason} onRetry={onRetry} busy={busy} />;
 }

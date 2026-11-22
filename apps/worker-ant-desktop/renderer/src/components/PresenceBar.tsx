@@ -48,20 +48,20 @@ export default function PresenceBar() {
   const fmt = (s: number) => (s >= 60 ? `${Math.floor(s / 60)}m${s % 60 ? `${Math.round(s % 60)}s` : ''}` : `${s}s`);
 
   return (
-    <div className={`mb-3 rounded-lg border p-2.5 text-sm shadow-sm ${staleCount > 0 ? 'border-orange-200 bg-orange-50' : 'border-blue-200 bg-blue-50'}`}>
+    <div className={`mb-3 rounded-card border p-2.5 text-sm shadow-card ${staleCount > 0 ? 'border-warn/25 bg-warn-soft' : 'border-accent/20 bg-accent-soft'}`}>
       <div className="flex items-center gap-2 flex-wrap">
-        <span className="flex items-center gap-1 text-xs font-semibold text-blue-700"><Activity className="w-4 h-4 animate-pulse" />执行中 {tasks.length}{tasks.length > 1 ? ` · 最长 ${fmt(longest)}` : ''}</span>
-        {staleCount > 0 && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-orange-100 text-orange-600">⚠ {staleCount} 项 {STALE_MS}s 无推进</span>}
+        <span className="flex items-center gap-1 text-xs font-semibold text-accent"><Activity className="w-4 h-4 animate-pulse" />执行中 <span className="tnum">{tasks.length}</span>{tasks.length > 1 ? ` · 最长 ${fmt(longest)}` : ''}</span>
+        {staleCount > 0 && <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-warn/25 bg-surface text-warn tnum">⚠ {staleCount} 项 {STALE_MS}s 无推进</span>}
         <div className="flex items-center gap-1.5 flex-wrap min-w-0 flex-1 justify-end">
           {tasks.map((t) => {
             const stale = staleHint && (t.staleSec || 0) > STALE_MS;
             return (
               <button key={t.taskId} type="button" onClick={() => navigate(`/tasks/${t.taskId}`)}
                 title={`${t.title}\n已运行 ${fmt(smooth(t.elapsedSec))} · tokens ${t.tokens}${t.updatedAt ? `\n最近推进 ${String(t.updatedAt).slice(5, 19)}` : ''}`}
-                className={`text-[11px] px-2 py-0.5 rounded-full border flex items-center gap-1 ${stale ? 'bg-red-50 text-red-600 border-red-200' : 'bg-white text-blue-700 border-blue-200 hover:bg-blue-100'}`}>
-                {stale && <AlertTriangle className="w-3 h-3 text-red-500" />}
+                className={`text-[11px] px-2 py-0.5 rounded-full border flex items-center gap-1 ${stale ? 'bg-cinnabar-soft text-cinnabar border-cinnabar/25' : 'bg-surface text-accent border-accent/25 hover:bg-accent-soft'}`}>
+                {stale && <AlertTriangle className="w-3 h-3 text-cinnabar" />}
                 <span className="max-w-[160px] truncate">{t.title || t.taskId.slice(0, 8)}</span>
-                <span className="opacity-70">{fmt(smooth(t.elapsedSec))}</span>
+                <span className="opacity-70 tnum">{fmt(smooth(t.elapsedSec))}</span>
               </button>
             );
           })}

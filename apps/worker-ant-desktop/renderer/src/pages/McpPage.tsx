@@ -33,14 +33,14 @@ export default function McpPage() {
   const statusLabels: Record<string, string> = { active: '正常', error: '异常', disabled: '已禁用', healing: '恢复中', unknown: '未知' };
   const statusColors: Record<string, string> = { active: 'bg-green-100 text-green-700', error: 'bg-red-100 text-red-700', disabled: 'bg-gray-100 text-gray-500', healing: 'bg-yellow-100 text-yellow-700', unknown: 'bg-gray-100 text-gray-500' };
 
-  if (loading) return <div className="flex justify-center py-12"><div className="animate-spin h-8 w-8 border-2 border-blue-500 border-t-transparent rounded-full" /></div>;
+  if (loading) return <div className="flex justify-center py-12"><div className="animate-spin h-8 w-8 border-2 border-accent border-t-transparent rounded-full" /></div>;
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
         <h2 className="text-xl font-bold">MCP 服务</h2>
         <div className="flex items-center gap-2">
           <button onClick={load} className="p-2 hover:bg-gray-100 rounded-lg" title="刷新"><RefreshCw className="w-4 h-4" /></button>
-          <button onClick={() => { setEditItem(null); setShowForm(true); }} className="flex items-center gap-1 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"><Plus className="w-3.5 h-3.5" />注册服务</button>
+          <button onClick={() => { setEditItem(null); setShowForm(true); }} className="flex items-center gap-1 px-3 py-1.5 bg-accent text-white rounded-lg text-sm hover:bg-accent/90"><Plus className="w-3.5 h-3.5" />注册服务</button>
         </div>
       </div>
       {error && <p className="text-red-500 text-sm mb-4">错误: {error}</p>}
@@ -49,11 +49,11 @@ export default function McpPage() {
           {items.map(m => (
             <div key={m.id} className="bg-white rounded-lg border p-4 flex items-center justify-between">
               <div className="flex items-center gap-3 min-w-0 flex-1">
-                <Server className="w-5 h-5 text-purple-500 flex-shrink-0" />
+                <Server className="w-5 h-5 text-accent flex-shrink-0" />
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
                     <h3 className="font-medium">{m.name}</h3>
-                    <span className={`text-[10px] px-1.5 py-0.5 rounded cursor-pointer hover:underline text-blue-600`} onClick={() => showDetail(m.id)}><Eye className="w-3 h-3 inline" /> 详情</span>
+                    <span className={`text-[10px] px-1.5 py-0.5 rounded cursor-pointer hover:underline text-accent`} onClick={() => showDetail(m.id)}><Eye className="w-3 h-3 inline" /> 详情</span>
                   </div>
                   <p className="text-xs text-gray-400 font-mono truncate">{m.endpoint || '—'}</p>
                   <p className="text-xs text-gray-400 mt-0.5">传输: {m.transport || '—'} · 最近检查: {formatTime(m.health_check_at)}</p>
@@ -61,9 +61,9 @@ export default function McpPage() {
               </div>
               <div className="flex items-center gap-2 flex-shrink-0">
                 <span className={`text-xs px-2 py-0.5 rounded-full ${statusColors[m.status || 'unknown'] || 'bg-gray-100 text-gray-500'}`}>{statusLabels[m.status || 'unknown'] || m.status || '未知'}</span>
-                <button onClick={() => handleHealthCheck(m.id)} className="p-1 hover:bg-blue-50 rounded" title="健康检查"><Activity className="w-3.5 h-3.5 text-blue-500" /></button>
+                <button onClick={() => handleHealthCheck(m.id)} className="p-1 hover:bg-accent-soft rounded" title="健康检查"><Activity className="w-3.5 h-3.5 text-accent" /></button>
                 <button onClick={() => handleRefresh(m.id)} className="p-1 hover:bg-green-50 rounded" title="刷新工具缓存"><RotateCcw className="w-3.5 h-3.5 text-green-500" /></button>
-                <button onClick={() => { setEditItem(m); setShowForm(true); }} className="p-1 hover:bg-blue-50 rounded" title="编辑"><Pencil className="w-3.5 h-3.5 text-blue-500" /></button>
+                <button onClick={() => { setEditItem(m); setShowForm(true); }} className="p-1 hover:bg-accent-soft rounded" title="编辑"><Pencil className="w-3.5 h-3.5 text-accent" /></button>
                 <button onClick={() => handleDelete(m.id)} className="p-1 hover:bg-red-50 rounded" title="删除"><Trash2 className="w-3.5 h-3.5 text-red-400" /></button>
               </div>
             </div>
@@ -106,7 +106,7 @@ function McpDetailDialog({ detail, onClose }: { detail: McpServer | null; onClos
               <div className="max-h-60 overflow-y-auto space-y-2">
                 {tools.map((t, i) => (
                   <div key={i} className="p-2 bg-gray-50 rounded text-xs">
-                    <p className="font-semibold text-blue-700">{t.name}</p>
+                    <p className="font-semibold text-accent">{t.name}</p>
                     <p className="text-gray-500 mt-0.5 line-clamp-2">{t.description?.slice(0, 200) || '无描述'}</p>
                   </div>
                 ))}
@@ -161,25 +161,25 @@ function McpDialog({ server, onClose, onSuccess }: { server?: McpServer | null; 
           <button onClick={onClose} className="p-1 hover:bg-gray-100 rounded"><X className="w-4 h-4" /></button>
         </div>
         <div className="space-y-3">
-          <div><label className="block text-sm font-medium mb-1">名称 *</label><input value={name} onChange={e => setName(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="如 github-mcp" /></div>
-          <div><label className="block text-sm font-medium mb-1">端点 URL *</label><input value={endpoint} onChange={e => setEndpoint(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="https://mcp.example.com" /></div>
+          <div><label className="block text-sm font-medium mb-1">名称 *</label><input value={name} onChange={e => setName(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" placeholder="如 github-mcp" /></div>
+          <div><label className="block text-sm font-medium mb-1">端点 URL *</label><input value={endpoint} onChange={e => setEndpoint(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-accent" placeholder="https://mcp.example.com" /></div>
           <div><label className="block text-sm font-medium mb-1">传输模式</label>
-            <select value={transport} onChange={e => setTransport(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <select value={transport} onChange={e => setTransport(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-accent">
               <option value="streamable-http">Streamable HTTP</option>
               <option value="stdio">stdio</option>
             </select>
           </div>
           <div><label className="block text-sm font-medium mb-1">认证方式</label>
-            <select value={authType} onChange={e => setAuthType(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <select value={authType} onChange={e => setAuthType(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-accent">
               <option value="none">无认证</option>
               <option value="bearer">Bearer Token</option>
             </select>
           </div>
-          {authType === 'bearer' && <div><label className="block text-sm font-medium mb-1">Token</label><input type="password" value={authToken} onChange={e => setAuthToken(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="Bearer token" /></div>}
+          {authType === 'bearer' && <div><label className="block text-sm font-medium mb-1">Token</label><input type="password" value={authToken} onChange={e => setAuthToken(e.target.value)} className="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent" placeholder="Bearer token" /></div>}
         </div>
         <div className="flex justify-end gap-2 mt-6">
           <button onClick={onClose} className="px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">取消</button>
-          <button onClick={submit} disabled={!name || !endpoint || saving} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50">{saving ? '保存中...' : '保存'}</button>
+          <button onClick={submit} disabled={!name || !endpoint || saving} className="px-4 py-2 bg-accent text-white rounded-lg text-sm hover:bg-accent/90 disabled:opacity-50">{saving ? '保存中...' : '保存'}</button>
         </div>
       </div>
     </div>

@@ -30,7 +30,9 @@ export type NextActionId =
   | 'view_deliverables'
   | 'filter_unverified'
   | 'open_models'
-  | 'open_settings';
+  | 'open_settings'
+  // zx_20261121_3 M2「用·地」：任务完成后有本任务沉淀的待审经验，跳回详情页经验卡。
+  | 'review_lesson';
 
 export interface NextAction {
   /** 稳定键：rr 精确断言用，改文案不动它。 */
@@ -188,6 +190,11 @@ export interface TaskActionFacts {
   progressAgeMs?: number | null;
   /** 暂停成因的人话（`pauseReasonLabel` 已转好）；无则不给。 */
   pauseReason?: string | null;
+  /**
+   * zx_20261121_3 M2「用·地」：本任务**自己的**待审岗位经验条数。
+   * 读不到给 `null`（不当作 0——「没读到」不等于「确实没有」）。
+   */
+  pendingLessonCount?: number | null;
 }
 
 export function nextActionForTask(f: TaskActionFacts | null | undefined): NextAction {
@@ -285,7 +292,21 @@ export function nextActionForTask(f: TaskActionFacts | null | undefined): NextAc
     };
   }
 
-  if (status === 'completed') return { key: 'task.completed', tone: 'ok', headline: '已完成' };
+  if (status === 'completed') {
+    // zx_20261121_3 M2「用·地」：任务完成了，但它自己沉淀的经验还等你确认——
+    //   这是「该我办」的一件事，不能只显示「已完成」让决定沉底。
+    const pendingLessons = n(f.pendingLessonCount);
+    if (pendingLessons > 0) {
+      return {
+        key: 'task.lesson_pending',
+        tone: 'act',
+        headline: `已完成；有 ${pendingLessons} 条岗位经验待确认`,
+        detail: '来自这次任务的复盘——采纳后才会用于后续任务；忽略也不影响本次结果。',
+        action: { label: '去确认', id: 'review_lesson' },
+      };
+    }
+    return { key: 'task.completed', tone: 'ok', headline: '已完成' };
+  }
   if (status === 'archived') return { key: 'task.archived', tone: 'ok', headline: '已归档' };
 
   return { key: 'task.other', tone: 'ok', headline: '无需处理' };

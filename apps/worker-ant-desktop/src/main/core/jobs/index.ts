@@ -33,6 +33,9 @@ import {
 } from '../project-profile.js';
 // zx_20261029_1「知」：项目须知生成作业（LLM 只在 `project-brief-job.ts` 一处）。
 import { BRIEF_GENERATE_TIMEOUT_MS, runProjectBriefInit } from '../project-brief-job.js';
+// zx_20261122_1 M3「自·产」：拒绝留痕 → 自省规则提案（只产 pending）；新建后发瞬态线。
+import { generateDenialRuleProposals } from '../self-evolve-scan.js';
+import { emitKnowledgeChanged } from '../refresh-events.js';
 // zx_20261113_1 B2「积」: 复盘落库后精炼岗位 pending 候选（只动 pending，人工结论不改写）。
 import { refinePositionLessonFromRetrospective } from '../positions.js';
 
@@ -628,4 +631,27 @@ export function registerAllJobs(deps: JobDeps): void {
     if (!projectId) return;
     await runProjectBriefInit({ db, ansClient, projectId, trigger });
   }, { orphanGraceMs: BRIEF_GENERATE_TIMEOUT_MS + 30_000 });
+
+  // ===== zx_20261122_1 M3「自·产」：拒绝留痕 → 自省规则提案 =====
+  //   只产 `pending`（人工批准才生效）；新建后发 knowledge.changed，待办中心即时刷。
+  //   单飞：本作业只读证据 + 写提案，6h 一次；失败只记日志，不拖主进程。
+  let _selfEvolveScanRunning = false;
+  scheduler.register('self-evolve-scan', async () => {
+    if (_selfEvolveScanRunning) return;
+    _selfEvolveScanRunning = true;
+    try {
+      const r = generateDenialRuleProposals(db);
+      if (r.created.length > 0) {
+        emitKnowledgeChanged('self_evolve.scan', { created: r.created.length });
+        logger.info({ created: r.created.map((x) => x.kind), counts: r.counts.slice(0, 5) }, '自省扫描：已生成规则提案（待人工批准）');
+      }
+    } catch (err) {
+      logger.warn({ errMsg: (err as Error).message }, '自省扫描失败（不影响主流程）');
+    } finally {
+      _selfEvolveScanRunning = false;
+    }
+  });
+  // 启动后 6s 首跑（等库/表就绪），此后每 6h 一次。
+  setTimeout(() => { scheduler.enqueue('self-evolve-scan', {}).catch(() => {}); }, 6000);
+  setInterval(() => { scheduler.enqueue('self-evolve-scan', {}).catch(() => {}); }, 6 * 3_600_000);
 }

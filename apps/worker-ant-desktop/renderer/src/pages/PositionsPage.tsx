@@ -24,6 +24,8 @@ import {
   type PositionLessonPromoteTarget,
 } from '../../../src/main/core/positions.js';
 import { routineSkipLabel, routineStatusLabel } from '../lib/routine-view';
+// zx_20261121_3 M5：页头 / 按钮 / 三态统一走共用原语（一处形状），逻辑与文案保持原样。
+import { PageHeader, Button, EmptyState, ErrorState, Skeleton } from '../components/ui';
 
 interface FormState {
   name: string;
@@ -94,7 +96,7 @@ function formOf(d: PositionDetail): FormState {
   };
 }
 
-const inputCls = 'w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500';
+const inputCls = 'w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent';
 
 
 export default function PositionsPage() {
@@ -564,42 +566,77 @@ export default function PositionsPage() {
     }
   }
 
-  if (loading && rows.length === 0) {
-    return <div className="flex justify-center py-12"><div className="animate-spin h-8 w-8 border-2 border-blue-500 border-t-transparent rounded-full" /></div>;
+  // zx_20261121_3 M5：首屏三态同形（载入骨架 / 读失败可重试 / 空态给出口），读不到不冒充"没有岗位"。
+  const loadingFirst = loading && rows.length === 0;
+  const enabledCount = rows.filter((p) => p.enabled).length;
+  const pendingLessonTotal = rows.reduce((n, p) => n + (p.pendingLessons || 0), 0);
+  // 一句主张只用页面已有事实（岗位数 / 启用数 / 待确认经验数），不编数字。
+  const positionClaim = loadingFirst
+    ? '正在读取岗位列表。'
+    : error && rows.length === 0
+      ? '岗位列表读取失败，可在下方重试。'
+      : rows.length === 0
+        ? '还没有岗位——新建后可指派任务。'
+        : `共 ${rows.length} 个岗位，${enabledCount} 个启用${pendingLessonTotal > 0 ? `，${pendingLessonTotal} 条经验待确认` : ''}。`;
+
+  const header = (
+    <PageHeader
+      eyebrow="项目管理"
+      title="岗位"
+      claim={positionClaim}
+      actions={<Button variant="ghost" size="sm" aria-label="刷新岗位列表" title="刷新" icon={<RefreshCw className="w-4 h-4" />} onClick={() => void loadList()} />}
+      primaryAction={
+        <Button variant="primary" icon={<Plus className="w-3.5 h-3.5" />} onClick={() => { setCreateForm(EMPTY_FORM); setShowCreate(true); }}>新建岗位</Button>
+      }
+    />
+  );
+
+  if (loadingFirst) {
+    return (
+      <div>
+        {header}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          <div className="space-y-2">
+            {Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-16 w-full" />)}
+          </div>
+          <div className="lg:col-span-2"><Skeleton className="h-72 w-full" /></div>
+        </div>
+      </div>
+    );
   }
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <h2 className="text-xl font-bold">岗位</h2>
-          <p className="text-xs text-gray-500 mt-1">长期在岗的知识载体：说明 / 规范 / 技能 / 知识四段常驻，任务可指派，收口经验需人工确认。</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <button onClick={() => void loadList()} className="p-2 hover:bg-gray-100 rounded-lg" title="刷新"><RefreshCw className="w-4 h-4" /></button>
-          <button onClick={() => { setCreateForm(EMPTY_FORM); setShowCreate(true); }} className="flex items-center gap-1 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"><Plus className="w-3.5 h-3.5" />新建岗位</button>
-        </div>
-      </div>
+      {header}
 
-      {error && <p className="text-red-500 text-sm mb-3">错误：{error}</p>}
+      {/* zx_20261121_3 M5：读失败走 ErrorState（原文原因 + 重试）；有列表时的失败是操作失败，分开说。 */}
+      {error && rows.length === 0 && <div className="mb-3"><ErrorState title="岗位列表读取失败" reason={error} onRetry={() => void loadList()} /></div>}
+      {error && rows.length > 0 && <div className="mb-3"><ErrorState title="操作失败" reason={error} /></div>}
       {notice && <p className="text-green-600 text-sm mb-3">{notice}</p>}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div className="space-y-2">
-          {rows.length === 0 && <p className="text-gray-400 text-center py-8">暂无岗位</p>}
+          {rows.length === 0 && !error && (
+            <EmptyState
+              compact
+              icon={<Briefcase className="w-8 h-8" />}
+              title="暂无岗位"
+              description="长期在岗的知识载体：说明 / 规范 / 技能 / 知识四段常驻，任务可指派，收口经验需人工确认。"
+            />
+          )}
           {rows.map((p) => (
             <button
               key={p.id}
               onClick={() => setSelectedId(p.id)}
-              className={`w-full text-left bg-white rounded-lg border p-3 hover:border-blue-300 ${selectedId === p.id ? 'border-blue-500 ring-1 ring-blue-200' : ''}`}
+              className={`w-full text-left bg-white rounded-lg border p-3 hover:border-accent/30 ${selectedId === p.id ? 'border-accent ring-1 ring-accent/25' : ''}`}
             >
               <div className="flex items-center gap-2">
-                <Briefcase className="w-4 h-4 text-blue-500 flex-shrink-0" />
+                <Briefcase className="w-4 h-4 text-accent flex-shrink-0" />
                 <span className="font-medium text-sm truncate">{p.name}</span>
                 {p.builtin && <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500">内置</span>}
                 <span className={`ml-auto text-[10px] px-1.5 py-0.5 rounded ${p.enabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>{p.enabled ? '启用' : '停用'}</span>
               </div>
-              <div className="flex items-center gap-2 mt-1 text-[11px] text-gray-500">
+              <div className="tnum flex items-center gap-2 mt-1 text-[11px] text-gray-500">
                 <span>绑定 {p.projectCount} 个项目</span>
                 {p.pendingLessons > 0 && <span className="text-amber-600">待确认经验 {p.pendingLessons}</span>}
               </div>
@@ -609,13 +646,13 @@ export default function PositionsPage() {
 
         <div className="lg:col-span-2">
           {!detail ? (
-            <div className="bg-white rounded-lg border p-8 text-center text-gray-400">选择左侧岗位查看详情</div>
+            <EmptyState title="选择左侧岗位查看详情" />
           ) : (
             <>
             {/* zx_20261120_3 M6「能力」页签：本机积累全档可用；带走/共享是 Pro/Team 的另一道闸。 */}
             <div className="flex items-center gap-1 mb-2">
-              <button onClick={() => setDetailTab('overview')} className={`px-3 py-1 rounded-lg text-xs font-medium ${detailTab === 'overview' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>概览</button>
-              <button onClick={() => setDetailTab('skills')} className={`px-3 py-1 rounded-lg text-xs font-medium ${detailTab === 'skills' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>能力（技能 / 生命周期）</button>
+              <button onClick={() => setDetailTab('overview')} className={`px-3 py-1 rounded-lg text-xs font-medium ${detailTab === 'overview' ? 'bg-accent text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>概览</button>
+              <button onClick={() => setDetailTab('skills')} className={`px-3 py-1 rounded-lg text-xs font-medium ${detailTab === 'skills' ? 'bg-accent text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>能力（技能 / 生命周期）</button>
               <span className="text-[10px] text-gray-400 ml-1">本机积累全档可用；带走（Pro）与团队共享（Team）是另一道闸。</span>
             </div>
             <div className={detailTab === 'skills' ? 'hidden' : 'space-y-4'}>
@@ -623,7 +660,7 @@ export default function PositionsPage() {
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
                     <h3 className="font-semibold">{detail.position.name}</h3>
-                    <span className="text-[10px] text-gray-400">v{detail.position.version}</span>
+                    <span className="tnum text-[10px] text-gray-400">v{detail.position.version}</span>
                     {detail.position.builtin && <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500">内置</span>}
                   </div>
                   <div className="flex items-center gap-2">
@@ -747,7 +784,7 @@ export default function PositionsPage() {
                 </div>
                 <div className="flex items-center justify-between mt-3">
                   <span className="text-[11px] text-gray-400">注入上限 1200 字；执行时只取说明 / 前 3 条规范 / 前 3 条技能 / 前 3 条知识 / 最近 3 条已采纳经验。</span>
-                  <button onClick={() => void save()} disabled={saving} className="flex items-center gap-1 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50"><Save className="w-3.5 h-3.5" />{saving ? '保存中…' : '保存'}</button>
+                  <button onClick={() => void save()} disabled={saving} className="flex items-center gap-1 px-3 py-1.5 bg-accent text-white rounded-lg text-sm hover:bg-accent/90 disabled:opacity-50"><Save className="w-3.5 h-3.5" />{saving ? '保存中…' : '保存'}</button>
                 </div>
               </div>
 
@@ -771,7 +808,7 @@ export default function PositionsPage() {
                   档位口径：本机例行全档可用；跨机执行仍走既有 multi_node，不新增闸。 */}
               <div className="bg-white rounded-lg border p-4">
                 <div className="flex items-center justify-between mb-2">
-                  <h4 className="text-sm font-semibold flex items-center gap-1.5"><Clock className="w-4 h-4 text-blue-500" />例行（到点该做的那件事）</h4>
+                  <h4 className="text-sm font-semibold flex items-center gap-1.5"><Clock className="w-4 h-4 text-accent" />例行（到点该做的那件事）</h4>
                   <label className="flex items-center gap-1 text-[11px] text-gray-500 mr-auto ml-3" title="缺省只在失败时推 IM；勾选后完成也推">
                     <input type="checkbox" checked={routineNotify} onChange={(e) => void toggleRoutineNotify(e.target.checked)} />
                     完成也推 IM
@@ -780,7 +817,7 @@ export default function PositionsPage() {
                     onClick={() => openRoutine()}
                     disabled={!detail.position.enabled || dispatchProjects.length === 0}
                     title={dispatchProjects.length === 0 ? '先在「项目启用」勾选一个项目' : '按 cron 到点自动建一条任务'}
-                    className="flex items-center gap-1 text-xs px-2 py-1 rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="flex items-center gap-1 text-xs px-2 py-1 rounded bg-accent text-white hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed"
                   ><Plus className="w-3 h-3" />新建例行</button>
                 </div>
                 {routineError && <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1 mb-2">{routineError}</p>}
@@ -828,15 +865,15 @@ export default function PositionsPage() {
                 )}
 
                 {routineSuggestions.length > 0 && (
-                  <div className="mt-3 rounded-lg border border-blue-100 bg-blue-50/50 p-2.5">
-                    <p className="text-[11px] text-blue-800 mb-1">近 90 天有同类任务反复出现——设为例行？（只建议，不自动建）</p>
+                  <div className="mt-3 rounded-lg border border-accent/15 bg-accent-soft/50 p-2.5">
+                    <p className="text-[11px] text-accent mb-1">近 90 天有同类任务反复出现——设为例行？（只建议，不自动建）</p>
                     <div className="space-y-1">
                       {routineSuggestions.map((s) => (
                         <div key={`${s.project_id}:${s.title}`} className="flex items-center justify-between gap-2 text-[12px]">
                           <span className="truncate">{s.title} · {s.runs} 次 · 最近 {s.last_run_at?.slice(0, 10)}</span>
                           <button
                             onClick={() => openRoutine({ projectId: s.project_id, name: s.title.slice(0, 20), title: s.title, cron: '0 9 * * 1' })}
-                            className="text-[11px] px-2 py-0.5 rounded border border-blue-200 text-blue-700 hover:bg-blue-100"
+                            className="text-[11px] px-2 py-0.5 rounded border border-accent/25 text-accent hover:bg-accent-soft"
                           >设为例行</button>
                         </div>
                       ))}
@@ -860,7 +897,7 @@ export default function PositionsPage() {
                                 <textarea value={editingLesson.content} onChange={(e) => setEditingLesson({ ...editingLesson, content: e.target.value })} rows={4} className="w-full px-2 py-1 border rounded text-sm" />
                                 <div className="flex items-center gap-2 text-[11px] text-gray-500">
                                   <span className={editingLesson.content.trim().length > 200 ? 'text-amber-600' : ''}>{editingLesson.content.trim().length} 字{editingLesson.content.trim().length > 200 ? '（晋升需 ≤200）' : ''}</span>
-                                  <button onClick={() => void saveLessonEdit()} className="px-2 py-0.5 bg-blue-600 text-white rounded text-xs">保存</button>
+                                  <button onClick={() => void saveLessonEdit()} className="px-2 py-0.5 bg-accent text-white rounded text-xs">保存</button>
                                   <button onClick={() => setEditingLesson(null)} className="px-2 py-0.5 border rounded text-xs">取消</button>
                                 </div>
                               </div>
@@ -879,10 +916,10 @@ export default function PositionsPage() {
                               </p>
                             )}
                             {l.promoteSuggested && (
-                              <p className="text-[11px] text-blue-600 mt-0.5">已反复用上，建议晋升到「规范/技能/知识」——仍由你决定。</p>
+                              <p className="text-[11px] text-accent mt-0.5">已反复用上，建议晋升到「规范/技能/知识」——仍由你决定。</p>
                             )}
                             <div className="flex items-center gap-1.5 flex-wrap mt-1">
-                              <span className={`text-[10px] px-1.5 py-0.5 rounded ${l.source === 'retrospective' ? 'bg-indigo-50 text-indigo-700' : 'bg-gray-100 text-gray-500'}`}>
+                              <span className={`text-[10px] px-1.5 py-0.5 rounded ${l.source === 'retrospective' ? 'bg-accent-soft text-accent' : 'bg-gray-100 text-gray-500'}`}>
                                 {(POSITION_LESSON_SOURCE_LABEL as Record<string, string>)[l.source] ?? l.source}
                               </span>
                               {!l.reusable && <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700" title="项目摘要或复盘判定不可复用——只留档，不注入、不可晋升">不可迁移</span>}
@@ -941,7 +978,7 @@ export default function PositionsPage() {
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-2">
                     <input value={skillForm.name} onChange={(e) => setSkillForm({ ...skillForm, name: e.target.value })} className={inputCls} placeholder="技能名（≤40 字）" />
                     <input value={skillForm.description} onChange={(e) => setSkillForm({ ...skillForm, description: e.target.value })} className={inputCls} placeholder="一句话说明" />
-                    <button onClick={() => void createSkill()} disabled={skillSaving || !skillForm.name.trim() || !skillForm.steps.trim()} className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs hover:bg-blue-700 disabled:opacity-50">沉淀为技能草案</button>
+                    <button onClick={() => void createSkill()} disabled={skillSaving || !skillForm.name.trim() || !skillForm.steps.trim()} className="px-3 py-1.5 bg-accent text-white rounded-lg text-xs hover:bg-accent/90 disabled:opacity-50">沉淀为技能草案</button>
                   </div>
                   <textarea value={skillForm.steps} onChange={(e) => setSkillForm({ ...skillForm, steps: e.target.value })} rows={3} className={inputCls} placeholder="步骤（每行一步；批准后作为提示词型技能内容）" />
                   <div className="mt-3 space-y-1.5">
@@ -1036,7 +1073,7 @@ export default function PositionsPage() {
             </div>
             <div className="flex justify-end gap-2 mt-5">
               <button onClick={() => setShowCreate(false)} className="px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">取消</button>
-              <button onClick={() => void create()} disabled={saving || !createForm.name.trim()} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50">{saving ? '创建中…' : '创建'}</button>
+              <button onClick={() => void create()} disabled={saving || !createForm.name.trim()} className="px-4 py-2 bg-accent text-white rounded-lg text-sm hover:bg-accent/90 disabled:opacity-50">{saving ? '创建中…' : '创建'}</button>
             </div>
           </div>
         </div>
@@ -1079,7 +1116,7 @@ export default function PositionsPage() {
             {error && <p className="text-red-500 text-xs mt-3">错误：{error}</p>}
             <div className="flex justify-end gap-2 mt-5">
               <button onClick={() => setShowRoutine(false)} className="px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">取消</button>
-              <button onClick={() => void submitRoutine()} disabled={routineSaving || !routineForm.name.trim() || !routineForm.title.trim() || !routineForm.projectId} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50">{routineSaving ? '创建中…' : '创建'}</button>
+              <button onClick={() => void submitRoutine()} disabled={routineSaving || !routineForm.name.trim() || !routineForm.title.trim() || !routineForm.projectId} className="px-4 py-2 bg-accent text-white rounded-lg text-sm hover:bg-accent/90 disabled:opacity-50">{routineSaving ? '创建中…' : '创建'}</button>
             </div>
           </div>
         </div>
